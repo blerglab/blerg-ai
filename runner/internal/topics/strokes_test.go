@@ -126,7 +126,7 @@ func TestStrokesFromRecordedEvents(t *testing.T) {
 		}
 	}
 	// Posted by the agent: the agent's line, recorded as the person's ruling.
-	if dec.By != "agent" || dec.RecordedAs != "person" || dec.TopicID != "tp_1" || dec.Jump == nil || dec.Jump.EventID != dec.ID {
+	if dec.By != "person" || dec.RecordedAs != "person" || dec.TopicID != "tp_1" || dec.Jump == nil || dec.Jump.EventID != dec.ID {
 		t.Errorf("decision mark = %+v", dec)
 	}
 	var tops []Stroke
@@ -257,7 +257,7 @@ func TestImportFixtureCleans(t *testing.T) {
 }
 
 // A ruling counts as the person's only when the person posted it.
-func TestMarkIsThePersonsOnlyWhenThePersonPostedIt(t *testing.T) {
+func TestMarkOwnershipIsIndependentOfPoster(t *testing.T) {
 	s := newScript()
 	s.add("mark", agent.MarkPayload{Kind: "decision", By: "person", Text: "theirs", PostedBy: "owner"})
 	s.add("mark", agent.MarkPayload{Kind: "decision", By: "person", Text: "recorded", PostedBy: "agent"})
@@ -266,7 +266,7 @@ func TestMarkIsThePersonsOnlyWhenThePersonPostedIt(t *testing.T) {
 	for _, x := range Build(s.events, nil, Options{Live: true}).Strokes {
 		got[x.Text] = x.By + "/" + x.RecordedAs
 	}
-	want := map[string]string{"theirs": "person/", "recorded": "agent/person", "own": "agent/"}
+	want := map[string]string{"theirs": "person/", "recorded": "person/person", "own": "agent/"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}

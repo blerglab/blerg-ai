@@ -62,9 +62,11 @@ func (fx *newRepoFx) post(t *testing.T, body map[string]any) (int, string, []pro
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &out)
 	var stages []protocol.StartStage
+	fx.api.hub.starts.mu.Lock()
 	if att := fx.api.hub.starts.get(out.SessionID); att != nil && out.SessionID != "" {
-		stages = att.stages
+		stages = append([]protocol.StartStage(nil), att.stages...)
 	}
+	fx.api.hub.starts.mu.Unlock()
 	return rec.Code, rec.Body.String(), stages
 }
 

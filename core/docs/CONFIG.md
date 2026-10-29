@@ -17,12 +17,13 @@ board or runner at all — see [Human login](#human-login) below.
 | `BLERG_CORE_LISTEN` | `:8080` | Listen address. |
 | `BLERG_CORE_WEB_DIST` | `web/dist` | Directory `core/web`'s built SPA (`/login`, `/app`, `/settings`) is served from, relative to the process's working directory when not absolute. The Docker image sets this to `/app/web/dist`. If the directory doesn't exist, every SPA route 404s — which looks exactly like "login is broken". |
 | `BLERG_VERSION` | `dev` | Build version shown on the landing page. |
-| `BLERG_UPDATE_CHECK` / `BLERG_UPDATE_REPO` | on / `blerglab/blerg-ai` | Core looks up the latest public release shortly after startup (30 s) and every 6 hours (`GET https://api.github.com/repos/<repo>/releases/latest`, unauthenticated) and, when it is newer than the running release, adds `latest_version` and `latest_url` to `GET /api/site`; the core footer, the board top bar and the runner sidebar then show a "vX.Y.Z available" link to its GitHub release page (board and runner read it from core through `BLERG_CORE_URL`). Privacy: this check contacts `api.github.com`, which sees the server's IP address; nothing else is sent. `BLERG_UPDATE_REPO` must be `owner/name`; anything else disables the check (logged once). Set `BLERG_UPDATE_CHECK=0` to turn it off (no request is made). |
+| `BLERG_UPDATE_CHECK` / `BLERG_UPDATE_REPO` | on / `blerglab/blerg-ai` | Core looks up the latest public release shortly after startup (30 s) and every 6 hours (`GET https://api.github.com/repos/<repo>/releases/latest`, unauthenticated) and, when it is newer than the running release, adds `latest_version` and `latest_url` to `GET /api/site`; the core footer, the board top bar and the runner sidebar then show a "vX.Y.Z available" link to its GitHub release page (board and runner read it from core through `BLERG_CORE_URL`). Privacy: this check contacts `api.github.com`, which sees the server's IP address; it also receives the static `User-Agent: blerg-core` and `Accept: application/vnd.github+json` headers, plus normal transport headers (`Host` and automatic `Accept-Encoding: gzip`). No custom build labels or install identifiers are sent. `BLERG_UPDATE_REPO` must be `blerglab/blerg-ai`; anything else disables the check (logged once). Set `BLERG_UPDATE_CHECK=0` to seed the disabled default (no request is made unless an administrator has saved an enabled setting in core). |
 | `BLERG_CORE_REGISTER_KEY` | unset | Shared bootstrap key components (board, runner) present to `POST /components` to register themselves. Unset disables component self-registration. |
 | `BLERG_CORE_BOARD_MINT_DISABLED` | `false` | Set `true` or `1` to disable new Run as me tokens entirely. Revocation of existing tokens remains available. |
 | `BLERG_CORE_BOARD_MINT_KEY` | unset | Shared secret the board presents for "Run as me": `POST /internal/tokens/board-automation` mints a `run-sessions` agent token for the person signed in to the board, proved by their own live board access token (kind human, a live browser session of that account), and `.../revoke` revokes only a token minted for that board. Opens nothing else; core refuses to boot when it equals `BLERG_CORE_INTERNAL_KEY` or `BLERG_CORE_REGISTER_KEY`. At most 10 attempts per account an hour. Unset disables both routes (503) and boards take a pasted token. Board reads the same value under the same name. |
+| `BLERG_CORE_RUNNER_URL` | unset | The runner's address as core reaches it (desktop compose: `http://blerg-runner:8080`; Kubernetes: the `blerg-runner` Service). **Settings → Account → Your desktops** lists, renames, removes and enrolls desktops through the runner's internal desktop routes with `BLERG_CORE_INTERNAL_KEY` and the signed-in person's account. Unset: that list says it is unavailable; Add a desktop still issues enrollment codes. |
 | `BLERG_CORE_INTERNAL_KEY` | unset | Shared secret guarding `POST /internal/credentials/fetch`, the endpoint runner calls to fetch a spawning account's personal engine credential. Deliberately a DIFFERENT secret from `BLERG_CORE_REGISTER_KEY`: registration is a low-trust bootstrap, credential fetch hands back plaintext. Unset disables the endpoint entirely (runner then always falls back to the shared operator Secret). Runner reads the same value as `BLERG_RUNNER_CORE_INTERNAL_KEY`. |
-| `BLERG_CORE_PLUGIN_MARKETPLACES` | `anthropics/claude-plugins-official` | Comma-separated GitHub `owner/repo` marketplaces an account may register **always-on plugins** from; `*` allows any *valid* `owner/repo` (never a URL or path). Enforced when a list is saved (`422 marketplace not allowed by this install`); the runner re-checks it at install time with its own `BLERG_RUNNER_PLUGIN_MARKETPLACES` — set both to the same value. Malformed entries are logged and dropped, never widened. |
+| `BLERG_CORE_PLUGIN_MARKETPLACES` | `anthropics/claude-plugins-official,codex:openai-curated,codex:openai-curated-remote` | Initial plugin marketplace policy, saved in Core on first use. Admins manage it under **Settings → Plugin marketplaces** afterward. GitHub `owner/repo` and Codex-native `codex:<marketplace>` sources; `*` permits any valid source. Native sources require Codex. Saved policy takes precedence over every runner/daemon environment; see [Plugin marketplace policy](#plugin-marketplace-policy). Invalid environment entries are logged and dropped. |
 | `BLERG_CORE_MCP_ALLOW_HTTP_HOSTS` | unset | Comma-separated hostnames for which an MCP connection's URL may use plain `http://` (otherwise `https` only). Core fetches a connection's URL itself, so this is an operator decision: list only hosts you run and trust. Empty by default. See [`docs/mcp-connections.md`](../../docs/mcp-connections.md). |
 | `BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS` | unset | Comma-separated hostnames an MCP connection may point at even though they resolve to a loopback, link-local, private (RFC 1918 / ULA) or carrier-grade NAT address. Every other host is checked at connect time, on the address actually dialled, and is refused if it is one of those. Empty by default. The runner has its own list, `BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS`; keep them consistent. |
 | `BLERG_CORE_COOKIE_SECURE` | `true` | Secure attribute on every cookie core sets. The desktop compose sets false because Safari does not treat http://localhost as a secure context for cookies. Anything reachable beyond localhost must keep true (and TLS). |
@@ -384,8 +385,92 @@ sessions and terminal sessions get none. Interactive Codex sessions with managed
 retain native coding tools and selected plugin skills/hooks in a private configuration home; ambient
 user, project and plugin MCP servers are suppressed, and granted MCP tools use the daemon gateway. `claude` and `codex` are
 registered (`core/internal/plugins`); an entry is `{marketplace, plugin}` — a GitHub
-`owner/repo` and a plugin name (`^[a-z0-9][a-z0-9._-]{0,63}$`). Max 20 per account, no duplicates,
-marketplace must be allowed by `BLERG_CORE_PLUGIN_MARKETPLACES`. The list is not secret.
+`owner/repo` or, for Codex only, `codex:<marketplace>`, and a plugin name
+(`^[a-z0-9][a-z0-9._-]{0,63}$`). Max 20 per account, no duplicates; the marketplace
+must be allowed by the saved install-wide marketplace policy. The list is not secret.
+
+### Plugin marketplace policy
+
+Admins manage **Settings → Plugin marketplaces** (`GET`/`PUT
+`/api/settings/plugin-marketplaces`, human admin login only). Anthropic's
+`anthropics/claude-plugins-official` and OpenAI's native `codex:openai-curated`
+and `codex:openai-curated-remote` identities ship enabled. Defaults can be
+turned off; added sources can also be removed. Sources are bounded GitHub
+`owner/repo` or `codex:<marketplace>` identities, never URLs or filesystem paths.
+The wildcard switch explicitly allows any valid source, including native sources.
+Individual toggles apply when that switch is off.
+
+Precedence and upgrades:
+
+1. Core seeds `plugin_marketplace_policy` once from
+   `BLERG_CORE_PLUGIN_MARKETPLACES` (unset/empty uses the shipped defaults).
+   The former shipped value, `anthropics/claude-plugins-official` (ignoring
+   case, surrounding whitespace, and empty comma-separated entries),
+   is upgraded to the new official defaults on this first seed. Other explicit
+   lists, including `*`, retain their meaning. Unlisted defaults remain visible
+   but off for a custom initial list. Use `,` for an explicitly empty fallback.
+2. The saved DB policy wins thereafter, across Core replicas and restarts.
+   Editing environment variables does not overwrite an administrator's choices.
+   Each change uses a revision check and commits an audit row with actor, login,
+   timestamp, and before/after policy in `plugin_marketplace_audit`. The initial
+   environment seed has no human actor.
+3. Runner servers refresh the authenticated Core policy every two seconds and
+   send it to connected desktop daemons and cluster runners over the existing
+   authenticated socket. New connections receive it during registration. Every
+   holder accepts a changed Core-generated `policy_id`, resetting its saved
+   revision; within one ID it accepts only a strictly newer revision. Replayed or
+   out-of-order revisions within that ID cannot replace permissions. Cluster pods check the same live policy
+   during startup installation and approved live installs, including updates
+   delivered while workspace preparation is still running.
+   The UUID is persisted in Core, stable across edits and restarts, and generated
+   when the singleton is created or an older database is migrated. After restoring
+   a backup that already contains `policy_id`, rotate it before serving Core:
+   `UPDATE plugin_marketplace_policy SET policy_id=gen_random_uuid() WHERE singleton;`.
+   A restore preserves the old ID otherwise, so holders cannot distinguish it from
+   a stale replica. Apply and persistence rejections are logged with bounded repeats.
+4. Each holder persists its last accepted policy and revision before applying it.
+   Runner servers use `marketplace-policy.json` in `BLERG_RUNNER_DATA_DIR`;
+   desktops use `plugins/claude/marketplace-policy.json` in their daemon state
+   directory, and cluster runners use that path under `$HOME/.blerg`.
+   Cluster HOME is ephemeral: every pod start must bootstrap the current policy
+   through `GET /api/session/plugin-marketplace-policy?session_id=<id>`, using its
+   current runtime credential. The server reads Core directly, bypasses its cached
+   policy, and rechecks the launch credential after the Core call. Until that
+   bootstrap succeeds, the pod denies startup and live plugin installs and ignores
+   socket policy frames. It retries every two seconds; a Core outage cannot make
+   a replacement pod accept an old permissive replica revision. After bootstrap,
+   socket updates follow the same policy ID and revision rules. Startup plugins
+   skipped during an outage stay skipped; recovery enables subsequent approved
+   installs or the next session start, without silently installing skipped plugins.
+   Keep server and desktop state directories on persistent storage for restart protection;
+   writes are locked and recheck the saved identity and revision before accepting
+   an update. An unreadable or invalid state file stops server
+   startup and makes a daemon or cluster workshop refuse plugin installs until
+   repaired.
+5. Core outages, disconnected sockets, unavailable-policy frames, and expiration
+   of the legacy 15-second wire lease retain the last accepted policy. They never
+   restore revoked permissions. `BLERG_RUNNER_PLUGIN_MARKETPLACES` supplies initial
+   configuration for servers and desktops only when they have no saved Core policy;
+   pods always require the fresh authenticated bootstrap described above. A later
+   Core policy can enable a marketplace again; revisions must advance within its ID. Environment configuration
+   is not an additional intersection with Core policy.
+
+Turning off or removing a source never deletes saved account selections, engine
+installs, or a running session's snapshot. Lists flag retained plugins as
+no longer allowed. New sessions skip disallowed entries; new installs are refused.
+A user can still remove saved disallowed entries or retain them while editing
+other entries. Owners can also remove disallowed plugins from supported live
+Codex sessions; removing one keeps the other loaded plugins unchanged.
+Re-enabling a marketplace makes those entries eligible again.
+
+Use an exact native identity in the Codex Settings field or the session's
+**Capabilities → Add → Enter a plugin by name** form. A GitHub source does not
+also allow a native identity with a similar name; Claude rejects native sources.
+Codex local sandboxes can save plugins for new sessions by name without a
+browsable catalog; cluster Codex installation remains unsupported.
+
+Deploy Core, runner server/frontend, and daemons together for centralized policy.
+Older daemons do not advertise policy support and keep their environment policy.
 
 - `GET /api/plugins/{engine}` and `PUT /api/plugins/{engine}` (body `{"plugins":[…]}`, replaces the
   whole ordered list atomically; a rejected list changes nothing): a signed-in **human** session
@@ -421,11 +506,12 @@ The additional internal routes all require `X-Internal-Key` and bounded JSON bod
   marketplace policy still apply. Human proof/account rows remain locked through the write;
   expiry is checked again immediately before commit. The response includes the resulting list.
 
-A failed validation or dead/foreign approval proof changes no settings. Keep Core, Runner and
-daemon marketplace policies aligned; none of these internal endpoints widens an allow-list.
+A failed validation or dead/foreign approval proof changes no settings. Core
+remains the policy authority; the server and daemon enforce its delivered policy
+locally, with their documented initial environment fallbacks.
 
 Known limits: a human session that is logged out or revoked makes the runner's read `404`, so a
-resumed session then starts without plugins (the start panel says so); with `BLERG_CORE_PLUGIN_MARKETPLACES=*`
+resumed session then starts without plugins (the start panel says so); with the saved wildcard marketplace policy enabled
 two allowed marketplaces may share a marketplace *name*, and then `plugin@name` is ambiguous in
 the CLI; core and the runner read separate allow-list variables, so keep them equal or the
 runner's stricter list silently wins at install time. Two saves racing on the same list: the loser
@@ -807,3 +893,71 @@ Not read by `blerg-core` itself, but they must agree with the values above.
 | `BLERG_RUNNER_CORE_INTERNAL_KEY` | runner | Must equal core's `BLERG_CORE_INTERNAL_KEY`. Together with `BLERG_CORE_URL`, enables the personal-credential-first session spawn path; either unset means runner always uses the shared operator Secret. |
 | `BLERG_RUNNER_ALLOWED_ORIGINS` | runner | Comma-separated `scheme://host` origins allowed to open the `/ws/browser` WebSocket cross-origin. Same-origin requests and requests with no `Origin` header are always allowed, so this is only needed when the frontend is served from a different origin than runner's API. |
 | `BLERG_BIND_ADDR` | `install/desktop/docker-compose.yml` | Not read by any Go process — it's a `docker compose` interpolation variable that prefixes all three published ports (core/board/runner): `${BLERG_BIND_ADDR:-127.0.0.1}:${BLERG_PORT_CORE:-8081}:8080`, etc. (R2/C1: without a host address, Docker publishes on `0.0.0.0` and bypasses `ufw`/`firewalld` — every LAN/VPN peer can reach core, board and runner). Defaults to `127.0.0.1` (loopback only). Set to `0.0.0.0` only if other machines must reach the stack — and then also point `BLERG_CORE_ALLOWED_RETURN_ORIGINS`/`BLERG_CORE_ORIGIN_AUDIENCES`/`BLERG_CORE_PUBLIC_URL` at that host, or login will still only work from `localhost`. |
+
+### Child session limits
+
+An administrator with a live login reads/sets `GET`/`PUT /api/settings/child-limits`.
+The two integer fields are `parallel` (1–50, default 3) and `starts_per_hour`
+(1–10000, default 120). Core migration 024 persists the install-wide override,
+including update time and actor. There is no lifetime start cap. Environment variables
+`BLERG_RUNNER_MAX_PARALLEL_CHILDREN` and `BLERG_RUNNER_MAX_CHILD_STARTS_PER_HOUR`
+seed defaults at core startup; invalid values log a warning and use 3/120. Saved settings
+always win. Runner reads `POST /internal/child-limits` using `X-Internal-Key` on the
+next start request, so settings changes require no restart. Runner retains the last
+valid values if core is unavailable, or its environment defaults before its first read.
+Account limits remain six running children and sixty starts per rolling hour across
+parents. Approval requests also reserve rate budget.
+
+### Session storage
+
+An administrator with a live login reads/sets `GET`/`PUT /api/settings/session-storage`
+(**Settings → Session storage**): `default_upload_mb`, what one session's attachments may weigh
+together, and `max_upload_mb`, the most an administrator may raise one session to with
+**Increase storage** (500 MiB per step); both 1–1048576 and the maximum at least the default.
+Core migration 031 stores the setting and records every save (who, before, after) in
+`session_storage_limits_audit`. Until one is saved, `BLERG_RUNNER_MAX_SESSION_UPLOADS_MB`
+(default 500) is the per-session value and the maximum is 5000 MiB or that value, whichever is
+larger. Runner reads `POST /internal/session-storage` with `X-Internal-Key` at most every 30
+seconds and keeps the last good value (or its environment) while core cannot be read. Raises of
+one session are recorded by the runner (`session_storage_audit`). When the board's chat names a person on a file change, the
+runner checks that account with `POST /internal/accounts/standing` (`X-Internal-Key`; answers
+whether the account exists, is active and is an administrator).
+
+### Release notice administration
+
+An administrator can save **Settings → Release notices** for the whole install.
+The saved value overrides the `BLERG_UPDATE_CHECK` environment default. Turning
+it off suppresses core's notices immediately and prevents subsequent GitHub
+requests. Board and runner cache core's answer for up to ten minutes; reload
+open pages after that interval. Expired or cold reads await one shared core
+refresh for at most five seconds, returning no notice on timeout. Reenabling resumes checks at the next scheduled
+poll. Failed checks clear the notice quietly. Browsers never call GitHub.
+
+`BLERG_INSTALL_TYPE=desktop|kubernetes` selects the commands in core's
+`/upgrade` panel, linked beside each release notice. Desktop Compose sets this
+value; Kubernetes is detected from `KUBERNETES_SERVICE_HOST` when no explicit
+value is set. Unrecognized or absent values outside Kubernetes are reported as
+unknown, with no guessed commands. Install detection is returned only to current
+administrators through the settings endpoint; public visitors receive generic
+guidance. Run the entire copyable procedure from a clean repository root. It
+fetches the exact validated tag from `blerglab/blerg-ai` into a new checkout,
+verifies its revision and VERSION, copies the existing install `.env`, and stops
+on any failure before deployment. Desktop rebuilds the stack and reinstalls the
+daemon; Kubernetes updates TAG in the new configuration and runs deploy.sh.
+Keep the new release directory for the installed source and configuration.
+
+`GET` and `PUT /api/settings/update-notice` accept an administrator's human
+principal; writes also require a live browser sign-in. The payload is
+`{"enabled":true}` or `{"enabled":false}`. The setting records the updating
+account and timestamp, like the child start limits.
+
+### Desktop credential issuance
+
+Core migration 026 stores hashes of person-bound desktop credentials. A live human calls
+`POST /api/desktop-tokens` with `{}` for a fresh desktop identity at revision 1; no other
+account or caller-selected identity is accepted. The internal component key gates
+`POST /internal/desktop-tokens/issue`, `/internal/desktop-tokens/validate` and
+`/internal/desktop-owners`. The installer issuer selects the explicit installing account
+or first enabled admin. Runner's persisted desktop owner and ownership revision remain
+the authoritative use-time check; core issuance alone never transfers a desktop.
+See [desktop ownership](../../docs/desktop-ownership.md) for enrollment and fencing.

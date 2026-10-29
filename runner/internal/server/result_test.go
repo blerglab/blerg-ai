@@ -159,6 +159,9 @@ func TestRunnerResultEndpoint(t *testing.T) {
 	if err := db.InsertSession(ctx, pool, sessionID, daemonID, "error", "/workspace/org/proj", "org/proj", "T", ""); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.SetSessionPosture(ctx, pool, sessionID, "cluster", false); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.SetSessionError(ctx, pool, sessionID, "clone failed"); err != nil {
 		t.Fatal(err)
 	}
@@ -309,6 +312,10 @@ func TestBuildSessionResultReportsTheLastTurnOnly(t *testing.T) {
 		"a turn in progress": {append(first,
 			ev{"user_message", `{"text":"q2","source":"chat"}`},
 			ev{"assistant_text", `{"text":"working on it","done":true}`}), "working on it", ""},
+		"a recovery diagnostic preserves the actual failure": {append(first,
+			ev{"error", `{"message":"model unavailable","retryable":true}`},
+			ev{"error", `{"message":"The session's host restarted.","retryable":true,"code":"session_recovery"}`},
+			ev{"turn_done", `{"stop_reason":"error"}`}), "", "model unavailable"},
 		"a retry notice in a clean turn": {append(first,
 			ev{"error", `{"message":"retrying the API (attempt 1)…","retryable":true,"code":"api_retry"}`},
 			ev{"assistant_text", `{"text":"answer two","done":true}`},

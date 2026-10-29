@@ -81,7 +81,7 @@ export default function Insights() {
       {error && (
         <div role="alert" className="insights-note insights-error">
           Could not load insights.{' '}
-          <button type="button" onClick={reload}>Try again</button>
+          <button type="button" className="btn small" onClick={reload}>Try again</button>
         </div>
       )}
       {data && !error && (
@@ -403,8 +403,8 @@ function PriceEditor({ stored, unpriced, onChange }: { stored: ModelPrice[]; unp
                   {field('cacheRead', 'Cache read', cur?.cache_read_per_mtok)}
                   {field('cacheWrite', 'Cache write', cur?.cache_write_per_mtok)}
                   <td className="actions">
-                    <button type="button" disabled={busy} aria-label={`Save ${m}`} onClick={() => void save(m)}>Save</button>
-                    {cur && <button type="button" disabled={busy} className="danger" aria-label={`Remove ${m}`} onClick={() => void remove(m)}>Remove</button>}
+                    <button type="button" className="btn small" disabled={busy} aria-label={`Save ${m}`} onClick={() => void save(m)}>Save</button>
+                    {cur && <button type="button" disabled={busy} className="btn small danger" aria-label={`Remove ${m}`} onClick={() => void remove(m)}>Remove</button>}
                   </td>
                 </tr>
               )

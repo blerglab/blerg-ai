@@ -61,6 +61,9 @@ type routeScope struct {
 
 // routeScopes is keyed by the exact mux pattern.
 var routeScopes = map[string]routeScope{
+	"GET /api/board-key-suggestion":                 {scopeDeny, "instance-wide availability for board creation; requires unscoped board.admin"},
+	"GET /api/boards/{id}/cards/by-number/{number}": {scopeBoard, "one card on this board, including archived cards; requires card.read and principal redaction"},
+
 	"POST /api/boards/{id}/file-card":              {scopeBoard, "one approved card, signed intent/digest and account bound; no other permission granted"},
 	"GET /api/boards/{id}/run-targets":             {scopeBoard, "execution targets for this board; handler requires card.write and only its automation owner can choose"},
 	"GET /api/boards/{id}/repo-remote":             {scopeBoard, "one bare board repo's remote on the desktop the person picked; handler requires a human board admin"},
@@ -150,6 +153,7 @@ var routeScopes = map[string]routeScope{
 	"GET /api/chat/sessions/{id}/artifacts/{aid}/download": {scopeSession, "chat: a file's download"},
 	"DELETE /api/chat/sessions/{id}/artifacts/{aid}":       {scopeSession, "chat: delete a file"},
 	"POST /api/chat/sessions/{id}/uploads":                 {scopeSession, "chat: a person's attachment (the handler refuses a non-human)"},
+	"POST /api/chat/sessions/{id}/storage":                 {scopeSession, "chat: an administrator raises the session's attachment storage (person only; the runner checks admin)"},
 }
 
 // RouteScopeDecision reports the reason recorded for a mux pattern's

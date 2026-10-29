@@ -214,7 +214,7 @@ export function BoardSearch({ boardId, value, onChange, cards, onOpenCard, colla
                   </>
                 ) : (
                   <>
-                    <span className="mono num">#{item.card.number}</span>
+                    <span className="mono num">{item.card.reference || `#${item.card.number}`}</span>
                     {item.card.board_id !== boardId && <span className="hit-board">{boards[item.card.board_id] ?? "?"}</span>}
                     <span className="hit-title">{item.card.title}</span>
                     {item.card.archived_at && <span className="chip">archived</span>}

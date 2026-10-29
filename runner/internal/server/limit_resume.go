@@ -21,6 +21,7 @@ const limitResumeSource = "limit_resume"
 const limitResumePrompt = "Continue the task that was interrupted by the provider usage limit. Check the current state before repeating any action."
 
 type limitRefusal struct {
+	WindowID string     `json:"window_id,omitempty"`
 	Provider string     `json:"provider"`
 	TurnID   string     `json:"turn_id"`
 	ResetAt  *time.Time `json:"reset_at,omitempty"`
@@ -89,7 +90,7 @@ func (a *API) HandleLimitResume(w http.ResponseWriter, r *http.Request) {
 			if e := db.SetLimitResume(r.Context(), conn, id, *body.Enabled, p.Sid); e != nil {
 				return e
 			}
-			if !*body.Enabled && row.AutoStop && previous.State == "pending" {
+			if !*body.Enabled && row.AutoStop && (previous.State == "pending" || previous.State == "unknown") {
 				var idle bool
 				if e := conn.QueryRow(r.Context(), `SELECT status='idle' FROM sessions WHERE id=$1`, id).Scan(&idle); e != nil {
 					return e
@@ -186,7 +187,29 @@ func ingestLimitResume(ctx context.Context, h *Hub, pool *pgxpool.Pool, msg prot
 		if err := db.BackfillLimitResumeTurn(ctx, conn, msg.SessionID, seq); err != nil {
 			return err
 		}
-		if err := db.RecordLimitRefusal(ctx, conn, msg.SessionID, p.Provider, p.TurnID, p.ResetAt, seq, at); err != nil {
+		previous, err := db.GetLimitResume(ctx, conn, msg.SessionID)
+		if err != nil {
+			return err
+		}
+		// A near-reset re-refusal must not turn a rounded clock into tomorrow.
+		retry := previous.DispatchedAt != nil && time.Since(*previous.DispatchedAt) < 10*time.Minute
+		if p.ResetAt == nil || retry {
+			after := at
+			if retry {
+				// A refusal is stronger evidence than an uncapped meter. Only
+				// a capped matching window may replace the provider's text.
+				after = time.Time{}
+			}
+			if reset := limitResumeMeterReset(h.FindDaemonForSession(msg.SessionID), p.Provider, p.WindowID, after); reset != nil {
+				p.ResetAt = reset
+			}
+		}
+		if retry && p.ResetAt != nil && (!p.ResetAt.After(*previous.DispatchedAt) || !db.LimitResumeDueAt(msg.SessionID, *p.ResetAt).After(time.Now())) {
+			// An already-due deadline can spend another attempt within seconds.
+			// Poll for new evidence and apply the grace to the new reading.
+			p.ResetAt = nil
+		}
+		if err := db.RecordLimitRefusal(ctx, conn, msg.SessionID, p.Provider, p.TurnID, p.ResetAt, seq, at, p.WindowID); err != nil {
 			return err
 		}
 		state, err := db.GetLimitResume(ctx, conn, msg.SessionID)
@@ -264,7 +287,7 @@ func (a *API) RunLimitResumes(ctx context.Context) {
 	if a.dbPool == nil {
 		return
 	}
-	ticker := time.NewTicker(15 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -284,25 +307,48 @@ func (a *API) checkLimitResumes(ctx context.Context) {
 		log.Printf("limit resume: list: %v", err)
 		return
 	}
-	// One dispatch per tick across the install. This also staggers sessions
-	// sharing credentials without storing provider account identifiers.
+	// Drain each batch; per-session random staggering is part of the durable deadline.
 	for _, id := range ids {
-		dispatched := false
 		settleAutoStop := false
-		err = db.WithLimitResumeLock(ctx, a.dbPool, "limit-resume-dispatch", func(global *pgxpool.Conn) error {
+		err = db.WithLimitResumeLock(ctx, a.dbPool, "limit-resume-dispatch", func(_ *pgxpool.Conn) error {
 			return db.WithLimitResumeLock(ctx, a.dbPool, id, func(conn *pgxpool.Conn) error {
-				var next *time.Time
-				if e := global.QueryRow(ctx, `SELECT max(dispatched_at) FROM session_limit_resume`).Scan(&next); e != nil {
-					return e
-				}
-				if next != nil && time.Since(*next) < 15*time.Second {
-					return nil
-				}
 				state, e := db.GetLimitResume(ctx, conn, id)
 				if e != nil {
 					return e
 				}
-				if !state.Enabled || state.State != "pending" || state.ResetAt == nil || time.Now().Before(state.ResetAt.Add(time.Minute)) {
+				if state.Enabled && state.State == "unknown" {
+					// Expiry is fixed at the original refusal plus eight days.
+					// Unknown waits stop a day earlier, after one full weekly
+					// window, even if a re-refusal refreshed refused_at.
+					if state.ExpiresAt == nil || !state.ExpiresAt.Add(-24*time.Hour).After(time.Now()) || state.RefusedAt != nil && time.Since(*state.RefusedAt) >= 7*24*time.Hour {
+						settleAutoStop = true
+						return db.SetLimitResumeState(ctx, conn, id, "expired", "The continuation window expired; continue manually.")
+					}
+					dc := a.hub.FindDaemonForSession(id)
+					var after time.Time
+					if state.RefusedAt != nil {
+						after = *state.RefusedAt
+					}
+					reset := limitResumeMeterReset(dc, state.Provider, state.WindowID, after)
+					if reset == nil {
+						if dc != nil {
+							poll, err := db.ClaimLimitResumeMeterPoll(ctx, conn, id, limitResumePollDelay(time.Since(after)))
+							if err != nil {
+								return err
+							}
+							if poll {
+								raw, _ := json.Marshal(protocol.UsageLimitsRequest{Type: "usage_limits_request"})
+								a.hub.trySendToDaemon(dc, raw)
+							}
+						}
+						return nil
+					}
+					if e := db.ResolveUnknownLimitReset(ctx, conn, id, *reset); e != nil {
+						return e
+					}
+					state.ResetAt, state.State = reset, "pending"
+				}
+				if !state.Enabled || state.State != "pending" || state.ResetAt == nil || time.Now().Before(db.LimitResumeDueAt(id, *state.ResetAt)) {
 					return nil
 				}
 				blocked, err := db.DelegationResumeBlocked(ctx, conn, id)
@@ -374,17 +420,14 @@ func (a *API) checkLimitResumes(ctx context.Context) {
 					if e != nil || !claimed {
 						return e
 					}
-					dispatched = true
 					limitResumeAudit(ctx, a.hub, a.dbPool, id, messageEventID(attemptID, "limit-resume-dispatch"), "Automatic continuation requested after the provider usage limit reset.")
 					if dc != nil {
 						raw, _ := json.Marshal(protocol.AgentUserMessage{Type: "agent_user_message", SessionID: id, Text: limitResumePrompt, Source: limitResumeSource, ExpectedTurnID: state.TurnID})
-						select {
-						case dc.send <- raw:
+						if a.hub.trySendToDaemon(dc, raw) {
 							return nil
-						default:
-							settleAutoStop = true
-							return db.SetLimitResumeState(ctx, conn, id, "blocked", "The runtime could not accept continuation; continue manually.")
 						}
+						settleAutoStop = true
+						return db.SetLimitResumeState(ctx, conn, id, "blocked", "The runtime could not accept continuation; continue manually.")
 					}
 					// The strict path validates retained owner authority at actual credential
 					// fetch and forbids operator fallback even if the proof expired meanwhile.
@@ -395,7 +438,6 @@ func (a *API) checkLimitResumes(ctx context.Context) {
 					return nil
 				})
 				if errors.Is(dispatchErr, db.ErrDelegationEnded) {
-					dispatched = false
 					settleAutoStop = false
 					return db.SetLimitResumeState(ctx, conn, id, "blocked", "The session's parent ended; this child cannot resume.")
 				}
@@ -407,9 +449,6 @@ func (a *API) checkLimitResumes(ctx context.Context) {
 		}
 		if settleAutoStop {
 			a.autoStopOnTurnDone(id) //nolint:contextcheck // auto-stop owns a bounded cleanup context independent of the scheduler
-		}
-		if dispatched {
-			return
 		}
 	}
 }
@@ -429,4 +468,66 @@ func limitResumeAudit(ctx context.Context, h *Hub, pool *pgxpool.Pool, id, event
 func engineLimitResumeSupported(engine string) bool {
 	descriptor, ok := engines.Lookup(engine)
 	return ok && descriptor.LimitResume
+}
+
+// Unknown resets poll once a minute at first, then back off as the wait grows.
+// The durable poll claim survives server restarts; readings are checked every tick.
+func limitResumePollDelay(age time.Duration) time.Duration {
+	switch {
+	case age >= 24*time.Hour:
+		return time.Hour
+	case age >= 6*time.Hour:
+		return 15 * time.Minute
+	case age >= time.Hour:
+		return 5 * time.Minute
+	default:
+		return time.Minute
+	}
+}
+
+// Only this session's daemon/account may resolve its refusal. A known window
+// cannot borrow another window's reset. With no label, all capped windows must
+// clear. A zero after permits only capped resets (for re-refusals). Otherwise,
+// a fresh reading below the limit proves availability; missing data proves nothing.
+func limitResumeMeterReset(dc *DaemonConn, provider, window string, after time.Time) *time.Time {
+	if dc == nil {
+		return nil
+	}
+	for _, u := range dc.usageLimitsAt(time.Now()) {
+		if u.Provider != provider {
+			continue
+		}
+		var capped time.Time
+		seen, available := false, true
+		for _, w := range u.Windows {
+			if window != "" && w.ID != window {
+				continue
+			}
+			if w.ID == "capped" && window != "capped" {
+				continue
+			} // reactive text is not an account reading
+			seen = true
+			// Older and current Claude daemons floor their reading. A rounded 99%
+			// can still be a provider refusal; it cannot prove capacity is available.
+			if w.UsedPercent >= 100 || provider == "claude" && w.UsedPercent >= 99 {
+				available = false
+			}
+			if w.UsedPercent >= 100 {
+				if w.ResetsAt.IsZero() {
+					return nil
+				}
+				if w.ResetsAt.After(capped) {
+					capped = w.ResetsAt
+				}
+			}
+		}
+		if !capped.IsZero() {
+			return &capped
+		}
+		if seen && available && !after.IsZero() && u.FetchedAt.After(after) {
+			reset := u.FetchedAt
+			return &reset
+		}
+	}
+	return nil
 }

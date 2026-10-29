@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { Board } from '../types'
 import { listBoards, deleteBoard } from '../lib/boardApi'
+import { ConfirmPopover } from '@blerglab/chat'
 import BoardCreateSheet from './BoardCreateSheet'
 
 export default function BoardsList() {
@@ -10,6 +11,10 @@ export default function BoardsList() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
+  const deleteAnchor = useRef<HTMLButtonElement | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<Board | null>(null)
+  const [deleteError, setDeleteError] = useState(false)
+  const [deleting, setDeleting] = useState(false)
 
   const fetchBoards = useCallback(() => {
     listBoards()
@@ -31,13 +36,16 @@ export default function BoardsList() {
   }, [fetchBoards])
 
   async function handleDelete(board: Board) {
-    const confirmed = window.confirm(`Delete board "${board.name}"? This cannot be undone.`)
-    if (!confirmed) return
+    if (deleting) return
+    setDeleting(true)
     try {
       await deleteBoard(board.id)
+      setDeleteTarget(null)
       loadBoards()
-    } catch (err: unknown) {
-      setError('Failed to delete board: ' + (err instanceof Error ? err.message : String(err)))
+    } catch {
+      setDeleteError(true)
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -176,7 +184,9 @@ export default function BoardsList() {
               aria-label="Delete board"
               onClick={e => {
                 e.stopPropagation()
-                handleDelete(board)
+                deleteAnchor.current = e.currentTarget
+                setDeleteError(false)
+                setDeleteTarget(board)
               }}
               style={{
                 position: 'absolute',
@@ -198,6 +208,19 @@ export default function BoardsList() {
           </div>
         ))}
       </div>
+
+      {deleteTarget && <ConfirmPopover
+        anchor={deleteAnchor}
+        title={deleteError ? 'Board could not be deleted' : 'Delete board?'}
+        description={deleteError ? 'Check your connection and board access, then try again.' : `Delete board "${deleteTarget.name}"? This cannot be undone.`}
+        confirmLabel={deleteError ? 'Retry' : 'Delete board'}
+        cancelLabel={deleteError ? 'Dismiss' : 'Cancel'}
+        danger={!deleteError}
+        busy={deleting}
+        closeOnConfirm={false}
+        onConfirm={() => { void handleDelete(deleteTarget) }}
+        onCancel={() => setDeleteTarget(null)}
+      />}
 
       {/* Create sheet — remounted on open/close so form state resets */}
       <BoardCreateSheet

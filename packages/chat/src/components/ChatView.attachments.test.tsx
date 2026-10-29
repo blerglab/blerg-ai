@@ -267,7 +267,7 @@ describe('messages with attachments in the transcript', () => {
     expect(screen.queryByTestId('message-attachments')).toBeNull()
   })
 
-  it('a queued message (session running) shows its attachments, and Esc still interrupts', async () => {
+  it('a queued message (session running) shows its attachments, and Esc does not interrupt', async () => {
     seed(ev(3, 'user_message', { text: 'go', source: 'chat' }))
     mount(running)
     attach(file('a.pdf'))
@@ -284,7 +284,7 @@ describe('messages with attachments in the transcript', () => {
     await waitFor(() => expect(screen.queryByTestId('queued-message')).toBeNull())
 
     fireEvent.keyDown(box(), { key: 'Escape' })
-    expect(t.interrupts).toBe(1)
+    expect(t.interrupts).toBe(0)
   })
 
   it('shows upload progress on the chip as it goes, then Processing, then the size', async () => {
@@ -326,5 +326,77 @@ describe('messages with attachments in the transcript', () => {
     fireEvent.click(screen.getByRole('button', { name: /Files/ }))
     await waitFor(() => expect(listCalls()).toBeGreaterThan(afterUpload))
     expect(await screen.findByText('you')).toBeInTheDocument()
+  })
+})
+
+describe('files waiting for space (#231)', () => {
+  const full = (over: Partial<import('../transport/types').FileSpace> = {}) => ({
+    artifacts: [{id: 'old', name: 'old.txt', size: 8, origin: 'user' as const, content_type: 'text/plain', view: 'text' as const, can_delete: true}],
+    limits: {max_session_upload_bytes: 8, max_session_upload_cap_bytes: 16}, can_delete: true, can_increase: false, ...over,
+  })
+
+  it('keeps Send enabled for a typed message, sends it without the waiting file, and keeps the file waiting', async () => {
+    files().space = async () => full()
+    mount()
+    attach(file('waiting.txt'))
+    await waitFor(() => expect(chips()[0]).toHaveTextContent('Waiting for space'))
+    fireEvent.change(box(), {target: {value: 'an answer meanwhile'}})
+    expect(sendBtn()).not.toBeDisabled()
+    await send()
+    expect(t.sent).toEqual(['an answer meanwhile'])
+    expect(chips()).toHaveLength(1)
+    expect(chips()[0]).toHaveTextContent('Waiting for space')
+    expect(files().uploads).toHaveLength(0)
+  })
+
+  it('shows the waiting actions once for several waiting files, says older attachments can be deleted, and announces it', async () => {
+    files().space = async () => full()
+    mount()
+    attach(file('one.txt'), file('two.txt'), file('three.txt'))
+    await waitFor(() => expect(chips().filter(c => c.textContent?.includes('Waiting for space'))).toHaveLength(3))
+    expect(screen.getAllByRole('button', {name: 'Free up space…'})).toHaveLength(1)
+    expect(screen.getByTestId('attach-space-panel')).toHaveTextContent('You can delete older attachments to make room')
+    expect(screen.getByTestId('attach-waiting-status')).toHaveTextContent('3 files are waiting for space')
+    expect(screen.queryByRole('button', {name: /Ask the session/})).toBeNull()
+    // Not an administrator: the person is told whom to ask.
+    expect(screen.getByTestId('attach-space-panel')).toHaveTextContent('Ask an admin to increase this session’s storage.')
+    expect(screen.queryByRole('button', {name: 'Increase storage'})).toBeNull()
+  })
+
+  it('lets an administrator increase storage once, and the waiting file then uploads', async () => {
+    let raised = false
+    let calls = 0
+    files().space = async () => raised ? full({limits: {max_session_upload_bytes: 32, max_session_upload_cap_bytes: 32}, can_increase: false}) : full({can_increase: true})
+    files().increaseStorage = async () => {calls++; await new Promise(r => setTimeout(r, 20)); raised = true}
+    mount()
+    attach(file('waiting.txt'))
+    const button = await screen.findByRole('button', {name: 'Increase storage'})
+    fireEvent.click(button); fireEvent.click(button)
+    await waitFor(() => expect(files().uploads).toHaveLength(1))
+    expect(calls).toBe(1)
+    await waitFor(() => expect(chips()[0]).not.toHaveTextContent('Waiting'))
+  })
+
+  it('says the server cannot be reached instead of claiming there is no space', async () => {
+    files().space = async () => {throw new TypeError('Failed to fetch')}
+    mount()
+    attach(file('waiting.txt'))
+    await waitFor(() => expect(chips()[0]).toHaveTextContent('Waiting to reach the server'))
+    expect(screen.getByTestId('attach-space-panel')).toHaveTextContent('Can’t reach the server')
+    expect(screen.queryByText(/attachments are full/)).toBeNull()
+  })
+
+  it('stops waiting when the session ends: the file fails and nothing polls', async () => {
+    let checks = 0
+    files().space = async () => {checks++; return full()}
+    const view = mount()
+    attach(file('waiting.txt'))
+    await waitFor(() => expect(chips()[0]).toHaveTextContent('Waiting for space'))
+    view.rerender(<ChatView session={SESSION} transport={t.transport} meta={{...idle, status: 'stopped'}} />)
+    act(() => t.setStatus('stopped'))
+    await waitFor(() => expect(chips()[0]).toHaveTextContent('session has ended'))
+    const after = checks
+    await act(async () => {window.dispatchEvent(new Event('focus')); await new Promise(r => setTimeout(r, 30))})
+    expect(checks).toBe(after)
   })
 })

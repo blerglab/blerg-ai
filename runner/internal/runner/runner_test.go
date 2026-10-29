@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"encoding/json"
 	"net/url"
 	"os"
 	"os/exec"
@@ -9,6 +10,25 @@ import (
 	"testing"
 	"time"
 )
+
+func TestPodCodexSnapshotCannotRotateDesktopLogin(t *testing.T) {
+	t.Setenv("CODEX_AUTH_JSON", `{"tokens":{"access_token":"fixture-access","refresh_token":"fixture-shared-refresh","account_id":"fixture-account"}}`)
+	home := t.TempDir()
+	if err := writeCodexAuthFromEnv(home); err != nil {
+		t.Fatal("could not prepare access-only snapshot")
+	}
+	raw, err := os.ReadFile(filepath.Join(home, ".codex", "auth.json"))
+	var auth struct {
+		LastRefresh time.Time         `json:"last_refresh"`
+		Tokens      map[string]string `json:"tokens"`
+	}
+	if err != nil || json.Unmarshal(raw, &auth) != nil || auth.Tokens["refresh_token"] != "" || auth.LastRefresh.IsZero() {
+		t.Fatal("pod inherited refresh authority or implicit refresh metadata")
+	}
+	if strings.Contains(os.Getenv("CODEX_AUTH_JSON"), "fixture-shared-refresh") || strings.Contains(os.Getenv("CODEX_AUTH_JSON"), "refresh_token") {
+		t.Fatal("native children can still inherit the original refresh credential through the environment")
+	}
+}
 
 // makeBareRepo creates a bare origin with one commit on main.
 func makeBareRepo(t *testing.T) string {
@@ -57,8 +77,11 @@ func TestWriteCodexAuthFromEnvWritesFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != `{"tokens":{"access_token":"tok"}}` {
-		t.Errorf("auth.json contents = %q", data)
+	var auth struct {
+		Tokens map[string]string `json:"tokens"`
+	}
+	if json.Unmarshal(data, &auth) != nil || auth.Tokens["access_token"] != "tok" || auth.Tokens["refresh_token"] != "" {
+		t.Fatal("invalid access-only login")
 	}
 }
 
@@ -399,5 +422,34 @@ func TestConfigFromEnvNewRepo(t *testing.T) {
 	t.Setenv("BLERG_RUNNER_NEW_REPO", "")
 	if ConfigFromEnv().NewRepo {
 		t.Fatal("NewRepo set without the variable")
+	}
+}
+
+func TestPrepareExistingWorkspacePinsTrustedPushDestination(t *testing.T) {
+	bare := makeBareRepo(t)
+	home := t.TempDir()
+	dir := filepath.Join(home, "proj")
+	if out, err := gitServed(home, bare, "upload-pack", "clone", "--", bare, dir); err != nil {
+		t.Fatal(err, out)
+	}
+	cfg := Config{Home: home, Repo: "proj", SessionID: "existing", GitURL: bare}
+	if _, state, err := PrepareWorkspace(cfg); err != nil || state != "existing" {
+		t.Fatal(state, err)
+	}
+	// Agent-controlled origin must never replace the trusted launch endpoint.
+	other := makeBareRepo(t)
+	gitT(t, dir, "remote", "set-url", "origin", other)
+	gitT(t, dir, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "--allow-empty", "-m", "existing work")
+	PushWip(dir, cfg.SessionID)
+	if got := gitT(t, bare, "rev-parse", "refs/heads/wip/existing"); got != gitT(t, dir, "rev-parse", "HEAD") {
+		t.Fatal("existing checkout did not push to launch destination")
+	}
+	cfg.GitURL = other
+	if _, _, err := PrepareWorkspace(cfg); err == nil {
+		t.Fatal("accepted changed destination on existing checkout")
+	}
+	cfg.GitURL = ""
+	if _, _, err := PrepareWorkspace(cfg); err == nil {
+		t.Fatal("accepted existing checkout without trusted destination")
 	}
 }

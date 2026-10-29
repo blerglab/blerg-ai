@@ -10,12 +10,12 @@ import { useBackdropClose } from '@blerglab/chat'
 import { apiFetch } from '../apiFetch'
 import type { ProposalInfo } from '../types'
 import type { useSessionPlugins } from '../hooks/useSessionPlugins'
-import { pluginApplication, type PluginScope } from '../lib/sessionPlugins'
+import { pluginApplication, pluginState, type PluginScope } from '../lib/sessionPlugins'
 import {
   addMarketplace, alwaysOn, fetchCatalog, installBlocker, matchesPlugin, validMarketplaceInput,
   type CatalogMarketplace, type CatalogPlugin, type CatalogResult,
 } from '../lib/pluginCatalog'
-import { PluginAddForm } from './SessionPlugins'
+import { PluginAddForm, StartPluginSession } from './SessionPlugins'
 import './PluginBrowser.css'
 
 type Model = ReturnType<typeof useSessionPlugins>
@@ -42,11 +42,16 @@ export default function PluginBrowser({ model, onClose }: Props) {
   const [market, setMarket] = useState('')
   const [byName, setByName] = useState(false)
 
+  // Requests can finish on a later poll, after the turn that delayed application.
+  // A stable completion key avoids refetching the native catalog on every poll.
+  const completedRequests = JSON.stringify((data?.requests ?? [])
+    .map(p => [p.id, pluginState(p)])
+    .filter(([, state]) => ['applied', 'failed', 'new_sessions'].includes(state)))
   useEffect(() => {
     let live = true
     void fetchCatalog(sessionId).then(r => { if (live) setResult(r) })
     return () => { live = false }
-  }, [sessionId, reload])
+  }, [sessionId, reload, completedRequests])
 
   useEffect(() => {
     const opener = document.activeElement as HTMLElement | null
@@ -107,7 +112,7 @@ export default function PluginBrowser({ model, onClose }: Props) {
             ? 'Browsing plugins is not available for sandboxed sessions yet. Add one by name:'
             : 'This engine has no plugin catalog here. Add one by name:'}
         </p>
-        <PluginAddForm model={model} />
+        <PluginAddForm model={model} onStart={onClose} />
       </div>
     )
   } else if (result.kind === 'error') {
@@ -129,7 +134,7 @@ export default function PluginBrowser({ model, onClose }: Props) {
         )}
         <ul className="pb-list" data-testid="plugin-browser-list">
           {filtered.slice(0, SHOWN).map(p => (
-            <PluginRow key={`${p.marketplace}\u0000${p.name}`} plugin={p} market={markets.get(p.marketplace)} model={model} scope={effectiveScope} />
+            <PluginRow key={`${p.marketplace}\u0000${p.name}`} plugin={p} market={markets.get(p.marketplace)} model={model} scope={effectiveScope} onClose={onClose} />
           ))}
         </ul>
         {filtered.length === 0 && <p className="pb-empty" data-testid="plugin-browser-no-match">No plugins match “{q}”.</p>}
@@ -170,7 +175,7 @@ export default function PluginBrowser({ model, onClose }: Props) {
             <button type="button" className="pb-link" aria-expanded={byName} onClick={() => setByName(v => !v)}>
               {byName ? 'Hide the name form' : 'Enter a plugin by name'}
             </button>
-            {byName && <PluginAddForm model={model} />}
+            {byName && <PluginAddForm model={model} onStart={onClose} />}
           </footer>
         )}
       </div>
@@ -179,11 +184,14 @@ export default function PluginBrowser({ model, onClose }: Props) {
   )
 }
 
-function PluginRow({ plugin, market, model, scope }: { plugin: CatalogPlugin; market?: CatalogMarketplace; model: Model; scope: PluginScope }) {
+function PluginRow({ plugin, market, model, scope, onClose }: { plugin: CatalogPlugin; market?: CatalogMarketplace; model: Model; scope: PluginScope; onClose: () => void }) {
   const [busy, setBusy] = useState(false)
-  const [note, setNote] = useState<{ text: string; failed: boolean } | null>(null)
-  const blocker = installBlocker(market, model.data)
+  const [note, setNote] = useState<{ text: string; failed: boolean; newSession?: boolean } | null>(null)
+  const removing = scope === 'session' && plugin.managed === true
+  const blocker = installBlocker(market, model.data, removing) ?? (removing ? null : plugin.install_reason)
   const always = alwaysOn(market, plugin.name, model.data)
+  const already = scope === 'session' ? plugin.enabled === true : always
+  const disallowed = market?.source && model.data && !model.data.any_marketplace && !model.data.allowed_marketplaces.some(s => s.toLowerCase() === market.source?.toLowerCase())
   const state = plugin.enabled ? 'Enabled in this session' : plugin.installed ? 'Installed, not enabled here' : always ? 'Always on for new sessions' : ''
   async function install() {
     if (busy || blocker || !market?.source) return
@@ -193,10 +201,11 @@ function PluginRow({ plugin, market, model, scope }: { plugin: CatalogPlugin; ma
       const res = await apiFetch(`/api/sessions/${encodeURIComponent(model.sessionId)}/plugins`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ marketplace: market.source, plugin: plugin.name, scope }),
+        body: JSON.stringify({ marketplace: market.source, plugin: plugin.name, scope, ...(removing ? { action: 'remove' } : {}) }),
       })
       if (!res.ok) throw new Error('refused')
-      setNote({ text: pluginApplication((await res.json()) as ProposalInfo), failed: false })
+      const proposal = (await res.json()) as ProposalInfo
+      setNote({ text: pluginApplication(proposal), failed: false, newSession: (proposal.result as {state?: string} | null)?.state === 'new_sessions' })
       await model.refresh()
     } catch {
       setNote({ text: 'The plugin was not accepted. Refresh and try again.', failed: true })
@@ -204,6 +213,8 @@ function PluginRow({ plugin, market, model, scope }: { plugin: CatalogPlugin; ma
       setBusy(false)
     }
   }
+  const disabledReason = busy ? 'Saving the plugin change.' : blocker ?? (already && !removing ? scope === 'session' ? 'Already enabled in this session.' : 'Already always on for new sessions.' : null)
+  const reasonId = useId()
   const meta = [plugin.version && `v${plugin.version.replace(/^v/, '')}`, plugin.author, plugin.category].filter(Boolean).join(' · ')
   return (
     <li className="pb-row" data-testid="plugin-browser-row">
@@ -218,14 +229,18 @@ function PluginRow({ plugin, market, model, scope }: { plugin: CatalogPlugin; ma
           <span className="rail-chip pb-market" title={market?.source ? `Marketplace ${plugin.marketplace} (${market.source})` : `Marketplace ${plugin.marketplace}`}>{plugin.marketplace}</span>
           {meta && <span className="pb-meta" title={meta}>{meta}</span>}
         </div>
+        {disallowed && (plugin.installed || plugin.enabled || always) && <p className="pb-note">Marketplace no longer allowed. Existing plugins are kept.</p>}
         {plugin.description && <p className="pb-desc" title={plugin.description}>{plugin.description}</p>}
-        {note && <p className={`pb-note${note.failed ? ' failed' : ''}`} role={note.failed ? 'alert' : 'status'}>{note.text}</p>}
+        {note && <p className={`pb-note${note.failed ? ' failed' : ''}`} role={note.failed ? 'alert' : 'status'}>{note.text} {note.newSession && <StartPluginSession onStart={onClose} />}</p>}
       </div>
-      <button type="button" className="pb-install" disabled={busy || !!blocker || plugin.enabled === true}
-        title={blocker ?? (plugin.enabled ? 'Already enabled in this session' : undefined)}
-        aria-label={`Install ${plugin.name}`} onClick={() => void install()}>
-        {busy ? 'Installing…' : plugin.enabled ? 'Enabled' : 'Install'}
-      </button>
+      <div className="pb-action">
+        <button type="button" className="pb-install" disabled={!!disabledReason} aria-describedby={disabledReason ? reasonId : undefined}
+          title={disabledReason ?? (removing ? 'Remove from this session between turns; account settings stay unchanged' : undefined)}
+          aria-label={`${removing ? 'Remove' : 'Install'} ${plugin.name}`} onClick={() => void install()}>
+          {busy ? 'Saving…' : removing ? 'Remove' : already ? scope === 'session' ? 'Enabled' : 'Always on' : 'Install'}
+        </button>
+        {disabledReason && <p id={reasonId} className="pb-disabled">{disabledReason}</p>}
+      </div>
     </li>
   )
 }

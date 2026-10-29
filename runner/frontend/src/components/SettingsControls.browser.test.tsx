@@ -9,7 +9,7 @@ import SettingsDialog from './SettingsDialog'
 const apiFetch = vi.hoisted(() => vi.fn())
 vi.mock('../apiFetch', () => ({ apiFetch }))
 
-const limits = { per_parent_running: 3, per_parent_starts: 20, per_account_running: 6, per_account_starts_per_hour: 60 }
+const limits = { per_parent_running: 3, per_parent_starts_per_hour: 120, per_account_running: 6, per_account_starts_per_hour: 60 }
 const rule = { id: 'rule', engine: 'codex', runtime: 'docker', daemon_id: 'host', daemon_name: 'Workstation', local_only: false, created_at: '2026-10-17T10:00:00Z' }
 const json = (body: unknown) => Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } }))
 
@@ -56,5 +56,16 @@ describe('Settings controls', () => {
     expect(box.right).toBeLessThanOrEqual(width)
     expect(dialog.scrollWidth).toBeLessThanOrEqual(dialog.clientWidth + 1)
     if (width === 3840) expect(box.width).toBeGreaterThan(1600)
+    for (const input of dialog.querySelectorAll<HTMLInputElement>('input[type=checkbox]')) {
+      expect(getComputedStyle(input).appearance).toBe('none')
+      expect(input.getBoundingClientRect().width).toBeLessThan(60)
+      expect(input.closest('label')!.getBoundingClientRect().right).toBeLessThanOrEqual(width)
+    }
+    const shots = (import.meta.env as Record<string, string | undefined>).VITE_SETTINGS_SHOTS
+    if (shots) {
+      await page.screenshot({ path: `${shots}/runner-settings-${width}.png` })
+      screen.getByRole('heading', { name: 'Code colors' }).scrollIntoView({ block: 'start' })
+      await page.screenshot({ path: `${shots}/runner-code-colors-${width}.png` })
+    }
   })
 })

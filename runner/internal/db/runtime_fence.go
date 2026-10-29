@@ -103,6 +103,10 @@ var runtimeFenceTimeout = 5 * time.Second
 // transaction owns only its advisory lock; application handlers keep using
 // the independent main pool. Cancellation bounds DB waits and handler I/O.
 func WithRuntimeLaunchFence(parent context.Context, main *pgxpool.Pool, session string, fn func(context.Context) error) error {
+	return withAuthorityFence(parent, main, session, 876433, fn)
+}
+
+func withAuthorityFence(parent context.Context, main *pgxpool.Pool, session string, namespace int64, fn func(context.Context) error) error {
 	if main == nil {
 		return ErrTokenInvalid
 	}
@@ -121,7 +125,7 @@ func WithRuntimeLaunchFence(parent context.Context, main *pgxpool.Pool, session 
 		defer cancelCleanup()
 		_ = tx.Rollback(cleanup)
 	}()
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text,876433))`, session); err != nil {
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text,$2))`, session, namespace); err != nil {
 		return fmt.Errorf("%w: %w", ErrRuntimeFenceBusy, err)
 	}
 	if err = fn(ctx); err != nil {

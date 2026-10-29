@@ -2,10 +2,10 @@
 
 export type MeterLevel = 'quiet' | 'warning' | 'danger'
 
-/** quiet below 70 %, warning from 70 %, danger from 90 %. */
+/** quiet below 80 %, warning from 80 %, danger from 90 %. */
 export function meterLevel(percent: number): MeterLevel {
   if (percent >= 90) return 'danger'
-  if (percent >= 70) return 'warning'
+  if (percent >= 80) return 'warning'
   return 'quiet'
 }
 

@@ -24,6 +24,7 @@ var toolDefs = []map[string]any{
 		"description": "Create a board (requires board.admin). Optionally declare repos, initial columns, and a field schema.",
 		"inputSchema": obj(props{
 			"name":            str("board name"),
+			"key":             str("unique 2–5 uppercase letters or digits, starting with a letter; suggested when omitted"),
 			"description":     str("what this board tracks"),
 			"repos":           arrStr("repos cards may reference"),
 			"columns":         arrStr("initial column names in order"),
@@ -51,6 +52,7 @@ var toolDefs = []map[string]any{
 		"inputSchema": obj(props{
 			"board_id":          str("board uuid"),
 			"name":              str("new name"),
+			"key":               str("unique 2–5 uppercase letters or digits, starting with a letter; old keys remain aliases"),
 			"field_schema":      fieldSchemaProp("replacement field schema"),
 			"repos":             arrStr("replacement repo list"),
 			"gate_enabled":      boolean("toggle the admission gate"),
@@ -78,12 +80,22 @@ var toolDefs = []map[string]any{
 	},
 	{
 		"name":        "blerg_column_create",
-		"description": "Append a column to a board (requires column.write).",
+		"description": "Add a column to a board (requires column.write): at the end, or before before_id.",
 		"inputSchema": obj(props{
 			"board_id":    str("board uuid"),
 			"name":        str("column name"),
 			"is_terminal": boolean("marks 'done'-style columns"),
+			"before_id":   str("place before this column (default: end)"),
 		}, req("board_id", "name")),
+	},
+	{
+		"name":        "blerg_column_update",
+		"description": "Rename a column and/or set its properties (requires column.write). Omitted fields stay as they are.",
+		"inputSchema": obj(props{
+			"column_id":   str("column uuid"),
+			"name":        str("new column name"),
+			"is_terminal": boolean("marks 'done'-style columns"),
+		}, req("column_id")),
 	},
 	{
 		"name":        "blerg_column_move",
@@ -94,17 +106,30 @@ var toolDefs = []map[string]any{
 		}, req("column_id")),
 	},
 	{
-		"name":        "blerg_card_search",
-		"description": "Search a board's cards by text and filters. ALWAYS call before filing a new card — the admission gate denies semantic duplicates.",
+		"name":        "blerg_column_delete",
+		"description": "Remove a column (requires column.write). An empty column is removed; a column with cards is removed only with move_cards_to, another column of the same board its cards move to (in order, at its end).",
 		"inputSchema": obj(props{
-			"board_id":         str("board uuid"),
-			"query":            str("free text over title+body (typo-tolerant)"),
-			"type":             str("filter: card type"),
-			"tag":              str("filter: tag"),
+			"column_id":     str("column uuid to remove"),
+			"move_cards_to": str("column uuid the cards move to first (required when the column has cards)"),
+		}, req("column_id")),
+	},
+	{
+		"name":        "blerg_card_search",
+		"description": "Search a board's cards by text, tag, column and other filters. ALWAYS call before filing a new card — the admission gate denies semantic duplicates.",
+		"inputSchema": obj(props{
+			"board_id": str("board uuid"),
+			"query":    str("free text over title+body (typo-tolerant), or KEY-N / #N / N"),
+			"type":     str("filter: card type"),
+			"tag":      str("filter: tag"),
+			// A plain array: some clients flatten anyOf when they convert tool schemas. The server
+			// also accepts a single string.
+			"column":           arrStr("filter: column names (case-insensitive, exact) or UUIDs on this board; matches any listed column; unknown columns are rejected with the available names"),
 			"priority":         str("filter: low|medium|high|urgent"),
 			"fields":           objectProp("equality filters on declared fields keys, e.g. {\"severity\":\"sev1\"}"),
 			"include_archived": boolean("include archived cards"),
-			"limit":            num("max results (default 20)"),
+			"limit":            num("page size (default 20, maximum 100)"),
+			"page":             boolean("return {cards, next_cursor} instead of an array; follow next_cursor until empty"),
+			"cursor":           str("opaque next_cursor from the previous page, with the same query and filters"),
 		}, req("board_id")),
 	},
 	{
@@ -215,9 +240,10 @@ func obj(p props, required []string) map[string]any {
 
 func cardRef(extra props, required []string) map[string]any {
 	p := props{
-		"card_id":  str("card uuid"),
-		"board_id": str("board uuid (with number)"),
-		"number":   num("human card number, e.g. 42"),
+		"reference": str("canonical card reference, e.g. BLG-205; old keys are accepted"),
+		"card_id":   str("card uuid"),
+		"board_id":  str("board uuid (with number)"),
+		"number":    num("human card number, e.g. 42"),
 	}
 	for k, v := range extra {
 		p[k] = v

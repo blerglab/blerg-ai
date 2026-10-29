@@ -27,13 +27,14 @@ func (l *Loop) compactAt() float64 {
 // tool_use/tool_result pair or strands thinking blocks. The full summary is
 // emitted in the compaction event (persisted; crash recovery rebuilds as
 // summary + events after it). Best-effort: failures leave context untouched.
-func (l *Loop) maybeCompact(ctx context.Context, lastInputTokens int) {
+// It says whether it compacted.
+func (l *Loop) maybeCompact(ctx context.Context, lastInputTokens int) bool {
 	if float64(lastInputTokens) < l.compactAt()*float64(l.windowTokens()) {
-		return
+		return false
 	}
 	cut := l.turnAlignedCut(int(float64(len(l.messages)) * 0.6))
 	if cut < 2 {
-		return
+		return false
 	}
 	old := l.messages[:cut]
 	summaryReq := Request{
@@ -42,7 +43,7 @@ func (l *Loop) maybeCompact(ctx context.Context, lastInputTokens int) {
 	}
 	ch, err := l.callWithRetry(ctx, summaryReq)
 	if err != nil {
-		return // next call may still fit
+		return false // next call may still fit
 	}
 	var summary strings.Builder
 	for ev := range ch {
@@ -54,7 +55,7 @@ func (l *Loop) maybeCompact(ctx context.Context, lastInputTokens int) {
 		}
 	}
 	if summary.Len() == 0 {
-		return
+		return false
 	}
 	replacement := Message{Role: "user", Blocks: []Block{{
 		Type: "text",
@@ -62,6 +63,7 @@ func (l *Loop) maybeCompact(ctx context.Context, lastInputTokens int) {
 	}}}
 	l.messages = append([]Message{replacement}, l.messages[cut:]...)
 	l.emit("compaction", CompactionPayload{Summary: summary.String(), ThroughIndex: cut})
+	return true
 }
 
 // turnAlignedCut returns the largest index <= want where messages[index] is a

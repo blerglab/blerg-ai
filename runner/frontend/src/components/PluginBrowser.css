@@ -362,3 +362,21 @@
   border: 1px solid var(--stone);
   border-radius: 8px;
 }
+
+/* Keep a refusal visible for touch users, alongside its own action. */
+.pb-action {
+  flex: 0 1 150px;
+  min-width: 80px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.pb-disabled {
+  margin: 0;
+  color: var(--fog);
+  font-size: 11px;
+  text-align: right;
+  overflow-wrap: anywhere;
+}

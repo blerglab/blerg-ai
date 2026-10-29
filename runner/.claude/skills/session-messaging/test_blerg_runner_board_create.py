@@ -73,6 +73,21 @@ class TestBoardCreateCLI(unittest.TestCase):
         self.assertEqual(calls[0]["key"], "fixture-key-1")
         self.assertIn("already sent", result.stdout)
 
+    def test_short_idempotency_key_matches_the_runner_contract(self):
+        result, calls = run(["Launch", "--idempotency-key", "k"], [PENDING])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls[0]["key"], "k")
+
+    def test_ascii_space_in_a_key_matches_existing_child_callers(self):
+        result, calls = run(["Launch", "--idempotency-key", "key with spaces"], [PENDING])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls[0]["key"], "key with spaces")
+
+    def test_space_key_retry_hint_is_shell_quoted(self):
+        result, _calls = run(["Launch", "--idempotency-key", "key with spaces"], [(200, {})])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--idempotency-key 'key with spaces'", result.stderr)
+
     def test_retries_an_outage_with_the_same_key(self):
         result, calls = run(["Launch"], [(503, {"error": "busy"}), PENDING])
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -83,7 +98,7 @@ class TestBoardCreateCLI(unittest.TestCase):
     def test_refuses_invalid_drafts_before_sending(self):
         for args in (["a\nb"], [""], ["x", "--repo", "../etc"], ["x", "--repo", "a/b/c"], ["x", "--repo", "app", "--repo", "APP"],
                      ["x", "--template", "focus-board", "--columns", "a"], ["x", "--columns", "a,a"],
-                     ["x", "--template", "Focus Board"], ["x", "--idempotency-key", "bad key"], ["x" * 101],
+                     ["x", "--template", "Focus Board"], ["x", "--idempotency-key", "bad/key"], ["x" * 101],
                      ["Release\u202eeganam"], ["x", "--columns", "Done\u200b,Todo"], ["x", "--description", "a\u2066b"]):
             result, calls = run(args, [PENDING])
             self.assertNotEqual(result.returncode, 0, args)

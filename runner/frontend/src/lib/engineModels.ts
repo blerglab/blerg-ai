@@ -121,6 +121,7 @@ export function parseModelSource(data: unknown): ModelList['source'] {
 // fetchModelList asks for engine's list; daemonId names the daemon the session
 // would run on (a daemon-reported list is that daemon's own).
 export interface FetchedModelList {
+  reconnect?: boolean
   refreshing?: boolean
   error?: string
   models: EngineModel[]
@@ -170,7 +171,7 @@ async function requestModelList(engine: string, daemonId?: string, runtime?: Mod
     : []
   return {
     models: parseModelList(engine, data), source: parseModelSource(data), engineEfforts,
-    ...(runtime === 'cluster' ? { refreshing: data.refreshing === true, error: typeof data.error === 'string' ? data.error : undefined } : {}),
+    ...(runtime === 'cluster' ? { reconnect: data.reconnect === true, refreshing: data.refreshing === true, error: typeof data.error === 'string' ? data.error : undefined } : {}),
   }
 }
 
@@ -179,6 +180,7 @@ export async function fetchModels(engine: string, daemonId?: string): Promise<En
 }
 
 export interface EngineModelsState {
+  reconnect?: boolean
   refreshing?: boolean
   retry?: () => void
   error?: string
@@ -220,7 +222,7 @@ export interface UseEngineModelsOptions {
 // session runs — that answer is dropped (no list) rather than shown.
 function toState(k: string, daemonId: string | undefined, r: FetchedModelList): { key: string } & EngineModelsState {
   const usable = r.source === 'daemon' && !daemonId ? [] : r.models
-  return { key: k, models: usable, loading: false, fallback: false, source: r.source, engineEfforts: r.engineEfforts, refreshing: r.refreshing, error: r.error }
+  return { key: k, models: usable, loading: false, fallback: false, source: r.source, engineEfforts: r.engineEfforts, reconnect: r.reconnect, refreshing: r.refreshing, error: r.error }
 }
 
 // useEngineModels starts on the engine's built-in list (so a picker can render
@@ -252,7 +254,11 @@ export function useEngineModels(engine: string, daemonId?: string, opts?: UseEng
     const load = (forceRefresh = false) => {
       void fetchModelList(key, daemonId, runtime, forceRefresh)
         .then(answer => {
-          if (!live || cache?.identity?.() !== identity) return
+          if (!live) return
+          // The cache moved on while this was out (an inventory refresh, another account): the answer
+          // is not kept, and the list is read again under the cache's new identity rather than left
+          // loading or stale (#250).
+          if (cache?.identity?.() !== identity) { setReload(value => value + 1); return }
           const kept = cache?.get(key, daemonId, runtime)
           const shown = (answer.refreshing || answer.error) && answer.models.length === 0 && kept
             ? { ...answer, models: kept.models, engineEfforts: answer.engineEfforts.length ? answer.engineEfforts : kept.engineEfforts }
@@ -262,7 +268,8 @@ export function useEngineModels(engine: string, daemonId?: string, opts?: UseEng
           if (runtime === 'cluster' && answer.refreshing) poll = setTimeout(load, 2000)
         })
         .catch((err: unknown) => {
-          if (!live || cache?.identity?.() !== identity) return
+          if (!live) return
+          if (cache?.identity?.() !== identity) { setReload(value => value + 1); return }
           const error = err instanceof Error ? err.message : 'Could not load models.'
           const kept = cache?.get(key, daemonId, runtime)
           setState(kept ? { ...toState(k, daemonId, kept), error } : { key: k, models: builtinModels(key), loading: false, fallback: true, engineEfforts: [], error })
@@ -273,7 +280,7 @@ export function useEngineModels(engine: string, daemonId?: string, opts?: UseEng
   }, [key, daemonId, runtime, stateKey, enabled, cache, reload])
   const retry = runtime === 'cluster' ? () => {
     forceNext.current = true
-    setState(previous => ({ ...previous, error: undefined, refreshing: true }))
+    setState(previous => ({ ...previous, error: undefined, reconnect: false, refreshing: true }))
     setReload(value => value + 1)
   } : undefined
   if (enabled && state.key === stateKey) return { ...state, retry }

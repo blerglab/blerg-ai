@@ -28,8 +28,10 @@ set -euo pipefail
 
 # Files that stay private: dependency bumps run in the private repository and
 # reach the public one with each release; the Claude Code plugin list is the
-# maintainers' own workflow, not something to switch on for contributors.
-exclude=(.github/dependabot.yml .claude/settings.json board/.claude/settings.json runner/.claude/settings.json)
+# maintainers' own workflow, not something to switch on for contributors; video/
+# is the maintainers' demo and capture harness for marketing videos, not product.
+# Entries may be folders.
+exclude=(.github/dependabot.yml .claude/settings.json board/.claude/settings.json runner/.claude/settings.json video)
 
 push=false
 if [ "${1:-}" = --push ]; then push=true; shift; fi
@@ -67,7 +69,7 @@ fi
 index=$(mktemp); export_dir=$(mktemp -d)
 trap 'rm -rf "$index" "$export_dir"' EXIT
 GIT_INDEX_FILE="$index" git read-tree HEAD
-GIT_INDEX_FILE="$index" git rm --cached --quiet --ignore-unmatch -- "${exclude[@]}"
+GIT_INDEX_FILE="$index" git rm -r --cached --quiet --ignore-unmatch -- "${exclude[@]}"
 tree=$(GIT_INDEX_FILE="$index" git write-tree)
 
 if [ -n "$parent" ] && [ "$tree" = "$(git rev-parse "$parent^{tree}")" ]; then

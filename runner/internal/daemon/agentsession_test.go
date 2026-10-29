@@ -837,7 +837,9 @@ func TestAgentHostSlashSkillRecordsTheTypedText(t *testing.T) {
 }
 
 func TestAgentHostKillWaitsForDriverCleanupBeforeEndingSession(t *testing.T) {
-	t.Setenv(DaemonStateDirEnv, t.TempDir())
+	state := t.TempDir()
+	t.Setenv(DaemonStateDirEnv, state)
+	private := attachmentFixture(t, state, "cleanup-session", false)
 	sender := &agentTestSender{}
 	done, canceled := make(chan struct{}), make(chan struct{})
 	sess := &agentSession{
@@ -860,6 +862,7 @@ func TestAgentHostKillWaitsForDriverCleanupBeforeEndingSession(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("Kill did not finish after driver cleanup")
 	}
+	assertAttachmentsGone(t, private)
 }
 
 func TestAgentHostKillBoundsUnresponsiveDriverCleanup(t *testing.T) {

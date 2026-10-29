@@ -7,7 +7,8 @@ package server
 //	GET    /api/runner/sessions/{id}/artifacts                 the session's files, newest first
 //	GET    /api/runner/sessions/{id}/artifacts/{aid}/raw       the bytes for an in-app viewer
 //	GET    /api/runner/sessions/{id}/artifacts/{aid}/download  the bytes as an attachment
-//	DELETE /api/runner/sessions/{id}/artifacts/{aid}           remove one (any origin)
+//	DELETE /api/runner/sessions/{id}/artifacts/{aid}           remove one (owner, admin, or own attachment)
+//	POST   /api/runner/sessions/{id}/storage                   an administrator raises the attachment total
 //	POST   /api/runner/sessions/{id}/uploads                   attach a person's file (raw body)
 //
 // Every route is authRunner + requireSessionAccess, exactly like send_message: an agent token
@@ -54,8 +55,8 @@ func (a *API) sessionFilesFor(w http.ResponseWriter, r *http.Request, principal 
 
 // HandleRunnerFilesList is GET /api/runner/sessions/{id}/artifacts.
 func (a *API) HandleRunnerFilesList(w http.ResponseWriter, r *http.Request) {
-	if _, sid, ok := a.runnerSessionFiles(w, r); ok {
-		(&artifactsHandler{api: a}).listSession(w, r, sid)
+	if p, sid, ok := a.runnerSessionFiles(w, r); ok {
+		(&artifactsHandler{api: a}).listSession(w, r, sid, a.runnerFileActor(r, p, sid))
 	}
 }
 
@@ -73,11 +74,11 @@ func (a *API) HandleRunnerFileDownload(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// HandleRunnerFileDelete is DELETE /api/runner/sessions/{id}/artifacts/{aid}: a file is deleted
-// by whoever may see the session, whichever origin it came from.
+// HandleRunnerFileDelete is DELETE /api/runner/sessions/{id}/artifacts/{aid}: the session's
+// owner or an administrator deletes any file, a person their own attachment (file_actor.go).
 func (a *API) HandleRunnerFileDelete(w http.ResponseWriter, r *http.Request) {
-	if _, sid, ok := a.runnerSessionFiles(w, r); ok {
-		(&artifactsHandler{api: a}).removeSession(w, r, sid)
+	if p, sid, ok := a.runnerSessionFiles(w, r); ok {
+		(&artifactsHandler{api: a}).removeSession(w, r, sid, a.runnerFileActor(r, p, sid))
 	}
 }
 
@@ -86,6 +87,6 @@ func (a *API) HandleRunnerFileDelete(w http.ResponseWriter, r *http.Request) {
 // acts for (none for the operator key).
 func (a *API) HandleRunnerUpload(w http.ResponseWriter, r *http.Request) {
 	if principal, sid, ok := a.runnerSessionFiles(w, r); ok {
-		(&artifactsHandler{api: a}).userUploadSession(w, r, sid, principal.spawningAccountID())
+		(&artifactsHandler{api: a}).userUploadSession(w, r, sid, a.runnerFileActor(r, principal, sid).uploadAccount(principal))
 	}
 }

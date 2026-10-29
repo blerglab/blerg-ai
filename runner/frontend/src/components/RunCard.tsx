@@ -3,7 +3,7 @@
 // the card used to spell out (in the background, the subagent's type, its effort) are in the title's
 // tooltip. The title is the card's one control: a click anywhere on the card (or Enter on the title)
 // does what it does, usually bringing the card's place in the conversation into view.
-import { useState, type MouseEvent, type ReactNode } from 'react'
+import { useState, type CSSProperties, type MouseEvent, type ReactNode } from 'react'
 import { useHovercard, type RunTarget } from '@blerglab/chat'
 
 export interface RunCardProps {
@@ -82,8 +82,8 @@ export default function RunCard(p: RunCardProps) {
 }
 
 /** A small glyph with its words in the tooltip and the accessible name. */
-export function RunGlyph({ label, children, testId, className }: { label: string; children: ReactNode; testId?: string; className?: string }) {
-  return <span className={`rail-run-glyph${className ? ` ${className}` : ''}`} role="img" aria-label={label} title={label} data-testid={testId}>{children}</span>
+export function RunGlyph({ label, children, testId, className, style }: { label: string; children: ReactNode; testId?: string; className?: string; style?: CSSProperties }) {
+  return <span className={`rail-run-glyph${className ? ` ${className}` : ''}`} role="img" aria-label={label} title={label} data-testid={testId} style={style}>{children}</span>
 }
 
 /** The card's step line: one mono line cut with an ellipsis. A tap (or Enter) shows it whole in place,

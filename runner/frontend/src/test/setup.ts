@@ -7,10 +7,16 @@
 import '@testing-library/jest-dom/vitest'
 import { afterEach, vi } from 'vitest'
 import { cleanup, configure } from '@testing-library/react'
+import { clearViews } from '../lib/sessionViewCache'
+import { clearViewCache } from '../../../../packages/chat/src/model/viewCache'
 
 // Unmount any rendered components and clear the DOM between tests.
 afterEach(() => {
   cleanup()
+  // A session's cached explorer and panel never carry into another test's fixtures.
+  clearViews()
+  // Nor the chat's kept Files lists and file contents (#281).
+  clearViewCache()
 })
 
 // waitFor's default second is not enough when the whole suite runs on a loaded CI runner; a

@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -20,10 +21,12 @@ type bareRepoRunner struct {
 	origins map[string]map[string]*runner.RepoOrigin // daemon → folder → origin (nil: no remote)
 	asked   []string                                 // daemon ids repo-origin discovery named
 	repos   []string                                 // repos plain discovery named
+	// resolvesBare: the cluster says it resolves bare names itself (a default organization).
+	resolvesBare bool
 }
 
 func (f *bareRepoRunner) targets(repo string) []runner.LaunchTarget {
-	out := []runner.LaunchTarget{{Name: "Cluster", Runtimes: []string{"cluster"}}}
+	out := []runner.LaunchTarget{{Name: "Cluster", Runtimes: []string{"cluster"}, ResolvesBareRepos: f.resolvesBare}}
 	for _, id := range []string{"desktop-a", "desktop-b"} {
 		t := runner.LaunchTarget{DaemonID: id, Name: strings.TrimPrefix(id, "desktop-"), Runtimes: []string{"daemon", "docker"}}
 		if repo != "" {
@@ -305,5 +308,101 @@ func TestBareRepoResolveKeepsTheBoardsWorkingDirectory(t *testing.T) {
 	}
 	if len(driver.repos) == 0 || driver.repos[len(driver.repos)-1] != "example-org/app" {
 		t.Fatalf("board discovery used %v, want the resolved app", driver.repos)
+	}
+}
+
+// startBoardSession opens the board's own session (the board drawer), the start the owner saw
+// fail with the runner's raw 422 on an install with a cluster.
+func startBoardSession(t *testing.T, do func(method, path string, body any) *http.Response, boardID string) (int, string) {
+	t.Helper()
+	resp := do("POST", "/api/boards/"+boardID+"/sessions", map[string]any{})
+	return resp.StatusCode, readAll(t, resp)
+}
+
+// A bare repo the cluster cannot clone, with no board target: the board's session runs on the
+// one desktop that has the folder (its sandbox) instead of being sent to the cluster.
+func TestBoardSessionBareRepoRunsOnTheDesktopThatHasIt(t *testing.T) {
+	boardID, _, fake, _, do := bareRepoFixture(t, map[string]map[string]*runner.RepoOrigin{
+		"desktop-b": {"app": nil},
+	})
+	if status, body := startBoardSession(t, do, boardID); status != http.StatusAccepted {
+		t.Fatalf("board session: %d %s", status, body)
+	}
+	if st := fake.started[0]; st.Runtime != "docker" || st.DaemonID != "desktop-b" || st.Repo != "app" {
+		t.Fatalf("start = runtime %q daemon %q repo %q, want docker on desktop-b", st.Runtime, st.DaemonID, st.Repo)
+	}
+}
+
+// An owner/name repo still goes where the runner sends it (the cluster), untouched.
+func TestBoardSessionFullRepoLeavesTheClusterChoice(t *testing.T) {
+	boardID, _, fake, _, do := bareRepoFixture(t, nil)
+	resp := do("PATCH", "/api/boards/"+boardID, map[string]any{"repos": []string{"example-org/app"}})
+	if body := readAll(t, resp); resp.StatusCode != http.StatusOK {
+		t.Fatalf("repos: %d %s", resp.StatusCode, body)
+	}
+	if status, body := startBoardSession(t, do, boardID); status != http.StatusAccepted {
+		t.Fatalf("board session: %d %s", status, body)
+	}
+	if st := fake.started[0]; st.Runtime != "" || st.DaemonID != "" || st.Repo != "example-org/app" {
+		t.Fatalf("start = runtime %q daemon %q repo %q, want the runner's choice", st.Runtime, st.DaemonID, st.Repo)
+	}
+}
+
+// A bare repo on no desktop, or on several, is refused before anything starts, with what to do.
+func TestBoardSessionBareRepoUnknownOrAmbiguous(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		origins map[string]map[string]*runner.RepoOrigin
+		want    string
+	}{
+		{"unknown", nil, "none of the connected desktops has a folder named app"},
+		{"ambiguous", map[string]map[string]*runner.RepoOrigin{"desktop-a": {"app": nil}, "desktop-b": {"app": nil}},
+			"2 connected desktops have a folder named app; choose which one in Where it runs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			boardID, _, fake, _, do := bareRepoFixture(t, tc.origins)
+			status, body := startBoardSession(t, do, boardID)
+			if status != http.StatusUnprocessableEntity || !strings.Contains(body, tc.want) || strings.Contains(body, "HTTP 4") {
+				t.Fatalf("board session: %d %s", status, body)
+			}
+			if fake.attemptCount() != 0 {
+				t.Fatal("a refused start reached the runner")
+			}
+		})
+	}
+}
+
+// When the runner still refuses a bare repo for the cluster (e.g. a card run it placed itself), the
+// person reads what to do, never the runner's HTTP exchange.
+func TestRunnerBareRepoRefusalIsReworded(t *testing.T) {
+	boardID, _, fake, driver, do := bareRepoFixture(t, nil)
+	driver.resolvesBare = true // the board leaves the start to the runner, which then refuses it
+	fake.startErr = &runner.StartRefusedError{Message: runner.ClusterBareRepoRefusal + " (or set BLERG_RUNNER_GITHUB_ORG)"}
+	status, body := startBoardSession(t, do, boardID)
+	if status != http.StatusUnprocessableEntity || !strings.Contains(body, "app is a desktop folder name") || strings.Contains(body, "HTTP") {
+		t.Fatalf("board session: %d %s", status, body)
+	}
+	fake.startErr = &runner.StartRefusedError{Message: "engine is not available"}
+	status, body = startBoardSession(t, do, boardID)
+	if status != http.StatusUnprocessableEntity || body == "" || !strings.Contains(body, "the runner could not start this session: engine is not available") {
+		t.Fatalf("other refusal: %d %s", status, body)
+	}
+}
+
+// A runner refusal of any status reaches the person as the board's plain message: never the raw
+// "runner start failed: … HTTP 409" exchange; a capacity refusal still counts as capacity.
+func TestRunnerRefusalsOfAnyStatusArePlain(t *testing.T) {
+	boardID, _, fake, driver, do := bareRepoFixture(t, nil)
+	driver.resolvesBare = true
+	fake.startErr = &runner.StartRefusedError{Status: http.StatusConflict, Message: "Select an existing repository using fresh source references."}
+	status, body := startBoardSession(t, do, boardID)
+	if status != http.StatusUnprocessableEntity || !strings.Contains(body, "the runner could not start this session: Select an existing repository") ||
+		strings.Contains(body, "HTTP") || strings.Contains(body, "runner start failed") {
+		t.Fatalf("409 refusal: %d %s", status, body)
+	}
+	fake.startErr = errors.New("dial tcp: connection refused")
+	status, body = startBoardSession(t, do, boardID)
+	if status != http.StatusBadGateway || !strings.Contains(body, "could not reach the runner") || strings.Contains(body, "dial tcp") {
+		t.Fatalf("unreachable runner: %d %s", status, body)
 	}
 }

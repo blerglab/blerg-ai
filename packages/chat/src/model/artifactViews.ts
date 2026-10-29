@@ -85,6 +85,13 @@ export async function mediaUrl(bytes: Blob | ArrayBuffer, view: string, contentT
   return URL.createObjectURL(new Blob([bytes], { type: blobTypeFor(view, contentType) }))
 }
 
+/** The URL for bytes a viewer kept (model/viewCache), made at once, as mediaUrl makes it: an SVG
+ *  draws from the data: URL kept with it (none kept: null), anything else from a typed object URL. */
+export function keptMediaUrl(blob: Blob, view: string, contentType: string, dataUrl?: string): string | null {
+  if (isSvgImage(view, contentType)) return dataUrl ?? null
+  return URL.createObjectURL(new Blob([blob], { type: blobTypeFor(view, contentType) }))
+}
+
 /** Frees a URL mediaUrl made (a data: URL holds nothing to free). */
 export function releaseMediaUrl(url: string | null | undefined): void {
   if (url && url.startsWith('blob:')) URL.revokeObjectURL(url)

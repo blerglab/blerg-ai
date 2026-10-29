@@ -9,6 +9,8 @@ import { GRANT_GLYPH } from '../lib/grantGlyphs'
 import { apiFetch } from '../apiFetch'
 import { ENGINE_LABELS, RUNTIME_LABELS } from '../lib/runtimes'
 import { useSessionBoards } from '../lib/sessionBoards'
+import { boardLinksTicket, publishSessionPermissions } from '../lib/sessionBoardLinks'
+import { sessionView } from '../lib/sessionView'
 import type { LiveDelegationGrant } from '../lib/liveState'
 import { refreshChildren } from '../hooks/useChildrenSignal'
 import { useChildApproval } from '../hooks/useChildApproval'
@@ -67,22 +69,33 @@ export default function SessionPermissions(props: {
 
 function Summary({ sessionId, active, delegationGrants, refreshKey, openRequest, onOpenRequestTaken }: { sessionId: string; active: boolean; delegationGrants: LiveDelegationGrant[]; refreshKey: string; openRequest?: number; onOpenRequestTaken?: () => void }) {
   const headId = useId()
-  const [view, setView] = useState<PermissionsView | null>(null)
-  const [state, setState] = useState<'loading' | 'ready' | 'hidden' | 'failed'>('loading')
+  // The last read of this session (the explorer and panel cache): shown at once, then read again.
+  const [cached] = useState(() => sessionView<{ view: PermissionsView | null; state: 'ready' | 'hidden' }>(sessionId, 'permissions').cached)
+  const [view, setView] = useState<PermissionsView | null>(() => cached?.view ?? null)
+  const [state, setState] = useState<'loading' | 'ready' | 'hidden' | 'failed'>(() => cached?.state ?? 'loading')
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [status, setStatus] = useState('')
   const [modal, setModal] = useState<null | 'search' | 'children'>(null)
   const generation = useRef(0)
+  const reading = useRef<AbortController | null>(null)
+  // Leaving the session ends its read: a reply that lands later updates nothing, not even the cache.
+  useEffect(() => () => { generation.current++; reading.current?.abort() }, [])
   const load = useCallback(async () => {
     const version = ++generation.current
+    // A newer read replaces the one still out; the cache and the board button keep only the newest.
+    reading.current?.abort()
+    const ac = new AbortController()
+    reading.current = ac
+    const cache = sessionView<{ view: PermissionsView | null; state: 'ready' | 'hidden' }>(sessionId, 'permissions')
+    const ticket = boardLinksTicket()
     try {
-      const r = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/permissions`)
+      const r = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/permissions`, { signal: ac.signal })
       if (version !== generation.current) return
-      if (r.status === 404 || r.status === 403) { setState('hidden'); return }
+      if (r.status === 404 || r.status === 403) { setState('hidden'); cache.keep({ view: null, state: 'hidden' }); return }
       if (!r.ok) throw new Error('load')
       const next = readPermissions(await r.json())
-      if (version === generation.current) { setView(next); setState('ready') }
+      if (version === generation.current) { setView(next); setState('ready'); publishSessionPermissions(sessionId, next, ticket); cache.keep({ view: next, state: 'ready' }) }
     } catch {
       if (version === generation.current) setState('failed')
     }

@@ -46,10 +46,10 @@ func TestBoardDiscoveryReadOnlyProbeAndNoCredential(t *testing.T) {
 		if err != nil || p.Project != "" || len(p.Caps) != 1 || p.Caps[0] != "card.read" || p.OnBehalfOf != e.acctA || p.ExpiresAt-p.IssuedAt > 30 {
 			t.Error("invalid read probe")
 		}
-		_, _ = w.Write([]byte(`[{"id":"b1","name":"Work","sensitive":"omitted"}]`))
+		_, _ = w.Write([]byte(`[{"id":"b1","name":"Work","key":"BLG","key_aliases":["OLD"],"sensitive":"omitted"}]`))
 	})
 	code, out, _ := e.internal(t, "/internal/boards/list", testInternalKey, map[string]any{"account_id": e.acctA, "session_id": e.sidA})
-	if code != 200 || out != "{\"boards\":[{\"id\":\"b1\",\"name\":\"Work\"}]}\n" {
+	if code != 200 || out != "{\"boards\":[{\"id\":\"b1\",\"name\":\"Work\",\"key\":\"BLG\",\"key_aliases\":[\"OLD\"]}]}\n" {
 		t.Fatalf("list = %d %s", code, out)
 	}
 }

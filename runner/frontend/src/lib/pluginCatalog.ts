@@ -21,6 +21,8 @@ export interface CatalogPlugin {
   category?: string
   installed?: boolean
   enabled?: boolean
+  managed?: boolean
+  install_reason?: string
 }
 
 export interface PluginCatalog {
@@ -60,7 +62,8 @@ export function parseCatalog(body: unknown): PluginCatalog | null {
     plugins.push({
       name, marketplace,
       description: str(r.description, 500), version: str(r.version, 100), author: str(r.author, 100), category: str(r.category, 100),
-      installed: r.installed === true, enabled: r.enabled === true,
+      install_reason: str(r.install_reason, 400),
+      installed: r.installed === true, enabled: r.enabled === true, managed: r.managed === true,
     })
   }
   return { engine: typeof b.engine === 'string' ? b.engine : '', marketplaces, plugins, truncated: b.truncated === true }
@@ -114,11 +117,12 @@ export function validMarketplaceInput(raw: string): boolean {
 }
 
 /** Why a plugin cannot be installed from here, or null when it can. */
-export function installBlocker(market: CatalogMarketplace | undefined, settings: SessionPluginSettings | null): string | null {
+export function installBlocker(market: CatalogMarketplace | undefined, settings: SessionPluginSettings | null, removing = false): string | null {
   if (!settings || !settings.supported) return 'Plugins cannot be added to this session.'
-  if (!market?.source) return 'Installed from its own marketplace only: not a GitHub marketplace.'
+  if (!market?.source) return 'This local marketplace cannot be installed here.'
+  if (market.source.startsWith('codex:') && settings.engine !== 'codex') return 'This marketplace requires Codex.'
   const src = market.source.toLowerCase()
-  if (!settings.any_marketplace && !settings.allowed_marketplaces.some(s => s.toLowerCase() === src)) return 'This marketplace is not allowed by this install.'
+  if (!removing && !settings.any_marketplace && !settings.allowed_marketplaces.some(s => s.toLowerCase() === src)) return 'This marketplace is not allowed by this install.'
   return null
 }
 

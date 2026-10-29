@@ -32,7 +32,7 @@ export const PLUGIN_ENGINES: readonly PluginEngine[] = [
   {
     engine: "codex",
     label: "Codex",
-    defaultMarketplace: OFFICIAL_MARKETPLACE,
+    defaultMarketplace: "codex:openai-curated-remote",
     suggestions: [],
   },
   {
@@ -93,7 +93,7 @@ function PluginEngineCard({ engine, label, defaultMarketplace, suggestions }: Pl
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    const load = async () => {
       try {
         const res = await apiFetch(`/api/plugins/${engine}`);
         if (cancelled) return;
@@ -104,8 +104,14 @@ function PluginEngineCard({ engine, label, defaultMarketplace, suggestions }: Pl
         if (!cancelled) setError("Could not reach the server. Please try again.");
       }
       if (!cancelled) setLoading(false);
-    })();
+    };
+    void load();
+    const refresh = () => { if (!document.hidden) void load(); };
+    window.addEventListener("plugin-marketplaces-changed", refresh);
+    const timer = window.setInterval(refresh, 10000);
     return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("plugin-marketplaces-changed", refresh);
       cancelled = true;
     };
   }, [engine, label]);
@@ -148,7 +154,7 @@ function PluginEngineCard({ engine, label, defaultMarketplace, suggestions }: Pl
   return (
     <li className="card">
       <div className="card-head">
-        <h3 className="card-title">{label}</h3>
+        <h3 className="settings-heading card-title">{label}</h3>
         <span className={current.length > 0 ? "chip up" : "chip idle"}>
           <span className="dot" aria-hidden="true" />
           <span className="label">{current.length} always on</span>
@@ -179,12 +185,12 @@ function PluginEngineCard({ engine, label, defaultMarketplace, suggestions }: Pl
                 <tbody>
                   {current.map((p) => (
                     <tr key={`${p.marketplace}/${p.plugin}`}>
-                      <td>{p.plugin}</td>
+                      <td>{p.plugin}{!list.any_marketplace && !list.allowed_marketplaces.some(m => m.toLowerCase() === p.marketplace.toLowerCase()) && <p className="field-help">Marketplace no longer allowed. This plugin stays in your list; it will not load in new sessions.</p>}</td>
                       <td className="mono">{p.marketplace}</td>
                       <td>
                         <button
                           type="button"
-                          className="btn btn-quiet"
+                          className="settings-action btn btn-quiet"
                           disabled={saving}
                           aria-label={`Remove ${p.plugin}`}
                           onClick={() => void save(current.filter((c) => !samePlugin(c, p)))}
@@ -205,7 +211,7 @@ function PluginEngineCard({ engine, label, defaultMarketplace, suggestions }: Pl
               <button
                 key={`${s.marketplace}/${s.plugin}`}
                 type="button"
-                className="btn"
+                className="settings-action btn"
                 title={s.blurb}
                 disabled={saving || has(s)}
                 onClick={() => void save([...current, { marketplace: s.marketplace, plugin: s.plugin }])}
@@ -216,19 +222,19 @@ function PluginEngineCard({ engine, label, defaultMarketplace, suggestions }: Pl
           </div>
 
           <form className="card-form" onSubmit={add}>
-            <label className="field" htmlFor={`plugin-marketplace-${engine}`}>
-              <span className="field-label">Marketplace (GitHub owner/repo)</span>
+            <label className="settings-field field" htmlFor={`plugin-marketplace-${engine}`}>
+              <span className="field-label">{engine === "codex" ? "Marketplace (GitHub owner/repo or codex:<marketplace>)" : "Marketplace (GitHub owner/repo)"}</span>
               <input
                 id={`plugin-marketplace-${engine}`}
-                className="mono"
+                className="settings-field mono"
                 value={marketplace}
                 onChange={(e) => setMarketplace(e.target.value)}
                 maxLength={140}
               />
             </label>
-            <label className="field" htmlFor={`plugin-name-${engine}`}>
+            <label className="settings-field field" htmlFor={`plugin-name-${engine}`}>
               <span className="field-label">Plugin name</span>
-              <input
+              <input className="settings-field"
                 id={`plugin-name-${engine}`}
                 value={plugin}
                 onChange={(e) => setPlugin(e.target.value)}
@@ -239,7 +245,7 @@ function PluginEngineCard({ engine, label, defaultMarketplace, suggestions }: Pl
             <div className="card-actions">
               <button
                 type="submit"
-                className="btn btn-primary"
+                className="settings-action btn btn-primary"
                 disabled={saving || draft.marketplace === "" || draft.plugin === ""}
               >
                 {saving ? "Saving…" : "Add plugin"}
@@ -248,7 +254,7 @@ function PluginEngineCard({ engine, label, defaultMarketplace, suggestions }: Pl
           </form>
           <p className="field-help">
             {list.any_marketplace
-              ? "This install accepts any GitHub marketplace."
+              ? (engine === "codex" ? "This install accepts any GitHub or Codex-native marketplace." : "This install accepts any GitHub marketplace.")
               : `This install accepts these marketplaces: ${list.allowed_marketplaces.join(", ") || "none"}.`}{" "}
             Up to {list.max} plugins.
           </p>
@@ -267,18 +273,12 @@ export default function PluginsSection({ engines: explicitEngines, metadata: sup
     return { engine: id, label: metadata!.engines.find(e => e.id === id)?.name ?? id, defaultMarketplace: hints?.defaultMarketplace ?? "", suggestions: hints?.suggestions ?? [] };
   });
   return (
-    <section className="section">
+    <section className="settings-section section">
       <p className="eyebrow">Sessions</p>
-      <h2 className="section-title">Always-on plugins</h2>
-      <p className="section-help">
-        These plugins are loaded into your supported agent sessions — on the
-        cluster and on your own workstation daemon (Local sandbox or This machine) — including
-        sessions your boards start with your automation token. They do not change your engine settings
-        on your own machine: a daemon keeps them in its own folder and loads them for the
-        session only. Plugins run code in your sessions, so only add ones you trust.
-      </p>
+      <h2 className="settings-heading section-title">Always-on plugins</h2>
+      <p className="settings-description">Choose trusted plugins to run code in your sessions.</p>
       {!explicitEngines && !metadata && !error && <p className="muted">Loading plugin integrations…</p>}
-      {error && <p role="alert">{error} <button type="button" onClick={retryDiscovery ?? discovery.retry}>Retry plugin discovery</button></p>}
+      {error && <p role="alert">{error} <button className="settings-action" type="button" onClick={retryDiscovery ?? discovery.retry}>Retry plugin discovery</button></p>}
       <ul className="card-list">
         {engines.map((e) => (
           <PluginEngineCard key={e.engine} {...e} />

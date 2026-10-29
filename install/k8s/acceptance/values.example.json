@@ -1,0 +1,14 @@
+{
+  "registry": "registry.example.invalid:5000",
+  "tag": "p6-review-COMMIT-RUN",
+  "postgres_image": "postgres:16",
+  "excluded_nodes": [
+    "excluded-control-node"
+  ],
+  "storage_class": "default",
+  "public_repos": [
+    "https://example.invalid/public/one.git",
+    "https://example.invalid/public/two.git"
+  ],
+  "push_targets": []
+}

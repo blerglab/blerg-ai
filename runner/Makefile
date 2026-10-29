@@ -4,6 +4,8 @@ GO ?= $(shell if [ -x $(HOME)/go/bin/go ]; then echo $(HOME)/go/bin/go; else com
 
 SERVER_IMAGE     ?= blerg-runner-server:latest
 
+COMMIT := $(shell git rev-parse HEAD 2>/dev/null || echo dev)
+
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 
 # ── build ──────────────────────────────────────────────────────────────────────
@@ -25,7 +27,17 @@ build-server:
 
 .PHONY: build-daemon
 build-daemon:
-	$(GO) build -ldflags "-X main.version=$(VERSION)" -o bin/blerg-runner-daemon ./cmd/daemon
+	$(GO) build -ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT)" -o bin/blerg-runner-daemon ./cmd/daemon
+
+# Capture the updater's live call before compilation. Both helper invocations
+# descend from this make process, even though recipe shells differ.
+.PHONY: begin-daemon-update
+begin-daemon-update:
+	@bash -c 'set -a; . ./.env.daemon; set +a; if [ -x ./bin/blerg-runner-daemon ]; then ./bin/blerg-runner-daemon begin-update >/dev/null 2>&1 || true; fi'
+
+ifneq ($(filter install-daemon restart-daemon,$(MAKECMDGOALS)),)
+build-daemon: begin-daemon-update
+endif
 
 .PHONY: build-frontend
 build-frontend:
@@ -33,7 +45,7 @@ build-frontend:
 
 .PHONY: test
 test:
-	$(GO) test -timeout 30m ./...
+	$(GO) test -p 1 -timeout 45m ./...
 
 # ── docker ─────────────────────────────────────────────────────────────────────
 
@@ -66,17 +78,23 @@ define write-service
 		> $(DAEMON_SERVICE)
 endef
 
+# The daemon observes the requesting process and writes its own planned update.
+# A missing older-daemon socket keeps normal pause behavior without blocking install.
+define restart-service
+@bash -c 'set -a; . ./.env.daemon; set +a; ./bin/blerg-runner-daemon prepare-update || true; systemctl --user restart blerg-runner-daemon; rc=$$?; if [ $$rc -ne 0 ]; then ./bin/blerg-runner-daemon cancel-update || true; fi; exit $$rc'
+endef
+
 .PHONY: install-daemon
 install-daemon: build-daemon ## Build + install systemd user service (reads .env.daemon); safe to re-run
 	$(call write-service,.env.daemon)
 	systemctl --user daemon-reload
 	systemctl --user enable blerg-runner-daemon
-	systemctl --user restart blerg-runner-daemon
+	$(restart-service)
 	@echo "blerg-runner-daemon installed. Run: systemctl --user status blerg-runner-daemon"
 
 .PHONY: restart-daemon
 restart-daemon: build-daemon ## Rebuild binary and restart the systemd service
-	systemctl --user restart blerg-runner-daemon
+	$(restart-service)
 
 .PHONY: uninstall-daemon
 uninstall-daemon: ## Stop, disable, and remove the systemd user service

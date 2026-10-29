@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/idempotency"
 	"github.com/blerglab/blerg-ai/runner/internal/testsupport"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -74,7 +75,7 @@ func (f *fakeStarter) Start(ctx context.Context, c *db.Cron, run *db.CronRun) (s
 	if e := f.pool.QueryRow(ctx, `SELECT gen_random_uuid()::text`).Scan(&sid); e != nil {
 		return "", e
 	}
-	existing, claimed, e := db.ClaimIdempotencyKey(ctx, f.pool, "cron:"+c.ID, run.IdempotencyKey(), "h", sid, 24*time.Hour)
+	existing, claimed, e := db.ClaimIdempotencyKey(ctx, f.pool, idempotency.Scope("cron", c.ID), run.IdempotencyKey(), "h", sid, 24*time.Hour)
 	if e != nil {
 		return "", e
 	}
@@ -315,59 +316,79 @@ func TestCrashBetweenClaimAndStartIsRecoveredOnce(t *testing.T) {
 // Crash after the key was claimed but before the session row existed: the
 // reaper releases the key and starts it once more.
 func TestReaperReleasesKeyWithoutSession(t *testing.T) {
-	e := newEnv(t)
-	c := e.addCron("0 * * * *", "UTC")
-	e.clock.Set(at(2026, 6, 1, 13, 0, 5))
-	s := e.sched()
-	claims, err := s.claimDue(context.Background(), e.clock.Now())
-	if err != nil || len(claims) != 1 {
-		t.Fatalf("claimDue = %d, %v", len(claims), err)
-	}
-	run := claims[0].Run
-	var ghost string
-	if err := e.pool.QueryRow(context.Background(), `SELECT gen_random_uuid()::text`).Scan(&ghost); err != nil {
-		t.Fatal(err)
-	}
-	if _, claimed, err := db.ClaimIdempotencyKey(context.Background(), e.pool, "cron:"+c.ID, run.IdempotencyKey(), "h", ghost, 24*time.Hour); err != nil || !claimed {
-		t.Fatalf("setup key: %v %v", claimed, err)
-	}
+	for name, scope := range map[string]func(*db.Cron) string{
+		"current": StableIdempotencyScope,
+		"legacy":  func(c *db.Cron) string { return "cron:" + c.ID },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			c := e.addCron("0 * * * *", "UTC")
+			e.clock.Set(at(2026, 6, 1, 13, 0, 5))
+			s := e.sched()
+			claims, err := s.claimDue(context.Background(), e.clock.Now())
+			if err != nil || len(claims) != 1 {
+				t.Fatalf("claimDue = %d, %v", len(claims), err)
+			}
+			run := claims[0].Run
+			var ghost string
+			if err := e.pool.QueryRow(context.Background(), `SELECT gen_random_uuid()::text`).Scan(&ghost); err != nil {
+				t.Fatal(err)
+			}
+			if _, claimed, err := db.ClaimIdempotencyKey(context.Background(), e.pool, scope(c), run.IdempotencyKey(), "h", ghost, 24*time.Hour); err != nil || !claimed {
+				t.Fatalf("setup key: %v %v", claimed, err)
+			}
 
-	e.clock.Advance(2 * time.Minute)
-	tick(t, e.sched())
-	got, _ := db.GetCronRun(context.Background(), e.pool, run.ID)
-	if got.Status != db.CronRunStarted || got.SessionID == nil || *got.SessionID == ghost {
-		t.Fatalf("run = %+v, want started with a real session (not the ghost %s)", got, ghost)
-	}
-	if e.count("sessions") != 1 || e.count("runner_idempotency") != 1 {
-		t.Fatalf("sessions=%d keys=%d, want 1 and 1", e.count("sessions"), e.count("runner_idempotency"))
+			e.clock.Advance(2 * time.Minute)
+			tick(t, e.sched())
+			got, _ := db.GetCronRun(context.Background(), e.pool, run.ID)
+			if got.Status != db.CronRunStarted || got.SessionID == nil || *got.SessionID == ghost {
+				t.Fatalf("run = %+v, want started with a real session (not the ghost %s)", got, ghost)
+			}
+			if e.count("sessions") != 1 || e.count("runner_idempotency") != 1 {
+				t.Fatalf("sessions=%d keys=%d, want 1 and 1", e.count("sessions"), e.count("runner_idempotency"))
+			}
+		})
 	}
 }
 
 // Crash after the session was created but before the run was marked started:
 // the reaper adopts that session and never calls the Starter again.
 func TestReaperAdoptsExistingSession(t *testing.T) {
-	e := newEnv(t)
-	c := e.addCron("0 * * * *", "UTC")
-	e.clock.Set(at(2026, 6, 1, 13, 0, 5))
-	s := e.sched()
-	claims, _ := s.claimDue(context.Background(), e.clock.Now())
-	run := claims[0].Run
-	sid, err := e.starter.Start(context.Background(), &claims[0].Cron, &run) // starts, then "crashes" before marking
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.starter.mu.Lock()
-	e.starter.calls = nil
-	e.starter.mu.Unlock()
+	for name, scope := range map[string]func(*db.Cron) string{
+		"current": StableIdempotencyScope,
+		"legacy":  func(c *db.Cron) string { return "cron:" + c.ID },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			c := e.addCron("0 * * * *", "UTC")
+			e.clock.Set(at(2026, 6, 1, 13, 0, 5))
+			s := e.sched()
+			claims, _ := s.claimDue(context.Background(), e.clock.Now())
+			run := claims[0].Run
+			sid, err := e.starter.Start(context.Background(), &claims[0].Cron, &run) // starts, then "crashes" before marking
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := e.pool.Exec(t.Context(), `UPDATE runner_idempotency SET scope = $1 WHERE scope = $2 AND key = $3`, scope(c), StableIdempotencyScope(c), run.IdempotencyKey()); err != nil {
+				t.Fatal(err)
+			}
+			if !s.keyMayExist(t.Context(), c, &run) {
+				t.Error("the existing claim must be left for the reaper")
+			}
+			e.starter.mu.Lock()
+			e.starter.calls = nil
+			e.starter.mu.Unlock()
 
-	e.clock.Advance(2 * time.Minute)
-	tick(t, e.sched())
-	got, _ := db.GetCronRun(context.Background(), e.pool, run.ID)
-	if got.Status != db.CronRunStarted || got.SessionID == nil || *got.SessionID != sid {
-		t.Fatalf("run = %+v, want started with session %s", got, sid)
-	}
-	if e.starter.callCount() != 0 || e.count("sessions") != 1 || len(e.runs(c.ID)) != 1 {
-		t.Fatalf("starter calls %d sessions %d", e.starter.callCount(), e.count("sessions"))
+			e.clock.Advance(2 * time.Minute)
+			e.sched().reapOne(t.Context(), &run, e.clock.Now())
+			got, _ := db.GetCronRun(context.Background(), e.pool, run.ID)
+			if got.Status != db.CronRunStarted || got.SessionID == nil || *got.SessionID != sid {
+				t.Fatalf("run = %+v, want started with session %s", got, sid)
+			}
+			if e.starter.callCount() != 0 || e.count("sessions") != 1 || e.count("runner_idempotency") != 1 || len(e.runs(c.ID)) != 1 {
+				t.Fatalf("starter calls %d sessions %d", e.starter.callCount(), e.count("sessions"))
+			}
+		})
 	}
 }
 

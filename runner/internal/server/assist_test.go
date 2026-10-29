@@ -51,7 +51,7 @@ func testAssistConnectedDaemon(t *testing.T, engine, model, effort string) {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/api/boards/"+board.ID+"/assist", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Authorization", "Bearer "+assistOwnerToken(t, api))
 	req.SetPathValue("id", board.ID)
 	rec := httptest.NewRecorder()
 	api.HandlePostAssist(rec, req)
@@ -180,7 +180,7 @@ func TestAssistSpawn_TicketScoped(t *testing.T) {
 
 	body := bytes.NewBufferString(`{"ticket_id":"` + ticket.ID + `"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/boards/"+board.ID+"/assist", body)
-	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Authorization", "Bearer "+assistOwnerToken(t, api))
 	req.SetPathValue("id", board.ID)
 	rec := httptest.NewRecorder()
 	api.HandlePostAssist(rec, req)
@@ -238,7 +238,7 @@ func TestAssistSpawn_NoDaemon(t *testing.T) {
 	api := NewAPI(hub, pool, "tok", nil, "")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/boards/"+board.ID+"/assist", bytes.NewBufferString(`{}`))
-	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Authorization", "Bearer "+assistOwnerToken(t, api))
 	req.SetPathValue("id", board.ID)
 	rec := httptest.NewRecorder()
 	api.HandlePostAssist(rec, req)
@@ -345,7 +345,7 @@ func TestAssistSpawn_NoRepos(t *testing.T) {
 	api := NewAPI(hub, pool, "tok", nil, "")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/boards/"+board.ID+"/assist", bytes.NewBufferString(`{}`))
-	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Authorization", "Bearer "+assistOwnerToken(t, api))
 	req.SetPathValue("id", board.ID)
 	rec := httptest.NewRecorder()
 	api.HandlePostAssist(rec, req)
@@ -392,7 +392,7 @@ func TestAssistSpawn_SendFailureRollsBack(t *testing.T) {
 
 	body := bytes.NewBufferString(`{"ticket_id":"` + ticket.ID + `"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/boards/"+board.ID+"/assist", body)
-	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Authorization", "Bearer "+assistOwnerToken(t, api))
 	req.SetPathValue("id", board.ID)
 	rec := httptest.NewRecorder()
 	api.HandlePostAssist(rec, req)
@@ -491,7 +491,7 @@ func TestAssistSpawnKeepsTicketWithinRequestedBoard(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodPost, "/api/boards/"+board.ID+"/assist", bytes.NewReader(body))
 	req.SetPathValue("id", board.ID)
-	req.Header.Set("Authorization", "Bearer fixture-token")
+	req.Header.Set("Authorization", "Bearer "+assistOwnerToken(t, api))
 	rec := httptest.NewRecorder()
 	api.HandlePostAssist(rec, req)
 	if rec.Code != http.StatusNotFound {
@@ -511,4 +511,12 @@ func TestAssistSpawnKeepsTicketWithinRequestedBoard(t *testing.T) {
 	if err != nil || detail.SessionID != nil {
 		t.Fatal("invalid request changed ticket binding")
 	}
+}
+
+func assistOwnerToken(t *testing.T, api *API) string {
+	t.Helper()
+	for _, dc := range api.hub.GetHostDaemons() {
+		fixtureOwnDesktop(t, api.dbPool, dc, "user-1")
+	}
+	return enableBrowserAuth(t, api)("session.start")
 }

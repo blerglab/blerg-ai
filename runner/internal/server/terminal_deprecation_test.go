@@ -16,7 +16,7 @@ func kindWant(kind string) string {
 	if kind == "" {
 		return `kind \"agent\" is required`
 	}
-	return "Terminal sessions are deprecated and will be removed in 0.5.0"
+	return "Terminal sessions were removed in 0.5.0: start an agent session"
 }
 
 func TestNewTerminalSessionsAreDeprecated(t *testing.T) {

@@ -1,3 +1,4 @@
+import { expectOnlyFileIcons } from '../test/assertFileIcons'
 import {useState} from 'react'
 import {afterEach,describe,expect,it} from 'vitest'
 import {fireEvent,render,waitFor,within} from '@testing-library/react'
@@ -45,10 +46,11 @@ describe('composer attachment previews in Chromium',()=>{
   expect(secondPageRed).toBe(0)
   expect(container.querySelector('.attach-chip-excerpt')?.textContent).toContain('<img src=')
   expect(container.querySelectorAll('img')).toHaveLength(2)
-  expect(container.querySelectorAll('script,iframe,svg')).toHaveLength(0)
+  expect(container.querySelectorAll('script,iframe')).toHaveLength(0)
+  expectOnlyFileIcons(container)
   expect(container.querySelectorAll('[role="progressbar"]')).toHaveLength(4)
-  completions.forEach(done=>done())
-  await waitFor(()=>expect(container.querySelectorAll('[role="progressbar"]')).toHaveLength(0))
+  // Uploads to one session go one at a time (#231): finish each as it starts.
+  await waitFor(()=>{completions.splice(0).forEach(done=>done());expect(container.querySelectorAll('[role="progressbar"]')).toHaveLength(0)})
   await userEvent.click(getByRole('button',{name:'Switch session'}));expect(container.querySelectorAll('[data-testid="attach-chip"]')).toHaveLength(0)
   await userEvent.click(getByRole('button',{name:'Switch session'}));expect(container.querySelectorAll('[data-testid="attach-chip"]')).toHaveLength(4)
   expect(getByRole('img',{name:'Preview of screenshot.png'})).toBeVisible()

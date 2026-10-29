@@ -59,6 +59,22 @@ const UNEXPIRED_TOKEN = () => fakeToken(Math.floor(Date.now() / 1000) + 3600)
 const EXPIRED_TOKEN = () => fakeToken(Math.floor(Date.now() / 1000) - 3600)
 
 describe('ws.ts', () => {
+  it('reconnects for the new person and ignores queued frames from the old socket', async () => {
+    getAccessToken.mockReturnValue(UNEXPIRED_TOKEN())
+    const ws = await import('./ws')
+    const old = FakeWebSocket.instances.at(-1)!
+    const received = vi.fn()
+    ws.onMessage('initial_state', received)
+    window.dispatchEvent(new Event('blerg-identity-changed'))
+    const current = FakeWebSocket.instances.at(-1)!
+    expect(current).not.toBe(old)
+    const message = new MessageEvent('message', { data: JSON.stringify({ type: 'initial_state', daemons: [{ id: 'private-old' }], sessions: [] }) })
+    old.onmessage?.(message)
+    expect(received).not.toHaveBeenCalled()
+    current.onmessage?.(message)
+    expect(received).toHaveBeenCalledTimes(1)
+  })
+
   beforeEach(() => {
     vi.resetModules()
     redirectToRefresh.mockClear()
@@ -144,7 +160,11 @@ describe('ws.ts', () => {
     expect(redirectToRefresh).toHaveBeenCalledTimes(1)
     expect(refreshAlreadyAttempted()).toBe(true)
 
-    socket.onopen?.()
+    socket.onopen?.() // a late callback from the closed socket has no authority
+    expect(refreshAlreadyAttempted()).toBe(true)
+    getAccessToken.mockReturnValue(UNEXPIRED_TOKEN())
+    window.dispatchEvent(new Event('online'))
+    FakeWebSocket.instances.at(-1)!.onopen?.()
     expect(refreshAlreadyAttempted()).toBe(false)
 
     vi.useRealTimers()

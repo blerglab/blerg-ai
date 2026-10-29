@@ -52,7 +52,7 @@ for line in sys.stdin:
 	}
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("CODEX_AUTH_JSON", `{}`)
+	t.Setenv("CODEX_AUTH_JSON", `{"auth_mode":"apikey","OPENAI_API_KEY":"fixture-api-key"}`)
 	t.Setenv("BLERG_RUNNER_MCP_PROMPT_WAIT_S", "0")
 	logPath := filepath.Join(dir, "native.log")
 	t.Setenv("FAKE_RECOVERY_CODEX_LOG", logPath)

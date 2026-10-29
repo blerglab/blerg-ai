@@ -52,3 +52,42 @@ func ReadChildTelemetry(ctx context.Context, pool *pgxpool.Pool, id string, thro
 	}
 	return out, nil
 }
+
+// ReadTurnUsageEvents reads a session's newest turn_done and newest usage_updated through the
+// boundary, ordered by seq: the last finished turn's usage and, when it is newer, what the running
+// turn has reported so far (the Running now token chip, live_usage.go).
+func ReadTurnUsageEvents(ctx context.Context, pool *pgxpool.Pool, id string, through int64) ([]AgentEventRow, error) {
+	rows, err := scanEventRows(ctx, pool, `SELECT e.session_id,e.seq,e.client_event_id,e.kind,e.payload::text,e.ts
+ FROM unnest($3::text[]) k(kind) CROSS JOIN LATERAL (
+ SELECT session_id,seq,client_event_id,kind,payload,ts FROM agent_events
+ WHERE session_id=$1 AND seq<=$2 AND kind=k.kind ORDER BY seq DESC LIMIT 1) e`, id, through, []string{"turn_done", "usage_updated"})
+	if err != nil {
+		return nil, err
+	}
+	sortRowsBySeq(rows)
+	return rows, nil
+}
+
+// ReadContextTurn reads a session's newest turn_done that reports its context (a `context` object,
+// agent.ContextUsage) through the boundary: the Running now context meter (live_usage.go). ok is
+// false when no turn has reported one. The turn_done entries of agent_events_live_idx bound the walk.
+// compaction is the newest compaction event after that turn, when there is one: the engine
+// summarized the conversation since, so the turn's count no longer describes it (a turn that
+// compacted, then failed or was interrupted, ends without a reading). That walk covers only the
+// events since the reading.
+func ReadContextTurn(ctx context.Context, pool *pgxpool.Pool, id string, through int64) (row AgentEventRow, compaction *AgentEventRow, ok bool, err error) {
+	rows, err := scanEventRows(ctx, pool, `SELECT session_id,seq,client_event_id,kind,payload::text,ts FROM agent_events
+ WHERE session_id=$1 AND seq<=$2 AND kind='turn_done' AND jsonb_typeof(payload->'context')='object' ORDER BY seq DESC LIMIT 1`, id, through)
+	if err != nil || len(rows) == 0 {
+		return AgentEventRow{}, nil, false, err
+	}
+	later, err := scanEventRows(ctx, pool, `SELECT session_id,seq,client_event_id,kind,payload::text,ts FROM agent_events
+ WHERE session_id=$1 AND seq>$2 AND seq<=$3 AND kind='compaction' ORDER BY seq DESC LIMIT 1`, id, rows[0].Seq, through)
+	if err != nil {
+		return AgentEventRow{}, nil, false, err
+	}
+	if len(later) > 0 {
+		compaction = &later[0]
+	}
+	return rows[0], compaction, true, nil
+}

@@ -56,6 +56,39 @@ describe('Mermaid rendering lifetime and image errors', () => {
     expect(api.initialize).not.toHaveBeenCalled()
     expect(api.render).not.toHaveBeenCalled()
   })
+  it.each([
+    'classDef blue fill:red;class:foo;position:fixed',
+    'classDef blue fill:red;class foo;fill:var(--evil)',
+    'classDef blue fill:red;class foo;stroke:u\\72l(/private)',
+    'classDef blue fill:red;class foo;fill:expression(1)',
+    'class A blue\nclassDef blue fill:red;position:fixed',
+    'class A blue\nstyle A fill:red;stroke:var(--evil)',
+  ])('refuses every state CSS declaration before invoking the frame: %s', async css => {
+    const host = document.createElement('div')
+    await expect(renderMermaid(`stateDiagram-v2\n[*] --> A\n${css}`, host)).rejects.toThrow(/line [34]: .*not allowed/)
+    expect(api.initialize).not.toHaveBeenCalled()
+    expect(api.render).not.toHaveBeenCalled()
+    expect(decode).not.toHaveBeenCalled()
+    expect(host.children).toHaveLength(0)
+  })
+  it.each(['é red', 'A red,blue', 'é,节点 red,blue', 'A red.blue'])(
+    'refuses unsafe styles after flowchart class %s before invoking the frame', async assignment => {
+      const host = document.createElement('div')
+      const source = `flowchart LR\nA-->B\nclassDef red fill:red; class ${assignment}; style B position:fixed`
+      await expect(renderMermaid(source, host)).rejects.toThrow('line 3: the style property "position" not allowed')
+      expect(api.initialize).not.toHaveBeenCalled()
+      expect(api.render).not.toHaveBeenCalled()
+      expect(decode).not.toHaveBeenCalled()
+      expect(host.children).toHaveLength(0)
+    },
+  )
+  it('rejects Mermaid error SVGs instead of displaying a silent failure', async () => {
+    api.render.mockResolvedValueOnce({svg: '<svg xmlns="http://www.w3.org/2000/svg"><path class="error-icon"/><text class="error-text">Syntax error in text</text></svg>'})
+    const host = document.createElement('div')
+    await expect(renderMermaid('flowchart LR; A-->B', host)).rejects.toThrow('Mermaid: Syntax error in text')
+    expect(host.children).toHaveLength(0)
+    expect(decode).not.toHaveBeenCalled()
+  })
   it('uses the resolved host tokens with a strict base theme', async () => {
     const host = document.createElement('div')
     host.style.setProperty('--chat-fg', '#eeeeee')

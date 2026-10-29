@@ -86,6 +86,7 @@ function stubFetch(changes = 0, live?: LiveReply) {
         : { ok: false, status: 404, headers: new Headers({ 'Content-Type': 'text/plain; charset=utf-8' }), json: () => Promise.reject(new SyntaxError('not JSON')) })
     }
     if (String(url).endsWith('/limit-resume')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ enabled: false, state: 'disabled', reason: '', attempts: 0 }) })
+    if (String(url).endsWith('/plan-nudges')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ enabled: true }) })
     const body = String(url).includes('/api/tool-changes')
       ? { tool_changes: Array.from({ length: changes }, (_, i) => ({ id: `t${i}`, kind: 'changed', muted: false })) }
       : {}
@@ -111,6 +112,9 @@ async function renderPage() {
 }
 
 const toggle = () => screen.getByTestId('rail-toggle')
+// The panel toggle's counts, as shown: "?2 🤖3 ↳1" (needs you, work inside, child sessions); '' with none.
+const badges = () => ['rail-badge-inside', 'rail-badge-children'].map(id => screen.queryByTestId(id)).filter(el => el !== null)
+  .map(el => el.textContent).join(' ')
 const rail = () => screen.queryByTestId('session-rail')
 const desktop = window.matchMedia
 
@@ -155,7 +159,9 @@ describe('session side panel', () => {
     fireEvent(window, new Event('focus'))
     expect(await within(needs).findByText('Second draft')).toBeTruthy()
     expect(within(needs).getByText('First draft')).toBeTruthy()
-    expect(screen.getByTestId('rail-toggle').getAttribute('aria-label')).toContain('2 need you')
+    expect(screen.getByTestId('rail-needs-count')).toHaveTextContent('2')
+    // The toggle counts no needs-you (owner rule, 2026-10-26).
+    expect(screen.getByTestId('rail-toggle').getAttribute('aria-label')).not.toMatch(/need/)
   })
 
   it('names the tool and connection a proposal runs before the title the agent wrote', async () => {
@@ -287,6 +293,15 @@ describe('session side panel', () => {
     expect(fetchCalls().filter(url => url.endsWith('/limit-resume'))).toEqual([])
   })
 
+  it('offers the plan nudge setting in the panel Session section, on by default', async () => {
+    seedSession({ engine: 'hermes', limit_resume_supported: false })
+    seedEvents(user())
+    await renderPage()
+    const box = await within(screen.getByTestId('rail-session')).findByRole('checkbox', { name: 'Nudge when the plan drifts' })
+    expect(box).toBeChecked()
+    expect(fetchCalls().filter(url => url.endsWith('/plan-nudges'))).toEqual(['/api/sessions/sess-a/plan-nudges'])
+  })
+
   describe('on a wide screen', () => {
     it('is open by default, a column of the page with no badge while nothing runs or needs you; the toggle closes it and remembers', async () => {
       seedSession({ status: 'idle' })
@@ -296,7 +311,7 @@ describe('session side panel', () => {
       expect(rail()).toBeVisible()
       expect(toggle()).toHaveAttribute('aria-expanded', 'true')
       expect(toggle()).toHaveAccessibleName('Session panel')
-      expect(screen.queryByTestId('rail-badge')).toBeNull()
+      expect(badges()).toBe('')
       // Not a popover or a dialog: a column of the page.
       expect(rail()!.tagName).toBe('ASIDE')
       expect(rail()).not.toHaveAttribute('role', 'dialog')
@@ -315,14 +330,14 @@ describe('session side panel', () => {
       expect(localStorage.getItem(RAIL_PREF_KEY)).toBe('1')
     })
 
-    it('on a wide screen the panel has no close button of its own: the header toggle closes it', async () => {
+    it('on a wide screen the shared header chevron collapses to a rail and the header toggle reopens it', async () => {
       seedSession({ status: 'idle' })
       seedEvents(user())
       localStorage.setItem(RAIL_PREF_KEY, '1')
       await renderPage()
       expect(rail()).toBeVisible()
-      expect(within(rail()!).queryByRole('button', { name: /hide the session panel|close/i })).toBeNull()
       fireEvent.click(toggle())
+      expect(screen.queryByRole('button', { name: 'Toggle session panel' })).toBeNull()
       expect(rail()).not.toBeVisible()
       expect(localStorage.getItem(RAIL_PREF_KEY)).toBe('0')
     })
@@ -337,9 +352,9 @@ describe('session side panel', () => {
       localStorage.setItem(RAIL_PREF_KEY, '0')
       await renderPage()
       expect(rail()).not.toBeVisible()
-      // The badge still says what runs.
-      expect(screen.getByTestId('rail-badge')).toHaveTextContent('1')
-      expect(toggle()).toHaveAccessibleName('Session panel: 1 running')
+      // The toggle still says what runs.
+      expect(badges()).toBe('🤖1')
+      expect(toggle()).toHaveAccessibleName('Session panel: 1 subagent or background task')
     })
 
     it('once closed by hand, opens by itself again only for something new that needs you, once', async () => {
@@ -373,7 +388,9 @@ describe('session side panel', () => {
       localStorage.setItem(RAIL_PREF_KEY, '0')
       await renderPage()
       expect(rail()).not.toBeVisible()
-      expect(screen.getByTestId('rail-badge')).toHaveTextContent('1')
+      // The toggle has no needs-you count (owner rule): the question is on Needs you.
+      expect(badges()).toBe('')
+      expect(within(rail()!).getByTestId('rail-needs-count')).toHaveTextContent('1')
     })
 
     it('lists what the server reads from the whole log on first paint, with no transcript loaded', async () => {
@@ -389,7 +406,7 @@ describe('session side panel', () => {
       seedSession({ status: 'idle', background_tasks: 2 })
       useTranscriptStore.setState({ sessions: {} })
       await renderPage()
-      await waitFor(() => expect(screen.getByTestId('rail-badge')).toHaveTextContent('5'))
+      await waitFor(() => expect(badges()).toBe('🤖3'))
       const panel = rail()!
       expect(within(panel).getByTestId('rail-needs-count')).toHaveTextContent('2')
       expect(within(panel).getByTestId('rail-running-count')).toHaveTextContent('3')
@@ -401,7 +418,8 @@ describe('session side panel', () => {
       expect(within(sub).queryByTestId('rail-sub-resumed')).toBeNull()
       expect(sub).toHaveTextContent('Watch the deploy')
       expect(sub).toHaveClass('background')
-      expect(within(sub).getByTestId('rail-sub-tokens')).toHaveAccessibleName('2.5k tokens')
+      expect(within(sub).getByTestId('rail-sub-tokens')).toHaveTextContent(/^2\.5k$/)
+      expect(within(sub).getByTestId('rail-sub-tokens').getAttribute('title')).toMatch(/^Tokens so far: 2\.5k tokens\nBreakdown unavailable/)
       expect(within(sub).getByTestId('rail-sub-doing')).toHaveTextContent('running Bash · kubectl get pods')
       expect(within(sub).getByTestId('rail-elapsed')).toHaveTextContent(/^1:(29:5\d|30:0\d)$/)
       const t = within(panel).getByTestId('rail-task')
@@ -422,14 +440,15 @@ describe('session side panel', () => {
       seedSession({ status: 'running' })
       seedEvents(user(), ask(), ...subagent())
       await renderPage()
-      // Only the main agent at work (the working line) counts before the server answers.
-      expect(screen.getByTestId('rail-badge')).toHaveTextContent('1')
+      // Nothing counts before the server answers (the main agent at work is not a count on the toggle).
+      expect(badges()).toBe('')
       await act(async () => {
         answer({ ok: true, status: 200, headers: new Headers({ 'Content-Type': 'application/json' }), json: () => Promise.resolve(liveReply({ through_seq: seq, tool_changes: 3 })) })
         for (let k = 0; k < 10; k++) await Promise.resolve()
       })
       // The server's reading wins: it holds no ask or subagent, whatever the transcript drew.
-      expect(screen.getByTestId('rail-badge')).toHaveTextContent('4')
+      expect(badges()).toBe('')
+      expect(within(rail()!).getByTestId('rail-needs-count')).toHaveTextContent('3')
     })
 
     it('moves at once with what comes after the server\'s reply, before it reads again', async () => {
@@ -439,11 +458,11 @@ describe('session side panel', () => {
       await renderPage()
       await waitFor(() => expect(fetchCalls().some(u => u.includes('/live'))).toBe(true))
       act(() => { useTranscriptStore.getState().ingest(ev('subagent_started', { child_id: 'A9', agent_type: 'Explore', summary: 'Survey the repo' }, 0)) })
-      await waitFor(() => expect(screen.getByTestId('rail-badge')).toHaveTextContent('2'))
+      await waitFor(() => expect(badges()).toBe('🤖1'))
       expect(within(rail()!).getByTestId('rail-subagent')).toHaveTextContent('Survey the repo')
       act(() => { useTranscriptStore.getState().ingest(ev('subagent_done', { child_id: 'A9', summary: 'ok' }, 0)) })
-      // The main agent still works: it alone is left in the badge.
-      expect(screen.getByTestId('rail-badge')).toHaveTextContent('1')
+      // The main agent still works (Running now lists it), but the toggle counts only the work inside.
+      expect(badges()).toBe('')
     })
 
     it('says what the badge counts to a screen reader as it changes', async () => {
@@ -453,8 +472,11 @@ describe('session side panel', () => {
       const live = screen.getByTestId('rail-announce')
       expect(live).toHaveAttribute('aria-live', 'polite')
       expect(live).toHaveTextContent(/^Session panel$/)
+      // A question is not a toggle count (it shows on Needs you); work inside the session is.
       act(() => { useTranscriptStore.getState().ingest(ev('ask', { body: 'Merge now?', message_id: 'm9' }, 0)) })
-      expect(live).toHaveTextContent('Session panel: 1 needs you')
+      expect(live).toHaveTextContent(/^Session panel$/)
+      act(() => { useTranscriptStore.getState().ingest(ev('subagent_started', { child_id: 'A7', agent_type: 'Explore', summary: 'Survey' }, 0)) })
+      expect(live).toHaveTextContent('Session panel: 1 subagent or background task')
     })
 
     it('lists what needs you and what runs, with counts, and the badge adds them up', async () => {
@@ -468,10 +490,10 @@ describe('session side panel', () => {
       // header's badge, its label and announcement.
       expect(within(panel).getByTestId('rail-running-count')).toHaveTextContent('3')
       expect(within(panel).getByTestId('rail-main')).toHaveAttribute('data-state', 'working')
-      expect(screen.getByTestId('rail-badge')).toHaveTextContent('5')
-      expect(screen.getByTestId('rail-badge')).toHaveClass('attention')
-      expect(toggle()).toHaveAccessibleName('Session panel: 2 need you, 3 running')
-      expect(screen.getByTestId('rail-announce')).toHaveTextContent('Session panel: 2 need you, 3 running')
+      expect(badges()).toBe('🤖2')
+      expect(screen.getByTestId('rail-badge-inside')).not.toHaveClass('attention')
+      expect(toggle()).toHaveAccessibleName('Session panel: 2 subagents and background tasks')
+      expect(screen.getByTestId('rail-announce')).toHaveTextContent('Session panel: 2 subagents and background tasks')
 
       const askRow = within(panel).getByTestId('rail-ask')
       expect(askRow).toHaveTextContent('Deploy to staging first?')
@@ -487,7 +509,9 @@ describe('session side panel', () => {
       // The type is in the title's tooltip; the model and tokens are glyphs with their words in tooltips.
       expect(within(sub).getByTestId('rail-show').getAttribute('title')).toContain('Explore')
       expect(within(sub).getByTestId('rail-sub-model')).toHaveAccessibleName('Model: haiku-5')
-      expect(within(sub).getByTestId('rail-sub-tokens')).toHaveAccessibleName('12k tokens')
+      // The chat's own reading (no /live here) has no owner/admin decision: no tokens, chip or hover.
+      expect(within(sub).queryByTestId('rail-sub-tokens')).toBeNull()
+      expect(sub.textContent).not.toMatch(/12k|12\.4k/)
       expect(within(sub).getByTestId('rail-sub-doing')).toHaveTextContent('running Bash · npm test')
       expect(within(sub).getByTestId('rail-elapsed')).toHaveTextContent('04:00')
       // A foreground subagent keeps the solid border.
@@ -505,17 +529,14 @@ describe('session side panel', () => {
       expect(panel.querySelector('[data-event-id], [data-call-id], [data-call-ids]')).toBeNull()
     })
 
-    it('an idle session with background tasks (the server\'s count) reads as working in the background, in the header and the facts', async () => {
+    it('an idle session with background tasks has no header chip: the panel says what runs', async () => {
       seedSession({ status: 'idle', background_tasks: 2 })
       seedEvents(user())
       localStorage.setItem(RAIL_PREF_KEY, '1')
       await renderPage()
-      const pill = screen.getByTestId('detail-status')
-      expect(pill).toHaveAttribute('data-status', 'background')
-      expect(pill).toHaveTextContent('working in background, 2 tasks')
-      const status = within(within(rail()!).getByTestId('rail-session')).getByTestId('rail-status')
-      expect(status).toHaveTextContent('working in background, 2 tasks')
-      expect(status).not.toHaveTextContent('idle')
+      expect(screen.queryByTestId('detail-status')).toBeNull()
+      expect(screen.queryByText(/working in background/)).toBeNull()
+      expect(within(rail()!).queryByTestId('rail-status')).toBeNull()
     })
 
     it('a background shell command reads as a command: glyph, the command, the description, shell · elapsed · status, no model or effort', async () => {
@@ -539,6 +560,8 @@ describe('session side panel', () => {
       // The subagent keeps its own look: the agent glyph, model, effort.
       const sub = within(rail()!).getByTestId('rail-subagent')
       expect(within(sub).getByRole('img', { name: 'Subagent' })).toHaveTextContent('🤖')
+      // The panel toggle's work-inside count carries the same robot face as this row (owner, #245).
+      expect(screen.getByTestId('rail-badge-inside').querySelector('.icon-btn-count-glyph')!.textContent).toBe(within(sub).getByRole('img', { name: 'Subagent' }).textContent)
       // It reports no effort of its own: it runs at the session's, which is said, never "unknown".
       expect(within(sub).getByTestId('rail-show').getAttribute('title')).toContain("effort: high (session's)")
     })
@@ -553,7 +576,7 @@ describe('session side panel', () => {
       expect(within(t).queryByTestId('rail-task-note')).toBeNull()
     })
 
-    it('an idle session whose live state has a task running reads as working in the background, before the server\'s count arrives', async () => {
+    it('an idle session whose live state has a task running lists it in the panel and counts it on the toggle, with no header chip', async () => {
       seedSession({ status: 'idle' })
       seedEvents(user())
       stubFetch(0, liveReply({
@@ -562,8 +585,11 @@ describe('session side panel', () => {
       }))
       localStorage.setItem(RAIL_PREF_KEY, '1')
       await renderPage()
-      await waitFor(() => expect(screen.getByTestId('detail-status')).toHaveTextContent('working in background, 1 task'))
-      expect(within(rail()!).getByTestId('rail-status')).toHaveAttribute('data-status', 'background')
+      await waitFor(() => expect(within(rail()!).getByTestId('rail-task')).toHaveTextContent('Wait for the deploy'))
+      expect(badges()).toBe('🤖1')
+      expect(within(rail()!).getByTestId('rail-running-count')).toHaveTextContent('1')
+      expect(screen.queryByTestId('detail-status')).toBeNull()
+      expect(within(rail()!).queryByTestId('rail-status')).toBeNull()
     })
 
     it('the live state wins over the server\'s count: nothing running live reads idle, and the count is the live one', async () => {
@@ -572,31 +598,31 @@ describe('session side panel', () => {
       stubFetch(0, liveReply())
       localStorage.setItem(RAIL_PREF_KEY, '1')
       await renderPage()
-      await waitFor(() => expect(within(rail()!).getByTestId('rail-status')).toHaveAttribute('data-status', 'idle'))
+      await waitFor(() => expect(screen.queryByTestId('detail-status')).toBeNull())
       expect(screen.queryByTestId('detail-status')).toBeNull()
     })
 
-    it('a running session stays running in the facts, background tasks or not', async () => {
+    it('a running session does not duplicate its status in Session', async () => {
       seedSession({ status: 'running', background_tasks: 1 })
       seedEvents(user())
       localStorage.setItem(RAIL_PREF_KEY, '1')
       await renderPage()
-      expect(within(rail()!).getByTestId('rail-status')).toHaveAttribute('data-status', 'running')
+      expect(within(rail()!).queryByTestId('rail-status')).toBeNull()
       expect(screen.queryByTestId('detail-status')).toBeNull()
     })
 
-    it('shows the session facts with links to Insights, Files and Capabilities', async () => {
+    it('keeps Insights only in the header and avoids duplicate panel links', async () => {
       seedSession({ status: 'idle' })
       seedEvents(user())
       localStorage.setItem(RAIL_PREF_KEY, '1')
       await renderPage()
       const facts = within(rail()!).getByTestId('rail-session')
-      expect(facts).toHaveTextContent('Runs onLocal sandbox · workstation')
-      expect(facts).toHaveTextContent('EngineClaude')
-      expect(within(facts).getByTitle('claude-opus-5-5')).toHaveTextContent('opus-5-5')
-      expect(within(facts).getByTitle('Configured effort')).toHaveTextContent('high')
+      expect(within(facts).getByLabelText('Runs on')).toHaveTextContent('Local sandbox · workstation')
+      expect(within(facts).getByTestId('rail-engine')).toHaveTextContent('Claude')
+      expect(within(facts).getByLabelText('Model')).toHaveValue('claude-opus-5-5')
+      expect(within(facts).getByLabelText('Effort')).toHaveValue('high')
       expect(within(facts).getByTestId('rail-lifetime')).toHaveTextContent('2 h 15 min')
-      expect(within(facts).getByTestId('rail-status')).toHaveTextContent('idle')
+      expect(within(facts).queryByTestId('rail-status')).toBeNull()
       // Idle with nothing in the background: the header names no state.
       expect(screen.queryByTestId('detail-status')).toBeNull()
 
@@ -605,7 +631,9 @@ describe('session side panel', () => {
       for (const id of ['rail-open-insights', 'rail-open-files', 'rail-open-capabilities']) {
         expect(within(facts).queryByTestId(id)).toBeNull()
       }
-      expect(within(facts).queryByRole('button', { name: /Insights|Files|Capabilities/ })).toBeNull()
+      expect(within(facts).queryByRole('button', { name: 'Insights' })).toBeNull()
+      expect(screen.getAllByRole('button', { name: 'Insights' })).toHaveLength(1)
+      expect(within(facts).queryByRole('button', { name: /Files|Capabilities/ })).toBeNull()
     })
 
     it('"Show in conversation" brings the subagent card, the task\'s call and the ask card into view', async () => {
@@ -750,7 +778,7 @@ describe('session side panel', () => {
         // More running (folded after the reply) is not something new that needs you.
         act(() => { useTranscriptStore.getState().ingest(ev('background_task_started', { task_id: 'b2', call_id: 'c2', kind: 'bash', description: 'Watch the log' }, 0)) })
         expect(rail()).not.toBeVisible()
-        expect(screen.getByTestId('rail-badge')).toHaveTextContent('2')
+        expect(badges()).toBe('🤖2')
         // A question asked after the close is.
         act(() => { useTranscriptStore.getState().ingest(ev('ask', { body: 'Merge now?', message_id: 'm9' }, 0)) })
         expect(rail()).toBeVisible()
@@ -768,7 +796,7 @@ describe('session side panel', () => {
         stubFetch(0, liveReply({ through_seq: seq, asks: [replyAsk(-3 * MIN)] }))
         localStorage.setItem(RAIL_PREF_KEY, '0')
         await renderPage()
-        await waitFor(() => expect(screen.getByTestId('rail-badge')).toHaveTextContent('1'))
+        await waitFor(() => expect(within(rail()!).getByTestId('rail-needs-count')).toHaveTextContent('1'))
         expect(rail()).not.toBeVisible()
       })
 
@@ -809,9 +837,8 @@ describe('session side panel', () => {
         expect(sent?.answer_message_id).toBe('m1')
         act(() => { useTranscriptStore.getState().ingest(ev('user_message', { text: 'yes, staging', source: 'ask_answer', message_id: 'm1', client_id: sent!.client_id }, 0)) })
         expect(within(rail()!).queryByTestId('rail-ask')).toBeNull()
-        // Nothing needs you; the answer sent sets the main agent to work, as the working line says.
-        expect(screen.getByTestId('rail-badge')).not.toHaveClass('attention')
-        expect(screen.getByTestId('rail-badge')).toHaveTextContent('1')
+        // Nothing needs you; the main agent at work is in Running now, not a count on the toggle.
+        expect(badges()).toBe('')
       })
 
       it('lists a question the agent did not wait on until the answer naming it; only the owner answers it', async () => {
@@ -850,11 +877,11 @@ describe('session side panel', () => {
         seedEvents(user())
         stubFetch(0, liveReply({ through_seq: seq, asks: [replyAsk(-3 * MIN)] }))
         await renderPage()
-        await waitFor(() => expect(screen.getByTestId('rail-badge')).toHaveTextContent('1'))
+        await waitFor(() => expect(within(rail()!).getByTestId('rail-needs-count')).toHaveTextContent('1'))
         act(() => {
           wsMock.emit({ type: 'message_answered', message: { id: 'm1', session_id: 'sess-a', kind: 'ask', body: 'Deploy to staging first?', status: 'answered', answer: '', created_at: iso(-3 * MIN) } } as never)
         })
-        expect(screen.queryByTestId('rail-badge')).toBeNull()
+        expect(badges()).toBe('')
         expect(within(rail()!).getByTestId('rail-needs')).toHaveTextContent('Nothing needs you.')
       })
 
@@ -875,7 +902,7 @@ describe('session side panel', () => {
     })
 
     it('has no panel for a terminal session', async () => {
-      seedSession({ kind: '', status: 'running' })
+      seedSession({ kind: 'tmux', status: 'running' })
       await renderPage()
       expect(screen.queryByTestId('rail-toggle')).toBeNull()
       expect(rail()).toBeNull()
@@ -906,7 +933,12 @@ describe('session side panel', () => {
       expect(localStorage.getItem(RAIL_PREF_KEY)).toBe('1')
     })
 
-    it('keeps Tab inside the drawer', async () => {
+    it.each([false, true])('keeps Tab inside the drawer (options available: %s)', async options => {
+      if (!options) {
+        const previousFetch = fetchMock.getMockImplementation() as (url: string) => Promise<unknown>
+        fetchMock.mockImplementation((url: string) => /\/(limit-resume|plan-nudges)$/.test(String(url))
+          ? Promise.resolve({ ok: false, status: 404 }) : previousFetch(url))
+      }
       seedSession({ status: 'idle' })
       seedEvents(user(), ...task())
       await renderPage()
@@ -916,8 +948,15 @@ describe('session side panel', () => {
       // The last control on the tab on screen (Live), not one of a hidden tab.
       await within(drawer).findByRole('tabpanel', { name: /^Live/ })
       const live = within(drawer).getByRole('tabpanel', { name: /^Live/ })
-      const stops = Array.from(live.querySelectorAll<HTMLElement>('button:not([disabled]), textarea:not([disabled]), input:not([disabled]), [href]'))
+      // Optional settings arrive asynchronously. Cover both the loaded options
+      // and the older-server case where the model select is the final control.
+      if (options) {
+        await within(live).findByRole('checkbox', { name: 'Resume when limit resets' })
+        await within(live).findByRole('checkbox', { name: 'Nudge when the plan drifts' })
+      }
+      const stops = Array.from(live.querySelectorAll<HTMLElement>('button:not([disabled]), select:not([disabled]), textarea:not([disabled]), input:not([disabled]), [href]'))
       const last = stops[stops.length - 1]
+      expect(last.tagName).toBe(options ? 'INPUT' : 'SELECT')
       expect(close).toHaveFocus()
       fireEvent.keyDown(drawer, { key: 'Tab', shiftKey: true })
       expect(last).toHaveFocus()
@@ -1104,17 +1143,16 @@ describe('session side panel', () => {
       expect(within(screen.getByTestId('rail-running')).getByTestId('rail-running-count')).toHaveTextContent('0')
     })
 
-    it('counts in the header badge, its label and announcement, but a turn starting never opens the panel by itself', async () => {
+    it('a turn starting is no count on the toggle and never opens the panel by itself', async () => {
       viewport(390)
       seedSession({ status: 'running' })
       seedEvents(user())
       await renderPage()
       // A phone, no saved choice: the drawer opens by itself only for something that needs you or runs beside the chat.
       expect(rail()).toBeNull()
-      expect(screen.getByTestId('rail-badge')).toHaveTextContent('1')
-      expect(screen.getByTestId('rail-badge')).not.toHaveClass('attention')
-      expect(toggle()).toHaveAccessibleName('Session panel: 1 running')
-      expect(screen.getByTestId('rail-announce')).toHaveTextContent('Session panel: 1 running')
+      expect(badges()).toBe('')
+      expect(toggle()).toHaveAccessibleName('Session panel')
+      expect(screen.getByTestId('rail-announce')).toHaveTextContent(/^Session panel$/)
       expect(screen.queryByRole('dialog', { name: 'Session panel' })).toBeNull()
     })
 
@@ -1127,15 +1165,60 @@ describe('session side panel', () => {
     })
   })
 
+  it.each([
+    ['only work inside', { subs: 2, kids: 0 }, '🤖2', 'Session panel: 2 subagents and background tasks'],
+    ['only a child session', { subs: 0, kids: 1 }, '↳1', 'Session panel: 1 child session'],
+    ['both', { subs: 1, kids: 3 }, '🤖1 ↳3', 'Session panel: 1 subagent or background task · 3 child sessions'],
+  ] as const)('the toggle shows its two counts, each hidden at zero, matching Running now (%s)', async (_name, n, shown, label) => {
+    seedSession({ status: 'idle' })
+    seedEvents(user())
+    const subagents = Array.from({ length: n.subs }, (_, i) => ({ key: `S${i}`, title: `Sub ${i}`, type: 'Explore', model: '', tokens: null, doing: '', started_at: iso(-MIN), active_at: iso(-1000), background: true, seq: 2 + i }))
+    const children = Array.from({ length: n.kids }, (_, i) => ({ id: `c-${i}`, title: `Child ${i}`, engine: i % 2 ? 'codex' : 'claude', model: 'fixture', status: 'running', started_at: iso(-MIN), ended_at: null, asking: false, tokens: null }))
+    stubFetch(0, liveReply({ subagents, children: [...children, { id: 'c-idle', title: 'Idle child', engine: 'codex', model: 'fixture', status: 'idle', started_at: iso(-MIN), ended_at: null, asking: false, tokens: null }] }))
+    await renderPage()
+    await waitFor(() => expect(badges()).toBe(shown))
+    expect(toggle()).toHaveAccessibleName(label)
+    expect(within(screen.getByTestId('rail-running')).getByTestId('rail-running-count')).toHaveTextContent(String(n.subs + n.kids))
+  })
+
+  it.each([
+    ['the live path (tokens hidden by the server, usage folded from later events)', true],
+    ['the transcript fallback (/live unavailable)', false],
+  ] as const)('shows a non-owner no subagent token totals on %s', async (_name, live) => {
+    seedSession({ status: 'running' })
+    // The subagent's events carry real usage (12k input + 400 output).
+    seedEvents(user(), ...subagent())
+    stubFetch(0, live ? liveReply({ through_seq: 1, tokens_hidden: true }) : undefined)
+    await renderPage()
+    const sub = await within(rail()!).findByTestId('rail-subagent')
+    if (live) await waitFor(() => expect(fetchCalls().some(u => u.includes('/live'))).toBe(true))
+    expect(within(sub).queryByTestId('rail-sub-tokens')).toBeNull()
+    expect(sub.textContent).not.toMatch(/12(\.4)?k/)
+    for (const el of sub.querySelectorAll('[title], [aria-description]')) {
+      expect(`${el.getAttribute('title') ?? ''} ${el.getAttribute('aria-description') ?? ''}`).not.toMatch(/token/i)
+    }
+  })
+
+  it('never counts what needs you on the toggle: an own tool change and a child that is asking add no needs-you count', async () => {
+    seedSession({ status: 'idle' })
+    seedEvents(user())
+    stubFetch(0, liveReply({ tool_changes: 1, children: [{ id: 'c-ask', title: 'Asking child', engine: 'codex', model: 'fixture', status: 'waiting', started_at: iso(-MIN), ended_at: null, asking: true, tokens: null }] }))
+    await renderPage()
+    await waitFor(() => expect(badges()).toBe('↳1'))
+    expect(screen.getByTestId('rail-toggle').querySelector('.attention')).toBeNull()
+    expect(toggle()).toHaveAccessibleName('Session panel: 1 child session')
+    expect(screen.getByTestId('rail-announce')).not.toHaveTextContent(/need/)
+  })
+
   it('an idle child does not badge or announce the panel toggle as running', async () => {
     seedSession({ status: 'idle' })
     seedEvents(user())
     stubFetch(0, liveReply({ children: [{ id: 'c-idle', title: 'Idle child', engine: 'codex', model: 'fixture', status: 'idle', started_at: iso(-MIN), ended_at: null, asking: false, tokens: null }] }))
     await renderPage()
     await waitFor(() => expect(screen.getByTestId('rail-started')).toHaveTextContent('Idle child'))
-    expect(screen.queryByTestId('rail-badge')).toBeNull()
-    expect(screen.getByTestId('rail-toggle').getAttribute('aria-label')).not.toMatch(/running/)
-    expect(screen.getByTestId('rail-announce')).not.toHaveTextContent(/running/)
+    expect(badges()).toBe('')
+    expect(screen.getByTestId('rail-toggle').getAttribute('aria-label')).not.toMatch(/child session|running/)
+    expect(screen.getByTestId('rail-announce')).not.toHaveTextContent(/child session|running/)
   })
 
   it('Running now lists working children only, and a row opens the child', async () => {

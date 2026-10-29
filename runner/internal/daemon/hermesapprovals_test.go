@@ -246,7 +246,7 @@ func TestHermesApprovalQuestionIsPostedOwnerOnly(t *testing.T) {
 		r, _, w := hermesSecurityRun(t)
 		r.begin()
 		em := &collectEmitter{}
-		r.d.AskUser = codexQuestionHandler(server.URL, "fixture-token", "session", em)
+		r.d.AskUser = codexQuestionHandler(server.URL, "fixture-token", nil, "session", em)
 		if approval {
 			params, _ := json.Marshal(map[string]any{"session_id": "owned-runtime", "request_id": "approval-o", "command": "true", "choices": []string{"once", "deny"}})
 			r.request(hermesFrame{ID: json.RawMessage(`"srq-o"`), Method: "approval", Params: params})

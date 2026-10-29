@@ -1,10 +1,11 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiFetch } from '../apiFetch'
 import type { ProposalInfo } from '../types'
 import { pluginApplication, type PluginScope } from '../lib/sessionPlugins'
 import { useSessionPlugins } from '../hooks/useSessionPlugins'
 import './SessionPlugins.css'
+import { openLaunchSheet } from '../hooks/useLaunchSheetOpen'
 
 type Model = ReturnType<typeof useSessionPlugins>
 
@@ -20,25 +21,36 @@ export function PluginAddButton({ open, onToggle, controls }: { open: boolean; o
 
 /** Adding a plugin (skills come in plugin bundles) to the session or to the account: the form the
  *  toolbar's "+ Add" opens. */
-export function PluginAddForm({ model, id }: { model: Model; id?: string }) {
+export function PluginAddForm({ model, id, onStart }: { model: Model; id?: string; onStart?: () => void }) {
+  const reasonId = useId()
   const { data, error, refresh, sessionId } = model
   const [marketplace, setMarketplace] = useState('')
   const [name, setName] = useState('')
   const [scope, setScope] = useState<PluginScope>('session')
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string | null>(null)
-  const [applied, setApplied] = useState<{ session: string; text: string } | null>(null)
+  const [applied, setApplied] = useState<{ session: string; text: string; newSession: boolean } | null>(null)
   const source = marketplace || data?.allowed_marketplaces[0] || ''
   const effectiveScope = data?.session_apply === true ? scope : 'always'
   const validName = /^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)
-  const validSource =
+  const nativeSource = /^codex:[a-z0-9][a-z0-9._-]{0,99}$/.test(source)
+  const validGitHubSource =
     /^[A-Za-z0-9._-]{1,39}\/[A-Za-z0-9._-]{1,100}$/.test(source) &&
     !source.startsWith('.') &&
     !source.startsWith('-') &&
     !['.', '..'].includes(source.split('/')[1])
+  const validSource = validGitHubSource || (data?.engine === 'codex' && nativeSource)
   const allowed =
     !!data &&
     (data.any_marketplace || data.allowed_marketplaces.some((s) => s.toLowerCase() === source.toLowerCase()))
+  const disabledReason = busy ? 'Saving plugin changes…'
+    : source.startsWith('codex:') && data?.engine !== 'codex' ? 'This marketplace requires Codex.'
+      : !validSource ? data?.engine === 'codex'
+        ? 'Enter a GitHub owner/repo or codex:<marketplace> (1–100 lowercase letters, digits, dots, underscores or hyphens, starting with a letter or digit).'
+        : 'Enter a GitHub owner/repo.'
+        : !allowed ? 'This marketplace is not allowed by this install.'
+          : !validName ? 'Enter a plugin name (1–64 lowercase letters, digits, dots, underscores or hyphens, starting with a letter or digit).'
+            : null
   async function add() {
     if (busy || !data?.supported || error || !validName || !validSource || !allowed) return
     setBusy(true)
@@ -51,7 +63,7 @@ export function PluginAddForm({ model, id }: { model: Model; id?: string }) {
       })
       if (!res.ok) throw new Error('Plugin change was not accepted. Refresh the choices and try again.')
       const p = (await res.json()) as ProposalInfo
-      setApplied({ session: sessionId, text: pluginApplication(p) })
+      setApplied({ session: sessionId, text: pluginApplication(p), newSession: (p.result as { state?: string } | null)?.state === 'new_sessions' })
       setName('')
       await refresh()
     } catch {
@@ -133,21 +145,27 @@ export function PluginAddForm({ model, id }: { model: Model; id?: string }) {
                 </p>
                 <button
                   type="button"
-                  disabled={busy || !validName || !validSource || !allowed}
+                  disabled={!!disabledReason}
+                  aria-describedby={disabledReason ? reasonId : undefined}
                   onClick={() => void add()}
                 >
                   {busy ? 'Saving…' : effectiveScope === 'session' ? 'Add to session' : 'Save always on'}
                 </button>
+                {disabledReason && <p id={reasonId}>{disabledReason}</p>}
               </>
             )}
           </>
         )}
         {failure && <p role="alert">{failure}</p>}
-        {applied?.session === sessionId && <p role="status">{applied.text}</p>}
+        {applied?.session === sessionId && <p role="status">{applied.text} {applied.newSession && <StartPluginSession onStart={onStart} />}</p>}
       </div>
     </section>
   )
 }
+export function StartPluginSession({ onStart }: { onStart?: () => void }) {
+  return <button type="button" className="btn small" onClick={() => { onStart?.(); openLaunchSheet() }}>Start a new session with it</button>
+}
+
 export function PluginRequests({ model, pendingOnly = false }: { model: Model; pendingOnly?: boolean }) {
   const requests = (model.data?.requests ?? []).filter((p) => !pendingOnly || p.state === 'pending')
   if (!requests.length) return null
@@ -181,4 +199,12 @@ export function SessionPluginChatRequests({ sessionId, active }: { sessionId: st
       <PluginRequests model={model} pendingOnly />
     </div>
   )
+}
+
+export function DisallowedPlugins({ model }: { model: Model }) {
+  const data = model.data
+  if (!data || data.any_marketplace) return null
+  const disallowed = data.plugins.filter(p => !data.allowed_marketplaces.some(s => s.toLowerCase() === p.marketplace.toLowerCase()))
+  if (!disallowed.length) return null
+  return <section className="session-plugins" aria-label="Disallowed saved plugins"><ul>{disallowed.map(p => <li key={`${p.marketplace}/${p.plugin}`}><strong>{p.plugin}</strong>: marketplace no longer allowed ({p.marketplace}). Kept in your account; it will not load in new sessions.</li>)}</ul></section>
 }

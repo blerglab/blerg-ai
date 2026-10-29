@@ -51,6 +51,9 @@ func (r *stageReporter) report(stages ...protocol.StartStage) {
 	if r == nil || r.s == nil || len(stages) == 0 {
 		return
 	}
+	for i := range stages {
+		stages[i].At = time.Now().UTC().Format(time.RFC3339Nano)
+	}
 	raw, err := json.Marshal(protocol.StartStagePayload{Stages: stages})
 	if err != nil {
 		return

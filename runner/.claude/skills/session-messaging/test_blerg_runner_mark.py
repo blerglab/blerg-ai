@@ -22,6 +22,10 @@ class ScriptedHandler(http.server.BaseHTTPRequestHandler):
         raw = self.rfile.read(length) if length else b""
         self.server.raw.append(raw)
         self.server.recorded.append({"path": self.path, "body": json.loads(raw)})
+        self.server.keys.append(self.headers.get("Idempotency-Key"))
+        if getattr(self.server, "drop_first", False) and len(self.server.recorded) == 1:
+            self.close_connection = True
+            return
         status, body = self.server.script[min(len(self.server.recorded), len(self.server.script)) - 1]
         data = json.dumps(body).encode()
         self.send_response(status)
@@ -33,7 +37,7 @@ class ScriptedHandler(http.server.BaseHTTPRequestHandler):
 
 def make_scripted_server(script):
     server = http.server.HTTPServer(("127.0.0.1", 0), ScriptedHandler)
-    server.recorded, server.raw, server.script = [], [], script
+    server.recorded, server.raw, server.keys, server.script = [], [], [], script
     return server
 
 
@@ -83,6 +87,26 @@ class TestMark(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(server.recorded[0]["body"], {"kind": "milestone", "text": "Merged"})
         self.assertEqual(result.stdout.strip(), "Marked Milestone: Merged")
+
+    def test_text_is_cleaned_before_truncation_and_empty_invisible_text_is_refused(self):
+        server = make_topic_server()
+        result = self._run(["finding", "\u2060" * 300 + "Visible\u202e words"], server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(server.recorded[0]["body"]["text"], "Visible words")
+        server = make_topic_server()
+        result = self._run(["finding", "\u200b\u2060\ufeff\u202e"], server)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(server.recorded, [])
+
+    def test_lost_live_mark_reply_retries_the_same_body_and_key(self):
+        server = make_scripted_server([(201, {"recorded": 0, "duplicates": 1})])
+        server.drop_first = True
+        result = self._run(["milestone", "Merged"], server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(server.recorded), 2)
+        self.assertEqual(server.raw[0], server.raw[1])
+        self.assertTrue(server.keys[0])
+        self.assertEqual(server.keys[0], server.keys[1])
 
     def test_bad_arguments_are_refused_before_sending(self):
         for args, words in [

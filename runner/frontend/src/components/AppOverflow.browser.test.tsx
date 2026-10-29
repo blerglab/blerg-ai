@@ -96,7 +96,7 @@ describe('session page long-content width', () => {
     await userEvent.click(within(card).getByRole('button', {name: /^View$/}))
     await waitFor(() => expect(document.querySelector('.diff-main')).not.toBeNull())
     await userEvent.keyboard('{Escape}')
-    await waitFor(() => expect(document.querySelector('.artifact-viewer')).toBeNull())
+    await waitFor(() => expect(document.querySelector('.artifact-viewer')).not.toBeVisible())
     noOverflow(width)
     const scrollers = [...document.querySelectorAll<HTMLElement>('body *')].filter(el => /^(auto|scroll)$/.test(getComputedStyle(el).overflowX) && el.clientWidth > 0 && !el.matches('pre, .code-wrap, .rail-tabs, .tcg-out, .md-code-scroll, .attach-chips, .diff-table-wrap'))
     const wide = scrollers.filter(el => el.scrollWidth > el.clientWidth + 1).map(el => ({tag: el.tagName, className: el.className, width: el.clientWidth, scroll: el.scrollWidth}))
@@ -150,5 +150,23 @@ describe('native background command waiting banner', () => {
     await waitFor(() => expect(details.open).toBe(false))
     expect(document.activeElement).toBe(summary)
     expect(banner.getBoundingClientRect().height).toBeLessThan(100)
+  })
+})
+
+describe('session list search spacing', () => {
+  // The search box sits between the header's separator line and the first session card; the owner
+  // asked for the same visible space on both sides (the smaller of the two).
+  it('leaves the same space above and below the search box', async () => {
+    await page.viewport(1440, 900)
+    renderPage()
+    const input = await screen.findByTestId('search-input')
+    const header = input.parentElement!.previousElementSibling as HTMLElement
+    const list = await screen.findByTestId('session-list')
+    const firstCard = [...list.querySelectorAll<HTMLElement>('*')].find(el => getComputedStyle(el).borderTopWidth !== '0px' && el.getBoundingClientRect().height > 20)!
+    const box = input.getBoundingClientRect()
+    const above = box.top - header.getBoundingClientRect().bottom
+    const below = firstCard.getBoundingClientRect().top - box.bottom
+    console.log(`search gap above=${above} below=${below}`)
+    expect(Math.abs(above - below)).toBeLessThanOrEqual(1)
   })
 })

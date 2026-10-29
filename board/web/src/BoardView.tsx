@@ -562,7 +562,7 @@ export function BoardView({ boardId }: { boardId: string }) {
               key={col.id} id={`column-${col.id}`}
               // on a phone the picked column is the tab panel its tab names; on a desktop each
               // column is a region named by its heading
-              {...(isPhone ? { role: "tabpanel", "aria-labelledby": `tab-${col.id}` } : { "aria-labelledby": `colname-${col.id}` })}
+              {...(isPhone ? { role: "tabpanel", tabIndex: 0, "aria-labelledby": `tab-${col.id}` } : { "aria-labelledby": `colname-${col.id}` })}
               onDragOver={(e) => {
                 e.preventDefault();
                 if (!dragging) return;
@@ -627,7 +627,7 @@ export function BoardView({ boardId }: { boardId: string }) {
                     onClick={() => openSheet(card)}
                   >
                     <div className="head">
-                      <span className="num">#{card.number}</span>
+                      <span className="num">{card.reference || `#${card.number}`}</span>
                       <span className="title">{card.title}</span>
                       <RestrictedMarker sensitive={card.sensitive} />
                       {indicatorFor(card, active, reviewCols)}

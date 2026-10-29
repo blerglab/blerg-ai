@@ -16,7 +16,7 @@ export NO_COLOR=1
 # A PATH holding only what the checks call, so `claude`/`codex`/`curl` presence is ours to choose.
 mkbin() { # dir tool...
   mkdir -p "$1"; local d="$1"; shift; rm -f "$d"/*
-  for x in bash cat grep sed tr id uname dirname date awk head cut wc mkdir seq sleep; do
+  for x in python3 bash cat grep sed tr id uname dirname date awk head cut wc mkdir seq sleep; do
     p="$(command -v "$x" 2>/dev/null)" && ln -sf "$p" "$d/$x"
   done
   for x in "$@"; do rm -f "$d/$x"; printf '#!/bin/sh\nexit 0\n' > "$d/$x"; chmod +x "$d/$x"; done
@@ -169,13 +169,13 @@ inst="$tmp/inst"
 mkdir -p "$inst/repo/install/desktop/daemon" "$inst/repo/runner" "$inst/repo/bin" "$inst/home" "$inst/repos"
 cp brand.sh hostcheck.sh "$inst/repo/install/desktop/"
 cp daemon/install.sh daemon/*.tmpl "$inst/repo/install/desktop/daemon/"
-printf 'BLERG_RUNNER_DAEMON_TOKEN=tok\nBLERG_RUNNER_REPOS_ROOT=%s\nBLERG_SKIP_CLAUDE_TOKEN_PROMPT=1\n' "$inst/repos" > "$inst/repo/install/desktop/.env"
+printf 'BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS=true\nBLERG_RUNNER_DAEMON_TOKEN=tok\nBLERG_RUNNER_REPOS_ROOT=%s\nBLERG_SKIP_CLAUDE_TOKEN_PROMPT=1\n' "$inst/repos" > "$inst/repo/install/desktop/.env"
 mkbin "$inst/bin" loginctl
 for x in mv chmod rm cmp; do p="$(command -v "$x")" && ln -sf "$p" "$inst/bin/$x"; done
 rm -f "$inst/bin/uname"
 printf '#!/bin/sh\n[ "$1" = -m ] && echo x86_64 || echo Linux\n' > "$inst/bin/uname"
-# go: "build -o OUT" writes a daemon whose content is $FAKE_BUILD and that reports no open work.
-printf '#!/bin/sh\n[ "$1" = version ] && { echo "go version go1.26.9 linux/amd64"; exit 0; }\nprintf "#!/bin/sh\\n# %%s\\nexit 0\\n" "$FAKE_BUILD" > "$3"; chmod +x "$3"\n' > "$inst/bin/go"
+# go: build locates -o OUT after optional build flags and writes a daemon whose content is $FAKE_BUILD and that reports no open work.
+printf '#!/bin/sh\n[ "$1" = version ] && { echo "go version go1.26.9 linux/amd64"; exit 0; }\nwhile [ "$1" != -o ]; do shift; done\nprintf "#!/bin/sh\\n# %%s\\nexit 0\\n" "$FAKE_BUILD" > "$2"; chmod +x "$2"\n' > "$inst/bin/go"
 # systemctl: is-active answers $FAKE_RUNNING; restart logs what the marker held at that moment.
 printf '#!/bin/sh\ncase "$*" in\n  *is-active*) [ "$FAKE_RUNNING" = 1 ] ;;\n  *restart*) echo "restart marker=$(cat "$BLERG_RUNNER_DAEMON_STATE_DIR/restart-planned" 2>/dev/null)" >> "$FAKE_LOG" ;;\nesac\n' > "$inst/bin/systemctl"
 chmod +x "$inst/bin/uname" "$inst/bin/go" "$inst/bin/systemctl"

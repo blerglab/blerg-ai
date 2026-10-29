@@ -1,23 +1,30 @@
-import { startTransition, useCallback, useEffect, useOptimistic, useState, createContext, useContext } from 'react'
-import { isAutomated, startedByLabel } from '../lib/startedBy'
+import { hasLiveParent } from '../lib/sessionTree'
+import { ACTIVE_STATUSES, selectSessionSections, useSessionListFilters, useSessionListSessions } from '../lib/sessionSelection'
+import { useShallow } from 'zustand/react/shallow'
+import { startTransition, useCallback, useEffect, useMemo, useOptimistic, useState, createContext, useContext } from 'react'
+import { startedByLabel } from '../lib/startedBy'
 import { useNavigate, useLocation, Link } from 'react-router-dom'
 import { apiFetch } from '../apiFetch'
-import type { SessionInfo, SessionStatus, DaemonInfo } from '../types'
+import type { SessionInfo, DaemonInfo } from '../types'
 import { useSessionStore } from '../hooks/useSessionStore'
-import SessionCard, { type SessionCardProps } from './SessionCard'
-import { nestChildren, searchTree, type SessionTree } from '../lib/sessionTree'
-import { childrenExpanded, setChildrenExpanded } from '../lib/sidebarPrefs'
-import { getFocus, setFocus } from '../lib/sidebarPrefs'
+import { LiveSessionCard as SessionCard, type SessionCardProps } from './SessionCard'
+import { type SessionTree } from '../lib/sessionTree'
+import { getFocus, useChildrenExpanded, setChildrenExpanded } from '../lib/sidebarPrefs'
 import ProposalNotifications, { ProposalBell } from './ProposalNotifications'
 import type { ProposalInbox } from '../hooks/useProposalInbox'
 import { ProposalsBadge } from './Proposals'
 import { OpenSessionContext } from '../lib/openSession'
 import { prefetchLaunchData } from '../lib/launchCache'
+import { coreOrigin } from '../authClient'
 import { formatBuild } from '../lib/buildInfo'
 import { setSettingsOpen } from '../lib/settingsDialog'
 import UsageMeters from './UsageMeters'
-import { displayState, pausedByRestart, waitingBannerText } from '../lib/displayState'
-import { repoLabel } from '../lib/noRepo'
+import { displayState, waitingBannerText } from '../lib/displayState'
+import SidePane from './SidePane'
+import { SessionToolsHost } from '../panes/context'
+import SessionTiles from './SessionTiles'
+import { ownsAppShortcut, modalIsOpen } from '../commands/shortcutOwnership'
+import { usePaneLayout, useViewportWidth } from '../hooks/usePaneLayout'
 
 interface Props {
   onNewSession?: () => void
@@ -28,85 +35,24 @@ interface Props {
 
 const Nesting = createContext<{ tree: SessionTree; activeId?: string; daemons: DaemonInfo[]; query: string } | null>(null)
 
-/** A parent's started sessions, under its card. A small round chevron button in the card's second line,
- *  right over the indent line (never opening the card), shows or hides them; the top line has the plain "↳ N" chip;
- *  the choice is kept per parent (sidebarPrefs). Hidden, the parent card says what is behind it (a
- *  glyph, its words in the tooltip), and a child that runs or needs the person is never hidden: it
- *  stays as a one-line row. */
+/** A parent's started sessions. Collapsing hides every descendant; the parent card's live
+ *  aggregate glyph still reflects their work and its count preserves the tree's presence. */
 function SessionBranch(props: SessionCardProps) {
   const context = useContext(Nesting)
-  const [expanded, setExpanded] = useState(() => childrenExpanded(props.session.id))
+  const expanded = useChildrenExpanded(props.session.id)
   const children = context?.tree.childrenOf.get(props.session.id) ?? []
   const [searchChoice, setSearchChoice] = useState<{ query: string; open: boolean } | null>(null)
   const shown = context?.query ? searchChoice?.query === context.query ? searchChoice.open : true : expanded
-  const toggle = () => { const next = !shown; setExpanded(next); if (context?.query) setSearchChoice({ query: context.query, open: next }); setChildrenExpanded(props.session.id, next) }
-  // Collapsed: what runs or needs the person anywhere below (a grandchild too) stays, and is counted.
-  const below = shown ? [] : descendants(context?.tree, props.session.id)
-  const kept = below.filter(childStaysVisible)
-  const hidden = shown ? null : { ...childrenSummary(below), total: children.length }
+  const query = context?.query
+  const toggle = useCallback(() => { const next = !shown; if (query) setSearchChoice({ query, open: next }); setChildrenExpanded(props.session.id, next) }, [shown, query, props.session.id])
+  const childrenControl = useMemo(() => children.length > 0 ? { total: children.length, shown: !!shown, toggle } : null, [children.length, shown, toggle])
   return <div data-session-branch={props.session.id}>
-    <SessionCard {...props} hiddenChildren={hidden} childrenControl={children.length > 0 ? { total: children.length, shown: !!shown, toggle } : null} />
+    <SessionCard {...props} childrenControl={childrenControl} />
     {shown && children.length > 0 && <div data-testid="nested-sessions" style={{ marginLeft: 21, paddingLeft: 8, borderLeft: '1px solid var(--stone)' }}>{children.map(child => <SessionBranch key={child.id} session={child} daemon={context?.daemons.find(d => d.id === child.daemon_id)} active={context?.activeId === child.id} nested />)}</div>}
-    {kept.length > 0 && <ul className="session-children-kept" data-testid="kept-children" aria-label="Started sessions that run or need you">
-      {kept.map(child => <KeptChild key={child.id} session={child} active={context?.activeId === child.id} />)}
-    </ul>}
   </div>
 }
 
-/** Every session started under id, at any depth, in tree order. */
-function descendants(tree: SessionTree | undefined, id: string): SessionInfo[] {
-  const out: SessionInfo[] = []
-  const walk = (parent: string) => {
-    for (const c of tree?.childrenOf.get(parent) ?? []) {
-      out.push(c)
-      walk(c.id)
-    }
-  }
-  walk(id)
-  return out
-}
-
-/** A child that runs or needs the person: never hidden with its siblings. */
-function childStaysVisible(s: SessionInfo): boolean {
-  return s.status === 'starting' || s.status === 'running' || s.status === 'waiting' || pausedByRestart(s)
-}
-
-/** What a collapsed parent's card says of its hidden children: how many, how many run, how many
- *  need the person. */
-function childrenSummary(children: SessionInfo[]): { total: number; running: number; waiting: number } {
-  let running = 0, waiting = 0
-  for (const c of children) {
-    if (c.status === 'waiting' || pausedByRestart(c)) waiting++
-    else if (c.status === 'starting' || c.status === 'running') running++
-  }
-  return { total: children.length, running, waiting }
-}
-
-/** A child kept visible under a collapsed parent: one line, its state as one glyph, opening it. */
-function KeptChild({ session, active }: { session: SessionInfo; active: boolean }) {
-  const openSession = useContext(OpenSessionContext)
-  const navigate = useNavigate()
-  const waiting = session.status === 'waiting' || pausedByRestart(session)
-  const words = waiting ? 'needs you' : session.status === 'starting' ? 'starting' : 'running'
-  return <li>
-    <button type="button" className={`session-kept-child${active ? ' active' : ''}`} data-testid="kept-child" data-state={waiting ? 'waiting' : 'running'}
-      title={`${session.title || repoLabel(session.repo)} · ${words}`} onClick={() => openSession ? openSession(session.id) : navigate(`/sessions/${session.id}`)}>
-      <span className={`session-kept-glyph${waiting ? ' waiting' : ''}`} aria-label={words} role="img">{waiting ? '?' : <span className="session-kept-spin" aria-hidden="true" />}</span>
-      <span className="session-kept-title">{session.title || repoLabel(session.repo)}</span>
-    </button>
-  </li>
-}
-
-const ACTIVE_STATUSES = new Set<SessionStatus>(['starting', 'running', 'idle', 'waiting'])
-
-// The persisted focus for "the cluster" (every other value is a daemon id).
 const CLUSTER_FOCUS = 'cluster'
-
-// The order of the active list: newest started first, and nothing else. A session's state (it
-// flips between running and idle all day) never moves its card; the status glyph shows it.
-function byNewestStarted(a: SessionInfo, b: SessionInfo): number {
-  return new Date(b.started_at).getTime() - new Date(a.started_at).getTime()
-}
 
 // A pill of the "Where sessions run" row: compact, and selected when it is the focus.
 function placePillStyle(selected: boolean, muted = false): React.CSSProperties {
@@ -337,8 +283,39 @@ function HistorySection({
   )
 }
 
-export default function SessionList({ onNewSession, variant = 'page', proposalInbox }: Props) {
-  const { daemons, sessions, serverVersion, serverRelease, serverCommit, latestVersion, latestUrl } = useSessionStore()
+export default function SessionList(props: Props) {
+  // A new list starts from its persisted place; collapsing it keeps this instance and its search.
+  useEffect(() => { useSessionListFilters.setState({ focus: getFocus(), query: '' }) }, [])
+  return props.variant === 'sidebar' ? <SessionListPane {...props} /> : <SessionListBody {...props} />
+}
+function SessionListPane(props: Props) {
+  const tools = useContext(SessionToolsHost)
+  const viewport = useViewportWidth()
+  const pane = usePaneLayout('session-list', 'Toggle session list', { min: 240, max: Math.max(240, viewport * .4), default: 300 }, true)
+  const { toggle: toggleList } = pane
+  useEffect(() => {
+    const key = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.altKey || event.shiftKey || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'b') return
+      if (ownsAppShortcut(event) || modalIsOpen()) return
+      event.preventDefault(); toggleList()
+    }
+    window.addEventListener('keydown', key)
+    return () => window.removeEventListener('keydown', key)
+  }, [toggleList])
+  const icon = <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M8 4v16M12 9h5M12 13h5" /></svg>
+  const actions = <>
+    <button type="button" className="icon-btn" aria-label="New session" title="New session" onClick={props.onNewSession} onPointerEnter={prefetchLaunchData} onFocus={prefetchLaunchData}><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
+    <div className="session-tools-slot" ref={tools?.setHost} />
+    <SessionTiles />
+    <div className="session-rail-bell">{props.proposalInbox ? <ProposalBell inbox={props.proposalInbox} /> : <ProposalNotifications />}</div>
+  </>
+  return <SidePane layout={pane} label="Session list" toggleLabel="Toggle session list" icon={icon} railActions={actions} keepMounted>
+    <SessionListBody {...props} />
+  </SidePane>
+}
+function SessionListBody({ onNewSession, variant = 'page', proposalInbox }: Props) {
+  const sessions = useSessionListSessions()
+  const { daemons, serverVersion, serverRelease, serverCommit, latestVersion, latestUrl } = useSessionStore(useShallow(s => ({ daemons: s.daemons, serverVersion: s.serverVersion, serverRelease: s.serverRelease, serverCommit: s.serverCommit, latestVersion: s.latestVersion, latestUrl: s.latestUrl })))
   const build = formatBuild({ version: serverVersion, release: serverRelease, commit: serverCommit, latestVersion, latestUrl })
   const navigate = useNavigate()
   const location = useLocation()
@@ -366,7 +343,7 @@ export default function SessionList({ onNewSession, variant = 'page', proposalIn
 
   // The cluster's active sessions as the store sees them (live); the status
   // response's own count is only used when it carries one.
-  const storeClusterActive = sessions.filter(s => s.runtime === 'cluster' && ACTIVE_STATUSES.has(s.status)).length
+  const storeClusterActive = useSessionStore(s => s.sessions.filter(session => session.runtime === 'cluster' && ACTIVE_STATUSES.has(session.status)).length)
 
   useEffect(() => {
     let cancelled = false
@@ -411,7 +388,8 @@ export default function SessionList({ onNewSession, variant = 'page', proposalIn
 
   // ── Focus state, seeded from localStorage on mount ─────────────────────────
   // The stored value is a workstation daemon id, or CLUSTER_FOCUS.
-  const [focus, setFocusState] = useState<string | null>(getFocus)
+  const { focus, setPlace: handleSetFocus, query, setQuery, setCluster: setFilterCluster } = useSessionListFilters()
+  useEffect(() => { setFilterCluster(cluster.configured) }, [cluster.configured, setFilterCluster])
 
   // A stored focus that points at nothing listed (a daemon that is gone, or
   // the cluster when it is not configured) means All.
@@ -421,66 +399,23 @@ export default function SessionList({ onNewSession, variant = 'page', proposalIn
       ? focus
       : null
 
-  function handleSetFocus(id: string | null) {
-    setFocusState(id)
-    setFocus(id)
-  }
-
-  // Waiting for input: a session working in the background is not, whatever its count.
-  const waitingCount = sessions.filter(s => !s.archived_at && displayState(s) === 'waiting').length
-
   // ── Search state ────────────────────────────────────────────────────────────
-  const [query, setQuery] = useState('')
   const searchActive = query.trim().length > 0
   const q = query.trim().toLowerCase()
 
-  // Sessions a tool, a cron or the operator key started are the person's to see, not the kind
-  // they drive: they get a section of their own, active and ended alike, out of the repo
-  // groups and out of History.
-  const tree = searchTree(nestChildren(sessions), q)
-  const listedIds = new Set(sessions.map(s => s.id))
-  const automatedSessions = tree.top.filter(s => isAutomated(s, listedIds))
-  const ownSessions = tree.top.filter(s => !isAutomated(s, listedIds))
-
-  // Separate active from done sessions.
-  const activeSessions = ownSessions.filter(s => ACTIVE_STATUSES.has(s.status))
-  // Discarded sessions leave the active tree but remain directly accessible in History.
-  const archivedSessions = sessions.filter(session => session.archived_at && (!q || `${session.title} ${session.repo}`.toLowerCase().includes(q)))
-  const doneSessions = [...ownSessions.filter(s => !ACTIVE_STATUSES.has(s.status)), ...archivedSessions]
-
-  // When a query is active, filter active sessions by title or repo (case-insensitive).
-  // An empty query leaves all sessions through so focus logic applies normally.
-  const filteredActiveSessions = activeSessions
-
-  // Starred active sessions — ignores focus, respects search.
-  const starredActive = filteredActiveSessions
-    .filter(s => s.starred)
-    .sort(byNewestStarted)
-
-  // A search spans every place to run; otherwise the focus narrows the list.
-  const inFocus = (s: SessionInfo) => {
-    if (searchActive || effectiveFocus === null) return true
-    if (effectiveFocus === CLUSTER_FOCUS) return s.runtime === 'cluster'
-    return s.daemon_id === effectiveFocus && s.runtime !== 'cluster'
-  }
-
-  // The active sessions, one card after the next across every runtime and repo (each card says
-  // its own org/repo). Starred sessions are excluded — they render in the Starred section above.
-  const listed = filteredActiveSessions
-    .filter(s => !s.starred && inFocus(s))
-    .sort(byNewestStarted)
+  const { tree, automated: automatedSessions, starred: starredActive, listed, done: doneSessions } = selectSessionSections(sessions, query, effectiveFocus, isSidebar ? activeSessionId : undefined)
 
   return (
     <OpenSessionContext.Provider value={openSession}>
     <Nesting.Provider value={{ tree, activeId: isSidebar ? activeSessionId : undefined, daemons, query: q }}>
     <div style={isSidebar ? {
-      width: 300,
+      width: '100%',
+      minHeight: 0,
       flexShrink: 0,
-      height: '100vh',
+      height: '100%',
       overflowY: 'auto',
       background: 'var(--basalt)',
       color: 'var(--chalk)',
-      borderRight: '1px solid var(--stone)',
       display: 'flex',
       flexDirection: 'column',
     } : {
@@ -493,7 +428,7 @@ export default function SessionList({ onNewSession, variant = 'page', proposalIn
         display: 'flex',
         justifyContent: 'space-between',
         alignItems: 'center',
-        padding: '12px 16px',
+        padding: isSidebar ? '12px 36px 12px 12px' : '12px 16px',
         borderBottom: '1px solid var(--stone)',
         position: 'sticky',
         top: 0,
@@ -523,7 +458,7 @@ export default function SessionList({ onNewSession, variant = 'page', proposalIn
             color: 'var(--amber)',
             border: '1px solid var(--blaze)',
             borderRadius: 6,
-            padding: '6px 14px',
+            padding: isSidebar ? '6px 8px' : '6px 14px',
             fontWeight: 600,
             cursor: 'pointer',
             fontSize: '0.9rem',
@@ -627,7 +562,6 @@ export default function SessionList({ onNewSession, variant = 'page', proposalIn
       {/* Search input */}
       <div style={{
         padding: '6px 16px',
-        borderBottom: '1px solid var(--basalt)',
         background: 'var(--basalt)',
       }}>
         <input
@@ -650,27 +584,11 @@ export default function SessionList({ onNewSession, variant = 'page', proposalIn
         />
       </div>
 
-      {/* Orange waiting banner: sessions waiting for input */}
-      {waitingCount > 0 && (
-        <div data-testid="waiting-banner" style={{
-          background: 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))',
-          borderBottom: '1px solid var(--blaze)',
-          padding: '10px 16px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          color: 'var(--amber)',
-          fontSize: '0.9rem',
-          fontWeight: 600,
-          letterSpacing: '0.05em',
-        }}>
-          <span>⚡</span>
-          <span style={{ flex: 1, minWidth: 0 }}>{waitingBannerText(waitingCount)}</span>
-        </div>
-      )}
+      <WaitingBanner />
 
-      {/* Content */}
-      <div style={{ padding: '12px 16px', flex: 1 }}>
+      {/* Content. No top padding: the search row's 6px is the whole gap below the search box, the
+          same as the gap between the header's separator line and the box above it. */}
+      <div style={{ padding: '0 16px 12px', flex: 1 }}>
         {/* ★ STARRED — pinned at top, always expanded, ignores focus, respects search */}
         {starredActive.length > 0 && (
           <div data-testid="starred-section" style={{ marginBottom: 20 }}>
@@ -869,6 +787,8 @@ export default function SessionList({ onNewSession, variant = 'page', proposalIn
           {build.update && (
             <>
               {' · '}
+              <a href={`${coreOrigin()}/upgrade`}>How to upgrade</a>
+              {' · '}
               <a
                 data-testid="build-update"
                 href={build.update.href}
@@ -887,4 +807,26 @@ export default function SessionList({ onNewSession, variant = 'page', proposalIn
     </Nesting.Provider>
     </OpenSessionContext.Provider>
   )
+}
+
+// Only root sessions ask the person; keep their waiting count independent of list structure.
+function WaitingBanner() {
+  const waitingCount = useSessionStore(s => s.sessions.filter(session => !session.archived_at && !hasLiveParent(session, s.sessions) && displayState(session) === 'waiting').length)
+  return waitingCount > 0 ? (
+    <div data-testid="waiting-banner" style={{
+      background: 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))',
+      borderBottom: '1px solid var(--blaze)',
+      padding: '10px 16px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      color: 'var(--amber)',
+      fontSize: '0.9rem',
+      fontWeight: 600,
+      letterSpacing: '0.05em',
+    }}>
+      <span>⚡</span>
+      <span style={{ flex: 1, minWidth: 0 }}>{waitingBannerText(waitingCount)}</span>
+    </div>
+  ) : null
 }

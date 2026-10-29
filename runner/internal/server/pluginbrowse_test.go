@@ -28,6 +28,7 @@ func newBrowseFx(t *testing.T, engines ...string) *browseFx {
 	fx.api.pluginAllow, _ = pluginspec.ParseAllowlist("")
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 8)}
 	dc.SetExtensionEngines(engines, engines)
+	fixtureOwnDesktop(t, fx.pool, dc, topicOwner)
 	fx.api.hub.Register(dc)
 	for _, sid := range []string{fx.sess, fx.privSess, fx.ended} {
 		fx.api.hub.SetSessionOwner(sid, dc.ID)
@@ -190,7 +191,7 @@ func TestAddMarketplaceOwnerOnlyAndValidated(t *testing.T) {
 	fx := newBrowseFx(t, "claude")
 	url := "/api/sessions/" + fx.sess + "/plugins/marketplaces"
 	owner := fx.token(topicOwner, "human")
-	if rec := fx.refused(http.MethodPost, url, fx.token(topicOther, "human", "account.manage"), map[string]string{"source": pluginspec.DefaultMarketplaces}); rec.Code != http.StatusForbidden {
+	if rec := fx.refused(http.MethodPost, url, fx.token(topicOther, "human", "account.manage"), map[string]string{"source": "anthropics/claude-plugins-official"}); rec.Code != http.StatusForbidden {
 		t.Fatalf("administrator add: %d", rec.Code)
 	}
 	for _, bad := range []string{"https://gitlab.com/a/b", "git@github.com:a/b.git", "-x/y", "file:///etc"} {
@@ -201,12 +202,12 @@ func TestAddMarketplaceOwnerOnlyAndValidated(t *testing.T) {
 	if rec := fx.refused(http.MethodPost, url, owner, map[string]string{"source": "someone/else"}); rec.Code != http.StatusForbidden {
 		t.Fatalf("not allow-listed: %d", rec.Code)
 	}
-	rec, sent := fx.answered(http.MethodPost, url, owner, map[string]string{"source": "https://github.com/" + pluginspec.DefaultMarketplaces + ".git"}, okCatalog)
+	rec, sent := fx.answered(http.MethodPost, url, owner, map[string]string{"source": "https://github.com/" + "anthropics/claude-plugins-official" + ".git"}, okCatalog)
 	var q protocol.ReadPluginCatalog
-	if rec.Code != http.StatusOK || json.Unmarshal(sent, &q) != nil || q.AddMarketplace != pluginspec.DefaultMarketplaces {
+	if rec.Code != http.StatusOK || json.Unmarshal(sent, &q) != nil || q.AddMarketplace != "anthropics/claude-plugins-official" {
 		t.Fatalf("%d %s / %s", rec.Code, rec.Body, sent)
 	}
-	rec, _ = fx.answered(http.MethodPost, url, owner, map[string]string{"source": pluginspec.DefaultMarketplaces}, func([]byte) any {
+	rec, _ = fx.answered(http.MethodPost, url, owner, map[string]string{"source": "anthropics/claude-plugins-official"}, func([]byte) any {
 		return protocol.PluginCatalogResult{ErrorCode: "add_failed"}
 	})
 	if rec.Code != http.StatusBadGateway {
@@ -335,7 +336,7 @@ func TestPluginBrowseNeedsABrowserSessionAndNoOnBehalfOf(t *testing.T) {
 			body         any
 		}{
 			{http.MethodGet, "/api/sessions/" + fx.sess + "/plugins/catalog", nil},
-			{http.MethodPost, "/api/sessions/" + fx.sess + "/plugins/marketplaces", map[string]string{"source": pluginspec.DefaultMarketplaces}},
+			{http.MethodPost, "/api/sessions/" + fx.sess + "/plugins/marketplaces", map[string]string{"source": "anthropics/claude-plugins-official"}},
 			{http.MethodPost, "/api/sessions/" + fx.sess + "/mcp/sign-in", map[string]string{"server": "tracker"}},
 		} {
 			if rec := fx.refused(c.method, c.path, tok, c.body); rec.Code != http.StatusForbidden {

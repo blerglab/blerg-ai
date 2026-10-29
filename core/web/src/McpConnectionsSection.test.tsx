@@ -115,14 +115,11 @@ describe("MCP connections", () => {
     sessionStorage.clear();
   });
 
-  it("explains the feature in the empty state and points at the runner app", async () => {
+  it("explains the feature in one plain sentence", async () => {
     setup();
     render(<McpConnectionsSection site={{ version: "x", board_url: "", runner_url: "https://runner.test" }} />);
     await screen.findByText(/No MCP connections yet/);
-    const help = document.querySelector(".section-help")!.textContent ?? "";
-    expect(help).toMatch(/off for every session until you select them/);
-    expect(help).toMatch(/Choosing the tools is done in the runner app/);
-    expect(screen.getByRole("link", { name: "runner app" })).toHaveAttribute("href", "https://runner.test");
+    expect(screen.getByText("Connect external tools that you can choose for your sessions.")).toBeInTheDocument();
     expect(screen.getByText("0 of 20 connections used.")).toBeInTheDocument();
   });
 

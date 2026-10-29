@@ -1,0 +1,49 @@
+/* Engine discovery: unavailable engines with reason, fix and actions (launch sheet + Settings). */
+.engine-status-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+.engine-status-row {
+  border: 1px dashed var(--stone);
+  border-radius: 6px;
+  padding: 6px 10px;
+  background: var(--basalt);
+  min-width: 0;
+}
+.engine-status-row.is-available { border-style: solid; }
+.engine-status-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.engine-status-pill.settings-action {
+  padding: 3px 9px;
+  font-size: 0.82rem;
+  border-style: dashed;
+  color: var(--fog-dim);
+  background: var(--scree);
+}
+.engine-status-name { font-weight: 700; color: var(--fog); font-size: 0.85rem; }
+.engine-status-word {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--amber);
+}
+.engine-status-row.is-available .engine-status-word { color: var(--lichen); }
+.engine-status-row.is-unsupported .engine-status-word { color: var(--fog-dim); }
+.engine-status-reason, .engine-status-fix, .engine-status-note {
+  margin: 4px 0 0;
+  font-size: 0.75rem;
+  color: var(--fog);
+  overflow-wrap: anywhere;
+}
+.engine-status-fix { color: var(--fog-dim); }
+.engine-status-fix code, .engine-status-path code {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  background: var(--scree);
+  border-radius: 4px;
+  padding: 0 4px;
+  overflow-wrap: anywhere;
+}
+.engine-status-note.is-error { color: var(--amber); }
+.engine-status-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.engine-status-actions .settings-action.btn.small { padding: 3px 9px; font-size: 0.75rem; }
+.engine-status-path { margin-top: 4px; font-size: 0.72rem; color: var(--fog-dim); }
+.engine-status-path summary { cursor: pointer; }
+.engine-status-path code { display: block; margin-top: 4px; padding: 4px 6px; }

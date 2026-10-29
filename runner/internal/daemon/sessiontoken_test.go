@@ -278,7 +278,13 @@ func TestSessionTokenIsAnswered(t *testing.T) {
 // none of the files of the one before: the session's re-issued token is
 // copied in from the host before anything runs in it.
 func TestRecreatedSandboxGetsTheHostTokenFile(t *testing.T) {
-	state := t.TempDir()
+	// Keep Go's test scratch root separate from the system temporary directory:
+	// clone setup must preserve the state directory containing the issued token.
+	goTemp := t.TempDir()
+	systemTemp := t.TempDir()
+	t.Setenv("GOTMPDIR", goTemp)
+	t.Setenv("TMPDIR", systemTemp)
+	state := filepath.Join(goTemp, "state")
 	t.Setenv(DaemonStateDirEnv, state)
 	const id = "33333333-4444-4555-8666-777777777777"
 	if err := writeSessionTokenFile(state, id, "gggg7777"); err != nil {

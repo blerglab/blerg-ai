@@ -21,6 +21,35 @@ unless you turn it off, and it needs **no operator-supplied credential at all**
 two runtimes coexist; a session picks one in the launch sheet, which defaults
 to the cluster runtime whenever no workstation daemon is connected.
 
+### Workspace v2 deployment profile
+
+Each workspace session keeps its checkouts on its own retained claim. By default
+(`WORKSPACE_STORAGE_CLASS` empty) that is **standard** storage: the claim goes in the
+class of Blerg's own `blerg-runner-data` claim (the installer renders it as
+`BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS`), with no physical size limit per workspace.
+Set `WORKSPACE_STORAGE_CLASS` in `.env` to a CSI class with verified byte and inode
+limits for **bounded** storage; the installer passes it as
+`BLERG_RUNNER_WORKSPACE_STORAGE_CLASS`. The trade-off, the classes that pass, and how
+to remove retained claims are in [README.md, "Workspace storage"](README.md#workspace-storage).
+The agent image must come from the same build as the server: an older image enforces
+bounded storage, so standard sessions fail to start.
+
+The workspace Job adds an init container and separate HOME, temporary and private
+scratch volumes. Only the retained projects claim is public. The init process
+sets private scratch to UID 1001, mode 0700. A fixed `setpriv` entry point starts
+the trusted Go controller as UID 1001 with CHOWN, DAC_OVERRIDE, SETUID, SETGID,
+KILL and SYS_PTRACE. Engine and PTY exec run as UID 1000 with zero capabilities.
+The controller requires its own container PID namespace and a distinct private
+mount; changing an environment path cannot supply that boundary.
+
+The root bootstrap, init container and listed capabilities require an operator
+admission profile that permits them. Workspace Jobs do not satisfy the Restricted
+Pod Security profile. The installer does not relax namespace admission policy.
+Review this profile before enabling the release gates. The container root
+filesystem is read-only, no host namespace or hostPath is used, and no service
+account token is mounted. Existing launcher RBAC remains unchanged: the runner
+cannot create the pod exec subresource. See the [runtime integration details](../../docs/cluster-workspace.md).
+
 ### Retained native conversations
 
 New account-owned Claude and Codex sessions retain their native conversation
@@ -82,6 +111,15 @@ claims and disk usage. Long-paused sessions consume claims until ended. Turning
 off native history prevents new native-backed sessions and intentionally refuses
 replacement of existing native-backed sessions until the feature is re-enabled;
 it does not downgrade them to archive recovery or delete their data.
+
+Keep namespace ResourceQuota and LimitRange policies in place. Concurrent quota
+accounting can reject a create with Kubernetes reason `Conflict`; the launcher
+retries PVC, Secret and Job creates with jittered backoff for up to ten seconds
+per object, within the launch deadline. The request keeps the same name and
+ownership marker. Lost responses require verified metadata and UID read-back;
+foreign `AlreadyExists` objects are refused. Actual quota exhaustion or admission
+denial (`Forbidden` or `Invalid`) remains a refusal. Logs and launch stages retain
+safe reason classes without Kubernetes response messages or credential material.
 
 ### What `deploy.sh` already did for you
 
@@ -159,7 +197,7 @@ on that page explains how to produce the value:
 | Kind | What to paste |
 |---|---|
 | `claude` | The token printed by `claude setup-token` on a machine where they're logged in (starts with `sk-ant-oat`), or an Anthropic console API key to bill an organization instead |
-| `codex` | Prefer Settings → Managed connections and complete the dedicated device login. Pasting `~/.codex/auth.json` remains a snapshot import with no coordinated refresh. |
+| `codex` | Prefer Settings → Managed connections and complete the dedicated device login. Pasting `~/.codex/auth.json` is access-only: its refresh token is withheld from Codex. When access expires, connect a dedicated managed login; copying a desktop login cannot provide safe renewal. |
 | `hermes` | The contents of `~/.hermes/.env` from a machine where Hermes is set up. Model servers come from the cluster's [shared Hermes providers](#shared-hermes-providers) when the operator set them (`HERMES_PROVIDERS_FILE`); keyless local servers need no `.env` at all |
 | `github` | A fine-grained personal access token with Contents read+write and Metadata read on the repos sessions may touch — sessions clone and push as that user |
 
@@ -290,7 +328,7 @@ What it does:
   endpoint the merged configuration can route to is on loopback or a private
   network and no provider key is set, the same rule as on a desktop. Before a
   pod exists the runner checks the fragment, the operator's
-  `HERMES_ENV_CONTENTS`, any uploaded config bundle's `~/.hermes/config.yaml`,
+  `HERMES_ENV_CONTENTS`, an explicitly configured operator bundle's `~/.hermes/config.yaml`,
   and whether the person saved their own Hermes credential (it becomes their
   pods' `.env`, which may hold a key), asked of core with the session's
   recorded launch proof: any of those, or a lookup that cannot tell, means
@@ -679,3 +717,83 @@ agent image doesn't install the `openclaw` CLI, and cluster session Jobs have
 no `OPENCLAW_*` credential wiring. The workstation daemon path supports all
 four engines; this is a real capability gap of cluster runtime specifically,
 not a bug. Extending cluster runtime to OpenClaw is future work.
+
+
+Workspace selection and desktop confidentiality in 0.5 are described in
+[workspace selection](../../docs/workspace-selection.md). Automatic desktop config
+uploads are retired. `BLERG_RUNNER_SHARED_AGENT_CONFIG_BUNDLE` optionally names
+an absolute path to an operator-managed, intentionally shared archive; leave it
+unset to serve none. Historical uploaded archives are ignored and should be
+removed from the runner data volume during upgrade. This does not re-enable
+personal desktop configuration sharing.
+
+### Interrupted agent pods and monitoring
+
+The runner records a stopped pod's Kubernetes reason in the session and its
+stage history, including the actual pod memory limit for `OOMKilled`. A
+**disconnected** session stays resumable. Raise `BLERG_RUNNER_POD_MEM_LIMIT`
+in `install/k8s/.env` and redeploy before resuming to use a larger limit.
+
+Workspace v2 keeps repository files and mid-turn commits on the retained projects
+PVC. Resume mounts that same volume; a killed turn may not have pushed its commits
+to `wip/<session>` yet. Files outside the retained workspace (including temporary
+files and legacy ephemeral checkouts) are not protected. Keep the retained claim;
+do not delete it to clear a pod-health alert. See [workspace recovery](../../docs/cluster-workspace.md).
+
+After recording a failed pod's reason, the runner patches that exact pod with
+`blerg.dev/session-ended=true` (UID and resource-version preconditions). Grant
+`patch` on pods through the updated `cluster-runtime.yaml`. The Job's existing
+TTL still removes the pod later; labeling never deletes the PVC or its work.
+Configure pod-health alerts to exclude these completed session pods, for example
+by filtering kube-state-metrics with the `label_blerg_dev_session_ended="true"`
+label (enable its pod label allowlist), or use the equivalent Kubernetes selector
+`blerg.dev/session-ended!=true`. Without that alert filter the label alone does
+not suppress an existing alert. Label failures are retried while disconnected.
+
+
+### Build and test budgets inside agent pods
+
+The runner container receives `BLERG_RUNNER_POD_CPU_MILLICORES` and
+`BLERG_RUNNER_POD_MEMORY_BYTES` through downward-API `resourceFieldRef` values
+(`limits.cpu` with divisor `1m`, `limits.memory` with divisor `1`). These names
+are reserved against session environment overrides. The Go image entry point
+sets budgets before starting the engine; no shell wrapper or host CPU detection
+is involved. Rebuild the agent image as well as the server for this change.
+
+Whole CPUs are rounded down, with a minimum of one (a fractional CPU still needs
+one worker). `BLERG_TOOL_WORKERS` is the smaller of that CPU count and one worker
+per 2 GiB of pod memory, with a minimum of one. The environment sets:
+
+| Tool | Budget |
+| --- | --- |
+| Go | `GOMAXPROCS` = whole CPUs; `GOFLAGS` appends `-p=<workers>` |
+| Vitest | `VITEST_MAX_WORKERS=<workers>` (Vitest 4 reads this directly) |
+| Node I/O | `UV_THREADPOOL_SIZE=<workers>` (at most 128) |
+| Native worker pools | `RAYON_NUM_THREADS=<workers>` and `OMP_NUM_THREADS=<workers>` |
+| Node heaps | `NODE_OPTIONS` sets `--max-old-space-size` to one quarter of memory divided by workers, in MiB (16–4096) |
+| Playwright | `PLAYWRIGHT_WORKERS=<workers>`; pass `--workers="$PLAYWRIGHT_WORKERS"` or read it in project config |
+| Make / CMake | `MAKEFLAGS` appends `-j<workers>`; `CMAKE_BUILD_PARALLEL_LEVEL=<workers>` |
+
+Other Go, Make and Node options are kept; an existing Node heap limit is replaced.
+For example a 1-CPU/4Gi pod gets one worker and a 1024 MiB Node heap; a
+4-CPU/12Gi pod gets four workers and a 768 MiB heap per Node process. Node's
+`os.availableParallelism()` may still report host cores: use these budgets or
+explicit worker flags. They are defaults, not a global memory reservation. Run
+heavy suites sequentially; independent tools or many Node subprocesses can still
+exhaust a pod. A tool's command-line flags can override its environment defaults.
+
+The optional `TestPodToolResourcesReachChildProcess` resource smoke runs
+`runner/scripts/pod-resource-suites.sh` after applying the production initializer.
+Compile the runner test binary on the host (`go test -c ./internal/runner`), then
+run only that test inside an owned Docker fixture with `--cpus=1 --memory=4g
+--memory-swap=4g`, the two downward variables set to `1000` and `4294967296`,
+`BLERG_POD_RESOURCE_SUITE=1`, and `BLERG_POD_RESOURCE_SCRIPT` pointing to that
+script. Mount this checkout writable, dependency/module/browser caches read-only,
+and provide a dedicated test Postgres URL. The image needs Go, Node, Chromium's
+libraries and the Playwright browser cache. No Kubernetes access is involved.
+The script runs the runner frontend and Go runner/daemon/server suites sequentially.
+Set `BLERG_POD_RESOURCE_PHASE=frontend` or `go` to run them in separate owned
+fixtures with the same budgets. Give the compiled test wrapper a sufficient
+`-test.timeout` (for example `90m` for the Go phase); each Go package still uses
+`-timeout 45m`. The script checks the cgroup quota/memory limit and records peak
+memory and OOM-kill counters for cgroup v1 or v2, failing on any OOM kill.

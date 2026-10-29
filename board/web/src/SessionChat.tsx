@@ -3,7 +3,8 @@
 // the chat talks to the board's /api/chat proxy with the board's own bearer token, and the board
 // passes each request to the runner for that one session after its own permission check.
 import { useMemo } from "react";
-import { ChatView, createProxyTransport, type DescribeUserMessage, type SessionMeta, type Transport } from "@blerglab/chat";
+import { cardReaders } from "./cardRefs";
+import { ChatView, createProxyTransport, forgetMarkdown, type ChatRefs, type CardTarget, type DescribeUserMessage, type SessionMeta, type Transport } from "@blerglab/chat";
 import "@blerglab/chat/blerg.css";
 import { ensureFreshToken, getAccessToken } from "./authClient";
 import { bounceToRefresh } from "./signIn";
@@ -38,20 +39,41 @@ function expired(token: string): boolean {
   }
 }
 
+/** Who is signed in (the token's unverified `sub`), or "" when nobody is: the account namespace
+ *  for what the chat keeps on this device (pending attachments, the line wrap choice). */
+export function boardChatScope(token: string | null = getAccessToken()): string {
+  if (!token) return "";
+  try {
+    const payload = JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))) as { sub?: unknown };
+    return typeof payload.sub === "string" ? payload.sub : "";
+  } catch {
+    return "";
+  }
+}
+
 // One transport for the page. The token is read fresh for every request, and renewed first when
 // it has run out: the live stream reconnects by itself, and a reconnect with a dead token would
 // be refused for good. A 401 that renewal cannot fix sends the page to core, as api() does.
 let shared: Transport | null = null;
-function boardTransport(): Transport {
+// The chat keeps rendered Markdown in memory for the signed-in account only: a token for another
+// account (the board renews tokens without a page load) forgets it first.
+let scopeSeen: string | undefined;
+export function rememberBoardChatScope(scope: string): void {
+  if (scopeSeen !== undefined && scopeSeen !== scope) forgetMarkdown();
+  scopeSeen = scope;
+}
+export function boardTransport(): Transport {
   if (shared) return shared;
   shared = createProxyTransport({
     baseUrl: "/api/chat",
+    attachmentScope: () => boardChatScope(),
     headers: async () => {
       let token = getAccessToken();
       if (!token || expired(token)) {
         await ensureFreshToken();
         token = getAccessToken();
       }
+      rememberBoardChatScope(boardChatScope(token));
       return token ? { Authorization: `Bearer ${token}` } : ({} as Record<string, string>);
     },
     onUnauthorized: () => {
@@ -94,6 +116,10 @@ export function SessionChat({ session, placeholder, readOnly }: {
   /** No composer: a session the board will not let the person message. */
   readOnly?: boolean;
 }) {
+  const refs = useMemo<ChatRefs>(() => ({
+    ...cardReaders(session.board_id),
+    openCard: (t: CardTarget) => window.location.assign(`/boards/${t.boardId}/cards/${t.key.replace(/^(?:#|[A-Z][A-Z0-9]{1,4}-|board:[A-Za-z0-9_-]{1,64}#)/, '')}`),
+  }), [session.board_id]);
   const { created_at, model, effort, engine, steering_supported, session_url, id: sessionId } = session;
   // The runner's status says how the session is, not when the board started it or on which
   // model; the board's own row does.
@@ -112,6 +138,7 @@ export function SessionChat({ session, placeholder, readOnly }: {
         key={session.id}
         session={session.id}
         transport={transport}
+        refs={refs}
         describeUserMessage={describeUserMessage}
         slots={{ header: readOnly ? undefined : <SessionModelControls session={session} /> }}
         placeholder={placeholder}

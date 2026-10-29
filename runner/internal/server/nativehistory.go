@@ -68,7 +68,7 @@ func (j *JobManager) withNativeHistory(spec SessionJobSpec) error {
 			return errNativeHistory
 		}
 		if expected == nil && (!j.NativeHistory.Enabled || !supported || spec.SpawningAccountID == "" || spec.Resume) {
-			return j.createSessionJob(spec) //nolint:contextcheck // Job creation outlives the request and owns bounded API calls; this branch explicitly retains legacy recovery.
+			return j.createSessionJobContext(ctx, spec)
 		}
 		if expected != nil && (expected.DetachedAt != nil || expected.ReclaimedAt != nil) {
 			return errNativeHistory
@@ -96,7 +96,7 @@ func (j *JobManager) withNativeHistory(spec SessionJobSpec) error {
 			return errNativeHistory
 		}
 		spec.nativeHistory = bound
-		return j.createSessionJob(spec) //nolint:contextcheck // Job creation outlives startup validation and owns bounded API calls.
+		return j.createSessionJobContext(ctx, spec)
 	})
 }
 
@@ -154,14 +154,16 @@ func (j *JobManager) prepareNativeHistory(ctx context.Context, spec SessionJobSp
 				storage["storageClassName"] = j.NativeHistory.StorageClass
 			}
 			body := map[string]any{"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": map[string]any{"name": historyClaimName(spec.SessionID), "namespace": j.Namespace, "labels": historyLabels(spec)}, "spec": storage}
-			resp, e := j.doWithContentType(ctx, http.MethodPost, "/api/v1/namespaces/"+j.Namespace+"/persistentvolumeclaims", body, "application/json")
+			resp, e := j.createLaunchObject(ctx, "/api/v1/namespaces/"+j.Namespace+"/persistentvolumeclaims", body)
 			if e != nil {
-				return errNativeHistory
+				return launchCreateFailure(e, errNativeHistory)
+			}
+			if resp.StatusCode != http.StatusCreated {
+				failure := launchCreateFailure(jobSubmissionRejection(resp), errNativeHistory)
+				_ = resp.Body.Close()
+				return failure
 			}
 			_ = resp.Body.Close()
-			if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusConflict {
-				return errNativeHistory
-			}
 			return nil
 		})
 		if err != nil {

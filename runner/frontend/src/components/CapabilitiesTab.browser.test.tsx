@@ -106,6 +106,21 @@ describe.each([
     return rail
   }
 
+  it.each(['danger-full-access', 'workspace-write'])('keeps the Codex %s chip concise and exposes scope accessibly', async sandbox => {
+    apiFetch.mockImplementation((url: string) => json(url.endsWith('/capabilities')
+      ? { ...CAPS, capabilities: { ...CAPS.capabilities, engine: 'codex', engine_name: 'Codex', permission_mode: 'never', sandbox_mode: sandbox } }
+      : url.endsWith('/plugins') ? PLUGINS : {}))
+    const rail = await openTab()
+    const chip = screen.getByTestId('caps-permission')
+    expect(chip.textContent).toBe('No prompts')
+    expect(chip.getAttribute('title')).toContain(`Codex: approval never, sandbox ${sandbox}`)
+    expect(chip.getAttribute('aria-description')).toBe(chip.getAttribute('title'))
+    expect(chip.className).toContain('risky')
+    expect(box(chip).width).toBeLessThan(100)
+    expect(rail.scrollWidth).toBeLessThanOrEqual(rail.clientWidth + 1)
+    expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
+  })
+
   it('heads the tab with a compact card: engine, version, model, workspace, permissions, As of', async () => {
     const rail = await openTab()
     if (shotDir) await page.screenshot({ path: `${shotDir}/capabilities-${width}.png`, element: rail })
@@ -116,7 +131,7 @@ describe.each([
     expect(path.getAttribute('title')).toBe(CAPS.capabilities.cwd)
     expect(path.textContent).toContain('…')
     const chip = within(card).getByTestId('caps-permission')
-    expect(chip.textContent).toBe('Bypass permissions')
+    expect(chip.textContent).toBe('No prompts')
     // Risky modes are amber; the chip says so to a screen reader too, through its title.
     expect(chip.className).toContain('risky')
     const amber = getComputedStyle(document.documentElement).getPropertyValue('--amber').trim()

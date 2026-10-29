@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -42,7 +43,7 @@ esac
 	t.Setenv("BLERG_RUNNER_GIT_TOKEN", "git-secret-value")
 	t.Setenv("BLERG_RUNNER_PLUGIN_MARKETPLACES", "")
 
-	res := InstallPlugins(context.Background(), Config{Home: home}, []pluginspec.Entry{ent("frontend-design"), ent("superpowers")})
+	res := InstallPlugins(context.Background(), Config{Home: home, pluginAllow: func() pluginspec.Allowlist { a, _ := pluginspec.ParseAllowlist(""); return a }}, []pluginspec.Entry{ent("frontend-design"), ent("superpowers")})
 	if res.Detail() != "1 of 2 installed — frontend-design failed" {
 		t.Fatalf("detail = %q", res.Detail())
 	}
@@ -93,7 +94,7 @@ func TestInstallChildrenGetAllowlistedEnvAndScratchCwd(t *testing.T) {
 	t.Setenv("LC_ALL", "C")
 	t.Setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
 	t.Setenv("BLERG_RUNNER_PLUGIN_MARKETPLACES", "")
-	res := InstallPlugins(context.Background(), Config{Home: home}, []pluginspec.Entry{ent("superpowers")})
+	res := InstallPlugins(context.Background(), Config{Home: home, pluginAllow: func() pluginspec.Allowlist { a, _ := pluginspec.ParseAllowlist(""); return a }}, []pluginspec.Entry{ent("superpowers")})
 	if res.Installed != 1 {
 		t.Fatalf("res = %+v", res)
 	}
@@ -152,18 +153,16 @@ func TestReportWorkspaceReadyEmitsPluginsStageBetweenCloneAndEngine(t *testing.T
 	}
 }
 
-func TestReportWorkspaceReadyWithoutPluginsOrForOtherEngines(t *testing.T) {
-	for _, cfg := range []Config{{}, {Engine: "codex", Plugins: []pluginspec.Entry{ent("a")}}} {
-		fs := &fakeSender{}
-		r := &stageReporter{s: fs, sessionID: "sid"}
-		reportWorkspaceReady(context.Background(), cfg, r, func(context.Context, Config, []pluginspec.Entry) PluginResult {
-			t.Fatal("install must not run")
-			return PluginResult{}
-		})
-		got := strings.Join(stageIDsAndStates(t, fs), " | ")
-		if strings.Contains(got, "plugins") || !strings.Contains(got, "engine:active") {
-			t.Fatalf("stages = %s", got)
-		}
+func TestReportWorkspaceReadyWithoutPlugins(t *testing.T) {
+	fs := &fakeSender{}
+	r := &stageReporter{s: fs, sessionID: "sid"}
+	reportWorkspaceReady(t.Context(), Config{}, r, func(context.Context, Config, []pluginspec.Entry) PluginResult {
+		t.Fatal("install must not run")
+		return PluginResult{}
+	})
+	got := strings.Join(stageIDsAndStates(t, fs), " | ")
+	if strings.Contains(got, "plugins") || !strings.Contains(got, "engine:active") {
+		t.Fatalf("stages = %s", got)
 	}
 }
 
@@ -175,7 +174,7 @@ func TestInstallPluginsWithRealClaude(t *testing.T) {
 	}
 	home := t.TempDir()
 	t.Setenv("BLERG_RUNNER_PLUGIN_MARKETPLACES", "")
-	res := InstallPlugins(context.Background(), Config{Home: home}, []pluginspec.Entry{ent("frontend-design"), ent("superpowers")})
+	res := InstallPlugins(context.Background(), Config{Home: home, pluginAllow: func() pluginspec.Allowlist { a, _ := pluginspec.ParseAllowlist(""); return a }}, []pluginspec.Entry{ent("frontend-design"), ent("superpowers")})
 	if res.Detail() != "2 of 2 installed" {
 		t.Fatalf("detail = %q", res.Detail())
 	}
@@ -187,5 +186,26 @@ func TestInstallPluginsWithRealClaude(t *testing.T) {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("settings.json lacks %s: %s", want, raw)
 		}
+	}
+}
+
+func TestReportWorkspaceReadyExplainsUnsupportedCodexPlugins(t *testing.T) {
+	fs := &fakeSender{}
+	r := &stageReporter{s: fs, sessionID: "sid"}
+	reportWorkspaceReady(t.Context(), Config{Engine: "codex", Plugins: []pluginspec.Entry{{Marketplace: "codex:market", Plugin: "selected"}}}, r, func(context.Context, Config, []pluginspec.Entry) PluginResult {
+		t.Fatal("unsupported runtime installed plugins")
+		return PluginResult{}
+	})
+	got := strings.Join(stageIDsAndStates(t, fs), " | ")
+	if !strings.Contains(got, "plugins:warning:This runtime cannot install Codex plugins.") || !strings.Contains(got, "engine:active") {
+		t.Fatal(got)
+	}
+}
+
+func TestInstallPluginsWithoutPolicyDeniesEnvironment(t *testing.T) {
+	t.Setenv("BLERG_RUNNER_PLUGIN_MARKETPLACES", "*")
+	res := InstallPlugins(t.Context(), Config{Home: t.TempDir(), StartCommand: func(*exec.Cmd) error { t.Error("missing policy ran a plugin installer"); return os.ErrPermission }}, []pluginspec.Entry{ent("selected")})
+	if res.Installed != 0 || len(res.Skipped) != 1 {
+		t.Fatal("missing policy used environment permissions", res)
 	}
 }

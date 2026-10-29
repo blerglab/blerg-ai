@@ -17,6 +17,7 @@ type codexCredentialState struct {
 	account    string
 	generation string
 	refreshing *codexCredentialFlight
+	secrets    []string
 }
 
 func (a *codexApp) loginManagedCredential(parent context.Context) error {
@@ -38,6 +39,7 @@ func (a *codexApp) loginManagedCredential(parent context.Context) error {
 	defer state.mu.Unlock()
 	state.account = access.AccountID
 	state.generation = access.Generation
+	state.secrets = []string{access.AccessToken}
 	state.refreshing = nil
 	return nil
 }
@@ -78,6 +80,10 @@ func (a *codexApp) managedCredentialRefresh(ctx context.Context, account string)
 		flight.err = errEngineCredential
 	} else {
 		state.generation = access.Generation
+		state.secrets = append(state.secrets, access.AccessToken)
+		if len(state.secrets) > 4 {
+			state.secrets = state.secrets[len(state.secrets)-4:]
+		}
 		flight.access = access
 	}
 	if state.refreshing == flight {

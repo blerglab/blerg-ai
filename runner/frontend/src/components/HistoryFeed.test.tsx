@@ -25,6 +25,8 @@ function show(reply: TopicsReply = strokesReply(NOW), over: { onJump?: (k: strin
   const onJump = over.onJump ?? vi.fn()
   const view: TopicsView = { status: 'ready', reply }
   render(<TopicList sessionId="sess-a" view={view} now={NOW} missing={over.missing ?? null} onJump={onJump} onOpenArtifact={vi.fn()} progress={over.progress ?? null} />)
+  // These stroke-content tests inspect both topics; collapse defaults have their own regression.
+  for (const head of screen.queryAllByTestId('reel-head')) if (head.getAttribute('aria-expanded') === 'false') fireEvent.click(head)
   return { onJump }
 }
 
@@ -76,13 +78,13 @@ describe('History feed', () => {
     expect(within(byText('Shipped on main')).getByTestId('reel-commit')).toHaveTextContent('9f8e7d6')
   })
 
-  it('opens a card chip on its Board page in Blerg when the board is known, and shows only the number otherwise', () => {
+  it('opens a card chip in Blerg when the board is known, and shows only the number otherwise', () => {
     show()
     const chips = screen.getAllByTestId('stroke-card')
-    const linked = chips.find(c => c.tagName === 'A')!
+    const linked = chips.find(c => c.tagName === 'BUTTON')!
     expect(linked).toHaveTextContent('#42')
-    expect(linked.getAttribute('href')).toMatch(/\/boards\/b1\/cards\/42$/)
-    const bare = chips.find(c => c.tagName !== 'A')!
+    expect(linked).toHaveAccessibleName(/Card Product #42/)
+    const bare = chips.find(c => c.tagName === 'SPAN')!
     expect(bare).toHaveTextContent('#115')
     expect(bare).toHaveAttribute('title', 'Card #115 · board unknown')
   })
@@ -183,14 +185,14 @@ describe('feedEntries', () => {
 })
 
 describe('History feed: the agent\'s account, approvals, a long feed', () => {
-  it('draws a ruling the agent recorded as yours as the agent\'s line, saying so', () => {
+  it('draws a person-owned ruling recorded by the agent as the person’s decision', () => {
     const reply = strokesReply(NOW)
-    reply.strokes!.push({ id: 'st-rec', kind: 'decision', source: 'mark', by: 'agent', recorded_as: 'person', text: 'Ship on Friday', at: new Date(NOW.getTime() - 3 * 60_000).toISOString(), seq: 336, jump: null })
+    reply.strokes!.push({ id: 'st-rec', kind: 'decision', source: 'mark', by: 'person', recorded_as: 'person', text: 'Ship on Friday', at: new Date(NOW.getTime() - 3 * 60_000).toISOString(), seq: 336, jump: null })
     show(reply)
     const line = lines().find(l => l.textContent!.includes('Ship on Friday'))!
-    expect(line.querySelector('.stroke-glyph')).toHaveTextContent('◇')
-    expect(line.querySelector('.stroke-glyph')).toHaveAttribute('title', 'Decision (agent): your ruling, as the agent recorded it')
-    expect(line).toHaveClass('by-agent')
+    expect(line.querySelector('.stroke-glyph')).toHaveTextContent('◆')
+    expect(line.querySelector('.stroke-glyph')).toHaveAttribute('title', 'Your decision')
+    expect(line).not.toHaveClass('by-agent')
   })
 
   it('draws a run of command approvals as one line', () => {
@@ -217,16 +219,16 @@ describe('History feed: the agent\'s account, approvals, a long feed', () => {
     reply.strokes = [...many, ...reply.strokes!]
     reply.strokes_truncated = 40
     show(reply)
-    expect(lines()).toHaveLength(100)
-    expect(screen.getByTestId('stroke-earlier')).toHaveTextContent('Show earlier (159)')
-    expect(screen.queryByTestId('reel-unmarked')).toBeNull()
-    // The finished topic is older than every line drawn: it waits with the earlier lines.
-    expect(screen.getAllByTestId('reel-card')).toHaveLength(1)
-    fireEvent.click(screen.getByTestId('stroke-earlier'))
-    expect(lines()).toHaveLength(200)
-    fireEvent.click(screen.getByTestId('stroke-earlier'))
-    expect(lines()).toHaveLength(258)
-    expect(screen.queryByTestId('stroke-earlier')).toBeNull()
+    const topic = screen.getAllByTestId('reel-card')[0]
+    expect(within(topic).getAllByTestId('stroke')).toHaveLength(100)
+    expect(within(topic).getByTestId('stroke-earlier')).toHaveTextContent('Show earlier strokes (153)')
+    // Going earlier replaces the mounted window; it never appends another hundred rows.
+    fireEvent.click(within(topic).getByTestId('stroke-earlier'))
+    expect(within(topic).getAllByTestId('stroke')).toHaveLength(100)
+    expect(within(topic).getByText('finding 100')).toBeTruthy()
+    fireEvent.click(within(topic).getByTestId('stroke-earlier'))
+    expect(within(topic).getAllByTestId('stroke')).toHaveLength(52)
+    expect(within(topic).queryByTestId('stroke-earlier')).toBeNull()
     expect(screen.getByTestId('stroke-truncated')).toHaveTextContent('40 older lines are not loaded.')
     expect(screen.getAllByTestId('reel-card')).toHaveLength(2)
   })
@@ -313,7 +315,7 @@ describe('History feed: folds and waiting items (#122, #121)', () => {
   it('opens the owner\'s topic onto compact lines: your 3 messages, 3 subagents, 2 files, a commit', () => {
     hold(1)
     show(ownerReply(NOW))
-    fireEvent.click(screen.getByTestId('reel-head'))
+    if (screen.getByTestId('reel-head').getAttribute('aria-expanded') === 'false') fireEvent.click(screen.getByTestId('reel-head'))
     const summary = screen.getByTestId('reel-summary')
     expect(Array.from(summary.children).map(c => c.getAttribute('data-testid'))).toEqual(['reel-sum-messages', 'reel-sum-agents', 'reel-sum-files', 'reel-sum-commits'])
     expect(within(summary).getAllByTestId('reel-sum-message')).toHaveLength(3)
@@ -369,7 +371,7 @@ describe('History feed: fix round 1 of #122', () => {
     expect(within(line).getByTestId('stroke-cards-earlier')).toHaveTextContent('+95')
     fireEvent.click(within(line).getByTestId('stroke-text'))
     expect(within(line).getByTestId('stroke-items-earlier')).toHaveTextContent('and 120 earlier')
-    fireEvent.click(screen.getByTestId('reel-head'))
+    if (screen.getByTestId('reel-head').getAttribute('aria-expanded') === 'false') fireEvent.click(screen.getByTestId('reel-head'))
     const msgs = screen.getByTestId('reel-sum-messages')
     expect(msgs).toHaveTextContent('15 messages')
     expect(within(msgs).getByTestId('reel-sum-messages-earlier')).toHaveTextContent('+12')
@@ -392,7 +394,7 @@ describe('History feed: fix round 1 of #122', () => {
     const reply = ownerReply(NOW)
     reply.topics[0].messages![0].ts = new Date(NOW.getTime() - 30 * 3600_000).toISOString()
     show(reply)
-    fireEvent.click(screen.getByTestId('reel-head'))
+    if (screen.getByTestId('reel-head').getAttribute('aria-expanded') === 'false') fireEvent.click(screen.getByTestId('reel-head'))
     const chips = within(screen.getByTestId('reel-sum-messages')).getAllByTestId('reel-sum-message')
     for (const c of chips) expect(c.textContent).toMatch(/^[A-Z][a-z]{2} \d{1,2}, \d{2}:\d{2}$/)
   })

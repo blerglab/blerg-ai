@@ -83,7 +83,7 @@ function startsTurn(events: AgentEvent[], i: number): boolean {
   if (ev.kind === 'turn_done' || isTurnError(ev)) return true
   if (ev.kind === 'user_message') {
     const source = (ev.payload as { source?: unknown } | null)?.source
-    return source !== 'system' && source !== 'ask_answer'
+    return source !== 'system' && source !== 'ask_answer' && source !== 'usage_limit'
   }
   if (ev.kind !== 'status_changed') return false
   const status = statusOf(ev)

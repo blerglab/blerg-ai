@@ -20,6 +20,7 @@ func (a *API) registerArtifactRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/sessions/{id}/artifacts/{aid}/raw", h.raw)
 	mux.HandleFunc("DELETE /api/sessions/{id}/artifacts/{aid}", h.remove)
 	mux.HandleFunc("POST /api/sessions/{id}/uploads", h.userUpload)
+	mux.HandleFunc("POST /api/sessions/{id}/storage", h.increaseStorage)
 	mux.HandleFunc("GET /api/sessions/{id}/attachments", h.attachments)
 	mux.HandleFunc("GET /api/sessions/{id}/attachments/{aid}/file", h.attachmentFile)
 	mux.HandleFunc("GET /api/sessions/{id}/files", h.files)

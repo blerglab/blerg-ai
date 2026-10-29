@@ -17,22 +17,22 @@ func TestHeadlessPlacementUsesRequestedEngine(t *testing.T) {
 	for _, scratch := range []bool{false, true} {
 		t.Run(map[bool]string{false: "repository", true: "scratch"}[scratch], func(t *testing.T) {
 			hub := NewHub()
-			first := &DaemonConn{ID: "a-host", send: make(chan []byte, 8)}
+			first := &DaemonConn{ID: "00000000-0000-4000-8000-000000000065", send: make(chan []byte, 8)}
 			first.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 			first.SetCheckedOutRepos([]string{"project"})
 			first.SetAvailableEngines([]string{"claude"})
-			second := &DaemonConn{ID: "b-host", send: make(chan []byte, 8)}
+			second := &DaemonConn{ID: "00000000-0000-4000-8000-000000000068", send: make(chan []byte, 8)}
 			second.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 			second.SetCheckedOutRepos([]string{"project"})
 			second.SetAvailableEngines([]string{"codex"})
 			hub.Register(first)
 			hub.Register(second)
-			api := NewAPI(hub, nil, "fixture-daemon-token", nil, "")
+			api := ownedInventoryAPI(t, hub, "fixture-daemon-token", nil, "")
 			req := runnerStartRequest{Repo: "project", Runtime: "daemon", Engine: "codex", Model: "gpt-example"}
 			if scratch {
 				req.Repo, req.NoRepo = "", true
 			}
-			if _, err := api.StartSession(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, req, ""); err != nil {
+			if _, err := api.StartSession(context.Background(), workspaceFixturePrincipal(), req, ""); err != nil {
 				t.Fatal(err)
 			}
 			select {
@@ -74,17 +74,17 @@ func TestRegisteredCapabilitiesDriveCronAndUsage(t *testing.T) {
 
 func TestHeadlessPinnedTargetNeverFallsBack(t *testing.T) {
 	hub := NewHub()
-	first := &DaemonConn{ID: "fixture-first", send: make(chan []byte, 8)}
+	first := &DaemonConn{ID: "00000000-0000-4000-8000-000000000072", send: make(chan []byte, 8)}
 	first.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	first.SetAvailableEngines([]string{"claude"})
-	second := &DaemonConn{ID: "fixture-second", send: make(chan []byte, 8)}
+	second := &DaemonConn{ID: "00000000-0000-4000-8000-000000000076", send: make(chan []byte, 8)}
 	second.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	second.SetAvailableEngines([]string{"codex"})
 	hub.Register(first)
 	hub.Register(second)
-	api := NewAPI(hub, nil, "fixture-token", nil, "")
+	api := ownedInventoryAPI(t, hub, "fixture-token", nil, "")
 	for _, pin := range []string{first.ID, "fixture-disconnected"} {
-		_, problem := api.StartSession(t.Context(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, runnerStartRequest{NoRepo: true, Runtime: "daemon", Engine: "codex", TargetDaemonID: pin}, "")
+		_, problem := api.StartSession(t.Context(), workspaceFixturePrincipal(), runnerStartRequest{NoRepo: true, Runtime: "daemon", Engine: "codex", TargetDaemonID: pin}, "")
 		if problem == nil {
 			t.Fatal("incompatible/disconnected pin silently changed hosts")
 		}
@@ -94,7 +94,7 @@ func TestHeadlessPinnedTargetNeverFallsBack(t *testing.T) {
 		t.Fatal("spawned on an unrequested host")
 	default:
 	}
-	_, problem := api.StartSession(t.Context(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, runnerStartRequest{NoRepo: true, Runtime: "daemon", Engine: "codex", TargetDaemonID: second.ID}, "")
+	_, problem := api.StartSession(t.Context(), workspaceFixturePrincipal(), runnerStartRequest{NoRepo: true, Runtime: "daemon", Engine: "codex", TargetDaemonID: second.ID}, "")
 	if problem != nil {
 		t.Fatal(problem)
 	}
@@ -123,21 +123,21 @@ func TestSessionAdvertisesRegisteredContinuationCapability(t *testing.T) {
 
 func TestHeadlessModelEffortValidatesSelectedHost(t *testing.T) {
 	hub := NewHub()
-	actual := reportingDaemon(hub, "fixture-actual", map[string]models.Report{"codex": rep(time.Now(), mdl("gpt-fixture", "low"))})
+	actual := reportingDaemon(hub, "00000000-0000-4000-8000-000000000071", map[string]models.Report{"codex": rep(time.Now(), mdl("gpt-fixture", "low"))})
 	actual.SetAvailableEngines([]string{"codex"})
-	other := reportingDaemon(hub, "fixture-other", map[string]models.Report{"codex": rep(time.Now(), mdl("gpt-fixture", "high"))})
+	other := reportingDaemon(hub, "00000000-0000-4000-8000-000000000075", map[string]models.Report{"codex": rep(time.Now(), mdl("gpt-fixture", "high"))})
 	other.SetAvailableEngines([]string{"codex"})
-	api := NewAPI(hub, nil, "fixture-token", nil, "")
+	api := ownedInventoryAPI(t, hub, "fixture-token", nil, "")
 	api.SetModelSources(NewModelSources(nil, hub))
 	req := runnerStartRequest{NoRepo: true, Runtime: "daemon", TargetDaemonID: actual.ID, Engine: "codex", Model: "gpt-fixture", Effort: "high"}
-	if _, problem := api.StartSession(t.Context(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, req, ""); problem == nil || problem.Status != 422 {
+	if _, problem := api.StartSession(t.Context(), workspaceFixturePrincipal(), req, ""); problem == nil || problem.Status != 422 {
 		t.Fatal("accepted another host's effort levels")
 	}
 	if len(actual.send) != 0 || len(other.send) != 0 {
 		t.Fatal("invalid effort reached a host")
 	}
 	req.Effort = "low"
-	if _, problem := api.StartSession(t.Context(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, req, ""); problem != nil {
+	if _, problem := api.StartSession(t.Context(), workspaceFixturePrincipal(), req, ""); problem != nil {
 		t.Fatal(problem)
 	}
 }

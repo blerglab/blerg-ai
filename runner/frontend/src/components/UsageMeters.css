@@ -83,6 +83,13 @@
   text-overflow: ellipsis;
 }
 
+.usage-meter--capped .usage-meter__pct {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .usage-meter__dot {
   flex: 0 0 auto;
   width: 6px;
@@ -109,4 +116,25 @@
 .usage-meters__empty {
   color: var(--fog-dim);
   cursor: help;
+}
+
+/* A gentle two-second pulse only on the fill and percentage, never a flash. */
+@keyframes usage-limit-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
+}
+.usage-meter--pulse .usage-meter__dot,
+.usage-meter--pulse .usage-meter__fill,
+.usage-meter--pulse .usage-meter__pct {
+  animation: usage-limit-pulse 2s ease-in-out infinite;
+}
+.usage-meter__critical { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .usage-meter--pulse .usage-meter__dot,
+  .usage-meter--pulse .usage-meter__fill,
+  .usage-meter--pulse .usage-meter__pct { animation: none; opacity: 1; }
+  .usage-meter--pulse .usage-meter__pct,
+  .usage-meter--pulse .usage-meter__critical { color: var(--danger); font-weight: 800; }
+  .usage-meter--pulse .usage-meter__critical { display: inline; flex: 0 0 auto; }
 }

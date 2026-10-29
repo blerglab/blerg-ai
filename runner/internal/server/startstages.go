@@ -303,6 +303,12 @@ func stageIndex(stages []protocol.StartStage, id string) int {
 // session's subscribers. The event reaches only browsers watching the
 // session; the sessions list learns about status from session_* messages.
 func persistStartStages(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID string, payload protocol.StartStagePayload) {
+	for i := range payload.Stages {
+		if payload.Stages[i].At == "" {
+			payload.Stages[i].At = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+	}
+	logLaunchStages(sessionID, payload.Stages)
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return
@@ -319,7 +325,7 @@ func persistStartStages(ctx context.Context, h *Hub, pool *pgxpool.Pool, session
 		}
 		ev.Seq = seq
 	}
-	if msg, err := json.Marshal(ev); err == nil {
+	if msg, err := json.Marshal(ev); err == nil && h != nil {
 		h.FanOutAgentEvent(sessionID, ev.Seq, msg)
 	}
 }
@@ -482,6 +488,11 @@ func watchClusterStart(h *Hub, pool *pgxpool.Pool, sessionID string, every time.
 		defer ticker.Stop()
 		for {
 			if ctx.Err() != nil || !h.starts.isOpen(sessionID) {
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) && parent.Err() == nil {
+					diagnostic, done := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+					failStart(diagnostic, h, pool, sessionID, "Launch progress observation deadline expired", "Inspect the current launch stage and cluster configuration before retrying")
+					done()
+				}
 				return
 			}
 			pod, err := jm.sessionPod(ctx, sessionID)
@@ -489,8 +500,12 @@ func watchClusterStart(h *Hub, pool *pgxpool.Pool, sessionID string, every time.
 				// No RBAC for pods: nothing to watch, and asking again every
 				// two seconds for twenty minutes would change nothing. The
 				// pod's own reports and the status transitions still arrive.
+				advanceStart(ctx, h, pool, sessionID, false, stage(protocol.StageSchedule, "", protocol.StageStateFailed, "Pod inventory refused; launcher requires get/list on pods (no exec permission)"))
 				log.Printf("start watcher %s: pods not readable (grant get/list on pods to show start progress)", sessionID)
 				return
+			}
+			if err != nil {
+				advanceStart(ctx, h, pool, sessionID, false, stage(protocol.StageSchedule, "", protocol.StageStateActive, "Pod inventory unavailable; retrying bounded Kubernetes requests"))
 			}
 			if err == nil {
 				if pool != nil {
@@ -502,6 +517,11 @@ func watchClusterStart(h *Hub, pool *pgxpool.Pool, sessionID string, every time.
 				updates, fatal := deriveClusterStages(pod, jm.stageContext(sessionID))
 				advanceStart(ctx, h, pool, sessionID, false, updates...)
 				if fatal != nil {
+					if fatal.ID != "" {
+						advanceStart(ctx, h, pool, sessionID, true, *fatal)
+						h.starts.close(sessionID)
+						return
+					}
 					failStart(ctx, h, pool, sessionID, fatal.Detail, fatal.Hint)
 					return
 				}
@@ -530,7 +550,9 @@ func broadcastSessionCreated(ctx context.Context, h *Hub, pool *pgxpool.Pool, se
 	if err != nil || row == nil {
 		return
 	}
-	h.BroadcastJSON(protocol.BrowserSessionStarted{Type: "session_started", Session: sessionRowToInfo(*row, "")})
+	h.BroadcastJSONPerAccount(func(account string) any { //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
+		return protocol.BrowserSessionStarted{Type: "session_started", Session: h.sessionInfoFor(ctx, *row, account)}
+	})
 }
 
 // announceClusterStart runs once a cluster session's row exists, before its
@@ -570,16 +592,16 @@ func (a *API) markClusterStartFailed(ctx context.Context, sessionID, reason stri
 	if a.dbPool != nil {
 		now := time.Now()
 		if err := db.EndSessionStatus(ctx, a.dbPool, sessionID, "error", &now, systemEnd(db.EndReasonStartFailed)); err != nil {
-			log.Printf("cluster start: mark %s failed: %v", sessionID, err)
+			logLaunchFailure("queued", &jobSubmissionError{reason: "InternalError"})
 		}
 		if err := db.SetSessionError(ctx, a.dbPool, sessionID, reason); err != nil {
-			log.Printf("cluster start: SetSessionError %s: %v", sessionID, err)
+			logLaunchFailure("queued", &jobSubmissionError{reason: "InternalError"})
 		}
 		// A start that failed after its grants were made: no Job will ever use the tokens.
 		revokeSessionGrants(ctx, a.dbPool, sessionID, "cluster start failed")
 	}
 	clusterJobCreateFailed(ctx, a.hub, a.dbPool, sessionID, reason)
-	broadcastWithEnd(a.hub, sessionEndFor(ctx, a.dbPool, sessionID, "error"), func(endReason string, endedBy *protocol.EndedBy) any {
+	broadcastWithEnd(a.hub, sessionEndFor(ctx, a.dbPool, sessionID, "error"), func(endReason string, endedBy *protocol.EndedBy) any { //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 		return protocol.SessionStateChanged{
 			Type: "session_state_changed", SessionID: sessionID, Status: "error", Message: &reason,
 			EndReason: endReason, EndedBy: endedBy,
@@ -615,9 +637,21 @@ func adoptClusterStart(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionI
 
 // k8sPod is the slice of a Pod's status the start stages are derived from.
 type k8sPod struct {
+	Spec struct {
+		Containers []struct {
+			Name      string `json:"name"`
+			Resources struct {
+				Limits map[string]string `json:"limits"`
+			} `json:"resources"`
+		} `json:"containers"`
+	} `json:"spec"`
 	Metadata struct {
-		CreationTimestamp string  `json:"creationTimestamp"`
-		DeletionTimestamp *string `json:"deletionTimestamp"`
+		Name              string            `json:"name"`
+		UID               string            `json:"uid"`
+		ResourceVersion   string            `json:"resourceVersion"`
+		Labels            map[string]string `json:"labels"`
+		CreationTimestamp string            `json:"creationTimestamp"`
+		DeletionTimestamp *string           `json:"deletionTimestamp"`
 	} `json:"metadata"`
 	Status struct {
 		Phase      string `json:"phase"`
@@ -628,7 +662,8 @@ type k8sPod struct {
 			Reason  string `json:"reason"`
 			Message string `json:"message"`
 		} `json:"conditions"`
-		ContainerStatuses []k8sContainerStatus `json:"containerStatuses"`
+		ContainerStatuses     []k8sContainerStatus `json:"containerStatuses"`
+		InitContainerStatuses []k8sContainerStatus `json:"initContainerStatuses"`
 	} `json:"status"`
 }
 
@@ -643,6 +678,7 @@ type k8sContainerStatus struct {
 		} `json:"running"`
 		Terminated *struct {
 			ExitCode int    `json:"exitCode"`
+			Message  string `json:"message"`
 			Reason   string `json:"reason"`
 		} `json:"terminated"`
 	} `json:"state"`
@@ -734,9 +770,17 @@ func deriveClusterStages(pod *k8sPod, sc stageContext) (updates []protocol.Start
 		t := runner.State.Terminated
 		detail := fmt.Sprintf("The pod exited (exit code %d)", t.ExitCode)
 		hint := "See the pod log: kubectl logs -n " + sc.Namespace + " job/" + sc.JobName
+		var refusal struct {
+			Stage  string `json:"stage"`
+			Reason string `json:"reason"`
+		}
+		if json.Unmarshal([]byte(t.Message), &refusal) == nil && knownLaunchStage(refusal.Stage) && refusal.Reason == "runtime_startup_refused" {
+			return nil, &protocol.StartStage{ID: refusal.Stage, State: protocol.StageStateFailed, Detail: "Pod runtime startup refused; inspect its protected storage, capabilities and configuration"}
+		}
 		if t.Reason == "OOMKilled" {
-			detail = "The pod ran out of memory (OOMKilled)"
-			hint = "Raise BLERG_RUNNER_POD_MEM_LIMIT for cluster sessions, then start the session again."
+			if fatal := podTermination(pod); fatal != nil {
+				detail, hint = fatal.Detail, fatal.Hint
+			}
 		}
 		return nil, &protocol.StartStage{State: protocol.StageStateFailed, Detail: detail, Hint: hint}
 	}
@@ -766,6 +810,23 @@ func deriveClusterStages(pod *k8sPod, sc stageContext) (updates []protocol.Start
 			stage(protocol.StageSchedule, "", protocol.StageStateActive, "Waiting for a node")}, nil
 	}
 	scheduledDone := stage(protocol.StageSchedule, "", protocol.StageStateDone, "")
+	for _, init := range pod.Status.InitContainerStatuses {
+		if init.State.Terminated != nil && init.State.Terminated.ExitCode == 0 {
+			continue
+		}
+		boot := stage("bootstrap", "Initializing protected storage", protocol.StageStateActive, "Waiting for init containers to prepare protected storage")
+		if init.State.Terminated != nil {
+			boot.State = protocol.StageStateFailed
+			boot.Detail = "Protected storage bootstrap init container failed"
+		} else if init.State.Waiting != nil {
+			switch init.State.Waiting.Reason {
+			case "ErrImagePull", "ImagePullBackOff", "CreateContainerConfigError", "CreateContainerError":
+				boot.State = protocol.StageStateFailed
+				boot.Detail = "Bootstrap init container image or configuration unavailable"
+			}
+		}
+		return []protocol.StartStage{queuedDone, scheduledDone, stage(protocol.StageImage, "", protocol.StageStateDone, ""), boot}, nil
+	}
 	waiting := ""
 	if runner != nil && runner.State.Waiting != nil {
 		waiting = runner.State.Waiting.Reason

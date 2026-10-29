@@ -39,6 +39,9 @@ kubeconfig
 *.sqlite
 *.db
 
+# Checkout-local frontend test caches (dependencies may be a shared symlink).
+/.cache/
+
 # Build output and dependencies.
 node_modules/
 dist/
@@ -47,3 +50,20 @@ dist-packages/
 
 # Video pipeline output (takes, finished videos, voice-over cache): never committed.
 /video/out/
+
+# Native workspace security gate evidence and private temporary caches.
+/workspace-macos-evidence/
+
+# Per-worktree frontend optimizer and TypeScript caches.
+.cache/
+
+# Local pane-system validation evidence and required viewport captures.
+/.pane-validation/
+/.pane-shots/
+
+# Local session-tab validation evidence and viewport captures.
+/.tab-validation/
+/.tab-shots/
+
+# Local launch-sheet validation evidence and viewport captures.
+/.launch-shots/

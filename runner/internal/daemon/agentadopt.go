@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
@@ -93,7 +94,7 @@ func (h *AgentHost) keepRecord(msg protocol.SpawnSession, workDir, model string,
 // Freeze stops every recovery-record write. It is the daemon's first act when it is told to
 // stop: the engines are stopped with it, each driver then reports its turn over, and that
 // report must not erase the "a turn was running" the next daemon needs to see.
-func (h *AgentHost) Freeze() { h.frozen.Store(true) }
+func (h *AgentHost) Freeze() { h.explorer.Close(); h.frozen.Store(true) }
 
 // DropRecord forgets a session this daemon is not hosting: a stop that arrived for a session
 // that was never adopted, or before it could be (it is then not brought back at all).
@@ -291,7 +292,10 @@ func (h *AgentHost) adoptOne(rec AgentRecord) string {
 // once per finished turn (AutoContinues): a turn whose own command restarts or crashes the daemon
 // would otherwise be re-run on every start, for ever.
 func adoptPlan(rec AgentRecord, resumed bool, interaction string) (cont, gaveUp bool) {
-	eligible := cutOffWork(rec) && resumed && !destructiveCutOff(rec)
+	return adoptPlanAfter(rec, resumed, interaction, RestartCause{})
+}
+func adoptPlanAfter(rec AgentRecord, resumed bool, interaction string, cause RestartCause) (cont, gaveUp bool) {
+	eligible := cutOffWork(rec) && resumed && (!destructiveCutOff(rec) || cause.updateSucceeded(rec))
 	if interaction != protocol.InteractionUnattended {
 		eligible = eligible && !waitsOnPerson(rec)
 	}
@@ -352,17 +356,9 @@ func (h *AgentHost) finishAdoptionConfirmed(ad *adoptRequest, sess *agentSession
 	hadConversation := ad.rec.ClaudeSessionID != "" || ad.rec.CodexThreadID != "" || ad.rec.EngineSession != nil
 	resumed := ad.resumeID != ""
 	cutOff := ad.rec.TurnActive
-	cont, gaveUp := adoptPlan(ad.rec, resumed, msg.Interaction)
+	cont, gaveUp := adoptPlanAfter(ad.rec, resumed, msg.Interaction, h.cfg.RestartCause)
 	tasks, subs := ad.rec.OpenTasks, ad.rec.OpenSubagents
 	notice := cutOffNotice(ad.rec.OpenCalls, tasks, subs)
-	// What the person sees of what the agent is told: the notice, then why the daemon restarted
-	// (the driver's adoption note ends the same way).
-	told := func() string {
-		if notice == "" || !resumed {
-			return notice
-		}
-		return notice + "\n\n" + h.restartCauseWords(ad.rec)
-	}
 
 	parts := []string{"The session's host restarted."}
 	switch {
@@ -397,17 +393,20 @@ func (h *AgentHost) finishAdoptionConfirmed(ad *adoptRequest, sess *agentSession
 	if ad.pluginsLost {
 		parts = append(parts, "Its plugins could not all be reinstalled.")
 	}
-	// A retryable error event: the chat renders it, it closes the tool call the restart left
-	// spinning, and (being retryable) it does not end the session.
+	// The diagnostic closes the interrupted tool calls. Chat hides this detail;
+	// one compact row below reports the final outcome. Retryable keeps the session alive.
 	sess.emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "error",
-		Payload: agent.ErrorPayload{Message: strings.Join(parts, " "), Retryable: true}})
+		Payload: agent.ErrorPayload{Message: strings.Join(parts, " "), Retryable: true, Code: "session_recovery"}})
 	emitCutOffWork(sess.emitter, tasks, subs)
+	var noticeOnce sync.Once
 	showNotice := func() {
-		if notice != "" && hadConversation {
-			// Shown as the system's message; nothing runs until the person writes.
-			sess.emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "user_message",
-				Payload: agent.UserMessagePayload{Text: told(), Source: "system"}})
+		if !cutOffWork(ad.rec) {
+			return
 		}
+		noticeOnce.Do(func() {
+			sess.emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "user_message",
+				Payload: agent.UserMessagePayload{Text: h.recoveryRow(ad.rec, resumed, false, gaveUp), Source: "system"}})
+		})
 	}
 	if !cont {
 		showNotice()
@@ -415,19 +414,14 @@ func (h *AgentHost) finishAdoptionConfirmed(ad *adoptRequest, sess *agentSession
 	log.Printf("agent session %s: recovered after a daemon restart (conversation resumed=%v, turn cut off=%v, tool calls cut off=%d, background tasks cut off=%d, subagents cut off=%d, continuing=%v)",
 		msg.SessionID, resumed, cutOff, len(ad.rec.OpenCalls), len(tasks), len(subs), cont)
 
-	if !cutOffWork(ad.rec) || !hadConversation {
-		// Nothing was cut off: nothing to continue, nothing paused. Or the session never had a
-		// conversation (cut off in its first turn, before the engine named one): a continue would
-		// reach an agent that does not know its task, so the person is asked to send it again.
+	if !cutOffWork(ad.rec) {
+		// Nothing was cut off: nothing to continue or report paused.
+		showNotice()
 		return
 	}
-	// What the agent is told: what was cut off, if anything (the adoption note carries it), then
-	// to continue. Recorded as the system's message, list and all, so the person sees what the
-	// agent was asked.
-	shown := ""
-	if notice != "" {
-		shown = told() + "\n\n" + adoptContinuePrompt
-	}
+	// The adoption note gives the agent its full recovery instructions once;
+	// the recorded system message is the person's compact outcome row.
+	shown := h.recoveryRow(ad.rec, resumed, true, false)
 	if cont {
 		// Counted now, before anything runs: if this continue is what takes the daemon down again,
 		// the next start must already know it was tried.
@@ -479,9 +473,8 @@ func (h *AgentHost) finishAdoptionConfirmed(ad *adoptRequest, sess *agentSession
 				r.AutoContinues--
 				return true
 			})
-			sess.emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "error",
-				Payload: agent.ErrorPayload{Message: "It had asked a question when the host restarted, so it waits for your message instead of continuing by itself.", Retryable: true}})
-			showNotice()
+
+			sess.emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "error", Payload: agent.ErrorPayload{Message: "It had asked a question when the host restarted, so it waits for your message instead of continuing by itself.", Retryable: true, Code: "session_recovery"}})
 			log.Printf("agent session %s: not continued after the restart: the server has a question of its open", msg.SessionID)
 		}
 		if !cont {
@@ -490,10 +483,11 @@ func (h *AgentHost) finishAdoptionConfirmed(ad *adoptRequest, sess *agentSession
 			// driver's lock keeps a message from the person from slipping in between: one that came
 			// first means it is not paused; one that comes after reports "running" after these.
 			report := func() {
+				showNotice()
 				if err := h.sender.Send(protocol.SessionStateChanged{Type: "session_state_changed", SessionID: msg.SessionID, Status: "idle"}); err != nil {
 					log.Printf("agent session %s: reporting it idle after the restart: %v", msg.SessionID, err)
 				}
-				if err := h.sender.Send(protocol.SessionPaused{Type: "session_paused", SessionID: msg.SessionID, Reason: protocol.PausedByRestart}); err != nil {
+				if err := h.sender.Send(protocol.SessionPaused{Type: "session_paused", SessionID: msg.SessionID, Reason: protocol.PausedByRestart, Detail: h.recoveryPauseReason(ad.rec, resumed, gaveUp)}); err != nil {
 					log.Printf("agent session %s: reporting it paused by the restart: %v", msg.SessionID, err)
 				}
 			}
@@ -519,9 +513,9 @@ func (h *AgentHost) finishAdoptionConfirmed(ad *adoptRequest, sess *agentSession
 		}
 		text := adoptContinuePrompt
 		if notice != "" {
-			text = told() + "\n\n" + adoptContinuePrompt
+			text = notice + "\n\n" + h.restartCauseWords(ad.rec) + "\n\n" + adoptContinuePrompt
 		}
-		driver.EnqueueInput(agent.Input{Text: text, Source: "system"})
+		driver.EnqueueInput(agent.Input{Text: text, Shown: shown, Source: "system"})
 	}()
 }
 
@@ -608,7 +602,51 @@ func plural(n int, one, many string) string {
 
 // restartCauseWords is why the daemon restarted, for a session it cut off (restartcause.go).
 func (h *AgentHost) restartCauseWords(rec AgentRecord) string {
+	if h.cfg.RestartCause.updateSucceeded(rec) {
+		return "The daemon update you started succeeded (now on " + h.cfg.RestartCause.update.Commit + "). Continue where you left off; do not repeat the update."
+	}
 	return restartCauseWords(h.cfg.RestartCause, rec.OpenCalls)
+}
+
+// recoveryRow is the person's summary; the driver's adoption note carries the
+// full instructions once, with the next input to the agent.
+func (h *AgentHost) recoveryRow(rec AgentRecord, resumed, continuing, gaveUp bool) string {
+	prefix := "Host restarted"
+	if h.cfg.RestartCause.updateSucceeded(rec) {
+		commit := h.cfg.RestartCause.update.Commit
+		if len(commit) > 12 {
+			commit = commit[:12]
+		}
+		prefix = "Updated to " + commit
+	}
+	if !cutOffWork(rec) {
+		return ""
+	}
+	row := "[system] ↻ " + prefix + " · "
+	if continuing {
+		return row + "continued"
+	}
+	var detail strings.Builder
+	cutOffCallList(&detail, rec.OpenCalls)
+	shells, agents := cutOffSplit(rec.OpenTasks, rec.OpenSubagents)
+	cutOffBackgroundList(&detail, shells, agents)
+	if detail.Len() == 0 {
+		detail.WriteString("\nThe step that was running was cut off.")
+	}
+	return row + "paused — " + h.recoveryPauseReason(rec, resumed, gaveUp) + detail.String()
+}
+
+func (h *AgentHost) recoveryPauseReason(rec AgentRecord, resumed, gaveUp bool) string {
+	switch {
+	case !resumed:
+		return "send the task again"
+	case gaveUp:
+		return "already continued once"
+	case destructiveCutOff(rec) && !h.cfg.RestartCause.updateSucceeded(rec):
+		return "check the interrupted command"
+	default:
+		return "waiting for your message"
+	}
 }
 
 // cutOffNotice is what the agent is told about the work a restart cut off ("" for none): its own
@@ -622,14 +660,7 @@ func cutOffNotice(calls []OpenCall, tasks []agent.BackgroundTaskStartedPayload, 
 	var b strings.Builder
 	b.WriteString("[system] The process hosting this session restarted, and work that was running was cut off.")
 	if len(calls) > 0 {
-		b.WriteString("\nYour own tool calls that were cut off before they returned:")
-		for _, c := range calls {
-			if c.Detail != "" {
-				fmt.Fprintf(&b, "\n- %s: %s", c.Tool, c.Detail)
-			} else {
-				fmt.Fprintf(&b, "\n- %s", c.Tool)
-			}
-		}
+		cutOffCallList(&b, calls)
 		b.WriteString("\nCheck its state first: it may not have finished, or may have half written a file. " +
 			"Never re-run anything destructive without checking.")
 		for _, c := range calls {
@@ -650,10 +681,34 @@ func cutOffNotice(calls []OpenCall, tasks []agent.BackgroundTaskStartedPayload, 
 			return b.String()
 		}
 	}
+	cutOffBackgroundList(&b, shells, agents)
+	b.WriteString("\nBefore trusting anything they did, check the state of their worktrees and outputs. " +
+		"Resume a subagent by sending a message to its agent id; re-run a background command that did not finish. " +
+		"Do not re-run anything destructive without checking.")
+	return b.String()
+}
+
+// These lists are shared by the person's disclosure and the agent's recovery note.
+// Keep instructions outside them so only the agent receives the recovery guidance.
+func cutOffCallList(b *strings.Builder, calls []OpenCall) {
+	if len(calls) == 0 {
+		return
+	}
+	b.WriteString("\nTool calls cut off before they returned:")
+	for _, c := range calls {
+		if c.Detail != "" {
+			fmt.Fprintf(b, "\n- %s: %s", c.Tool, c.Detail)
+		} else {
+			fmt.Fprintf(b, "\n- %s", c.Tool)
+		}
+	}
+}
+
+func cutOffBackgroundList(b *strings.Builder, shells []agent.BackgroundTaskStartedPayload, agents []OpenSubagent) {
 	if len(shells) > 0 {
 		b.WriteString("\nBackground tasks that were cut off:")
 		for _, t := range shells {
-			fmt.Fprintf(&b, "\n- %s %s: %s", t.Kind, t.TaskID, cutRunes(t.Description, 100))
+			fmt.Fprintf(b, "\n- %s %s: %s", t.Kind, t.TaskID, cutRunes(t.Description, 100))
 		}
 	}
 	if len(agents) > 0 {
@@ -663,18 +718,14 @@ func cutOffNotice(calls []OpenCall, tasks []agent.BackgroundTaskStartedPayload, 
 			if kind == "" {
 				kind = "subagent"
 			}
-			fmt.Fprintf(&b, "\n- %s %q", kind, cutRunes(s.Summary, 100))
+			fmt.Fprintf(b, "\n- %s %q", kind, cutRunes(s.Summary, 100))
 			if s.AgentID != "" {
-				fmt.Fprintf(&b, ", agent id %s", s.AgentID)
+				fmt.Fprintf(b, ", agent id %s", s.AgentID)
 			} else {
 				b.WriteString(", in the foreground (no agent id: start it again if it is still needed)")
 			}
 		}
 	}
-	b.WriteString("\nBefore trusting anything they did, check the state of their worktrees and outputs. " +
-		"Resume a subagent by sending a message to its agent id; re-run a background command that did not finish. " +
-		"Do not re-run anything destructive without checking.")
-	return b.String()
 }
 
 // NoteConnected is called each time the daemon has a connection to its server: what adoption

@@ -257,3 +257,47 @@ it('refreshes on children_changed for this parent only', async () => {
   await flush()
   expect(fetchMock).toHaveBeenCalledTimes(2)
 })
+
+it('coalesces child signals without rendering and preserves unchanged parent chat inputs', async () => {
+  const { emit } = await import('../test/wsMock')
+  const child = { id: 'builder', title: 'Builder', engine: 'codex', model: 'model-next', status: 'running', started_at: new Date().toISOString(), asking: false, tokens: null }
+  const original = reply({
+    children: [child],
+    checklist: { items: [{ id: 'task', text: 'Parent task', done: false }], event_id: 'list', updated_at: new Date().toISOString() },
+    mcp_hold: { since: new Date(Date.now() - 1000).toISOString(), until: new Date(Date.now() + 600_000).toISOString() },
+  })
+  fetchMock.mockResolvedValueOnce(json(original))
+  let renders = 0
+  const { result } = renderHook(() => { renders++; return useLiveStateServer('s1', true, '') })
+  await flush()
+  const first = result.current
+  expect(first.status).toBe('ready')
+  if (first.status !== 'ready') return
+  const before = renders
+  const updated = structuredClone(original)
+  updated.children![0].activity = 'Compiling'
+  fetchMock.mockResolvedValueOnce(json(updated, '"2"'))
+  act(() => { for (let i = 0; i < 30; i++) emit({ type: 'children_changed', session_id: 's1' }) })
+  expect(renders).toBe(before)
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  await wait(GAP)
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+  const second = result.current
+  expect(second.status).toBe('ready')
+  if (second.status !== 'ready') return
+  expect(second.view.children?.[0].activity).toBe('Compiling')
+  expect(second.view.checklist?.items).toBe(first.view.checklist?.items)
+  expect(second.view.mcpHold).toBe(first.view.mcpHold)
+  const changed = structuredClone(updated)
+  changed.checklist!.items[0].done = true
+  changed.mcp_hold!.until = new Date(Date.now() + 700_000).toISOString()
+  fetchMock.mockResolvedValueOnce(json(changed, '"3"'))
+  act(() => emit({ type: 'children_changed', session_id: 's1' }))
+  await wait(GAP)
+  const third = result.current
+  expect(third.status).toBe('ready')
+  if (third.status !== 'ready') return
+  expect(third.view.checklist?.items).not.toBe(first.view.checklist?.items)
+  expect(third.view.checklist?.items[0].done).toBe(true)
+  expect(third.view.mcpHold).not.toBe(first.view.mcpHold)
+})

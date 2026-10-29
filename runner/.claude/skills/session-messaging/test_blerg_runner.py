@@ -804,6 +804,7 @@ class TestPublish(unittest.TestCase):
             "BLERG_RUNNER_SESSION_TOKEN": "sess-tok",
             "BLERG_RUNNER_DAEMON_TOKEN": None,  # never present in a session
             "BLERG_RUNNER_BOARD_TOKEN": None,
+            "BLERG_RUNNER_ATTACHMENTS_DIR": os.path.join(self.tmp.name, "private", "attachments"),
         }
         env.update(extra)
         return env
@@ -1309,6 +1310,8 @@ class TestFetch(unittest.TestCase):
             "BLERG_RUNNER_SESSION_TOKEN": "sess-tok",
             "BLERG_RUNNER_DAEMON_TOKEN": None,
             "BLERG_RUNNER_BOARD_TOKEN": None,
+            "GIT_CEILING_DIRECTORIES": os.path.dirname(self.tmp.name),
+            "BLERG_RUNNER_ATTACHMENTS_DIR": os.path.join(self.tmp.name, "private", "attachments"),
         }
         env.update(extra)
         return env
@@ -1316,7 +1319,7 @@ class TestFetch(unittest.TestCase):
     def _run(self, args, **kw):
         # The CLI writes relative to its working directory.
         env = cli_test_env(self._env(**kw))
-        return subprocess.run([sys.executable, SCRIPT, "fetch"] + args, capture_output=True, text=True,
+        return subprocess.run([sys.executable, SCRIPT, "fetch", "--out", "attachments"] + args, capture_output=True, text=True,
                               timeout=15, env=env, cwd=self.tmp.name)
 
     def _downloaded_names(self):
@@ -1338,18 +1341,88 @@ class TestFetch(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self._read("attachments", "one.pdf"), b"%PDF one")
         self.assertEqual(self._read("attachments", "two.pdf"), b"%PDF two two")
-        self.assertIn(f"Saved attachments/one.pdf (id {'a' * 32}, 8 B)", result.stdout)
-        self.assertIn(f"Saved attachments/two.pdf (id {'b' * 32}, 12 B)", result.stdout)
+        self.assertIn(f"Saved {self.tmp.name}/attachments/one.pdf (id {'a' * 32}, 8 B)", result.stdout)
+        self.assertIn(f"Saved {self.tmp.name}/attachments/two.pdf (id {'b' * 32}, 12 B)", result.stdout)
         self.assertIn("Fetched 2 files", result.stdout)
         self.assertTrue(all(r["auth"] == "Bearer sess-tok" for r in self.server.recorded))
         self.assertEqual(os.stat(os.path.join(self.tmp.name, "attachments")).st_mode & 0o777, 0o755)
+
+    def test_default_is_private_absolute_and_outside_repository(self):
+        repo = os.path.join(self.tmp.name, "repo")
+        os.mkdir(repo)
+        subprocess.run(["git", "init", repo], check=True, capture_output=True)
+        for runtime in ("host", "sandbox", "cluster"):
+            with self.subTest(runtime=runtime):
+                home = os.path.join(self.tmp.name, runtime)
+                state = os.path.join(home, ".blerg-runner-daemon")
+                target = os.path.join(state, "sessions", "sess-fetch", "attachments")
+                env = cli_test_env(self._env(HOME=home, BLERG_RUNNER_DAEMON_STATE_DIR=state,
+                                             BLERG_RUNNER_ATTACHMENTS_DIR=None))
+                result = subprocess.run([sys.executable, SCRIPT, "fetch", "--all"],
+                                        capture_output=True, text=True, timeout=15, env=env, cwd=repo)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"Saved {target}/one.pdf", result.stdout)
+                self.assertEqual(os.stat(target).st_mode & 0o777, 0o700)
+        self.assertFalse(os.path.exists(os.path.join(repo, "attachments")))
+
+    def test_injected_default_is_used_without_touching_old_attachments(self):
+        os.mkdir(os.path.join(self.tmp.name, "attachments"))
+        marker = os.path.join(self.tmp.name, "attachments", "keep.txt")
+        with open(marker, "w") as f:
+            f.write("keep")
+        result = subprocess.run([sys.executable, SCRIPT, "fetch", "--all"],
+                                capture_output=True, text=True, timeout=15,
+                                env=cli_test_env(self._env()), cwd=self.tmp.name)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Saved {self.tmp.name}/private/attachments/one.pdf", result.stdout)
+        self.assertEqual(self._read("attachments", "keep.txt"), b"keep")
+        self.assertEqual(os.listdir(os.path.join(self.tmp.name, "attachments")), ["keep.txt"])
+
+    def test_cluster_workspace_home_falls_back_outside_workspace(self):
+        env = cli_test_env(self._env(HOME="/workspace", BLERG_RUNNER_DAEMON_STATE_DIR=None,
+                                     BLERG_RUNNER_ATTACHMENTS_DIR=None))
+        code = "import runpy,sys; m=runpy.run_path(sys.argv[1]); print(m['_attachments_dir']())"
+        result = subprocess.run([sys.executable, "-c", code, SCRIPT],
+                                capture_output=True, text=True, timeout=15, env=env, cwd=self.tmp.name)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "/home/agent/.blerg-runner-daemon/sessions/sess-fetch/attachments")
+
+    def test_explicit_linked_worktree_output_is_excluded(self):
+        origin = os.path.join(self.tmp.name, "origin")
+        linked = os.path.join(self.tmp.name, "linked")
+        def git(*args):
+            subprocess.run(["git", *args], check=True, capture_output=True)
+        git("init", origin)
+        git("-C", origin, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "fixture")
+        git("-C", origin, "worktree", "add", "-b", "linked", linked)
+        result = subprocess.run([sys.executable, SCRIPT, "fetch", "--all", "--out", "inputs"],
+                                capture_output=True, text=True, timeout=15,
+                                env=cli_test_env(self._env()), cwd=linked)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Saved {linked}/inputs/one.pdf", result.stdout)
+        git("-C", linked, "check-ignore", "inputs/one.pdf")
+        self.assertIn(b"/inputs/", self._read("origin", ".git", "info", "exclude"))
+
+    def test_explicit_repo_output_is_excluded_idempotently(self):
+        subprocess.run(["git", "init", self.tmp.name], check=True, capture_output=True)
+        for _ in range(2):
+            result = self._run(["--all", "--out", "inputs [private]"])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(".git/info/exclude", result.stderr)
+        exclude = self._read(".git", "info", "exclude").decode()
+        self.assertEqual(exclude.count(r"/inputs\ \[private\]/"), 1, exclude)
+        ignored = subprocess.run(["git", "check-ignore", "inputs [private]/one.pdf"],
+                                 capture_output=True, text=True, cwd=self.tmp.name)
+        self.assertEqual(ignored.returncode, 0, ignored.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, ".gitignore")))
 
     def test_out_dir_and_specific_id(self):
         result = self._run(["b" * 32, "--out", "work/in"])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self._read("work", "in", "two.pdf"), b"%PDF two two")
         self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "work", "in", "one.pdf")))
-        self.assertIn("Saved work/in/two.pdf", result.stdout)
+        self.assertIn(f"Saved {self.tmp.name}/work/in/two.pdf", result.stdout)
 
     def test_never_overwrites(self):
         folder = os.path.join(self.tmp.name, "attachments")
@@ -1528,15 +1601,15 @@ class TestFetch(unittest.TestCase):
         self.server.versions = {"a" * 32: (1, 1)}
         first = self._run(["--all"])
         self.assertEqual(first.returncode, 0, first.stderr)
-        self.assertIn(f"Saved attachments/image.png (id {'a' * 32}, ", first.stdout)
+        self.assertIn(f"Saved {self.tmp.name}/attachments/image.png (id {'a' * 32}, ", first.stdout)
         self.server.files["c" * 32] = ("image.png", b"second picture")
         self.server.versions = {"a" * 32: (1, 2), "c" * 32: (2, 2)}
         second = self._run(["--all"])
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(self._read("attachments", "image.png"), b"first picture")
         self.assertEqual(self._read("attachments", "image-1.png"), b"second picture")
-        self.assertIn(f"Saved attachments/image-1.png (id {'c' * 32}, ", second.stdout)
-        self.assertIn(f"Already have {'a' * 32} at attachments/image.png", second.stdout)
+        self.assertIn(f"Saved {self.tmp.name}/attachments/image-1.png (id {'c' * 32}, ", second.stdout)
+        self.assertIn(f"Already have {'a' * 32} at {self.tmp.name}/attachments/image.png", second.stdout)
         # A fetch of the same two into a fresh folder in one go maps them the same way.
         fresh = self._run(["--all", "--out", "fresh"])
         self.assertEqual(fresh.returncode, 0, fresh.stderr)
@@ -1545,7 +1618,7 @@ class TestFetch(unittest.TestCase):
         # The same ID asked for again says where it already is.
         again = self._run(["c" * 32])
         self.assertEqual(again.returncode, 0, again.stderr)
-        self.assertIn(f"Already have {'c' * 32} at attachments/image-1.png", again.stdout)
+        self.assertIn(f"Already have {'c' * 32} at {self.tmp.name}/attachments/image-1.png", again.stdout)
         listed = self._run(["--list"])
         self.assertEqual(listed.returncode, 0, listed.stderr)
         lines = {l.split()[0]: l for l in listed.stdout.strip().splitlines()}
@@ -1774,7 +1847,7 @@ class TestReview(unittest.TestCase):
         return [r for r in self.server.recorded if r.get("method") == "POST"]
 
     def _state(self, name="report.md"):
-        with open(os.path.join(self.tmp.name, "attachments", ".reviews", name + ".review.json"), "rb") as f:
+        with open(os.path.join(self.tmp.name, "private", "attachments", ".reviews", name + ".review.json"), "rb") as f:
             return json.load(f)
 
     # list ──
@@ -1802,6 +1875,25 @@ class TestReview(unittest.TestCase):
         self.assertIn("report.md (v3): 1 open request\n", result.stdout)
         self.assertIn("[m3q9]", result.stdout)
         self.assertNotIn("[k7x2]", result.stdout)
+
+    def test_reply_migrates_legacy_state_by_reading_without_modifying_it(self):
+        legacy_dir = os.path.join(self.tmp.name, "attachments", ".reviews")
+        os.makedirs(legacy_dir)
+        legacy = os.path.join(legacy_dir, "report.md.review.json")
+        data = _review_file("report.md", [
+            _req("k7x2", "this is the median, not the mean", status="done", reply="fixed"),
+        ])
+        with open(legacy, "wb") as f:
+            f.write(data)
+        result = self._review(["reply", "m3q9", "done", "Added sample count"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self._state()["requests"][0]["status"], "done")
+        self.assertEqual(self._state()["requests"][1]["status"], "done")
+        with open(legacy, "rb") as f:
+            self.assertEqual(f.read(), data)
+        private = os.path.join(self.tmp.name, "private", "attachments")
+        self.assertEqual(os.stat(private).st_mode & 0o777, 0o700)
+        self.assertEqual(os.stat(os.path.join(private, ".reviews")).st_mode & 0o777, 0o700)
 
     def test_list_takes_the_newest_version_of_the_persons_review_file(self):
         self.server.files["c" * 32] = ("report.md.review.json", _review_file("report.md", [
@@ -2327,6 +2419,14 @@ class TestWork(unittest.TestCase):
         out = run_blerg_runner(["pin", "--help"]).stdout
         for needle in ("A JIRA issue", "A Bugzilla bug", "show_bug.cgi", "fields.summary", "copies the ticket's text"):
             self.assertIn(needle, out)
+
+    def test_help_says_what_blerg_keeps_of_the_plan(self):
+        checklist = " ".join(run_blerg_runner(["checklist", "--help"]).stdout.split())
+        for needle in ('ticks every open item naming it as #N ("ticked: #N done")', "assigned to your open item naming #N", "plan_drift notice"):
+            self.assertIn(needle, checklist)
+        pin = " ".join(run_blerg_runner(["pin", "--help"]).stdout.split())
+        for needle in ("A Blerg Board card is filled from the Board when you pin it", "in-progress column is pinned for you", "plan_drift notice"):
+            self.assertIn(needle, pin)
 
     def test_noop_when_not_under_blerg(self):
         env = {k: None for k in ("BLERG_RUNNER_SESSION_ID", "BLERG_RUNNER_SERVER_HTTP",
@@ -3225,12 +3325,13 @@ class TestBoardFilingCLI(unittest.TestCase):
 
     def test_search_encodes_target_and_query_and_warns_about_truncation(self):
         result, calls = self._run(['search', '--board', 'Other project', '--query', 'path/x ?'],
-                                 {'cards': [{'id': 'card-fixture', 'number': 12, 'title': 'Duplicate'}], 'truncated': True})
+                                 {'cards': [{'id': 'card-fixture', 'board_id': 'board-fixture', 'number': 12, 'title': 'Duplicate'}], 'truncated': True})
         self.assertEqual(result.returncode, 0, result.stderr)
         query = parse_qs(urlparse(calls[0]['path']).query)
         self.assertEqual(urlparse(calls[0]['path']).path, '/api/sessions/sess-filing/board-search')
         self.assertEqual(query, {'board': ['Other project'], 'q': ['path/x ?']})
         self.assertIn('Duplicate', result.stdout)
+        self.assertIn('board:board-fixture#12', result.stdout)
         self.assertIn('truncated', result.stderr)
 
     def test_unconfigured_boards_and_older_server_are_clear(self):
@@ -3724,6 +3825,13 @@ class TestSession(unittest.TestCase):
     def _body(self, rec):
         return json.loads(rec["raw"]) if rec["raw"] else {}
 
+    def test_workspace_selection_repeatable_repo_and_all_repos(self):
+        for flags, expected in [(["--repo", "api", "--repo", "web"], {"repos": ["api", "web"]}),
+                                (["--all-repos"], {"all_repos": True})]:
+            result, rec = self._run(["start", *flags, "p"], [("POST", "/children", 201, STARTED)])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self._body(rec[0]), {"prompt": "p", **expected})
+
     def test_start_with_a_rule_prints_the_child(self):
         result, rec = self._run(["start", "--engine", "codex", "--no-repo", "do it"],
                                 [("POST", "/api/sessions/sess-par/children", 201, STARTED)])
@@ -3731,7 +3839,7 @@ class TestSession(unittest.TestCase):
         lines = result.stdout.splitlines()
         self.assertEqual(lines[0], f"started {CHILD} (codex gpt-5, docker, via rule:r1)")
         self.assertEqual(lines[1], "plugins: skipped")
-        self.assertEqual(lines[2], "codex  5h 12% used, resets 4:10 PM")
+        self.assertEqual(lines[2], "codex  5h 12% used, resets 2030-01-01 4:10 PM UTC")
         self.assertEqual(rec[0]["headers"]["Authorization"], "Bearer sess-tok")
 
     def test_start_sends_an_idempotency_key_and_the_body(self):
@@ -3750,6 +3858,17 @@ class TestSession(unittest.TestCase):
         result, rec = self._run(["start", "--no-repo", "--idempotency-key", "k-1", "p"], [("POST", "/children", 201, STARTED)])
         self.assertEqual(rec[0]["headers"]["Idempotency-Key"], "k-1")
         self.assertEqual(self._body(rec[0]), {"prompt": "p", "no_repo": True})
+
+    def test_start_workspace_subset_and_all(self):
+        for flags, expected in [(["--repo", "one", "--repo", "two"], {"repos": ["one", "two"]}),
+                                (["--all-repos"], {"all_repos": True})]:
+            result, rec = self._run(["start"] + flags + ["p"], [("POST", "/children", 201, STARTED)])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self._body(rec[0]), dict(prompt="p", **expected))
+        for flags in [["--all-repos", "--repo", "one"], ["--all-repos", "--no-repo"], ["--no-repo", "--repo", "one"]]:
+            result, rec = self._run(["start"] + flags + ["p"], [])
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(rec, [])
 
     def test_start_passes_boards_down(self):
         started = json.loads(json.dumps(STARTED))
@@ -4231,7 +4350,7 @@ class TestSession(unittest.TestCase):
         res, rec = self._run(["budget"], [("GET", "/api/sessions/sess-par/budget", 200, body)], cmd=())
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(res.stdout.splitlines(), [
-            "claude  5h 62% used, resets 4:10 PM · 7d 31%",
+            "claude  5h 62% used, resets 2030-01-01 4:10 PM UTC · 7d 31% used, resets 2030-01-05 12:00 AM UTC",
             "codex  usage unknown (remote provider)",
             "hermes  local (runs on your hardware)",
             "openclaw  not installed on this daemon"])
@@ -4240,9 +4359,31 @@ class TestSession(unittest.TestCase):
         capped = {"engines": [{"engine": "claude", "available": True, "capped_until": "2030-01-01T16:10:00Z",
                                "windows": [{"id": "5h", "used_percent": 100}, {"id": "capped", "used_percent": 100}]}]}
         res, _ = self._run(["budget"], [("GET", "/budget", 200, capped)], cmd=())
-        self.assertEqual(res.stdout.strip(), "claude  5h 100% used · capped until 4:10 PM")
+        self.assertEqual(res.stdout.strip(), "claude  5h 100% used · capped until 2030-01-01 4:10 PM UTC")
         res, _ = self._run(["budget"], [("GET", "/budget", 200, {"engines": [], "note": "no desktop daemon"})], cmd=())
         self.assertEqual(res.stdout.strip(), "no desktop daemon")
+
+    def test_budget_reset_dates_windows_and_timezone(self):
+        # Invented dates straddle the daylight-saving transition: a weekly
+        # midnight five days away must not look like midnight tonight.
+        weekly = {"id": "7d", "used_percent": 82, "resets_at": "2030-11-04T05:59:54Z"}
+        short = {"id": "5h", "used_percent": 12, "resets_at": "2030-10-30T05:00:00Z"}
+        for name, windows, expected in [
+            ("weekly alone", [weekly],
+             "codex  7d 82% used, resets 2030-11-04 12:59 AM EST"),
+            ("two windows", [short, weekly],
+             "codex  5h 12% used, resets 2030-10-30 1:00 AM EDT · "
+             "7d 82% used, resets 2030-11-04 12:59 AM EST"),
+            ("weekly first", [weekly, short],
+             "codex  7d 82% used, resets 2030-11-04 12:59 AM EST · "
+             "5h 12% used, resets 2030-10-30 1:00 AM EDT"),
+        ]:
+            with self.subTest(name=name):
+                body = {"engines": [{"engine": "codex", "available": True, "windows": windows}]}
+                res, _ = self._run(["budget"], [("GET", "/budget", 200, body)], cmd=(),
+                                   extra_env={"TZ": "America/New_York"})
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertEqual(res.stdout.strip(), expected)
 
     def test_budget_for_a_desktop_sessions_cluster_children(self):
         body = {"daemon": "the cluster", "engines": [{"engine": "codex", "available": True, "windows": [], "note": "usage unknown (remote provider)"}]}
@@ -4269,7 +4410,8 @@ class TestSession(unittest.TestCase):
         self.assertEqual(res.returncode, 0)
         for text in ("blerg-runner budget", "session start", "per provider", "destructive or irreversible",
                      "blerg-runner ask", "session wait <request_id>", "never run\n`start` with a NEW key",
-                     "loopback", "--runtime daemon", "exit with code 3", "80%", "blerg-runner models", "--runtime cluster"):
+                     "loopback", "--runtime daemon", "exit with code 3", "80%", "blerg-runner models", "--runtime cluster", "120 starts per parent per rolling hour",
+                     "no lifetime start cap", "core Settings", "stop a child or wait until the reported UTC time"):
             self.assertIn(text, res.stdout, text)
 
     def test_the_help_starts_with_the_line_the_daemon_injects(self):
@@ -4685,6 +4827,39 @@ signal.setitimer(signal.ITIMER_REAL, 0)
         self.assertIn(f"request {REQ}", stdout.getvalue())
         self.assertIn(f"session wait {REQ}", stdout.getvalue())
         self.assertIn("fixture-deadline-key", stderr.getvalue())
+
+    def test_start_no_reply_hint_quotes_a_spaced_key(self):
+        import io
+        import runpy
+        import types
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as folder:
+            env = {"HOME": folder, "PATH": os.defpath, "BLERG_RUNNER_SESSION_ID": "fixture-parent",
+                   "BLERG_RUNNER_SERVER_HTTP": "http://example.invalid",
+                   "BLERG_RUNNER_SESSION_TOKEN": "fixture-token"}
+            with mock.patch.dict(os.environ, env, clear=True):
+                entry = runpy.run_path(SCRIPT, run_name="key_hint_fixture")["cmd_session_start"]
+        namespace = entry.__globals__
+        now = [100.0]
+
+        def no_reply(_method, _path, _payload, **kwargs):
+            self.assertEqual(kwargs["headers"]["Idempotency-Key"], "key with spaces")
+            now[0] = 102.0
+            raise namespace["_RequestError"]("command timeout")
+
+        args = types.SimpleNamespace(prompt_file=None, prompt="p", repo=None, no_repo=True,
+                                     engine=None, model=None, effort=None, runtime=None, title=None,
+                                     keep_running=False, idempotency_key="key with spaces",
+                                     timeout=1, no_wait=False)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        clock = types.SimpleNamespace(monotonic=lambda: now[0])
+        with mock.patch.dict(namespace, {"time": clock, "_call_full": no_reply}):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as stopped:
+                    entry(args)
+        self.assertEqual(stopped.exception.code, 3, stderr.getvalue())
+        self.assertIn("--idempotency-key 'key with spaces'", stdout.getvalue() + stderr.getvalue())
 
     def test_wait_immediate_inflight_polls_do_not_spin(self):
         starting = dict(PENDING, status="allowed")

@@ -1,5 +1,6 @@
+import type { AgentEvent } from '@blerglab/chat'
 import { describe, expect, it } from 'vitest'
-import { onlyBoard, unknownBoardTarget, withSessionBoard } from './sessionBoard'
+import { inUseBoards, onlyBoard, unknownBoardTarget, withSessionBoard } from './sessionBoard'
 
 const perms = (boards: { board_id: string; board_name?: string }[]) => ({
   can_grant: true, reason: '', grants: [], mcp_tools: [], boards: boards.map(b => ({ ...b, level: 'full' })),
@@ -23,5 +24,20 @@ describe('the session\'s one board (#139)', () => {
 
   it('says the board is unknown in the hovercard', () => {
     expect(unknownBoardTarget(115)).toEqual({ kind: 'card', source: 'Card', key: '#115', status: 'board unknown' })
+  })
+})
+
+describe('boards used during a session (#184)', () => {
+  const event = (kind: string, payload: unknown, seq = 1) => ({ kind, payload, seq, client_event_id: `e${seq}` } as AgentEvent)
+  const pin = (board: string, action = 'pin', seq = 1) => event('ticket', { action, ticket: { source: 'blerg-board', key: '#7', board_id: board, title: 'Work' } }, seq)
+  const created = (id: string, access = 'full') => event('proposal_decided', { proposal_id: id, kind: 'board_create', state: 'done', board: { board_id: id, board_name: id, access } })
+  it('finds the newly created board even before permission discovery refreshes', () => {
+    expect(inUseBoards([created('new-board')])).toEqual([{ id: 'new-board', name: 'new-board' }])
+    expect(inUseBoards([created('proposal-only', 'propose')])).toEqual([])
+  })
+  it('uses live pins and preserves ambiguity across boards', () => {
+    expect(inUseBoards([pin('b1')])).toEqual([{ id: 'b1' }])
+    expect(inUseBoards([pin('b1'), created('b2')]).map(b => b.id)).toEqual(['b1', 'b2'])
+    expect(inUseBoards([pin('b1'), pin('b1', 'unpin', 2)])).toEqual([])
   })
 })

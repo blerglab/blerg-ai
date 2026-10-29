@@ -542,3 +542,65 @@ func TestCommitLookupIgnoresGrafts(t *testing.T) {
 		t.Fatalf("grafted parents shown: %+v", res.Commit)
 	}
 }
+
+// A child's wip branch is merged when its tip is an ancestor of HEAD; only a session id names it.
+func TestChildMergedRead(t *testing.T) {
+	t.Setenv(DaemonStateDirEnv, t.TempDir())
+	dir, b := commitFixture(t)
+	commitFile(t, dir, "README.md", "one\n", "Root")
+	child := "0f0e0d0c-0b0a-4908-8706-050403020100"
+	if res := readChildMerged(t.Context(), "s", b, child); res.OK || res.ErrorCode != "not_found" {
+		t.Fatalf("no branch: %+v", res)
+	}
+	if _, err := createSandboxClone(dir, child, filepath.Dir(dir)); err != nil {
+		t.Fatal(err)
+	}
+	originGit(t, dir, "branch", "wip/"+child)
+	if res := readChildMerged(t.Context(), "s", b, child); !res.OK || res.Merged {
+		t.Fatalf("untouched recent base: %+v", res)
+	}
+	originGit(t, dir, "checkout", "-q", "wip/"+child)
+	commitFile(t, dir, "work.txt", "w\n", "Child work")
+	originGit(t, dir, "checkout", "-q", "main")
+	res := readChildMerged(t.Context(), "s", b, child)
+	if !res.OK || res.Merged {
+		t.Fatalf("unmerged: %+v", res)
+	}
+
+	originGit(t, dir, "-c", "core.hooksPath=/dev/null", "merge", "-q", "--no-edit", "--no-ff", "wip/"+child)
+	if res := readChildMerged(t.Context(), "s", b, child); !res.OK || !res.Merged {
+		t.Fatalf("merged: %+v", res)
+	}
+	originGit(t, dir, "checkout", "-q", "wip/"+child)
+	if res := readChildMerged(t.Context(), "s", b, child); !res.OK || res.Merged {
+		t.Fatalf("checked out child: %+v", res)
+	}
+	originGit(t, dir, "checkout", "-q", "main")
+	originGit(t, dir, "branch", "wip/"+child+".incoming")
+	if res := readChildMerged(t.Context(), "s", b, child); !res.OK || res.Merged {
+		t.Fatalf("incoming work: %+v", res)
+	}
+	originGit(t, dir, "branch", "-D", "wip/"+child+".incoming")
+	otherWorktree := filepath.Join(t.TempDir(), "child-worktree")
+	originGit(t, dir, "worktree", "add", "-q", otherWorktree, "wip/"+child)
+	if res := readChildMerged(t.Context(), "s", b, child); !res.OK || res.Merged {
+		t.Fatalf("child checked out elsewhere: %+v", res)
+	}
+	originGit(t, dir, "worktree", "remove", otherWorktree)
+
+	parent := "af0e0d0c-0b0a-4908-8706-050403020100"
+	parentDir, err := createSandboxClone(dir, parent, filepath.Dir(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	originGit(t, dir, "branch", "wip/"+parent)
+	originGit(t, dir, "checkout", "-q", "main~1")
+	if res := readChildMerged(t.Context(), parent, originBinding(t, parentDir), child); !res.OK || !res.Merged {
+		t.Fatalf("sandboxed parent branch: %+v", res)
+	}
+	for _, bad := range []string{"HEAD", "main", "../x", "0F0E0D0C-0B0A-4908-8706-050403020100", child + "^", "--all"} {
+		if res := readChildMerged(t.Context(), "s", b, bad); res.OK || res.ErrorCode != "invalid" {
+			t.Fatalf("%q: %+v", bad, res)
+		}
+	}
+}

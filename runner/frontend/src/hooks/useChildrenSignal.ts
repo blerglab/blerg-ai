@@ -11,6 +11,9 @@ export function refreshChildren(sessionId: string): void {
   })
 }
 onMessage<ChildrenChanged>('children_changed', msg => refreshChildren(msg.session_id))
-export function useChildrenSignal(sessionId: string): number {
-  return useSignals(s => s.counts[sessionId] ?? 0)
+// Notifications schedule a server read; they carry no renderable state of their own.
+export function subscribeChildren(sessionId: string, notify: () => void): () => void {
+  return useSignals.subscribe((state, previous) => {
+    if (state.counts[sessionId] !== previous.counts[sessionId]) notify()
+  })
 }

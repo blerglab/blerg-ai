@@ -266,7 +266,9 @@ pastes plain text, and undo (Ctrl/Cmd+Z) takes a paste back in one step.
 
 ## Interrupting
 
-**Esc**, or the Stop button, cancels what the agent is doing right now. The conversation and the
+**Stop** (■), in the session header immediately left of End session and shown only while the agent
+works, cancels what the agent is doing right now. It is kept far from Send so it is not pressed by
+accident, and Esc does not interrupt. The conversation and the
 session stay as they are, and any message you had already queued runs next, as its own turn. It does
 not restart the agent: its context is kept.
 
@@ -282,10 +284,14 @@ cut off.
 session cannot be resumed, the chat says so, and the message box is locked. **Discard**, in the ⋯ menu,
 ends and archives it (with its children); its history and URL are kept.
 
-The header's controls are icons, their names in the tooltips: the star, Insights, the side panel, Stop
-and ⋯. The app has one Notifications bell, beside **+ New** at the top of the session list (on a phone, in a
+The header's controls are icons, their names in the tooltips: the star, Insights, Stop (while the agent
+works) and End session. On a phone the header keeps search and Stop; End session is in the command palette. The app has one Notifications bell, beside **+ New** at the top of the session list (on a phone, in a
 session's header, where Insights moves into ⋯): what needs you (proposals and questions) and, at its
 foot, the switch that turns push notifications for this browser on or off.
+
+Transient notices and shell errors share a dismissible stack near the top of the page. It scrolls
+above the message box, attachments and any focused input without moving them. On phones it stays
+inside the visible area above the keyboard. Shell connection notices stay above their own terminal.
 
 ## Long conversations
 
@@ -342,13 +348,16 @@ them, and its label carries the progress ("Plan 18/23", or a count of tickets an
 no list). Live keeps one line at its top for the list ("Checklist · 18 of 23 · Next: ..."), as two controls: the pinned ticket
 (key and status, a chip that opens the ticket over the page) and the list (with a short bar beside the
 count; it goes to Plan). A long checklist therefore never pushes Needs you and Running now
-off Live. The chat's toolbar above the conversation keeps
-the model and effort pickers, Rules and Stop; what belongs to the session as a whole is in the
-panel. On a wide
+off Live. Stop sits in the session header beside End session while the agent works, not in the
+message box (Send still takes a message mid-turn). The model and effort
+pickers, and everything else that belongs to the session as a whole, are in the panel. On a wide
 screen (1024 px and up) it is a column beside the chat, and the chat makes room for it; on a narrower
 screen or a phone it is a drawer that slides over the chat, and Escape, the ✕ or a tap beside it
-closes it. The button at the right end of the session header opens and closes it; its badge counts
-what needs you and what is running. On a wide screen the panel is open until you close it, and
+closes it. The panel toggle on the tab bar opens and closes it. Its two small counts say the work
+running inside the session (🤖3, with the robot face Running now gives subagents: subagents, background commands and tasks) and the child sessions
+at work (`↳4`); each hides at zero, its tooltip spells them out ("3 subagents and background tasks ·
+4 child sessions"), and they are the numbers Running now lists. What needs you is not counted on the
+toggle: the session's own questions are in the chat and on Needs you. On a wide screen the panel is open until you close it, and
 then it stays as you left it, in this browser. Once you have closed it, it opens by itself again
 only when the agent asks a new question, once.
 Tool changes waiting on you do not reopen it: their count is read when the session opens and again
@@ -402,12 +411,27 @@ Terminal sessions have no panel.
   answer nor an approval: a waiting `blerg-runner ask` and `review wait` / `review status` exit 4,
   and the agent may ask again. History shows it as "dismissed by you". The bell lists your pending
   review requests too.
-- **Running now**: the subagents at work, each with its task, type, model, tokens, what it is doing
-  and how long it has run; and the background tasks. When the session or a subagent has a plan,
+- **Running now**: Main (the agent you talk to), the subagents at work, each with its task, type,
+  model, tokens, what it is doing and how long it has run; the background tasks; and the started
+  sessions at work. Main, each subagent and each started session (any engine) carry a token chip
+  (`1.4M`, `180k`): the tokens that session has used so far, from the recorded turn usage Insights
+  reads. Its tooltip breaks it down: the total, this turn (or the last finished one; for a subagent,
+  its run so far), input against cached, what its subagents used, and the estimated cost when every
+  model has a price. A session
+  that has not finished a turn yet shows `–`. Like Insights, only the session's owner and an
+  administrator see the chip. Beside it, a context meter (`62%`) shows how full that session's
+  context window was at the end of its latest turn, filled to the share in use; its tooltip gives
+  the tokens in context against the model's window and the engine's compaction size when it reports
+  one. Above 85% (of that size, or of the window) the meter turns amber: the engine will summarize
+  the conversation soon, so it is a poor time to hand that session a large task. `⇊` marks a turn in
+  which the engine compacted. Claude and Codex report the size and the window; an engine that
+  reports neither (Hermes) has no meter, and its token chip's tooltip says so. The Session section
+  repeats the session's own reading as a bar. When the session or a subagent has a plan,
   its row also shows a short progress bar, the completed/total count and the current step's label
   (or its last completed step). A completed bar is green. Each subagent has its own plan and count;
   its updates never replace the session's plan. No plan or explicit progress means no bar.
-- **Session**: where it runs, the engine and model, when it started and how long it has lived. The
+- **Session**: what does not change first (where it runs, the engine, when it started and how long it
+  has lived), then what can (model and effort), then the options. The
   session's Insights open from the Insights button in the session header. For an engine that can
   continue after a usage limit, **Resume when limit resets** is here too: it belongs to this session
   ([Usage limits](#resume-after-a-usage-limit)). Settings that apply to every session are not in the
@@ -508,7 +532,9 @@ collapsed, with Show all), extra fields, the acceptance criteria and the latest 
 Pinning it again refreshes it, and the new card says "Ticket updated" and what changed (the status,
 a new title). At most five are pinned at once; the newest is the current one, and
 `blerg-runner unpin [<source>:<key>]` takes one off (a line in the chat says so). A Board card is
-pinned the same way (source `blerg-board`); nothing is pinned by itself.
+pinned the same way (source `blerg-board`), and its copy is filled from the Board (title, description, column, type,
+priority, tags, read with the session's board access; what the agent sent stays only where the Board has
+nothing, and all of it when the card cannot be read).
 
 Pinning copies the ticket's text into the session: whoever can see the session can read it, as
 they can read the rest of it (a private session is yours alone). The text is drawn as plain text and
@@ -550,6 +576,46 @@ gets **View diff**, which opens it. When the diff cannot be made (the commits ar
 repository, or it is over the per-file limit) the command says so and the item keeps its commits
 without one.
 
+#### What keeps the plan honest
+
+The pins and the checklist used to drift when the agent forgot them. Part of the plan is now kept by
+the runner from what it sees, and the rest is checked at the end of each turn. Nothing here asks a
+model; every rule is a fixed check.
+
+Kept automatically:
+
+- A Board card the session moves into an in-progress column (a column named like "In progress",
+  "Doing" or "Working", the Board's own rule), through `blerg-runner ticket move`, the `blerg_board`
+  tool or the session's board connection, is pinned, filled from the Board. With five pinned, the
+  oldest pin whose card is done is unpinned first; when none is done, the card is not pinned and the
+  agent is told at the end of the turn.
+- A card the session moves into a done column (the Board's terminal columns) is unpinned, and every
+  open checklist item naming it as `#N` (a whole token, as the chat's card chips read it, on the
+  session's one board) is ticked. The chat row says so: "ticked “Parser #12” (Blerg: #12 done)".
+- A board-started session pins the card it was started for.
+- A session the agent starts whose title or prompt names `#N` is assigned to the agent's open
+  checklist item naming `#N`.
+
+Checked at turn end and held until the next input, with each fact rechecked and told once: the agent gets a Blerg system message (marked, like a child's turn note) naming exactly
+what drifted and the commands that fix it, when
+
+- every pinned ticket is done and your last turn ran tools;
+- every checklist item is ticked, or none is doing, and your last turn ran tools (`blerg-runner`
+  commands alone do not count);
+- a child session or a background subagent started in the turn has no checklist item;
+- a pinned card was closed on the board;
+- a child looks finished: stopped or idle, and either nothing done since the agent read its result
+  (`blerg-runner session result`), or its `wip/<id>` branch, holding work beyond its recorded clone base, merged into the parent's branch (its own `wip/<parent>` for a sandboxed parent) (asked of the agent's daemon,
+  which reinstalling brings). The notice suggests `blerg-runner session discard <id>`; nothing is
+  discarded by itself.
+
+The notice shares one input with the next message; it never starts a turn or wakes a parent.
+Older daemons receive no notice. Interrupted or failed turns are not checked. **Nudge when the plan drifts**, in the session panel's
+Session section, turns the notices off for that session (the automatic pins and ticks go on); it is
+on by default and only the session's owner sees it. A cron session gets notices only when it keeps
+pins or a checklist. The checks read the pinned Board cards with the session's own board access, so
+an unreadable card is never treated as closed.
+
 ### Proposing a new Board ticket
 
 To file something discovered during a session, the agent first lists the Boards the session owner
@@ -561,6 +627,8 @@ blerg-runner ticket search --board "Example" --query "startup progress"
 blerg-runner ticket file --board "Example" --title "Show startup progress" \
   --body "Describe the observed behavior and the expected result." --type bug --repo app
 ```
+
+**Card references stay inside Blerg.** Whenever you mention a card, write `board:<board-id>#<number>` directly in prose or a table, for example `board:example-board#7`; copy the exact reference printed by `ticket create|get|list|search`. It renders as a chip with a hover preview and opens the card inside the session. Use the returned board id, including for a board this session just created; a title or board name is not an id. Do not wrap the reference in backticks or a Markdown link, and never use raw board URLs to mention cards. Bare `#N` (and ranges like `#7–9`) works only when the session has one unambiguous in-use board: its created or pinned board, otherwise its only accessible board. With several boards in use, always qualify each card.
 
 `--board` accepts a board name or ID. Repeat `--repo` for multiple target repositories; these are
 independent of the session's source repository. If a board requires a repository and has only one,
@@ -615,7 +683,7 @@ launch sheet's **Permissions…**). Each level includes the ones below it:
 | **Propose** (every board, the default) | search for duplicates and propose a card, which asks you |
 | **Read** | also list, get and search every card |
 | **File without asking** | also file its proposals at once (the 0.4.3 board filing permission) |
-| **Full** | also create, update, move, link and comment: what choosing the board at launch gives |
+| **Full** | also create, update, move, link and comment, and manage the board's columns (add, rename, set properties such as terminal, move, and remove an empty column or one whose cards move to another): what choosing the board at launch gives |
 
 Session board access allows 600 HTTP requests per rolling minute by default. A CLI command can make
 several requests: a named card move uses one access lookup and six board-tool calls. Access is
@@ -634,8 +702,12 @@ runner reads the other three from core and uses a change within a minute, at eac
 board call. If core cannot be asked, the runner keeps the limits it read last (its defaults before
 the first read).
 
-Columns, archiving and board settings are never available to an agent at any level. A board you
-chose at launch shows as Full; lower it, or set it to Propose to revoke it, like any other.
+Archiving and board settings are never available to an agent at any level. Column management is
+part of Full and needs a person behind the access: a level you set here, or a board you chose at
+launch signed in. A cron, or a session launched with an agent token, never manages columns. Below
+Full every column command is refused, like any other write; propose a card instead. Every column
+change is recorded on the board (who, and the session it came from). A board you chose at launch
+shows as Full; lower it, or set it to Propose to revoke it, like any other.
 
 The level is checked on every command and call, so a change holds at the agent's next one, with no
 restart; lowering a level applies from the next call, and a call already running finishes. The agent
@@ -643,7 +715,7 @@ is told when you change a level: a short note from Blerg reaches it at its next 
 changed: board "Product" is now Full (was Propose)"), and it is asked to check `blerg_board` with
 `{"tool":"access"}` (or `blerg-runner board access`) before telling you it lacks access.
 `blerg-runner board access` lists the boards and levels the session has. The `blerg-runner board`,
-`ticket list|get|create|update|move` and `tag` commands reach a board given here through the runner
+`column`, `ticket list|get|create|update|move` and `tag` commands reach a board given here through the runner
 with the session's own token: name it (`blerg-runner ticket list Product`), or, in a session without
 a board chosen at launch, it is their default when it is the only one. With a launch board, a command
 that names no board uses the launch board. Claude and Codex get the same through the `blerg_board`
@@ -686,10 +758,11 @@ again and renew the parent's level), or when the parent was stopped for good or 
 
 **Each child has its own limits.** A child's board calls count against its own limits, not its
 parent's: 8 board calls at once and 600 board requests a minute per session (the defaults; see above),
-and at most 20 filings an hour approved without asking per permission. A parent runs at most 3
+and at most 20 filings an hour approved without asking per permission. By default a parent runs at most 3
 children at once and an account at most 6, so with children an account can have up to 48 more board
 calls in flight, and a parent at **File without asking** and its children together up to 80 filings
-an hour without asking.
+an hour without asking at the default child limit. The install administrator can change the
+parallel child limit in core Settings; the account cap still applies.
 
 Every board call of the child is checked against the lower of its own level and the parent's level
 at that moment. Lowering or revoking the parent's level lowers every child at its next call, and
@@ -759,6 +832,12 @@ it. Importing a file again records nothing new. Only the session's own agent, or
 mark its parent. Someone you share the session with sees the same feed, and nothing the transcript
 does not already show them.
 
+Live History mark requests from the CLI use an `Idempotency-Key`, retained across network retries,
+so a lost reply does not record the same mark twice. API callers may send one key of 1–128 characters
+per request. Keys are scoped to the authorized caller and session; reusing a retained key with a
+different request returns 409. The key claim and the marks commit together. Backdated imports still
+deduplicate by their contents across separate invocations.
+
 The pieces of work the agent marked (topics) are the feed's section headers. The agent marks one with
 `blerg-runner topic "<title>"` when it starts something you asked for that takes several steps, and
 `blerg-runner topic --done "<outcome>"` when it is finished or dropped, naming the commits the work
@@ -802,7 +881,20 @@ what it is waiting on ("Waiting on a background task: Watch the deploy"), and th
 the sidebar carries "⏱ N" for as long as tasks run, whether or not the session is open. Such a
 session is not shown as idle: while its turn is over and tasks run, its sidebar card shows "⏱ N"
 where "Zz" would be, it is never counted as waiting for you, and
-the session header, the panel's Session facts and Insights say "working in background". The sidebar lists the active sessions starred first, then by start time, newest first, and
+Insights says "working in background"; the session header has no chip for it, because the
+panel's Running now lists that work and the panel toggle counts it. The panel's Session section starts with
+the static facts: runtime and permission mode on one line with the sandbox sentence under it, the
+engine, then the start time and elapsed lifetime. Model and effort, which can change, share the
+next line, followed by Options.
+
+Sidebar cards and collapsed session tiles share the same state rule: a parent shows a question
+mark when it or any descendant needs you, otherwise a spinner when any of them is working.
+Paused-by-restart sessions keep their question mark and descriptive tooltip. Background work
+keeps the quieter ⏱ glyph and task count. Zz remains for a session whose whole tree is idle.
+These glyphs stay the same whether children are expanded, collapsed or hidden by search;
+tooltips and accessible labels describe the aggregate state in words.
+
+The sidebar lists the active sessions starred first, then by start time, newest first, and
 nothing else: a session changing state (running, idle, waiting) never moves its card, only its glyph
 changes; a new session appears at the top. A task the
 agent left running ends with the session, or when its Claude Code process ends. A daemon restart
@@ -914,8 +1006,12 @@ you add or remove them, desktop and cluster rules alike (the cluster runtime is 
 install has one); a card's **Always allow** button adds one too. The sidebar groups children under their parent, and Insights shows child
 usage separately from the parent's own usage.
 
-A parent can have three running children and make twenty starts. Across your account, the limits
-are six running children and sixty starts per hour. Approval requests expire after ten minutes.
+By default a parent can run three children at once and start 120 per rolling hour, with no
+lifetime start cap. An administrator can change both under core Settings → Child session limits;
+changes apply on the next start request. Across your account, the limits remain six running
+children and sixty starts per rolling hour, which can be reached before the parent limit.
+Approval requests reserve rate budget too. A refusal names the limit and says to stop a child
+or gives the next available time in UTC. Approval requests expire after ten minutes.
 Pausing or restarting a parent expires its pending requests while preserving existing children and
 session permissions. A real end revokes those permissions and stops children, including children
 whose daemon reconnects later, unless you approved **Keep running** for them. Resuming the parent
@@ -1131,3 +1227,16 @@ changes. Use **Discard** on its panel row or in its sidebar card's Actions menu,
 Discard stops and archives the child. History, Insights totals and its direct session URL stay
 available. A failed stop leaves the child listed so you can retry. The parent can also run
 `blerg-runner session discard <child>`; `session stop` by itself keeps the worker listed.
+
+Automatic Board pin fill copies descriptions into the session; anyone allowed to view the session can see that copy. With one board, bare `#N` in checklist items means that board's card, including text that also mentions a PR. Items naming several cards tick only when every named card is done. Child assignment prefers a single title reference and requires one matching item.
+
+### Where attached files go
+
+Files you attach are downloaded by `blerg-runner fetch --all` into a private folder
+outside the session's repository, named by `BLERG_RUNNER_ATTACHMENTS_DIR`. The CLI
+prints absolute paths so the agent can open them. Downloads and local review state
+are deleted when the session ends or is discarded; a resumed session can fetch them
+again. An explicit `fetch --out DIR` inside a Git repository adds a local Git exclude
+and reports it. Existing `attachments/` folders are left alone. See
+[private attachment storage](artifacts.md#private-attachment-storage) for retention
+and startup cleanup rules.

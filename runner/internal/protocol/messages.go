@@ -15,13 +15,19 @@ import (
 
 // DaemonInfo describes a connected daemon.
 type DaemonInfo struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Mode       string `json:"mode"`
-	Version    string `json:"version"`
-	ReposRoot  string `json:"repos_root"`
-	Status     string `json:"status"`
-	LastSeenAt string `json:"last_seen_at"`
+	Compatibility         bool                  `json:"compatibility,omitempty"`
+	RepoInventoryLimited  bool                  `json:"repo_inventory_limited,omitempty"`
+	DiscoveryVersion      int                   `json:"discovery_version,omitempty"`
+	WorkspaceCapabilities WorkspaceCapabilities `json:"workspace_capabilities,omitzero"`
+	OwnershipRevision     int64                 `json:"ownership_revision,omitempty"`
+	ConnectionGeneration  string                `json:"connection_generation,omitempty"`
+	ID                    string                `json:"id"`
+	Name                  string                `json:"name"`
+	Mode                  string                `json:"mode"`
+	Version               string                `json:"version"`
+	ReposRoot             string                `json:"repos_root"`
+	Status                string                `json:"status"`
+	LastSeenAt            string                `json:"last_seen_at"`
 	// SandboxAvailable reports whether this daemon can actually run "Local
 	// sandbox" sessions right now (the blerg-runner-sandbox image is present)
 	// — surfaced in the launch UI so picking that runtime isn't a guess.
@@ -46,7 +52,11 @@ type DaemonInfo struct {
 	// launch UI default its Engine picker to something that will actually
 	// work instead of a client-side guess with no awareness of the daemon.
 	AvailableEngines []string `json:"available_engines"`
-	MCPGateway       bool     `json:"mcp_gateway"`
+	// EngineStatuses is the daemon's last per-engine report (EngineStatus),
+	// with the server's person-facing reason and fix filled in. Absent from
+	// an older daemon, which reports only AvailableEngines.
+	EngineStatuses []EngineStatus `json:"engine_statuses,omitempty"`
+	MCPGateway     bool           `json:"mcp_gateway"`
 	// MCPGatewayViaServer: the daemon dials the gateway at the server's web
 	// address and takes a board for a session on its host (This machine).
 	MCPGatewayViaServer bool     `json:"mcp_gateway_via_server,omitempty"`
@@ -73,6 +83,7 @@ type DaemonInfo struct {
 // carries secret values — only key presence (AvailableEngines) and
 // non-secret config, all safe to show in a browser.
 type ClusterStatus struct {
+	WorkspaceCapabilities WorkspaceCapabilities `json:"workspace_capabilities,omitzero"`
 	// Configured is false when this server has no cluster runtime at all
 	// (not running in k8s, or BLERG_RUNNER_AGENT_IMAGE unset) — every other
 	// field is the zero value in that case.
@@ -143,6 +154,12 @@ type MyCredentials struct {
 
 // SessionInfo describes a terminal or agent session.
 type SessionInfo struct {
+	DesktopCompatibility bool                    `json:"desktop_compatibility,omitempty"`
+	DesktopStatus        string                  `json:"desktop_status,omitempty"`
+	DesktopStatusReason  string                  `json:"desktop_status_reason,omitempty"`
+	Workspace            *WorkspaceManifest      `json:"workspace,omitempty"`
+	WorkspaceResults     []WorkspaceMemberResult `json:"workspace_results,omitempty"`
+
 	ArchivedAt           *string `json:"archived_at,omitempty"`
 	SteeringSupported    bool    `json:"steering_supported"`
 	LimitResumeSupported bool    `json:"limit_resume_supported,omitempty"`
@@ -216,6 +233,18 @@ type EndedBy struct {
 
 // DaemonHello is the first message a daemon sends upon connecting.
 type DaemonHello struct {
+	PluginPolicy bool `json:"plugin_policy,omitempty"`
+	// Display-only local identity for a person's enrollment confirmation.
+	Hostname              string                `json:"hostname,omitempty"`
+	OSUser                string                `json:"os_user,omitempty"`
+	DesktopEnrollment     bool                  `json:"desktop_enrollment,omitempty"`
+	RepoInventoryLimited  bool                  `json:"repo_inventory_limited,omitempty"`
+	DiscoveryVersion      int                   `json:"discovery_version,omitempty"`
+	DesktopID             string                `json:"desktop_id,omitempty"`
+	WorkspaceCapabilities WorkspaceCapabilities `json:"workspace_capabilities,omitzero"`
+
+	PlanNudges   bool `json:"plan_nudges,omitempty"`
+	UsageNotices bool `json:"usage_notices,omitempty"`
 	// RecoveryReady negotiates the current-link recovery policy barrier.
 	RecoveryReady            bool     `json:"recovery_ready,omitempty"`
 	RecoveryRequiredSessions []string `json:"recovery_required_sessions,omitempty"`
@@ -344,6 +373,10 @@ type DaemonHello struct {
 	SandboxClaudeCredential *bool `json:"sandbox_claude_credential,omitempty"`
 	// AvailableEngines — see DaemonInfo.AvailableEngines.
 	AvailableEngines []string `json:"available_engines"`
+	// EngineStatuses is why each known engine is or is not usable on this
+	// host (EngineStatus). Absent from older daemons. A daemon that sends it
+	// also answers engine_check.
+	EngineStatuses []EngineStatus `json:"engine_statuses,omitempty"`
 	// LocalEngines lists the engine ids ("hermes", "openclaw") whose endpoint is on this machine or
 	// its LAN with no provider key configured. Absent means none (or an older daemon).
 	LocalEngines []string `json:"local_engines,omitempty"`
@@ -369,6 +402,9 @@ type DaemonHello struct {
 // was accepted and the daemon attached. Sent only when the hello set Welcome,
 // before any other message on the connection. Never carries a credential.
 type DaemonWelcome struct {
+	WorkspaceCapabilities WorkspaceCapabilities `json:"workspace_capabilities,omitzero"`
+
+	PlanNudges bool `json:"plan_nudges,omitempty"`
 	// RecoveryHold keeps marked recovered children paused until daemon_recovery_ready.
 	RecoveryHold bool   `json:"recovery_hold,omitempty"`
 	Type         string `json:"type"` // "daemon_welcome"
@@ -395,10 +431,11 @@ type RepoOrigin struct {
 // dropped session_state_changed event (a lost "idle" would otherwise leave the
 // session stuck on "running" forever).
 type DaemonHeartbeat struct {
-	Type            string                   `json:"type"`            // "daemon_heartbeat"
-	ActiveSessions  []string                 `json:"active_sessions"` // IDs of currently live sessions
-	BackgroundTasks *BackgroundTaskInventory `json:"background_task_inventory,omitempty"`
-	SessionStates   map[string]string        `json:"session_states,omitempty"` // sessionID → "running"|"idle"|"waiting"
+	RepoInventoryLimited bool                     `json:"repo_inventory_limited,omitempty"`
+	Type                 string                   `json:"type"`            // "daemon_heartbeat"
+	ActiveSessions       []string                 `json:"active_sessions"` // IDs of currently live sessions
+	BackgroundTasks      *BackgroundTaskInventory `json:"background_task_inventory,omitempty"`
+	SessionStates        map[string]string        `json:"session_states,omitempty"` // sessionID → "running"|"idle"|"waiting"
 	// QueuedSessions refreshes DaemonHello's field of the same name.
 	QueuedSessions []string `json:"queued_sessions,omitempty"`
 	// SandboxAvailable reports whether blerg-runner-sandbox:latest is present
@@ -431,6 +468,9 @@ type DaemonHeartbeat struct {
 	// AvailableEngines refreshes DaemonHello's field of the same name every
 	// heartbeat — see DaemonInfo.AvailableEngines.
 	AvailableEngines []string `json:"available_engines"`
+	// EngineStatuses refreshes DaemonHello's field of the same name every
+	// heartbeat. Absent from older daemons, meaning unknown.
+	EngineStatuses []EngineStatus `json:"engine_statuses,omitempty"`
 	// LocalEngines refreshes DaemonHello.LocalEngines every heartbeat. Absent means none: the
 	// server replaces its copy each time.
 	LocalEngines []string `json:"local_engines,omitempty"`
@@ -440,6 +480,11 @@ type DaemonHeartbeat struct {
 	// change it from the app (set_repos_root) without a reconnect. Absent
 	// from older daemons, meaning unchanged.
 	ReposRoot string `json:"repos_root,omitempty"`
+}
+
+// UsageLimitsRequest asks the owning daemon to refresh its account meters.
+type UsageLimitsRequest struct {
+	Type string `json:"type"`
 }
 
 // UsageLimits is a daemon's report of one provider's usage limits on its
@@ -572,7 +617,8 @@ const PausedByRestart = "restart"
 type SessionPaused struct {
 	Type      string `json:"type"` // "session_paused"
 	SessionID string `json:"session_id"`
-	Reason    string `json:"reason"` // PausedByRestart
+	Reason    string `json:"reason"`           // PausedByRestart
+	Detail    string `json:"detail,omitempty"` // human-readable recovery pause reason
 }
 
 // OpenAsks is sent by the server to a daemon after its hello: which of the sessions it reported
@@ -593,6 +639,8 @@ type SessionPausedChanged struct {
 
 // SessionEnded is sent when a session's process exits.
 type SessionEnded struct {
+	WorkspaceResults []WorkspaceMemberResult `json:"workspace_results,omitempty"`
+
 	Type      string  `json:"type"` // "session_ended"
 	SessionID string  `json:"session_id"`
 	ExitCode  int     `json:"exit_code"`
@@ -610,6 +658,9 @@ type SessionEnded struct {
 
 // SpawnSession instructs the daemon to start a new session.
 type SpawnSession struct {
+	Workspace             *WorkspaceManifest    `json:"workspace,omitempty"`
+	WorkspaceCapabilities WorkspaceCapabilities `json:"workspace_capabilities,omitzero"`
+
 	// RequireRecoveryReady persists fail-closed recovery for delegated work.
 	RequireRecoveryReady  bool   `json:"require_recovery_ready,omitempty"`
 	Type                  string `json:"type"` // "spawn_session"
@@ -804,6 +855,71 @@ type ResizeSession struct {
 	Rows      int    `json:"rows"`
 }
 
+// Engine status values (EngineStatus.Status).
+const (
+	EngineAvailable    = "available"
+	EngineNotInstalled = "not_installed" // the CLI is not on the daemon's PATH
+	EngineNotLoggedIn  = "not_logged_in" // the CLI is there, its login is not
+	EngineMisconfigure = "misconfigured" // logged in or installed, but not set up to run (no provider, not onboarded)
+	EngineOutdated     = "outdated"      // the CLI is older than this daemon supports
+)
+
+// EngineStatus is one engine's state on a daemon's host, re-detected on
+// every heartbeat and on demand (EngineCheck). The daemon sends facts only —
+// a status, where the CLI was found, the PATH it searched — with every path
+// under the home folder written as "~/..." and nothing read from a login or
+// config file. The server writes the person-facing Reason and Fix from these
+// facts (enginestatus.go) and overwrites whatever a daemon put there.
+type EngineStatus struct {
+	Engine string `json:"engine"`
+	Status string `json:"status"`
+	// Detail narrows a status: "keychain" (macOS Claude: login not readable,
+	// so not claimed missing), "no_provider" (Hermes), "not_onboarded"
+	// (OpenClaw), "found_elsewhere" (not_installed, but FoundAt has it).
+	Detail string `json:"detail,omitempty"`
+	// FoundAt is where the CLI is: on the daemon's PATH when installed, or a
+	// well-known install folder off it when not_installed.
+	FoundAt string `json:"found_at,omitempty"`
+	// SearchedPath is the daemon's PATH, bounded, when the CLI was not found.
+	SearchedPath []string `json:"searched_path,omitempty"`
+	Version      string   `json:"version,omitempty"`
+	MinVersion   string   `json:"min_version,omitempty"`
+	// Reason and Fix are written by the server for the browser.
+	Reason string `json:"reason,omitempty"`
+	Fix    string `json:"fix,omitempty"`
+	// Action is the one-click fix the browser offers: "check_again",
+	// "redetect_path" or "settings". Written by the server.
+	Action string `json:"action,omitempty"`
+}
+
+// EngineCheck asks a daemon to re-detect its engines now instead of at the
+// next heartbeat (server → daemon; the browser's "Check again"). With
+// RedetectPath the daemon first reads its owner's login-shell PATH, merges it
+// into its own and saves it so a restart keeps it ("Re-detect PATH").
+type EngineCheck struct {
+	Type         string `json:"type"` // "engine_check"
+	RequestID    string `json:"request_id"`
+	RedetectPath bool   `json:"redetect_path,omitempty"`
+}
+
+// EngineCheckResult answers an EngineCheck (daemon → server).
+type EngineCheckResult struct {
+	Type      string         `json:"type"` // "engine_check_result"
+	RequestID string         `json:"request_id"`
+	Statuses  []EngineStatus `json:"statuses"`
+	// AvailableEngines is the same detection as a heartbeat's.
+	AvailableEngines []string `json:"available_engines"`
+	// PathAdded lists the folders Re-detect PATH added (home as "~").
+	PathAdded []string `json:"path_added,omitempty"`
+	// PathError says why the login-shell PATH could not be read.
+	PathError string `json:"path_error,omitempty"`
+	// PathSaveError: the PATH was read and applied, but saving it for the
+	// next start failed (a restart loses it).
+	PathSaveError string `json:"path_save_error,omitempty"`
+	// Busy: another check is running on the daemon; this one did nothing.
+	Busy bool `json:"busy,omitempty"`
+}
+
 // SetReposRoot asks a daemon to move its repos root — where new sessions'
 // checkouts live — to ReposRoot (server → daemon; the browser asks via
 // PUT /api/daemons/{id}/repos-root). The daemon validates it (it is the one
@@ -855,16 +971,20 @@ type DaemonConnected struct {
 // DaemonLimitsChanged tells browsers a daemon's usage limits changed: its
 // full current set, one entry per provider (empty when none reports).
 type DaemonLimitsChanged struct {
-	Type        string        `json:"type"` // "daemon_limits_changed"
-	DaemonID    string        `json:"daemon_id"`
-	UsageLimits []UsageLimits `json:"usage_limits"`
+	OwnershipRevision    int64         `json:"ownership_revision,omitempty"`
+	ConnectionGeneration string        `json:"connection_generation,omitempty"`
+	Type                 string        `json:"type"` // "daemon_limits_changed"
+	DaemonID             string        `json:"daemon_id"`
+	UsageLimits          []UsageLimits `json:"usage_limits"`
 }
 
 // DaemonDisconnected notifies the browser that a daemon went offline.
 type DaemonDisconnected struct {
-	Type               string   `json:"type"` // "daemon_disconnected"
-	DaemonID           string   `json:"daemon_id"`
-	AffectedSessionIDs []string `json:"affected_session_ids"`
+	OwnershipRevision    int64    `json:"ownership_revision,omitempty"`
+	ConnectionGeneration string   `json:"connection_generation,omitempty"`
+	Type                 string   `json:"type"` // "daemon_disconnected"
+	DaemonID             string   `json:"daemon_id"`
+	AffectedSessionIDs   []string `json:"affected_session_ids"`
 }
 
 // BrowserSessionStarted notifies the browser that a session was created.
@@ -1092,6 +1212,7 @@ const (
 // human text written by whoever knows the stage (server or pod); Hint is the
 // next step to take when the stage has failed or is stuck.
 type StartStage struct {
+	At     string `json:"at,omitempty"` // UTC transition time: active starts a stage, terminal states end it.
 	ID     string `json:"id"`
 	Label  string `json:"label,omitempty"`
 	State  string `json:"state"`
@@ -1135,6 +1256,7 @@ type AgentEventAck struct {
 // AgentUserMessage delivers a user message to an agent session
 // (browser → server → daemon).
 type AgentUserMessage struct {
+	PlanNudge      string `json:"plan_nudge,omitempty"`
 	ExpectedTurnID string `json:"expected_turn_id,omitempty"`
 	Type           string `json:"type"` // "agent_user_message"
 	SessionID      string `json:"session_id"`
@@ -1242,4 +1364,27 @@ type DaemonRecoveryReady struct {
 	Type string `json:"type"` // "daemon_recovery_ready"
 	// SessionID routes the frame through a session pod's scoped write pump.
 	SessionID string `json:"session_id,omitempty"`
+}
+
+// PlanInputRequest asks for drift metadata immediately before an initial/resume input is queued.
+// Only the daemon owning SessionID can request it; it never creates a model input itself.
+type PlanInputRequest struct {
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	RequestID string `json:"request_id"`
+	ClientID  string `json:"client_id,omitempty"`
+	Source    string `json:"source,omitempty"`
+}
+type PlanInputResult struct {
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	RequestID string `json:"request_id"`
+	PlanNudge string `json:"plan_nudge,omitempty"`
+}
+
+// DesktopOwnershipChanged removes previously delivered inventory for its exact recipient.
+type DesktopOwnershipChanged struct {
+	Type              string `json:"type"`
+	DesktopID         string `json:"desktop_id"`
+	OwnershipRevision int64  `json:"ownership_revision"`
 }

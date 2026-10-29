@@ -50,6 +50,12 @@ export interface ChatReport extends LiveReport {
   filesKey?: string
   /** The Files list and what can be done with it; absent when the chat has no file operations. */
   files?: ChatFiles
+  /** The agent is working: a turn runs or waits, or a message just sent has not settled. A host's
+   *  Stop shows while it is true. */
+  busy?: boolean
+  /** Interrupts the running turn (the session goes on); absent when the transport cannot, or the
+   *  chat is read-only. The runner's session header calls it from its Stop. */
+  interrupt?: () => Promise<void>
 }
 
 interface ReportState {

@@ -112,7 +112,7 @@ func InsertArtifactCapped(ctx context.Context, pool *pgxpool.Pool, a ArtifactRow
 	if sameName >= MaxArtifactVersions {
 		return ArtifactRow{}, ErrArtifactVersionLimit
 	}
-	if n >= limit {
+	if limit > 0 && n >= limit {
 		return ArtifactRow{}, ErrArtifactLimit
 	}
 	if maxTotal > 0 && total+a.Size > maxTotal {

@@ -68,7 +68,8 @@ Also decide, without asking, `TAG`: a fresh value for this build, e.g.
 
 ## Preflight
 
-Run each command; compare with the expected output. Any mismatch is a stop.
+Run each command; compare with the expected output. Any mismatch is a stop except
+the advisory authorization notice in P13: relay its warning and continue.
 
 | # | Command | Expected |
 |---|---|---|
@@ -84,6 +85,7 @@ Run each command; compare with the expected output. Any mismatch is a stop.
 | P10 | `curl -s -o /dev/null -w '%{http_code}\n' https://<REGISTRY>/v2/` (use `http://` for a plain-HTTP registry) | `200` or `401`. This only proves this machine reaches it; node pulls are checked in Install step 4. With `REGISTRY=localhost:32000`, run this — and `deploy.sh` — on a cluster node. |
 | P11 | `kubectl get namespace blerg` | `Error from server (NotFound)` for a new install. If it exists, this is an **upgrade**: tell the human, set no `SECRET_*` value, only change `TAG`, and pass the [upgrade gate](#upgrade-gate-upgrades-only) before Step 3. |
 | P12 | `git check-ignore install/k8s/.env` | Prints `install/k8s/.env`. |
+| P13 | `(cd install/k8s && . ./deploy_lib.sh && cluster_authorization_notice)` | Normally silent: the runner cannot get secrets in `kube-system`. An allowed probe warns that authorization is effectively AlwaysAllow or overly broad and Blerg's RBAC boundaries (no `pods/exec`, namespace-scoped Roles) are not enforced; an inconclusive probe also warns. Relay the notice and how to enable RBAC (`microk8s enable rbac` on MicroK8s), without blocking or adding a prompt. `deploy.sh` repeats this check, including with `--yes`. |
 
 ## Install
 

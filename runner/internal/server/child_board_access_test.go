@@ -593,7 +593,7 @@ func TestChildBoardDocsStateTheLimitsAndTheFilingGap(t *testing.T) {
 		"A child files proposals with its parent's sign-in.",
 		fmt.Sprintf("%d board calls at once and %d board requests a minute per session (the defaults", boardCallsInFlight, boardCallsPerMinute),
 		fmt.Sprintf("at most %d filings an hour approved without asking per permission", defaultGrantHourlyCap),
-		fmt.Sprintf("A parent runs at most %d children at once and an account at most %d", maxRunningChildrenPerParent, maxRunningChildrenPerAccount),
+		fmt.Sprintf("By default a parent runs at most %d children at once and an account at most %d", maxRunningChildrenPerParent, maxRunningChildrenPerAccount),
 		fmt.Sprintf("up to %d more board calls in flight", maxRunningChildrenPerAccount*boardCallsInFlight),
 		fmt.Sprintf("up to %d filings an hour without asking", (1+maxRunningChildrenPerParent)*defaultGrantHourlyCap),
 	} {

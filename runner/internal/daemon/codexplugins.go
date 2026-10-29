@@ -2,7 +2,8 @@ package daemon
 
 // Codex has no equivalent of Claude's --plugin-dir. An unrestricted session therefore gets
 // a private CODEX_HOME with copied plugin cache entries and fixed links to its existing
-// login, settings and conversations. Installation runs separately, with no login or tokens.
+// login, settings and conversations. Installation runs separately; native marketplaces use
+// a disposable login copy and never writable links to the person's configuration.
 import (
 	"context"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	"github.com/blerglab/blerg-ai/runner/internal/pluginsinstall"
@@ -40,7 +42,7 @@ type codexPluginSnapshot struct {
 
 // prepareCodex is for unrestricted native sessions. A sandbox mounts the private
 // and source homes at their original absolute paths so fixed links remain valid.
-func (w *pluginWorkshop) prepareCodex(ctx context.Context, sessionID string, entries []pluginspec.Entry) (string, map[string]any, pluginsinstall.Result) {
+func (w *pluginWorkshop) prepareCodex(ctx context.Context, sessionID string, entries []pluginspec.Entry, sources ...string) (string, map[string]any, pluginsinstall.Result) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -48,7 +50,7 @@ func (w *pluginWorkshop) prepareCodex(ctx context.Context, sessionID string, ent
 		return "", nil, failedCodexPlugins(entries)
 	}
 	for _, e := range entries {
-		if pluginspec.ValidateCodex(e) != nil || !w.allow.Allows(e.Marketplace) {
+		if pluginspec.ValidateCodex(e) != nil || !w.currentAllow().Allows(e.Marketplace) {
 			res := pluginsinstall.Result{Total: len(entries)}
 			for _, entry := range entries {
 				res.Skipped = append(res.Skipped, safePluginName(entry.Plugin))
@@ -59,6 +61,9 @@ func (w *pluginWorkshop) prepareCodex(ctx context.Context, sessionID string, ent
 	source := os.Getenv("CODEX_HOME")
 	if source == "" {
 		source = filepath.Join(w.home, ".codex")
+	}
+	if len(sources) > 0 && sources[0] != "" {
+		source = sources[0]
 	}
 	base := filepath.Join(filepath.Dir(w.dir), "codex")
 	snapshot := filepath.Join(base, "sessions", safeFileName(sessionID))
@@ -72,9 +77,32 @@ func (w *pluginWorkshop) prepareCodex(ctx context.Context, sessionID string, ent
 			return "", nil, failedCodexPlugins(entries)
 		}
 	}
-	opts := pluginsinstall.Options{Bin: "codex", Env: pluginsinstall.ChildEnv(emptyHome, append([]string{"CODEX_HOME=" + workshop}, gitSafetyEnv()...)...), Allow: w.allow, Run: w.run, LogPrefix: "daemon: codex plugins"}
+	// Native remote installs need Codex authentication, never the person's writable config.
+	// Copy only auth into the daemon-owned install home and remove it even on timeout.
+	native := false
+	for _, entry := range entries {
+		if _, ok := pluginspec.CodexMarketplaceName(entry.Marketplace); ok {
+			native = true
+		}
+	}
+	if native {
+		// A disposable install home also removes copied login state after a failure;
+		// its config cannot affect any running or later session.
+		privateHome, err := os.MkdirTemp(base, ".native-install-")
+		if err != nil {
+			return "", nil, failedCodexPlugins(entries)
+		}
+		defer func() { _ = os.RemoveAll(privateHome) }()
+		workshop = privateHome
+		cleanup, err := copyCodexInstallerAuth(source, workshop)
+		if err != nil {
+			return "", nil, failedCodexPlugins(entries)
+		}
+		defer cleanup()
+	}
+	opts := pluginsinstall.Options{PrivateOutput: true, Bin: "codex", Env: pluginsinstall.ChildEnv(emptyHome, append([]string{"CODEX_HOME=" + workshop}, gitSafetyEnv()...)...), Allow: w.currentAllow(), Run: w.run, LogPrefix: "daemon: codex plugins"}
 	res := pluginsinstall.InstallCodex(ctx, opts, entries)
-	if res.Installed == 0 {
+	if res.Installed == 0 && len(entries) > 0 {
 		return "", nil, res
 	}
 	home, config, err := snapshotCodexPluginHome(snapshot, source, workshop, res.Entries, res.Paths, codexSnapshotOptions{Requested: entries, Names: res.Names})
@@ -83,8 +111,69 @@ func (w *pluginWorkshop) prepareCodex(ctx context.Context, sessionID string, ent
 	}
 	return home, config, res
 }
+
+// prepareCodexRemoval copies only an already-loaded subset. Revocation must not
+// force the owner to reinstall retained plugins or silently drop the others.
+func (w *pluginWorkshop) prepareCodexRemoval(ctx context.Context, id string, entries []pluginspec.Entry, previous, source string) (string, map[string]any, pluginsinstall.Result) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	fail := func() (string, map[string]any, pluginsinstall.Result) { return "", nil, failedCodexPlugins(entries) }
+	if ctx.Err() != nil || len(entries) > pluginspec.MaxEntries {
+		return fail()
+	}
+	raw, err := readCodexSnapshotMetadata(previous)
+	var meta codexPluginSnapshot
+	if err != nil || json.Unmarshal(raw, &meta) != nil || len(meta.IDs) != len(meta.Entries) {
+		return fail()
+	}
+	selected := meta.Requested
+	if selected == nil {
+		selected = meta.Entries
+	}
+	if _, _, err := existingCodexPluginHome(previous, source, selected); err != nil {
+		return fail()
+	}
+	paths, names := map[string]string{}, map[string]string{}
+	for _, entry := range entries {
+		if pluginspec.ValidateCodex(entry) != nil {
+			return fail()
+		}
+		found := false
+		for i, retained := range meta.Entries {
+			if !strings.EqualFold(retained.Marketplace, entry.Marketplace) || retained.Plugin != entry.Plugin {
+				continue
+			}
+			plugin, market, ok := strings.Cut(meta.IDs[i], "@")
+			if !ok || plugin != entry.Plugin || !pluginsinstall.ValidMarketplaceName(market) {
+				return fail()
+			}
+			path := filepath.Join(previous, "plugins", "cache", market, plugin)
+			versions, err := os.ReadDir(path)
+			if err != nil || len(versions) != 1 || !versions[0].IsDir() {
+				return fail()
+			}
+			paths[meta.IDs[i]] = filepath.Join(path, versions[0].Name())
+			names[strings.ToLower(entry.Marketplace)] = market
+			found = true
+			break
+		}
+		if !found {
+			return fail()
+		}
+	}
+	snapshot := filepath.Join(filepath.Dir(w.dir), "codex", "sessions", safeFileName(id))
+	home, config, err := snapshotCodexPluginHome(snapshot, source, previous, entries, paths, codexSnapshotOptions{Requested: entries, Names: names})
+	if err != nil {
+		return fail()
+	}
+	return home, config, codexSnapshotResult(home, entries)
+}
+
 func failedCodexPlugins(entries []pluginspec.Entry) pluginsinstall.Result {
 	res := pluginsinstall.Result{Total: len(entries)}
+	if len(entries) == 0 {
+		res.Failed = []string{"snapshot"}
+	}
 	for _, e := range entries {
 		res.Failed = append(res.Failed, safePluginName(e.Plugin))
 	}
@@ -149,11 +238,11 @@ func snapshotCodexPluginHome(snapshot, source, workshop string, entries []plugin
 	}
 	catalogs := map[string][]map[string]any{}
 	cache, err := filepath.EvalSymlinks(filepath.Join(workshop, "plugins", "cache"))
-	if err != nil {
+	if err != nil && len(entries) > 0 {
 		return "", nil, err
 	}
 	for _, e := range entries {
-		if pluginspec.ValidateClaude(e) != nil {
+		if pluginspec.ValidateCodex(e) != nil {
 			return "", nil, errors.New("invalid Codex plugin entry")
 		}
 		found := false
@@ -432,4 +521,48 @@ func codexSnapshotResult(home string, requested []pluginspec.Entry) pluginsinsta
 		}
 	}
 	return res
+}
+
+// The installer must never refresh credentials or settings through a link to the login home.
+func copyCodexInstallerAuth(source, home string) (func(), error) {
+	cleanup := func() { _ = os.Remove(filepath.Join(home, "auth.json")) }
+	sourceRoot, err := os.OpenRoot(source)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = sourceRoot.Close() }()
+	// Nonblocking/no-follow opens refuse a link or a FIFO substituted while the
+	// daemon reads the session login. Every read stays anchored in that home.
+	file, err := sourceRoot.OpenFile("auth.json", os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if errors.Is(err, fs.ErrNotExist) {
+		return func() {}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || !ownedByDaemon(info) || info.Mode().Perm()&0077 != 0 || info.Size() > codexConfigMax {
+		return nil, errors.New("codex login is not a private regular file within the size limit")
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, codexConfigMax+1))
+	if err != nil || len(raw) > codexConfigMax {
+		return nil, errors.New("could not read codex installer login")
+	}
+	destination, err := os.OpenRoot(home)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = destination.Close() }()
+	copyFile, err := destination.OpenFile("auth.json", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return nil, err
+	}
+	_, writeErr := copyFile.Write(raw)
+	closeErr := copyFile.Close()
+	if writeErr != nil || closeErr != nil {
+		cleanup()
+		return nil, errors.New("could not prepare codex installer login")
+	}
+	return cleanup, nil
 }

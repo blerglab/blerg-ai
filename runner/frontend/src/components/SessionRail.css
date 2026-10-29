@@ -376,27 +376,41 @@
 }
 
 .rail-facts {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 4px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   margin: 0;
-}
-
-.rail-facts div {
-  display: contents;
-}
-
-.rail-facts dt {
+  min-width: 0;
   font-size: var(--text-xs);
+}
+.rail-runtime { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.rail-runtime > svg, .rail-runtime > .permission-chip { flex-shrink: 0; }
+.rail-runtime-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-engine { margin: 0; color: var(--chalk); font-size: var(--text-xs); line-height: 1.5; }
+.rail-fact-label { color: var(--fog-dim); }
+.rail-context { display: flex; align-items: center; gap: 6px; min-width: 0; margin: 4px 0 0; color: var(--chalk); font-size: var(--text-xs); line-height: 1.5; }
+.rail-context-bar {
+  flex: 0 1 120px;
+  min-width: 48px;
+  height: 6px;
+  border-radius: 999px;
+  border: 1px solid var(--stone);
+  background: linear-gradient(to right, var(--fog-dim) var(--ctx-fill, 0%), transparent var(--ctx-fill, 0%));
+}
+.rail-context.warn .rail-context-bar { border-color: color-mix(in srgb, var(--amber) 60%, var(--stone)); background: linear-gradient(to right, var(--amber) var(--ctx-fill, 0%), transparent var(--ctx-fill, 0%)); }
+.rail-context.warn .rail-context-text { color: var(--amber); }
+.rail-context-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.rail-context-compacted { flex: none; color: var(--fog-dim); }
+.rail-runtime-note, .rail-timing {
+  margin: 0;
   color: var(--fog-dim);
-}
-
-.rail-facts dd {
-  margin: 0;
   font-size: var(--text-xs);
-  color: var(--chalk);
-  overflow-wrap: anywhere;
+  line-height: 1.5;
 }
+.rail-runtime-note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-timing { line-height: 1.5; }
+.rail-options { margin: 6px 0 0; padding: 0; border: 0; min-width: 0; }
+.rail-options legend { padding: 0; margin-bottom: 6px; color: var(--fog-dim); font-size: var(--text-xs); }
 
 /* The header button that opens and closes the panel, with the count of what needs you or runs. */
 .rail-toggle {
@@ -442,8 +456,14 @@
   border: 0;
 }
 
-/* Live · History: the panel's two views. */
+/* Live · History: the panel's two views. The strip stays at the top of the panel while its content
+   scrolls (each tab's scroll place is the content's; a focused tab is always in view, #281). */
 .rail-tabs {
+  position: sticky;
+  /* The body's top padding: flush with its top edge, so nothing scrolls past above the strip. */
+  top: -4px;
+  z-index: 2;
+  background: var(--scree);
   display: flex;
   overflow-x: auto;
   scrollbar-width: none;
@@ -537,6 +557,7 @@
 .reel-chip {
   padding: 0 7px;
   border: 1px solid var(--stone);
+  background: none;
   border-radius: 999px;
   color: var(--chalk);
   font-size: 11px;
@@ -1390,7 +1411,6 @@ button.plan-ref:focus-visible {
 @keyframes rail-child-pulse { 50% { opacity:0.3; } }
 @media (prefers-reduced-motion:reduce) { .rail-child-pulse { animation:none; } }
 
-.rail-chip.rail-effort { color: var(--fog-dim); background: transparent; border-color: transparent; font-size: 0.85em; }
 
 /* Permissions take one row until the person asks to manage them. */
 .rail-child-permissions .rail-section-head { margin-bottom: 0; }
@@ -1510,6 +1530,21 @@ button.plan-ref:focus-visible {
   cursor: default;
 }
 .rail-run-glyph.tokens { font-family: var(--mono); }
+/* The context meter (ContextMeter.tsx): a fixed width so rows stay aligned whatever the share,
+   filled from the left to the share in use; amber near compaction. */
+.rail-run-glyph.context {
+  min-width: 44px;
+  gap: 2px;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  background: linear-gradient(to right, color-mix(in srgb, var(--fog) 22%, transparent) var(--ctx-fill, 0%), transparent var(--ctx-fill, 0%));
+}
+.rail-run-glyph.context.warn {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 60%, var(--stone));
+  background: linear-gradient(to right, color-mix(in srgb, var(--amber) 22%, transparent) var(--ctx-fill, 0%), transparent var(--ctx-fill, 0%));
+}
+.rail-run-glyph.context .ctx-mark { font-family: var(--body); }
 .rail-run-glyph.attention { color: var(--amber); border-color: var(--amber); }
 button.rail-run-glyph { cursor: pointer; font-family: inherit; }
 button.rail-run-glyph:hover, button.rail-run-glyph:focus-visible { color: var(--chalk); border-color: var(--fog); }
@@ -1610,3 +1645,13 @@ button.rail-work-item:hover { color: var(--chalk); text-decoration: underline; }
 /* Dismiss in Needs you (card #155): a link-like button with a touch-sized target. */
 .rail-dismiss { min-height: 24px; color: var(--fog); }
 .rail-review-item .rail-actions { margin: 0 8px 6px; }
+
+.session-panel-pane { overflow: hidden; min-width: 0; max-height: 100%; }
+.session-panel-pane .rail-header { padding-left: 16px; min-height: 45px; box-sizing: border-box; }
+
+.history-window { display: flex; flex-wrap: wrap; gap: 6px 10px; padding: 6px 0; font-size: 12px; color: var(--fog); }
+.reel-stroke-count { font-size: 10px; white-space: nowrap; }
+
+/* The panel owns its vertical scroll; its content cannot grow the session columns. */
+.session-panel-pane > .rail-header { flex-shrink: 0; }
+.session-panel-pane > .rail-body { min-width: 0; overflow-x: hidden; }

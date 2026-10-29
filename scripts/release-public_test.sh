@@ -34,6 +34,7 @@ echo "deploy host 192.168.7.7" > hosts.txt  # scrub:allow (test fixture)
 git add -A && git commit -qm "private: homelab notes"
 git rm -q hosts.txt
 echo "updates: []" > .github/dependabot.yml
+mkdir -p video/demo && echo "demo" > video/demo/demo.sh && echo "# Video" > video/README.md
 echo "0.1.0" > VERSION
 printf '# Changelog\n\n## [0.1.0] - 2026-01-01\n' > CHANGELOG.md
 echo "hello" > app.txt
@@ -61,9 +62,11 @@ pub() { git --git-dir="$tmp/blerg-ai.git" "$@"; }
   || fail "first release has the wrong author"
 pub cat-file -e main:app.txt || fail "first release lost app.txt"
 ! pub cat-file -e main:.github/dependabot.yml 2>/dev/null || fail "dependabot.yml was published"
+! pub cat-file -e main:video 2>/dev/null || fail "the video/ folder was published"
 [ "$(pub rev-parse v0.1.0)" = "$(pub rev-parse main)" ] || fail "v0.1.0 tag missing"
 git merge-base --is-ancestor "$(pub rev-parse main)" HEAD || fail "release not merged back"
 [ -f .github/dependabot.yml ] || fail "merge back dropped dependabot.yml"
+[ -f video/demo/demo.sh ] || fail "merge back dropped the private video/ folder"
 ok "first release is one commit, right author, tagged, merged back"
 
 must_fail "pushing private main to the public repo" git push -q public main

@@ -92,7 +92,7 @@ func (c *claudeExtensions) AddMarketplace(ctx context.Context, source string) er
 	if c.workshop == nil {
 		return extUnsupported
 	}
-	if !c.workshop.allow.Allows(source) {
+	if !c.workshop.currentAllow().Allows(source) {
 		return extNotAllowed
 	}
 	if err := c.workshop.addMarketplace(ctx, source); err != nil {

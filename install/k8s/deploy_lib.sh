@@ -2,6 +2,37 @@
 # Helpers sourced by deploy.sh (and exercised without a cluster by deploy_test.sh).
 # kubectl is only ever called as a plain command, so deploy_test.sh can stub it and run anywhere.
 
+# Capture explicit legacy aliases before deploy.sh supplies their defaults.
+# Exact BLERG_RUNNER_* names win when both forms are supplied.
+runner_config_aliases() {
+  local pair alias_name key value
+  for pair in TRUSTED_PROXIES:BLERG_RUNNER_TRUSTED_PROXIES \
+              WEBHOOK_ALLOW_PRIVATE:BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE \
+              WORKSPACE_STORAGE_CLASS:BLERG_RUNNER_WORKSPACE_STORAGE_CLASS; do
+    alias_name="${pair%%:*}"; key="${pair#*:}"
+    if [[ -v "$alias_name" && ! -v "$key" ]]; then
+      value="${!alias_name}"
+      if [ "$alias_name" = WEBHOOK_ALLOW_PRIVATE ]; then
+        case "${value,,}" in 1|true|yes) value=true ;; *) value=false ;; esac
+      fi
+      printf -v "$key" '%s' "$value"
+      export "$key"
+    fi
+  done
+  return 0
+}
+
+# Image selection belongs to this deploy, not the previous live ConfigMap:
+# advance TAG and honor the off switch even when an older image is present.
+runner_config_agent_image() {
+  if [ "$1" = off ]; then
+    AGENT_IMAGE=""
+  else
+    AGENT_IMAGE="${BLERG_RUNNER_AGENT_IMAGE-$2/blerg-runner-agent:$3}"
+  fi
+  export BLERG_RUNNER_AGENT_IMAGE="$AGENT_IMAGE"
+}
+
 # --- Confirmation before touching a cluster -------------------------------------------
 
 # True when stdin is a terminal. A function so tests can override it.
@@ -35,6 +66,35 @@ deploy_needs_confirmation() {
 deploy_must_refuse() {
   deploy_assumes_yes "$@" && return 1
   stdin_is_tty && return 1
+  return 0
+}
+
+# --- Cluster authorization safety notice -----------------------------------------------
+
+# Probe a permission no Blerg Role grants, using the runner's identity and normal SA groups.
+# A grant can mean AlwaysAllow or overly broad operator-managed bindings; either defeats our
+# namespace boundary. This works before the ServiceAccount exists on a first install.
+# This is advisory: errors (including an operator who cannot impersonate) are inconclusive,
+# never evidence of enforced RBAC, and neither errors nor grants add a confirmation prompt.
+cluster_authorization_notice() {
+  local answer status=0
+  answer="$(kubectl auth can-i get secrets --namespace=kube-system \
+    --as=system:serviceaccount:blerg:blerg-runner-agent-launcher \
+    --as-group=system:serviceaccounts --as-group=system:serviceaccounts:blerg \
+    --as-group=system:authenticated --request-timeout=10s 2>/dev/null)" || status=$?
+  if [ "$status" -eq 0 ] && [ "$answer" = yes ]; then
+    echo "WARNING: the runner service account can get secrets in kube-system." >&2
+    echo "Cluster authorization is effectively AlwaysAllow or has overly broad grants." >&2
+    echo "Blerg's RBAC boundaries (no pods/exec, namespace-scoped Roles) are not enforced." >&2
+    echo "Enable RBAC (on MicroK8s: microk8s enable rbac) and remove overly broad grants," >&2
+    echo "then rerun this installer to check again. Continuing deployment." >&2
+  elif { [ "$status" -eq 0 ] || [ "$status" -eq 1 ]; } && [ "$answer" = no ]; then
+    : # Expected denial. This probe does not certify every permission in the cluster.
+  else
+    echo "WARNING: could not verify cluster authorization as the runner service account." >&2
+    echo "Check kubectl connectivity and impersonation permissions, then rerun this installer." >&2
+    echo "Ensure RBAC is enabled (on MicroK8s: microk8s enable rbac). Continuing deployment." >&2
+  fi
   return 0
 }
 
@@ -138,6 +198,78 @@ runner_data_claim_check() {
   if [ -n "$want_class" ] && [ "$class" != "$want_class" ]; then
     echo "    warning: RUNNER_DATA_STORAGE_CLASS=$want_class differs from the claim's ${class:-none}; a bound claim's class cannot change" >&2
   fi
+  return 0
+}
+
+# --- Workspace storage ------------------------------------------------------------------------
+#
+# Cluster workspace claims use "standard" storage unless WORKSPACE_STORAGE_CLASS names a
+# size-limited class ("bounded"). Standard claims go in the class Blerg's own data claim uses, so
+# a cluster that can run Blerg can run workspaces. See README.md, "Workspace storage".
+
+# workspace_default_class: prints the class for standard workspace claims
+# (BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS). An explicit BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS (from
+# .env or the environment, even empty) is used as it is; otherwise it is the class of the
+# blerg-runner-data claim as stored on the object, read without waiting for it to bind (a new
+# claim gets the cluster's default class when it is created). Prints nothing when the claim has
+# no class. Returns 1 (stop) when the claim cannot be read or the class is not a class name:
+# deploying on a guess would point every new workspace at the wrong storage.
+workspace_default_class() {
+  local out
+  if [[ -v BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS ]]; then
+    runner_data_class_ok "$BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS" \
+      || { echo "BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS is not a StorageClass name: $BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS" >&2; return 1; }
+    printf '%s' "$BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS"
+    return 0
+  fi
+  if ! out="$(kubectl -n blerg get persistentvolumeclaim blerg-runner-data -o 'jsonpath={.spec.storageClassName}' 2>&1)"; then
+    echo "cannot read the storage class of persistentvolumeclaim/blerg-runner-data, so not choosing one for workspaces: $out" >&2
+    return 1
+  fi
+  if ! runner_data_class_ok "$out"; then
+    echo "persistentvolumeclaim/blerg-runner-data reports an unexpected storage class, so not choosing one for workspaces: $out" >&2
+    return 1
+  fi
+  printf '%s' "$out"
+}
+
+# rendered_config_value FILE KEY: prints KEY's value from a rendered blerg-config ConfigMap
+# (one `  KEY: "json string"` line, as render_runner_config.py and the template write it).
+# Prints nothing for a missing key; returns 1 when the file or the value cannot be read.
+rendered_config_value() {
+  python3 - "$1" "$2" <<'PY'
+import json, re, sys
+path, key = sys.argv[1:]
+for line in open(path, encoding="utf-8"):
+    m = re.match(r"^  (\w+): (.*)$", line.rstrip("\n"))
+    if m and m[1] == key:
+        sys.stdout.write(json.loads(m[2]))
+        break
+PY
+}
+
+# workspace_storage_notice RENDERED_CONFIGMAP: says which workspace storage mode this deploy
+# configured, from the values the runner will actually read. Always returns 0.
+workspace_storage_notice() {
+  local bounded default
+  if ! bounded="$(rendered_config_value "$1" BLERG_RUNNER_WORKSPACE_STORAGE_CLASS)" \
+      || ! default="$(rendered_config_value "$1" BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS)"; then
+    echo "==> Workspace storage: could not read the rendered configuration (see README.md, \"Workspace storage\")"
+    return 0
+  fi
+  if [ -n "$bounded" ]; then
+    echo "==> Workspace storage: bounded ($bounded)."
+    return 0
+  fi
+  if [ -n "$default" ]; then
+    echo "==> Workspace storage: standard (class $default; no size limit per workspace)."
+  else
+    echo "==> Workspace storage: standard (cluster default class; no size limit per workspace)."
+    echo "    The workspace class setting (BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS) is empty, so workspace claims"
+    echo "    name no class and use the cluster's default StorageClass. With no default class they cannot bind:"
+    echo "    mark a class as the default, or set BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS."
+  fi
+  echo "    Set WORKSPACE_STORAGE_CLASS to a size-limited StorageClass for bounded workspaces (README.md, \"Workspace storage\")."
   return 0
 }
 

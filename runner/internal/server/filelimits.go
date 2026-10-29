@@ -4,8 +4,9 @@ package server
 //
 // One file, whoever sent it (an agent's `blerg-runner publish`, a person's attachment), is at most
 // maxArtifactBytes. A session's attachments together are at most maxUploadBytesPerSession, and the
-// files its agent published together at most maxArtifactBytesPerSession. The file counts
-// (maxArtifactsPerSession, maxUploadsPerSession) are not configurable.
+// files its agent published together at most maxArtifactBytesPerSession. There is no cap on the
+// number of files (maxArtifactsPerSession and maxUploadsPerSession are 0): a long-running session
+// must not stop accepting files after a fixed count; the size totals bound storage.
 //
 // The sizes are set once at start from the environment (ConfigureFileLimits) and reported to
 // every client that sends files, so a client can refuse a file that is too big before sending it:
@@ -37,8 +38,8 @@ var (
 	maxArtifactBytes           int64 = defaultMaxFileMB << 20
 	maxArtifactBytesPerSession int64 = defaultMaxSessionArtifactsMB << 20
 	maxUploadBytesPerSession   int64 = defaultMaxSessionUploadsMB << 20
-	maxArtifactsPerSession           = 50
-	maxUploadsPerSession             = 100
+	maxArtifactsPerSession           = 0
+	maxUploadsPerSession             = 0
 )
 
 // ConfigureFileLimits reads BLERG_RUNNER_MAX_FILE_MB, BLERG_RUNNER_MAX_SESSION_UPLOADS_MB and

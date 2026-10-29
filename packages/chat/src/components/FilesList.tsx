@@ -12,10 +12,12 @@ import { formatSize, groupArtifacts, type ArtifactGroup } from '../model/artifac
 import { ARTIFACT_VIEWS, isViewable } from '../model/artifactViews'
 import type { ArtifactsStatus } from '../hooks/useArtifacts'
 import type { ArtifactInfo, TransportFiles } from '../transport/types'
-import { fileErrorText } from '../transport/files'
+import { fileActionError, fileErrorText } from '../transport/files'
 import ErrorId from './ErrorId'
 import { Hover } from './Hovercard'
 import { TimeLabel } from './TimeLabel'
+import {FreeSpaceButton} from './FreeSpace'
+import { FileIcon } from './FileIcon'
 
 const SORT_KEY = 'blerg.files.sort'
 const ORIGIN_KEY = 'blerg.files.origin'
@@ -24,30 +26,6 @@ const SEARCH_OVER = 6
 
 type Sort = 'newest' | 'name'
 type Origin = 'all' | 'agent' | 'user'
-
-// One small glyph per view: a page with a mark that tells the kinds apart.
-const GLYPHS: Record<string, string> = {
-  markdown: 'M6 11V8l1.5 2L9 8v3',
-  pdf: 'M6.5 12V8h2a1 1 0 0 1 0 2h-2',
-  image: 'm5 12 2-3 1.5 2 1-1 2 2z',
-  csv: 'M5.5 8.5h6M5.5 10.5h6M8.5 7v6',
-  json: 'm7 8-2 2 2 2m3-4 2 2-2 2',
-  diff: 'M8.5 7v3M7 8.5h3M7 12h3',
-  html: 'M8.5 7a3 3 0 1 0 0 6 3 3 0 0 0 0-6',
-  audio: 'M7 12V8.5l4-1V11',
-  video: 'M7 8v4l3.5-2z',
-  text: 'M6 8.5h5M6 10.5h5M6 12.5h3',
-}
-
-function FileGlyph({ view, label }: { view: string; label: string }) {
-  return (
-    <svg className="artifact-glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-      <title>{label}</title>
-      <path d="M3.5 1.5h6L13 5v9.5H3.5zM9.5 1.5V5H13" fill="none" stroke="currentColor" strokeWidth="1" strokeLinejoin="round" />
-      <path d={GLYPHS[view] ?? GLYPHS.text} fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
 
 const DOWNLOAD_ICON = 'M8 2.5v8m-3-3 3 3 3-3M3 13h10'
 const DELETE_ICON = 'M3.5 4.5h9M6.5 4.5v-2h3v2M5 4.5l.5 9h5l.5-9'
@@ -121,8 +99,11 @@ export default function FilesList({ sessionId, files, items, status, onView, onC
       await files.remove(sessionId, a.id)
       setConfirming(null)
       onChanged()
-    } catch {
-      fail(a.id, { message: 'Couldn’t delete this file. Try again.' })
+      // Files waiting for space under the message box check again at once.
+      window.dispatchEvent(new Event('blerg-files-changed'))
+    } catch (e) {
+      setConfirming(null)
+      fail(a.id, fileActionError(e, 'Couldn’t delete this file. Try again.'))
     } finally {
       setBusy(null)
     }
@@ -154,7 +135,7 @@ export default function FilesList({ sessionId, files, items, status, onView, onC
     )
     return (
       <>
-        <FileGlyph view={a.view} label={gone ? 'No longer available' : kind} />
+        <FileIcon name={a.name} label={gone ? 'No longer available' : kind} />
         {viewable
           ? <Hover target={{ kind: 'file', sessionId, id: a.id, artifact: { ...a, ...(g.latest.version ? { latest_version: g.latest.version } : {}) } }}>
               <button type="button" {...mainProps} aria-label={`View ${a.name}`} onClick={() => onView(a)}>{main}</button>
@@ -169,7 +150,9 @@ export default function FilesList({ sessionId, files, items, status, onView, onC
         ) : (
           <div className="artifact-row-actions">
             {!gone && <IconButton label="Download" path={DOWNLOAD_ICON} onClick={() => void download(a)} />}
-            <IconButton label="Delete" path={DELETE_ICON} onClick={() => { clear(a.id); setConfirming(a.id) }} />
+            {/* Only a file the person may delete offers it: the owner or an administrator any file,
+                a person their own attachments (the server decides; `can_delete` says so). */}
+            {a.can_delete !== false && <IconButton label="Delete" path={DELETE_ICON} onClick={() => { clear(a.id); setConfirming(a.id) }} />}
           </div>
         )}
         {errors[a.id] && <div className="artifact-error" role="alert">{errors[a.id].message}<ErrorId id={errors[a.id].errorId} /></div>}
@@ -275,5 +258,5 @@ export default function FilesList({ sessionId, files, items, status, onView, onC
       </>
     )
   }
-  return <>{body}</>
+  return <><FreeSpaceButton sessionId={sessionId} files={files} onChanged={onChanged} />{body}</>
 }

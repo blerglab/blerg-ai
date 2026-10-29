@@ -3,7 +3,7 @@
 // only for devices that can hover, reads its data on first open (never for a chip not hovered) and
 // keeps it; one switch turns it off, and one object holds the delay and the fields.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import {
   COMMIT_MISS_MS, HOVERCARD, Hover, HovercardProvider, clearHovercardCache, headsFor, placeCard, setHovercardClock, setHovercardsEnabled, type CardPreview, type CardTarget, type HovercardSources,
 } from './Hovercard'
@@ -332,6 +332,7 @@ describe('Hover: what a file shows', () => {
     expect(lines.textContent!.split('\n')).toHaveLength(HOVERCARD.excerptLines)
     expect(lines).toHaveClass('has-more')
     expect(screen.getByTestId('hovercard-name')).toHaveTextContent('notes.md')
+    expect(document.querySelector('.hc-file-icon')).toHaveAttribute('data-file-icon', 'markdown')
     expect(screen.getByTestId('hovercard-version')).toHaveTextContent('v2 of 3')
     expect(screen.getByTestId('hovercard-size')).toHaveTextContent('2.0 KB')
     expect(screen.getByTestId('hovercard-publisher')).toHaveTextContent('by the agent')
@@ -651,4 +652,114 @@ describe('headsFor: direction over a window, with tolerance', () => {
     expect(headsFor({ x: 507, y: 209 }, { x: 510, y: 200 }, card)).toBe(true)
     expect(headsFor({ x: 509, y: 206 }, { x: 510, y: 200 }, card)).toBe(false)
   })
+})
+
+it('keeps same-SHA hover reads separate for each member and runtime generation', async () => {
+  const first = { member_id: 'one', launch_generation: 'launch', generation: 7 }
+  const second = { member_id: 'two', launch_generation: 'launch', generation: 7 }
+  const commit = vi.fn(async (_session: string, _sha: string, _signal?: AbortSignal, member?: typeof first) => ({ ...DETAILS, ...member, subject: `Member ${member?.member_id} generation ${member?.generation}` }))
+  const files = Object.assign(filesWith({ d1: COMMIT_PATCH }), { commit })
+  const { rerender } = render(<HovercardProvider value={{ files }}><CommitChips commits={[{ sha: SHA, member: first }, { sha: SHA, member: second }]} hover={{ sessionId: 's1', diff: 'd1' }} /></HovercardProvider>)
+  const chips = screen.getAllByRole('button', { name: `Copy commit ${SHA}` })
+  await openOn(chips[0]!)
+  expect(screen.getByTestId('hovercard-subject')).toHaveTextContent('Member one generation 7')
+  fireEvent.keyDown(document.body, { key: 'Escape' })
+  await openOn(chips[1]!)
+  expect(screen.getByTestId('hovercard-subject')).toHaveTextContent('Member two generation 7')
+  expect(commit).toHaveBeenCalledWith('s1', SHA, undefined, first)
+  expect(commit).toHaveBeenCalledWith('s1', SHA, undefined, second)
+  fireEvent.keyDown(document.body, { key: 'Escape' })
+  const replacement = { ...second, generation: 8 }
+  rerender(<HovercardProvider value={{ files }}><CommitChips commits={[{ sha: SHA, member: replacement }]} hover={{ sessionId: 's1', diff: 'd1' }} /></HovercardProvider>)
+  await openOn(screen.getByRole('button', { name: `Copy commit ${SHA}` }))
+  expect(screen.getByTestId('hovercard-subject')).toHaveTextContent('Member two generation 8')
+  expect(commit).toHaveBeenCalledTimes(3)
+})
+
+it('renders host session facts in the existing run hovercard and escapes their text', () => {
+  vi.useFakeTimers()
+  const chip = show({}, { kind: 'run', title: 'Build widgets', facts: { model: { value: 'Model next' } }, details: [
+    { label: 'Repository / folder', value: 'example-org/widget' },
+    { label: 'Runtime', value: 'Sandbox' },
+    { label: 'Started session', value: '<script>Child checks</script>' },
+  ] })
+  fireEvent.pointerEnter(chip, { pointerType: 'mouse' })
+  act(() => { vi.advanceTimersByTime(DELAY + 1) })
+  const preview = screen.getByTestId('hovercard')
+  expect(preview).toHaveTextContent('example-org/widget')
+  expect(preview).toHaveTextContent('Sandbox')
+  expect(preview).toHaveTextContent('Model next')
+  expect(preview).toHaveTextContent('<script>Child checks</script>')
+  expect(preview.querySelector('script')).toBeNull()
+})
+
+it('uses the host card content inside the shared delayed popup', () => {
+  vi.useFakeTimers()
+  const action = vi.fn()
+  render(<Hover target={{ kind: 'run', title: 'Fallback summary', facts: {} }} content={<article>Full host card<button onClick={action}>Host action</button></article>}><button>tile</button></Hover>)
+  const tile = screen.getByRole('button', { name: 'tile' })
+  expect(screen.queryByText('Full host card')).toBeNull()
+  fireEvent.pointerEnter(tile, { pointerType: 'mouse' })
+  act(() => { vi.advanceTimersByTime(HOVERCARD.openDelayMs + 10) })
+  const popup = screen.getByTestId('hovercard')
+  expect(popup).toHaveTextContent('Full host card')
+  expect(popup).not.toHaveTextContent('Fallback summary')
+  expect(tile).toHaveAttribute('aria-describedby', popup.id)
+  fireEvent.click(screen.getByRole('button', { name: 'Host action' }))
+  expect(action).toHaveBeenCalledOnce()
+})
+
+it('keeps focus within the popup or anchor, then closes after focus leaves both', () => {
+  vi.useFakeTimers()
+  render(<><Hover target={{ kind: 'run', title: 'Preview', facts: {} }} content={<><button>Action</button><button>Disclosure</button></>}><button>tile</button></Hover><button>Outside</button></>)
+  const tile = screen.getByRole('button', { name: 'tile' })
+  fireEvent.keyDown(document.body, { key: 'Tab' })
+  act(() => tile.focus())
+  fireEvent.pointerEnter(tile, { pointerType: 'mouse' })
+  act(() => { vi.advanceTimersByTime(HOVERCARD.openDelayMs) })
+  const popup = screen.getByTestId('hovercard')
+  const action = within(popup).getByRole('button', { name: 'Action' })
+  const disclosure = within(popup).getByRole('button', { name: 'Disclosure' })
+  act(() => action.focus())
+  act(() => { vi.advanceTimersByTime(HOVERCARD.closeDelayMs + 100) })
+  expect(action).toHaveFocus()
+  expect(screen.getByTestId('hovercard')).toBe(popup)
+  act(() => disclosure.focus())
+  act(() => { vi.advanceTimersByTime(HOVERCARD.closeDelayMs + 100) })
+  expect(disclosure).toHaveFocus()
+  act(() => tile.focus())
+  act(() => { vi.advanceTimersByTime(HOVERCARD.closeDelayMs + HOVERCARD.openDelayMs) })
+  expect(screen.getByTestId('hovercard')).toBe(popup)
+  act(() => action.focus())
+  act(() => screen.getByRole('button', { name: 'Outside' }).focus())
+  act(() => { vi.advanceTimersByTime(HOVERCARD.closeDelayMs - 1) })
+  act(() => action.focus())
+  act(() => { vi.advanceTimersByTime(HOVERCARD.closeDelayMs + 100) })
+  expect(action).toHaveFocus()
+  expect(screen.getByTestId('hovercard')).toBe(popup)
+  act(() => screen.getByRole('button', { name: 'Outside' }).focus())
+  act(() => { vi.advanceTimersByTime(HOVERCARD.closeDelayMs - 1) })
+  expect(screen.getByTestId('hovercard')).toBe(popup)
+  act(() => { vi.advanceTimersByTime(1) })
+  expect(screen.queryByTestId('hovercard')).toBeNull()
+  expect(screen.getByRole('button', { name: 'Outside' })).toHaveFocus()
+})
+
+it('Esc from popup controls closes and returns focus to the anchor without reopening', () => {
+  vi.useFakeTimers()
+  const escape = vi.fn()
+  render(<div onKeyDown={escape}><Hover target={{ kind: 'run', title: 'Preview', facts: {} }} content={<button>Action</button>}><button>tile</button></Hover></div>)
+  const tile = screen.getByRole('button', { name: 'tile' })
+  fireEvent.keyDown(document.body, { key: 'Tab' })
+  act(() => tile.focus())
+  fireEvent.pointerEnter(tile, { pointerType: 'mouse' })
+  act(() => { vi.advanceTimersByTime(HOVERCARD.openDelayMs) })
+  const action = screen.getByRole('button', { name: 'Action' })
+  act(() => action.focus())
+  fireEvent.keyDown(action, { key: 'Escape' })
+  expect(screen.queryByTestId('hovercard')).toBeNull()
+  expect(tile).toHaveFocus()
+  expect(escape).not.toHaveBeenCalled()
+  act(() => { vi.advanceTimersByTime(HOVERCARD.openDelayMs + 100) })
+  expect(screen.queryByTestId('hovercard')).toBeNull()
 })

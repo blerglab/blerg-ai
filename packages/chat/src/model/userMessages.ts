@@ -14,20 +14,25 @@ import { isHarnessText } from './harnessText'
 export type UserMessageShape =
   | { as: 'person' }
   | { as: 'hidden' }
-  | { as: 'notice'; text: string; label?: string }
+  | { as: 'notice'; text: string; label?: string; detail?: string; restart?: 'paused' | 'continued' }
   | { as: 'output'; text: string }
 
 const NOTE_PREFIX = '[system] '
 // The restart note an older daemon queued as the person's message.
 const RESTART_NOTE = '[system] Session resumed after a restart'
-// What the daemon sends an agent session it recovered (daemon/claudeadopt.go adoptContinuePrompt).
+// What the daemon sends an agent session it recovered (daemon/claudeadopt.go adoptContinuePrompt),
+// and what a paused restart row's Resume button sends for the person.
 const ADOPT_PROMPT = 'Continue the task you were working on.'
+export const RESUME_PROMPT = ADOPT_PROMPT
+/** A paused restart row's words for the person, and the one-line reason its details open with. */
+export const PAUSED_ROW_TEXT = 'Paused after a restart'
+export const PAUSED_ROW_REASON = 'A command was cut off: it may not have finished.'
 const ADOPT_NOTE = 'Session recovered: the agent was asked to continue the task it was working on.'
 
-/** Sources whose messages Blerg wrote on its own behalf (decisions relayed to the agent, and a
- *  parent's note that its child's turn ended). */
+/** Sources whose messages Blerg wrote on its own behalf (decisions relayed to the agent, a parent's
+ *  note that its child's turn ended, and a nudge that the session's plan drifted). */
 export function isBlergRelaySource(source: unknown): boolean {
-  return source === 'review' || source === 'proposal' || source === 'child_turn'
+  return source === 'review' || source === 'proposal' || source === 'child_turn' || source === 'plan_drift' || source === 'usage_limit'
 }
 
 /** Who wrote a message that some automation, not the person, sent: a board's (a card's task, a
@@ -74,6 +79,7 @@ export function userMessageShape(payload: unknown): UserMessageShape {
   if (!payload || typeof payload !== 'object') return { as: 'person' }
   const p = payload as Partial<UserMessagePayload>
   const text = typeof p.text === 'string' ? p.text : ''
+  if (p.source === 'system' && text.startsWith('[system] The process hosting this session restarted, and work that was running was cut off.')) return { as: 'hidden' }
   if (isHarnessText(text)) return { as: 'hidden' }
   // The answer to a question the agent did not wait on, as Blerg sent it on to the agent: the
   // question's card already shows the person's answer.
@@ -93,9 +99,45 @@ export function userMessageShape(payload: unknown): UserMessageShape {
     return trimmed.startsWith(RESTART_NOTE) ? { as: 'notice', text: trimmed.slice(NOTE_PREFIX.length) } : { as: 'person' }
   }
   if (trimmed === '' || trimmed.startsWith('[system reminder]')) return { as: 'hidden' }
+  if (trimmed.startsWith('[system] ↻ ')) {
+    const [summary, ...detail] = trimmed.slice('[system] ↻ '.length).split('\n')
+    // The daemon's paused row ("Host restarted · paused — check the interrupted command") speaks to
+    // the agent; the person reads one plain line, the reason and the cut-off list in its details.
+    if (/ · paused(?: —|$)/u.test(summary)) {
+      return { as: 'notice', text: PAUSED_ROW_TEXT, label: '↻', detail: [PAUSED_ROW_REASON, ...detail].join('\n'), restart: 'paused' }
+    }
+    return { as: 'notice', text: summary, label: '↻', detail: detail.join('\n') || undefined, restart: / · continued$/u.test(summary) ? 'continued' : undefined }
+  }
   if (trimmed.startsWith(NOTE_PREFIX)) return { as: 'notice', text: trimmed.slice(NOTE_PREFIX.length) }
   if (trimmed === ADOPT_PROMPT) return { as: 'notice', text: ADOPT_NOTE }
   return { as: 'output', text }
+}
+
+/** Where a paused restart row stands: 'paused' while the session still waits for it, 'resumed' once
+ *  someone sent the session a message after it (its Resume button, or a typed message), and
+ *  'superseded' when a later restart row took its place before anyone did. */
+export type RestartRowState = 'paused' | 'resumed' | 'superseded'
+
+/** The state of every paused restart row in the transcript, by client_event_id. */
+export function restartRowStates(events: readonly AgentEvent[]): Map<string, RestartRowState> {
+  const states = new Map<string, RestartRowState>()
+  let open: string | null = null
+  for (const ev of events) {
+    if (ev.kind !== 'user_message') continue
+    const shape = userMessageShape(ev.payload)
+    const p = ev.payload as Partial<UserMessagePayload> | undefined
+    const restartRow = shape.as === 'notice' && shape.label === '↻'
+    const fromSomeone = shape.as === 'person' || p?.source === 'ask_answer'
+    if (open !== null && (restartRow || fromSomeone)) {
+      states.set(open, restartRow ? 'superseded' : 'resumed')
+      open = null
+    }
+    if (shape.as === 'notice' && shape.restart === 'paused') {
+      states.set(ev.client_event_id, 'paused')
+      open = ev.client_event_id
+    }
+  }
+  return states
 }
 
 /** Whether the transcript draws anything for a user_message. */

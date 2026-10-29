@@ -266,15 +266,15 @@ func TestBoardProposalValidatesTheDraft(t *testing.T) {
 func TestBoardProposalIdempotency(t *testing.T) {
 	fx, _ := newBoardCreateFx(t)
 	body := map[string]any{"name": "Launch", "repos": []string{"team/app"}}
-	code, first := proposeBoard(fx, fx.sess, fx.sessTok, "key-00000001", body)
+	code, first := proposeBoard(fx, fx.sess, fx.sessTok, "key-1", body)
 	if code != http.StatusAccepted {
 		t.Fatalf("first = %d", code)
 	}
-	code, again := proposeBoard(fx, fx.sess, fx.sessTok, "key-00000001", body)
+	code, again := proposeBoard(fx, fx.sess, fx.sessTok, "key-1", body)
 	if code != http.StatusAccepted || again["proposal_id"] != first["proposal_id"] || again["repeated"] != true {
 		t.Fatalf("repeat = %d %v", code, again)
 	}
-	if code, _ := proposeBoard(fx, fx.sess, fx.sessTok, "key-00000001", map[string]any{"name": "Other"}); code != http.StatusConflict {
+	if code, _ := proposeBoard(fx, fx.sess, fx.sessTok, "key-1", map[string]any{"name": "Other"}); code != http.StatusConflict {
 		t.Fatalf("reused key, other draft = %d", code)
 	}
 	// Without a key, the same draft soon after is the same proposal; a new key is a new one.
@@ -449,26 +449,31 @@ func TestBoardRepoChoicesForTheBoardServerOnly(t *testing.T) {
 			t.Fatalf("non-board caller = %d", rec.Code)
 		}
 	}
-	if rec := get(topicDaemonToken); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"repos":[`) {
+	if rec := get(topicDaemonToken); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("board server = %d %s", rec.Code, rec.Body.String())
 	}
 }
 
 func TestBoardRepoChoicesNameReposAsBoardsStoreThem(t *testing.T) {
 	hub := NewHub()
-	d1 := &DaemonConn{ID: "d1", Name: "desk"}
+	d1 := &DaemonConn{ID: newUUID(), Name: "desk"}
 	d1.SetSandboxClones(true)
 	d1.SetCheckedOutRepos([]string{"entertainment", "scratch", "shared", "split", "has space"})
 	d1.SetRepoRemotes(map[string]string{"entertainment": "example-org/example-repo", "shared": "example-org/shared", "split": "example-org/split-a"})
 	hub.Register(d1)
-	d2 := &DaemonConn{ID: "d2", Name: "laptop"}
+	d2 := &DaemonConn{ID: newUUID(), Name: "laptop"}
 	d2.SetSandboxClones(true)
 	d2.SetCheckedOutRepos([]string{"shared", "split"})
 	d2.SetRepoRemotes(map[string]string{"shared": "example-org/shared", "split": "example-org/split-b"})
 	hub.Register(d2)
-	api := NewAPI(hub, nil, "board-key", nil, "")
+	pool := connectSrvTestDB(t)
+	api := NewAPI(hub, pool, "board-key", nil, "")
+	fixtureOwnDesktop(t, pool, d1, "user-1")
+	fixtureOwnDesktop(t, pool, d2, "user-1")
+	proof := workspaceBoardProof(t, api, "user-1")
 	req := httptest.NewRequest(http.MethodGet, "/api/board-repo-choices", nil)
 	req.Header.Set("Authorization", "Bearer board-key")
+	req.Header.Set(desktopViewerHeader, proof)
 	rec := httptest.NewRecorder()
 	api.HandleBoardRepoChoices(rec, req)
 	var out struct {

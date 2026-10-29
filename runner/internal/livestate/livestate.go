@@ -72,20 +72,30 @@ type Ask struct {
 // StaleRunning after that). Resumed: a finished subagent the main agent resumed, running until its
 // own end whatever the turn does; Background then says how its original ran.
 type Subagent struct {
-	Reasoning  *Reasoning `json:"reasoning,omitempty"`
-	Progress   *Progress  `json:"progress,omitempty"`
-	Effort     string     `json:"effort"`
-	Key        string     `json:"key"`
-	Title      string     `json:"title"`
-	Type       string     `json:"type"`
-	Model      string     `json:"model"`
-	Tokens     *int64     `json:"tokens"`
-	Doing      string     `json:"doing"`
-	StartedAt  time.Time  `json:"started_at"`
-	ActiveAt   time.Time  `json:"active_at"`
-	Background bool       `json:"background"`
-	Resumed    bool       `json:"resumed,omitempty"`
-	Seq        int64      `json:"seq"`
+	Reasoning *Reasoning `json:"reasoning,omitempty"`
+	Progress  *Progress  `json:"progress,omitempty"`
+	Effort    string     `json:"effort"`
+	Key       string     `json:"key"`
+	Title     string     `json:"title"`
+	Type      string     `json:"type"`
+	Model     string     `json:"model"`
+	Tokens    *int64     `json:"tokens"`
+	// Usage is Tokens broken down (the Running now chip's tooltip); present exactly when Tokens is.
+	Usage      *Usage    `json:"usage,omitempty"`
+	Doing      string    `json:"doing"`
+	StartedAt  time.Time `json:"started_at"`
+	ActiveAt   time.Time `json:"active_at"`
+	Background bool      `json:"background"`
+	Resumed    bool      `json:"resumed,omitempty"`
+	Seq        int64     `json:"seq"`
+}
+
+// Usage is a subagent's reported usage so far, by part.
+type Usage struct {
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	CacheRead  int64 `json:"cache_read"`
+	CacheWrite int64 `json:"cache_write"`
 }
 
 // Task is a background task still running (a background subagent's own task left out).
@@ -159,7 +169,7 @@ func readSubagents(events []Event) (order []*subAcc, lastTurnDone int64) {
 			// The chat's liveCalls: a message that is not the system's ends what the turn had in
 			// flight (a person's mid-turn message, an answer), as a turn's end does.
 			var p agent.UserMessagePayload
-			if json.Unmarshal(ev.Payload, &p) == nil && p.Source != "system" {
+			if json.Unmarshal(ev.Payload, &p) == nil && p.Source != "system" && p.Source != "usage_limit" {
 				lastTurnDone = ev.Seq
 			}
 		case "subagent_started", "subagent_update", "subagent_done":
@@ -358,10 +368,12 @@ func (a *subAcc) view(showTokens bool) Subagent {
 	}
 	s.Effort = a.effort
 	if showTokens {
-		if n := usageTotal(done.Usage); n != nil {
-			s.Tokens = n
-		} else {
-			s.Tokens = usageTotal(update.Usage)
+		u := done.Usage
+		if u == nil {
+			u = update.Usage
+		}
+		if s.Tokens = usageTotal(u); s.Tokens != nil {
+			s.Usage = &Usage{Input: int64(u.InputTokens), Output: int64(u.OutputTokens), CacheRead: int64(u.CacheReadTokens), CacheWrite: int64(u.CacheWriteTokens)}
 		}
 	}
 	if a.row != nil {
@@ -406,7 +418,7 @@ type askAcc struct {
 // child.
 func answersLegacyAsk(source string) bool {
 	switch source {
-	case "system", "review", "proposal", "child_turn", "blerg-board", "cron", "question_answer":
+	case "system", "review", "proposal", "child_turn", "blerg-board", "cron", "question_answer", "plan_drift", "usage_limit":
 		return false
 	}
 	return true

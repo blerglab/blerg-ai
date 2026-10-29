@@ -34,6 +34,9 @@ func TestMessagesAreRecordedInTheAgentTranscript(t *testing.T) {
 	if err := db.SetSessionKind(ctx, pool, agentSess, "agent"); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.SetSessionKind(ctx, pool, termSess, "tmux"); err != nil {
+		t.Fatal(err)
+	}
 	board, err := db.CreateBoard(ctx, pool, "B", nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)

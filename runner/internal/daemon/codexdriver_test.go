@@ -1,7 +1,10 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +14,58 @@ import (
 
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 )
+
+func TestCodexConnectionFailureRetainsCauseOnInterruptedTurnAndExit(t *testing.T) {
+	for _, mode := range []string{"interrupted", "exit", "requested"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := fakeCodex(t)
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("FAKE_CODEX_CONNECTION_FAILURE", mode)
+			var logs bytes.Buffer
+			old := log.Writer()
+			log.SetOutput(&logs)
+			defer log.SetOutput(old)
+			em := &collectEmitter{}
+			d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
+			stop := startTestCodexDriver(t.Context(), t, d)
+			d.Enqueue("Reply without tools", "chat")
+			if mode == "requested" {
+				waitUntil(t, "connection retry", func() bool { return countKind(em, "error") > 0 })
+				d.Interrupt()
+			}
+			waitUntil(t, "failed turn", func() bool { return countKind(em, "turn_done") > 0 })
+			stop()
+			var finalCause bool
+			for _, ev := range em.snapshot() {
+				if ev.Kind == "error" {
+					p, _ := ev.Payload.(agent.ErrorPayload)
+					if p.Code != agent.ErrorCodeAPIRetry && strings.Contains(p.Message, "TLS handshake failed") {
+						finalCause = true
+					}
+				}
+				if ev.Kind == "turn_done" {
+					p, _ := ev.Payload.(agent.TurnDonePayload)
+					want := "error"
+					if mode == "requested" {
+						want = "interrupted"
+					}
+					if p.StopReason != want {
+						t.Error("connection failure or requested interruption recorded incorrectly")
+					}
+				}
+			}
+			if (mode != "requested" && !finalCause) || !strings.Contains(logs.String(), "TLS handshake failed") {
+				t.Error("engine connection cause missing from final error or pod log")
+			}
+			all, _ := json.Marshal(em.snapshot())
+			for _, secret := range []string{"fixture-private-token", "fixture-password", "fixture-query"} {
+				if bytes.Contains(all, []byte(secret)) || strings.Contains(logs.String(), secret) {
+					t.Error("connection diagnostic disclosed a credential")
+				}
+			}
+		})
+	}
+}
 
 // startTestCodexDriver owns the runtime until it has stopped, including runApp's
 // deferred process/PID cleanup. Callers defer the returned stop function so it
@@ -44,12 +99,15 @@ func fakeCodex(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	script := `#!/usr/bin/env python3
-import json, os, sys, time
+import json, os, sys, time, subprocess
 if "--version" in sys.argv:
  print(os.environ.get("FAKE_CODEX_VERSION","codex-cli 0.162.1"));sys.exit(0)
 if os.environ.get("FAKE_CODEX_ENV_DUMP"):
  with open(os.environ["FAKE_CODEX_ENV_DUMP"],"w") as dump: json.dump(dict(os.environ),dump)
 with open(os.environ.get("FAKE_CODEX_LOG", os.devnull), "a") as log: log.write("codex " + " ".join(sys.argv[1:]) + "\n")
+if os.environ.get("FAKE_CODEX_HELPERS"):
+ helper=subprocess.Popen(["sleep", "300"],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+ with open(os.environ["FAKE_CODEX_HELPERS"],"a") as log: log.write(str(helper.pid)+"\n")
 mcp_reads=0
 turn_starts=0
 for line in sys.stdin:
@@ -57,6 +115,13 @@ for line in sys.stdin:
  with open(os.environ.get("FAKE_CODEX_LOG", os.devnull), "a") as log: log.write(method + " " + json.dumps(r.get("params",{})) + "\n")
  def send(v): print(json.dumps(v), flush=True)
  if ident is None: continue
+ if os.environ.get("FAKE_CODEX_REJECT_PLUGIN")==method and any("selected@market" in arg for arg in sys.argv):
+  gate=os.environ.get("FAKE_CODEX_PLUGIN_GATE")
+  if gate:
+   with open(gate+".waiting","w") as f: f.write("ready")
+   while not os.path.exists(gate): time.sleep(0.005)
+  send({"id":ident,"error":{"code":-32603,"message":"fixture plugin load failed"}})
+  sys.exit(1)
  if method=="" and ("result" in r or "error" in r):
   if ident==2000:
    send({"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-1","status":"completed"}}})
@@ -81,6 +146,7 @@ for line in sys.stdin:
   elif os.environ["FAKE_CODEX_MCP_FAILURE"]=="null-data": send({"id":ident,"result":{"data":None}})
   else: send({"id":ident,"error":{"code":-32603,"message":"fixture failure"}})
   continue
+ if method=="thread/read" and r.get("params",{}).get("threadId")=="cx-thread-1": result={"thread":{"id":"cx-thread-1","status":{"type":"idle"},"turns":[]}}
  if method=="thread/read" and not os.environ.get("FAKE_CODEX_CHILD_READ"):
   child_id=r.get("params",{}).get("threadId")
   if (child_id=="owned-child" and os.environ.get("FAKE_CODEX_CHILD_QUESTION") in ("owned","stale")) or (child_id=="child-thread" and (os.environ.get("FAKE_CODEX_CHILD_FOLLOWUP") or os.environ.get("FAKE_CODEX_CHILD_REROUTE"))):
@@ -181,6 +247,12 @@ for line in sys.stdin:
   message="You've hit your usage limit. Try again at 2030-01-02T03:04:05Z."
   send({"method":"error","params":{"threadId":"cx-thread-1","error":{"message":message},"willRetry":False}})
   send({"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-1","status":"failed","error":{"message":message}}}})
+  continue
+ if method=="turn/start" and os.environ.get("FAKE_CODEX_CONNECTION_FAILURE"):
+  send({"method":"error","params":{"threadId":"cx-thread-1","error":{"message":"Reconnecting... 5/5","additionalDetails":"TLS handshake failed; Authorization: Bearer fixture-private-token; https://user:fixture-password@example.test/responses?token=fixture-query"},"willRetry":True}})
+  if os.environ["FAKE_CODEX_CONNECTION_FAILURE"]=="exit": sys.exit(1)
+  if os.environ["FAKE_CODEX_CONNECTION_FAILURE"]=="requested": continue
+  send({"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-1","status":"interrupted"}}})
   continue
  if method=="turn/start" and os.environ.get("FAKE_CODEX_STREAM_FIRST"):
   for _ in range(1000): send({"method":"item/agentMessage/delta","params":{"threadId":"cx-thread-1","delta":"progress"}})
@@ -311,6 +383,7 @@ func TestCodexDriverFailedCommandMarksToolResultError(t *testing.T) {
 }
 
 func TestCodexDriverReportsExpiredAuthWithoutForwardingStderr(t *testing.T) {
+	t.Setenv("CODEX_AUTH_JSON", `{"OPENAI_API_KEY":"fixture-api-private"}`)
 	t.Setenv("PATH", fakeCodex(t)+":"+os.Getenv("PATH"))
 	t.Setenv("FAKE_CODEX_AUTH_DIAGNOSTIC", "1")
 	em := &collectEmitter{}
@@ -333,7 +406,7 @@ func TestCodexDriverReportsExpiredAuthWithoutForwardingStderr(t *testing.T) {
 		if !ok {
 			continue
 		}
-		if p.Message == "Codex login expired and could not be refreshed. Reconnect your Codex credential in Settings, then retry." {
+		if strings.Contains(p.Message, "Settings") && strings.Contains(p.Message, "new person-owned cluster session") && strings.Contains(p.Message, "API key") {
 			found = true
 		}
 		if strings.Contains(p.Message, "sample-private-value") {

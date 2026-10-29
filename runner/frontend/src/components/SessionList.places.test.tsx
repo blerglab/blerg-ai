@@ -149,7 +149,7 @@ describe('SessionList — where sessions run', () => {
     // Directly beneath the row of pills.
     expect(screen.getByTestId('place-pills').nextElementSibling).toBe(meters)
     expect(within(meters).getByTestId('usage-row-codex')).toHaveTextContent('Codex5h75%week12%')
-    expect(within(meters).getByTestId('usage-window-5h')).toHaveClass('usage-meter--warning')
+    expect(within(meters).getByTestId('usage-window-5h')).toHaveClass('usage-meter--quiet')
   })
 
   it('the strip wraps instead of scrolling sideways', () => {
@@ -185,8 +185,8 @@ describe('SessionList — focus across runtimes', () => {
     expect(screen.queryByText('workstation', { selector: 'span[style*="uppercase"]' })).not.toBeInTheDocument()
     expect(screen.getByText('Widget on host')).toBeInTheDocument()
     expect(screen.getByText('Widget on cluster')).toBeInTheDocument()
-    const chips = screen.getAllByTestId('runtime-chip').map(c => c.textContent)
-    expect(chips.sort()).toEqual(['Cluster', 'Cluster', 'Host'])
+    const chips = screen.getAllByTestId('runtime-chip').map(c => c.querySelector('[data-runtime]')?.getAttribute('data-runtime'))
+    expect(chips.sort()).toEqual(['cluster', 'cluster', 'host'])
   })
 
   it('offers All / Cluster / each workstation daemon when there is more than one place', async () => {

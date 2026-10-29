@@ -84,6 +84,11 @@ describe('liveTurn', () => {
     const sys = liveTurn([call('orphan'), ev('user_message', { text: 'x', source: 'system' }), call('a')], true)
     expect([ids(sys), sys.bounded]).toEqual([['orphan', 'a'], false])
   })
+  it('keeps calls in flight when a usage notice arrives', () => {
+    const t = liveTurn([call('a'), ev('user_message', { text: '95%', source: 'usage_limit' }), call('b')], true)
+    expect(ids(t)).toEqual(['a', 'b'])
+    expect(t.bounded).toBe(false)
+  })
   it('takes an ask (waiting, the answer, then running again) as part of the turn', () => {
     // The order the native loop records: the ask's call, waiting, the answer, running, its result.
     const start = ev('user_message', { text: 'x' })

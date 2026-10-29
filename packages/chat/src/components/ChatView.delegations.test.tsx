@@ -37,6 +37,21 @@ const seedRequest = (over: Partial<DelegationRequestPayload> = {}) =>
   seed(ev(1, 'user_message', { text: 'go', source: 'chat' }), ev(2, 'delegation_request', { ...REQUEST, ...over }))
 
 describe('the delegation card', () => {
+  it('lists selected repository names and their parent runtime paths', () => {
+    seedRequest({ repo: undefined, members: [{ id: 'api', name: 'API', path: 'api' }, { id: 'web', name: 'Web', path: 'web' }] })
+    mount()
+    const list = screen.getByRole('list', { name: 'Chosen repositories' })
+    expect(list.textContent).toContain('API api')
+    expect(list.textContent).toContain('Web web')
+  })
+  it('keeps hidden desktop details out of the public approval card', () => {
+    seedRequest({ metadata_hidden: true, repo: undefined, members: undefined })
+    mount()
+    expect(screen.getByText('Workspace details are private')).toBeTruthy()
+    expect(screen.queryByRole('list', { name: 'Chosen repositories' })).toBeNull()
+    expect(screen.queryByText('no repository')).toBeNull()
+  })
+
   beforeEach(() => resetChatState())
 
   it('shows engine, model, the unsandboxed warning, the title, the excerpt and the budget', () => {

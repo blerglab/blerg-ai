@@ -25,7 +25,9 @@ it: [`docs/backup-and-restore.md`](../../docs/backup-and-restore.md).
 
 `install/desktop/.env`, the systemd unit (`~/.config/systemd/user/blerg-runner-daemon.service`),
 and the launchd plist (`~/Library/LaunchAgents/dev.blerg.runner-daemon.plist`)
-all hold the daemon token and, if you gave one, your Claude OAuth token. Both
+hold private install configuration and, if you gave one, your Claude OAuth token.
+Person-issued desktop credentials live only in the private daemon state file; the
+new service loads that file rather than copying its token into the environment. Both
 installer scripts `umask 077` before writing anything, and the unit/plist are
 additionally `chmod 600` right after being rendered — so all three end up
 owner-read/write-only (`0600`), not group- or world-readable. This is enforced
@@ -120,6 +122,19 @@ Sessions already running keep the folder they started in; only new sessions
 records (`<repos root>/.blerg-runner/sessions/`) move with the root, so a
 daemon restart still recovers them.
 
+### Plugin marketplace policy
+
+An administrator manages trusted sources in Core's **Settings → Plugin marketplaces**.
+Official Anthropic and OpenAI Codex marketplaces ship on. A connected desktop daemon
+receives changes from its runner server without restarting and checks that policy locally.
+Turning a source off keeps existing plugin installations and running snapshots; lists flag
+them, while new sessions skip them. `BLERG_RUNNER_PLUGIN_MARKETPLACES` is the daemon's
+initial fallback only until the first Core policy is accepted. The daemon saves
+that policy, its Core-generated ID, and its revision locally. A changed ID resets
+revision tracking; stale or replayed revisions within one ID are rejected. Saved
+permissions survive disconnections, Core outages, lease expiry, and restarts.
+See [Core's precedence and upgrade rules](../../core/docs/CONFIG.md#plugin-marketplace-policy).
+
 ### What a daemon restart does to running sessions
 
 Restarting the daemon (an update with `install.sh install`, a crash, a reboot of the service)
@@ -213,20 +228,52 @@ ask; your message picks it up. The list:
   `terraform apply|destroy`, `helm
   install|upgrade|uninstall|delete|rollback`, `kubectl … apply|delete`;
 - the installer or a service restart: `install.sh`, `blerg-up.sh`, `systemctl …
-  restart|stop|kill`, `launchctl … kickstart|stop|unload|bootout`, `service <name> restart|stop`;
+  restart|stop|kill`, `launchctl … kickstart|stop|unload|bootout`, `service <name> restart|stop`,
+  `make … install-daemon|restart-daemon`;
 - dropping data: `DROP TABLE|DATABASE|SCHEMA|INDEX|VIEW|OWNED`, `TRUNCATE`, `DELETE FROM`.
 
 Only the command is matched, never the call's description. It errs towards pausing: a command that only mentions one of these (`kubectl get deployment`)
 pauses too. Background tasks and subagents are not matched (their record keeps a description,
 not the command).
 
-The restart that installs a daemon with this behavior over one without it still ends the agent
-sessions running at that moment: the old daemon kept no records. Updating the daemon from inside
-one of its own agent sessions works from then on; the session's turn is cut off when the
-installer restarts the service, and, `install.sh` being on the list above, the session is
-paused for you to resume. (A daemon older than the
-background-work records cannot list what its sessions run in the background, so the first update
-past it marks none of it stopped.)
+The restart that first installs recovery support over a daemon without it still ends
+agent sessions: the old daemon kept no records. Ordinary nondestructive work continues
+under the usual conversation, waiting-for-you and once-per-turn guards.
+
+A planned successful update continues the session that started it when its **only**
+cut-off tool call is the one the running daemon observed. This works with the plain
+installer, `make restart-daemon`, and detached `setsid nohup … &` launches followed
+by a wait loop. The wait must stay in the **same tool call**, with a Bash timeout long
+enough to cover the build and restart (120 seconds by default, 600 seconds maximum);
+if that call finishes or times out first, ordinary recovery applies. The installer asks
+the running daemon to record the planned target;
+only the daemon writes update evidence. The replacement checks its executable digest
+and embedded commit, consumes the record once, and resumes the matching conversation.
+The person sees `↻ Updated to <commit> · continued`; the agent gets the detailed
+instructions and is told not to repeat the update. Idle sessions get no restart row;
+a paused row expands to list the interrupted calls, background tasks and subagents.
+
+Other sessions, two interrupted calls, other destructive work in the same shell call,
+failed or rolled-back updates, expired evidence, missing conversation history and the
+usual person-wait and once-per-turn guards retain the normal pause. Paused children
+also tell their live parent, using a deduplicated child-turn note with the pause reason.
+The ordinary user service handles updates; no root service or special sudo policy is
+installed. A daemon that predates this protocol cannot observe an update, so its first
+update to this version still uses the ordinary recovery rules.
+
+If you tried #221's unreleased `--protected-updates`, remove its stray system service before reinstalling: `sudo systemctl disable --now "blerg-runner-daemon-protected-$(id -u).service" && sudo rm -f "/etc/systemd/system/blerg-runner-daemon-protected-$(id -u).service" && sudo systemctl daemon-reload && sudo rm -rf "/var/lib/blerg-daemon-updates/$(id -u)"` (that folder held the supervisor and a copy of the daemon token).
+
+The state directory is owner-only (0700), with 0600 pending-update records. These are
+same-user recovery bookkeeping, not a security boundary against host sessions: those
+sessions already run as you, so pretending to have started an update adds no authority.
+Process ancestry identifies the live requester; for already-reparented detached
+installers, the daemon also checks the session identity inherited in the OS process
+environment against the live engine. No session-written receipts are used. Evidence
+expires after five minutes and is consumed even on rejection. Legacy
+`restart-update.json`, `note-update` and `note-update-failed` remain unsupported.
+
+(A daemon older than the background-work records cannot list what its sessions run in the
+background, so the first update past it marks none of it stopped.)
 
 Before `install.sh install` restarts a running daemon, it asks the new build which agent sessions
 the restart would cut off (`blerg-runner-daemon status --open-work`, read from the recovery
@@ -309,8 +356,8 @@ session, card spawn, **Run board**, the MCP `start_session` tool) gets the same
 default: with no `runtime` in the request it runs in the **local sandbox**
 whenever the chosen daemon reports the sandbox image available, and on the
 bare host only when it doesn't. `runtime: daemon` is still an explicit choice,
-and an operator can pin every board-started session to the host by setting
-`BLERG_BOARD_RUNNER_RUNTIME=daemon` on the board. That contract has no "bypass
+and a board runs on the host only where its owner chose and acknowledged it in
+Where it runs (`BLERG_BOARD_RUNNER_RUNTIME=daemon` no longer puts board starts on the host). That contract has no "bypass
 permission prompts" field, so a v1 start never asks for one — though an Agent
 session runs non-interactively and its engine bypasses the prompts anyway, on
 either runtime.
@@ -492,7 +539,7 @@ be accepted and then fail inside the container.
 installer does:
 
 ```
-docker build --build-arg UID=$(id -u) -t blerg-runner-sandbox:latest runner/sandbox
+docker build -f runner/sandbox/Dockerfile --build-arg UID=$(id -u) -t blerg-runner-sandbox:latest .
 ```
 
 (`runner/sandbox/Dockerfile` — debian + git/node/python/build tools + all
@@ -662,6 +709,17 @@ sessions too: every Claude **agent-kind** session (Local sandbox or This machine
 those plugins loaded. Terminal sessions do not (run `/plugin` there yourself), and neither does a
 restricted session (an MCP grant, a cron).
 
+Codex also accepts native `codex:<marketplace>` identities. The official
+`codex:openai-curated` and `codex:openai-curated-remote` identities ship enabled,
+alongside Anthropic's official marketplace. An admin manages these sources in
+Core **Settings → Plugin marketplaces**; the server delivers changes to this
+daemon without a restart. Enter the native identity under Codex in Settings or
+in **Capabilities → Add → Enter a plugin by name**. Local sandboxes without a
+catalog can save it as **Always on** for new sessions; host sessions also support
+**This session only**. Claude does not accept native Codex identities. The wildcard
+permits both kinds of source. [Precedence and fallback](../../core/docs/CONFIG.md#plugin-marketplace-policy)
+apply to desktops too.
+
 How, and what it touches:
 
 - The daemon's hello says `plugins` only when `claude` is on its PATH and it has a state
@@ -684,10 +742,11 @@ How, and what it touches:
 - Once an hour the daemon refreshes: `claude plugin marketplace update` per marketplace and
   `claude plugin update` per plugin, so a plugin's new version arrives on a later launch. A warm
   launch costs a few seconds; the very first launch clones the marketplace (about a minute).
-- The daemon re-validates every entry and re-checks its own `BLERG_RUNNER_PLUGIN_MARKETPLACES`
-  (default: the official marketplace only). If you allow more marketplaces on the server and core,
-  set the same value in the daemon's own environment too, or those plugins are skipped as "not
-  allowed" on this machine. Entries that fail are
+- The daemon re-validates every entry against Core's delivered policy, or its own
+  `BLERG_RUNNER_PLUGIN_MARKETPLACES` environment only before any Core policy has
+  been saved. The last accepted policy remains in force during outages and after
+  restarts. Defaults include the official Anthropic and OpenAI
+  marketplaces. Entries that fail are
   skipped, never installed; one failing plugin never stops the others or the session. The start
   panel's `plugins` stage shows `2 of 2 installed` or a warning naming what failed. When the
   workshop itself looks broken — a marketplace that cannot be added or listed, an install path
@@ -776,7 +835,7 @@ OpenClaw's `openclaw onboard`).
   account state from, so each engine gets its credential a different way
   there — Claude via the `CLAUDE_CODE_OAUTH_TOKEN` env var (from
   `blerg-runner-agent`'s Secret), Codex via a `CODEX_AUTH_JSON` env var
-  holding the raw contents of a logged-in `~/.codex/auth.json`, written to
+  holding a snapshot of a logged-in `~/.codex/auth.json`, stripped of refresh authority and written to
   `$HOME/.codex/auth.json` by the pod on startup (Codex has no equivalent of
   a pure-token env var — confirmed by testing that a headless `codex exec`
   only needs that one file, not the rest of the interactive login state), and
@@ -788,6 +847,73 @@ OpenClaw's `openclaw onboard`).
   config-bundle mechanism alongside `CLAUDE.md`/skills. All three credential
   env vars are optional keys in the same Secret; a session picks whichever
   one its engine needs.
+
+### Adding an engine after install
+
+You don't need to reinstall Blerg to use an engine you install or log in to later. The daemon
+looks for engines again on every heartbeat (about every 30 seconds), and you can make it look
+right away.
+
+1. Install the engine's CLI and log in, in your normal terminal on that machine:
+   - **Claude Code**: install it (`npm install -g @anthropic-ai/claude-code`, or Anthropic's
+     installer), then run `claude` once and log in. On macOS, where the login lives in the
+     keychain, run `claude setup-token`, put the token in `install/desktop/.env` as
+     `CLAUDE_CODE_OAUTH_TOKEN=…` and run `./daemon/install.sh install`.
+   - **Codex**: `npm install -g @openai/codex`, then `codex login`.
+   - **Hermes**: install it, then `hermes setup` to choose a model provider.
+   - **OpenClaw**: install it, then `openclaw onboard`.
+2. Open the launch sheet. Every engine is listed: one that can't run yet is shown disabled under
+   **Not available here**, with the reason and the exact fix (for example "Codex is installed
+   on blerg but not logged in. Run `codex login` on blerg, then Check again."). Select **Check
+   again** to re-detect now instead of at the next heartbeat. **Settings → Engines** shows the
+   same list for each of your desktops.
+3. If the engine is installed but the daemon can't find it ("isn't on the daemon's PATH"),
+   select **Re-detect PATH**. The daemon reads your login shell's PATH (the PATH your terminal
+   gets, including what nvm, a custom npm prefix, Volta, asdf or Homebrew add), puts it ahead of
+   its own and keeps it for later restarts. No restart is needed. When the reason names the
+   folder ("Codex is installed at ~/.nvm/versions/node/v22.11.0/bin/codex …") and Re-detect
+   PATH doesn't help, that folder isn't on your login shell's PATH either: add it in your shell
+   profile (`~/.zprofile`, `~/.bash_profile` or `~/.profile`), then Re-detect PATH.
+
+Without the app, the installer does the same:
+
+- **Linux (systemd)**: `./daemon/install.sh refresh-path` reads your login shell's PATH again,
+  writes it into `~/.config/systemd/user/blerg-runner-daemon.service` as `Environment=PATH=…`
+  and restarts the daemon. It doesn't rebuild anything. If agent work is running it lists it and
+  asks first (`--yes` goes ahead). Sessions it interrupts are continued after the restart, the
+  same as after an install.
+- **macOS (launchd)**: the same command writes `PATH` into the `EnvironmentVariables` of
+  `~/Library/LaunchAgents/dev.blerg.runner-daemon.plist` and reloads the agent.
+
+`install` itself captures the PATH too: it runs your login shell once (interactive first, then
+plain; 10 seconds each, enforced without `timeout(1)` so a hanging profile can't stall the
+install on stock macOS, with no input and none of the installer's tokens), keeps only absolute
+folders made of plain path characters, puts them ahead of the defaults
+(`~/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`, plus `/opt/homebrew/bin` on
+macOS), drops duplicates and stops at 64. When the shell can't be read it says so and uses the
+defaults.
+
+**Which PATH wins.** Re-detect PATH (the app) saves what it read in the daemon's state folder
+(`~/.blerg-runner-daemon/login-path.json`), and the daemon puts that ahead of its service PATH
+at every start. `install` and `refresh-path` rewrite the same file with what they just read, so
+the most recent capture wins, from the app or from the installer. When the installer can't read
+your login shell it leaves the file alone. If the app can apply a PATH but can't save it (a
+read-only or full state folder), it says so: the PATH works until the daemon restarts.
+
+What each status means:
+
+| Status | Meaning | Fix |
+|---|---|---|
+| Not found | the CLI isn't on the daemon's PATH (the reason names where it is when it's in a usual install folder, and lists the PATH searched) | install it, or Re-detect PATH |
+| Not logged in | the CLI is there, its login isn't (`~/.codex/auth.json`, `~/.claude/.credentials.json`) | log in, then Check again |
+| Not set up | logged in or installed, but not ready to run: Hermes has no provider, OpenClaw isn't onboarded | `hermes setup` / `openclaw onboard`, then Check again |
+| Too old | the CLI is older than the oldest version Blerg supports | update it, then Check again |
+| Not offered here | this runtime or session kind never runs it (OpenClaw in the Local sandbox or on the Cluster) | choose another runtime |
+| Not connected | Cluster only: no credential for this engine | connect it in Settings |
+
+The daemon reports facts only: a status, where a CLI is and the PATH it searched, with your home
+folder written as `~`. It never reads a login's contents to report it. The server writes the
+words you see.
 
 ### OpenClaw
 
@@ -861,6 +987,7 @@ Installed automatically by `blerg-up.sh`. To manage it directly:
 ```
 ./daemon/install.sh install     # build + install + start
 ./daemon/install.sh status      # is it running, and is it connected?
+./daemon/install.sh refresh-path  # give the service your login shell's PATH again, restart it
 ./daemon/install.sh uninstall   # stop + remove
 journalctl --user -u blerg-runner-daemon -f   # logs
 ```
@@ -879,6 +1006,98 @@ stops with the exact `sudo chown -R` to run.
 detects it and prints the fix: add `[boot]` and `systemd=true` (two lines) to
 `/etc/wsl.conf`, run `wsl --shutdown` from Windows, reopen the distribution and
 re-run `./blerg-up.sh`.
+
+### WSL2: return after Windows restart
+
+There are two separate startup steps. The enabled systemd user service plus
+**lingering** starts the daemon when the distro boots, without a Linux login.
+Windows must also start the distro after sign-in. Systemd services alone
+[do not keep WSL alive](https://learn.microsoft.com/en-us/windows/wsl/systemd).
+
+During interactive setup, the installer offers an optional Windows logon task
+(default **No**). Noninteractive setup prints the opt-in command; `--yes` only
+confirms replacing a busy daemon and does not opt in to Windows startup.
+From `install/desktop` inside the distro, as your normal Linux account:
+
+```bash
+./daemon/install.sh wsl-startup enable   # opt in, without restarting the daemon
+./daemon/install.sh wsl-startup status   # task name, state, result, log location
+./daemon/install.sh wsl-startup disable  # remove this account/distro's task
+# Or opt in while installing/upgrading the daemon:
+./daemon/install.sh install --wsl-startup
+```
+
+**Disclosure:** enabling creates one `Blerg-WSL-<id>` task in Windows Task
+Scheduler for the current Windows account, distro, and Linux account. PowerShell
+runs without a profile and with a process-scoped execution-policy bypass;
+organization policy still applies. The task runs at that Windows account's
+sign-in, without elevation or a stored password,
+and starts immediately on opt-in. A hidden Windows PowerShell process runs
+`wsl.exe --distribution <distro> --user <linux-account> --exec /bin/sleep infinity`.
+This keeps the distro and its background services running while signed in,
+**including on battery**, even after you close all terminals. It uses resources
+until Windows sign-out/shutdown or you disable the task. It does not edit
+`.wslconfig`, Windows Startup folders, or WSL boot configuration.
+
+The task's self-contained worker and bounded startup logs live under
+`%LOCALAPPDATA%\Blerg\wsl\<id>\`. They contain no Blerg credentials. The
+worker is stored on Windows so it can start before the distro is running;
+it does not depend on the source checkout at sign-in. Re-running enable updates
+the same task and worker. Task settings and a worker lock prevent duplicates.
+A running worker picks up script updates at its next start/sign-in. Disable is
+idempotent and retains logs; it does not stop the daemon or terminate WSL.
+Daemon uninstall removes this task first; if Windows is inaccessible, fix interop
+and retry uninstall, or delete the exact task shown by `wsl-startup status` in
+Windows Task Scheduler before removing the Linux service.
+
+**Prerequisites:** WSL2 with systemd support (WSL 0.67.6 or newer; run
+`wsl --version` in Windows and `wsl --update` if needed), systemd enabled in
+`/etc/wsl.conf`, an enabled daemon unit, and `Linger=yes` from
+`loginctl show-user "$(id -u)" -p Linger`. If needed, run
+`sudo loginctl enable-linger "$(id -un)"` once; enabling the Windows task refuses
+to proceed without lingering. The distro needs `/bin/sleep` with `infinity`
+support (standard on Ubuntu/Debian), Windows interop (`powershell.exe` and
+`wslpath` on PATH), Windows PowerShell 5.1 with ScheduledTasks, and permission
+to create your own interactive logon task. Start from the Windows account that
+owns the registered distro. Distro names support letters, numbers, spaces,
+dots, underscores, and hyphens (starting with a letter or number); other names
+need a manually configured startup task.
+
+**Recovery and diagnostics:** the Windows worker retries every 15 seconds after
+WSL startup errors or exits, including a deliberate WSL shutdown. To keep WSL
+stopped for maintenance, disable the task first. Task Scheduler also retries a
+failed worker every minute (up to 999 times), without its default execution
+time limit or battery restrictions. Check `wsl-startup status`, Task Scheduler's
+History/last result, and the printed `startup.log` location for WSL errors.
+`0x41301` (267009) means the keep-alive task is running; it does not confirm the
+daemon connected. Once the distro is running, check:
+
+```bash
+systemctl --user is-enabled blerg-runner-daemon
+loginctl show-user "$(id -u)" -p Linger
+./daemon/install.sh status
+journalctl --user -u blerg-runner-daemon -b --no-pager
+```
+
+The daemon unit retries process startup failures every 15 seconds without a
+start rate limit. The daemon independently reconnects with exponential backoff
+when the runner/network is unavailable, and reports its connection state in
+`install.sh status`. A local Docker Desktop/Compose server must also start at
+Windows sign-in (or start the server yourself); this task starts only the WSL
+distro. A remote runner needs working network/DNS/VPN. Token refusal needs the
+correct daemon token in `.env` and a service reinstall; retries cannot fix it.
+
+**Unsupported configurations:** WSL1 or WSL without systemd needs migration to
+WSL2/systemd or the manual terminal daemon below. If interop or Windows PATH
+import is disabled, enable `[interop] enabled=true` and `appendWindowsPath=true`
+in `/etc/wsl.conf` and restart WSL at a safe time, or run the copied
+`wsl-startup.ps1 -Action enable -Distro "<distro>" -LinuxUser "<account>"` from
+Windows PowerShell as the distro's Windows owner. If organization policy blocks
+PowerShell or Task Scheduler, ask your administrator to provision an equivalent
+interactive logon task that keeps a foreground WSL process alive. Without it,
+start the distro manually after sign-in. Running before Windows sign-in or after
+sign-out is not supported by this integration; use a separate always-on Linux
+host for that requirement. Do not run setup as root or elevate the whole installer.
 
 ### Failed to connect to bus
 
@@ -991,7 +1210,7 @@ process id; never a token. Only the daemon that owns the state directory writes 
 started by hand does not), and a session pod in a cluster never writes one.
 
 **What the installer checks.** `install.sh install` (and `blerg-up.sh`, which runs it) asks the
-server whether it accepts the token from `install/desktop/.env` before it replaces the running
+server whether it accepts the enrolled credential before it replaces the running
 daemon (`GET /api/daemon/whoami`; the token goes to `curl` in a private header file, never on a
 command line, and is never printed):
 
@@ -1007,35 +1226,24 @@ daemon's `connection.json`; a file the replaced daemon left is not taken as the 
 a warning only, with the command to read the daemon's log; it never waits for a key press.
 
 `blerg-up.sh` exits 6 too when the daemon token was refused: the stack is up, but the daemon is
-not connected, and its last box says to fix the token in `.env` and run `./daemon/install.sh
-install`. The installer's messages never show a `user:password@` part of the server URL, and its
+not connected, and its last box says to enroll the desktop for its recorded owner and
+run `./daemon/install.sh install`. The installer's messages never show a `user:password@` part of the server URL, and its
 check ignores your `~/.curlrc`.
 
 ### The server refused the daemon token
 
-The daemon logs a line that starts with `daemon: REFUSED:` (`the server at ... refused the daemon
-token (close 4401)`), and `install.sh` says `the server refused this daemon token`. The token the
-daemon presents is not the server's `BLERG_RUNNER_DAEMON_TOKEN`.
+The daemon reports close 4401 when its credential is expired, revoked or bound to an
+old desktop owner/revision. Enroll again for the persisted owner (or **Add a desktop**
+and run `./daemon/install.sh install --enroll <code>`), then rerun
+`./daemon/install.sh install`. The private credential is
+`~/.blerg-runner-daemon/desktop-credential.json`; the daemon prefers it over environment
+credentials. See [Desktop ownership](../../docs/desktop-ownership.md) for hosted
+issuance, admin assignment and the installer-account/first-admin upgrade path.
 
-Where the daemon's token comes from: the installed service's environment
-(`Environment=BLERG_RUNNER_DAEMON_TOKEN` in the systemd unit, or the launchd plist), which
-`install.sh install` copies from `BLERG_RUNNER_DAEMON_TOKEN` in `install/desktop/.env`. A daemon
-you started by hand in a terminal takes it from that shell.
-
-Common causes:
-
-- **A daemon connected to a cluster** (`BLERG_RUNNER_SERVER_URL` is `wss://runner.<DOMAIN>/ws/daemon`):
-  the token in `.env` is not the one in the cluster's `blerg-secrets`, for example after the
-  cluster's secrets were generated again. Put the cluster's value in `.env` (see
-  [Connecting the workstation daemon](../k8s/README.md#connecting-the-workstation-daemon)), then
-  run `./daemon/install.sh install`.
-- **The desktop stack on this machine**: its runner reads the same `.env`, so the runner container
-  is running with an older token. `./blerg-up.sh` starts it again with the current `.env` and then
-  reinstalls the daemon.
-
-A refused daemon keeps trying, more and more slowly (from 2 seconds up to once a minute), so it
-connects by itself once the server has the matching token. When the token in `.env` was the wrong
-one, the daemon needs the new value in its service: run `./daemon/install.sh install`.
+A refused daemon retries with backoff, but an obsolete credential cannot become valid
+by reconnecting. Do not copy the install-wide server secret to repair a person-owned
+desktop. The explicit legacy compatibility switch supports unowned desktops during
+0.5 only and is removed in 0.6.
 
 ## Verifying an engine actually works
 
@@ -1071,7 +1279,7 @@ prints the exact commands to run the daemon in a foreground terminal instead:
 
 ```
 export BLERG_RUNNER_SERVER_URL=ws://localhost:8083/ws/daemon   # your BLERG_PORT_RUNNER
-export BLERG_RUNNER_DAEMON_TOKEN=<BLERG_RUNNER_DAEMON_TOKEN from install/desktop/.env>
+# Enroll first; the daemon loads its private desktop-credential.json file.
 export BLERG_RUNNER_REPOS_ROOT=<the directory your repos live in — required>
 # either already logged into claude, or:
 export CLAUDE_CODE_OAUTH_TOKEN=<from `claude setup-token`>
@@ -1112,3 +1320,74 @@ sessions; no separate change to the person's interactive CLI configuration is ne
 An agent's `request-plugin` command only asks the person. Approval is required before installing
 or saving an account setting, including for cron and board-started sessions. Rejection or expiry
 leaves both the running session and settings unchanged.
+
+### Person-owned desktop credentials (0.5 upgrade)
+
+Existing shared-credential desktops recorded at upgrade keep working automatically
+through 0.5, including launch targets, children and file references. Fresh desktops
+require a personal credential. Compatibility ends in 0.6.
+
+**A new desktop** (a laptop for a new person, a second machine): in Blerg's
+**Settings → Account → Your desktops**, select **Add a desktop**. It shows one
+command with a one-time code; run it from a checkout of this repository on the new
+machine, within 15 minutes:
+
+```sh
+BLERG_RUNNER_SERVER_URL=wss://runner.example.com/ws/daemon install/desktop/daemon/install.sh install --enroll <code>
+```
+
+The installer sends the code to the runner, which redeems it through core for a
+credential bound to you and a new desktop identity, stores it privately in
+`~/.blerg-runner-daemon/desktop-credential.json` and installs the service. The
+code works once, expires, can be revoked from the same page and is never printed
+or written to disk by the installer; no `.env` is needed (one is created, keeping
+the server address). The desktop then shows as **Enrolled**. A refused code (wrong,
+expired, revoked or already used) stops with exit code 7 and changes nothing.
+
+**A desktop that already connects** (upgrade-era): update the daemon with
+`daemon/install.sh install`, then open **Settings → Account → Your desktops** (a
+session on that desktop links there) and select **Enroll**.
+Review the hostname, OS user, connected-since time and server-observed source
+address, then select **Confirm enrollment**. If the connection changes, review
+its details and confirm again. The server delivers the credential over the existing authenticated connection;
+the daemon stores it privately and reconnects. The button needs no copying,
+internal key or reinstall. **Rename** and **Remove** are on the same page; Remove
+disconnects the desktop and revokes its credential. Ask an administrator to assign the desktop first if
+it belongs to another person.
+
+If the button is unavailable, ask your installation operator to run
+`daemon/enroll.py --export` on the component host as described in
+[desktop ownership](../../docs/desktop-ownership.md). That helper writes a private
+file locally using the internal component key; no browser response contains the
+credential. Transfer the file privately to this desktop, then run:
+
+```sh
+chmod 600 /path/to/credential.json
+daemon/install.sh import-credential /path/to/credential.json
+daemon/install.sh install
+```
+
+The import never prints the credential. The all-in-one installer can still enroll
+using its internal key and `BLERG_RUNNER_INSTALLING_ACCOUNT_ID` or the first enabled
+admin. A fresh install must create its account first.
+`BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS=auto` is the default; explicit `false` disables
+shared sockets and `true` permits unowned legacy connections without granting
+fresh desktops launch access. Neither override authenticates an owned desktop.
+
+## Workspace 0.5.0 upgrade status
+
+Update core, runner and the desktop daemon together and retain database backups.
+Core migrations 026/027 add desktop credentials and shell policy; runner migrations
+076–083 add selection, ownership, runtime, settlement, consent and completion state.
+The installer builds the contained Linux workspace worker (protocol 3). Sandbox
+builds use the repository root as their Docker build context.
+
+Workspace v2 and owner shells remain gated off. Existing single-repository sessions
+retain scalar contracts. A discovery-capable peer without workspace v2 refuses
+checked-out selections, including a single repository, rather than losing source
+identity through a bare-name downgrade. Sandbox file viewing requires an in-container
+reader and returns unavailable when that binding is absent. Do not enable a
+capability from discovery availability or a successful image build. See
+[workspace integration](../../docs/workspace-integration.md) for remaining gates,
+including physical Mac and Docker engine restart acceptance. Reinstalling does
+not authorize deleting retained workspace allocations.

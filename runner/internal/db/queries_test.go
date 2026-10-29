@@ -732,24 +732,13 @@ func TestAgentDataPlane(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Rules: insert (disabled), enable, filter, delete.
-	id, err := db.InsertAgentRule(ctx, pool, "proj", "always run make test")
-	if err != nil {
+	// Agent rules were removed in 0.5.0 (migration 089 drops the table).
+	var rulesTable *string
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('agent_rules')::text`).Scan(&rulesTable); err != nil {
 		t.Fatal(err)
 	}
-	enabled, err := db.ListAgentRules(ctx, pool, "proj", true)
-	if err != nil || len(enabled) != 0 {
-		t.Fatalf("new rule must be disabled: %v err=%v", enabled, err)
-	}
-	if err := db.SetAgentRuleEnabled(ctx, pool, id, true); err != nil {
-		t.Fatal(err)
-	}
-	enabled, err = db.ListAgentRules(ctx, pool, "proj", true)
-	if err != nil || len(enabled) != 1 {
-		t.Fatalf("enabled=%v err=%v", enabled, err)
-	}
-	if err := db.DeleteAgentRule(ctx, pool, id); err != nil {
-		t.Fatal(err)
+	if rulesTable != nil {
+		t.Fatalf("agent_rules still exists after migrations: %s", *rulesTable)
 	}
 }
 
@@ -844,6 +833,9 @@ func TestSessionRowsCarryKindAndRuntime(t *testing.T) {
 		if err := db.InsertSession(ctx, pool, id, daemonID, "running", "/repos/app", "app", "T", ""); err != nil {
 			t.Fatalf("InsertSession %s: %v", id, err)
 		}
+	}
+	if _, err := pool.Exec(ctx, `UPDATE sessions SET kind='tmux' WHERE id=$1`, tmuxID); err != nil {
+		t.Fatalf("mark tmux fixture: %v", err)
 	}
 	if err := db.SetSessionKind(ctx, pool, agentID, "agent"); err != nil {
 		t.Fatalf("SetSessionKind: %v", err)

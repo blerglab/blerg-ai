@@ -317,7 +317,7 @@ export function CardSheet({ card, board, columns, onClose }: {
       >
         <div className="sheet-card">
           <div className="row">
-            <span className="num mono">#{full.number}{full.external_id ? ` · ${full.external_id}` : ""}</span>
+            <span className="num mono">{full.reference || `#${full.number}`}{full.external_id ? ` · ${full.external_id}` : ""}</span>
             <button className="chip board-here" onClick={onClose}
               title={`this card lives on the ${board.name} board — close the card to see it`}>
               {board.name}
@@ -495,6 +495,7 @@ export function CardSheet({ card, board, columns, onClose }: {
           </div>
         )}
         {hasSession && !isMirrored && sessCollapsed && (
+          // button-guard-ignore: the pull tab shows only at 1000px and wider, where .sess-tab (styles.css) styles it.
           <button className="sess-tab" onClick={() => setCollapsed(false)} title="show the session panel">
             ⟪ session
           </button>

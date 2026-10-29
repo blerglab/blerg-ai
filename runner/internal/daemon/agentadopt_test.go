@@ -381,7 +381,7 @@ func TestAdoptResumesAnInteractiveSessionWaitingForThePersonAndWaits(t *testing.
 			t.Errorf("the engine was not given %q: %s", want, argv)
 		}
 	}
-	if got := userTexts(sender); len(got) != 1 || got[0] != "chat:where were we?" {
+	if got := userTexts(sender); len(got) != 2 || !strings.Contains(got[0], "↻ Host restarted · paused") || got[1] != "chat:where were we?" {
 		t.Errorf("the transcript must keep the person's own words, got %v", got)
 	}
 
@@ -451,7 +451,7 @@ func TestAdoptContinuesAnUnattendedCutOffTurnOnce(t *testing.T) {
 		!strings.Contains(string(argv), "--resume conv-1") {
 		t.Fatalf("the cut-off turn was not continued with the note: %s", argv)
 	}
-	if got := userTexts(sender); len(got) != 1 || got[0] != "system:"+adoptContinuePrompt {
+	if got := userTexts(sender); len(got) != 1 || got[0] != "system:[system] ↻ Host restarted · continued" {
 		t.Errorf("the continue is the system's message, not the person's: %v", got)
 	}
 	if n := errorTexts(sender); len(n) != 1 || !strings.Contains(n[0], "being asked to continue") {

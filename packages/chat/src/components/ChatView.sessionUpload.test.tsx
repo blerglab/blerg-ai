@@ -15,6 +15,7 @@ it('shows a parent-upload note without answering an ask or removing live reply t
   const note = screen.getByTestId('session-upload')
   expect(note).toHaveTextContent('from Parent task')
   expect(note).toHaveTextContent('input.md')
+  expect(note.querySelector('svg')).toHaveAttribute('data-file-icon', 'markdown')
   expect(screen.getByTestId('streaming')).toHaveTextContent('Unfinished root reply')
   expect(within(screen.getByTestId('ask-card')).getByLabelText('Your answer')).toBeInTheDocument()
   expect(t.sentWith).toHaveLength(0)

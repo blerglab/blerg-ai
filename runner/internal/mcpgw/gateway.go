@@ -115,6 +115,9 @@ type Gateway struct {
 	refresherMu sync.RWMutex
 	refresher   Refresher
 
+	observerMu sync.RWMutex
+	observer   BoardObserver
+
 	statesMu sync.Mutex
 	states   map[string]*grantState
 
@@ -189,6 +192,26 @@ func New(cfg Config) *Gateway {
 	g.client = cfg.Policy.Client(cfg.CallTimeout+30*time.Second, maxUpstreamBytes)
 	g.boardClient = BoardHTTPClient(cfg.BoardMCPURL, cfg.CallTimeout+30*time.Second, maxUpstreamBytes)
 	return g
+}
+
+// BoardObserver hears each successful tool call on a session's built-in board connection (the
+// runner keeps the session's plan from the moves it sees: server/plansync.go). It must return at
+// once; it gets the board, the tool and the sanitized result.
+type BoardObserver interface {
+	BoardToolCalled(sessionID, boardID, tool string, result json.RawMessage)
+}
+
+// SetBoardObserver installs the observer (nil removes it).
+func (g *Gateway) SetBoardObserver(o BoardObserver) {
+	g.observerMu.Lock()
+	g.observer = o
+	g.observerMu.Unlock()
+}
+
+func (g *Gateway) boardObserver() BoardObserver {
+	g.observerMu.RLock()
+	defer g.observerMu.RUnlock()
+	return g.observer
 }
 
 // SetProposalSink installs the sink for propose-mode tools (nil removes it).
@@ -815,7 +838,7 @@ func (g *Gateway) effectiveMode(t db.MCPGrantTool, listed bool) string {
 // match the hash the person confirmed; a built-in has no pin but offers only its fixed tool set.
 func toolPinOK(gr *db.MCPGrant, entry db.MCPGrantTool, name, upstreamHash string) bool {
 	if gr.Builtin != "" {
-		return boardToolSet[name]
+		return builtinToolOffered(name)
 	}
 	return entry.Hash == upstreamHash
 }
@@ -865,8 +888,11 @@ func (g *Gateway) handleToolsCall(w http.ResponseWriter, r *http.Request, gr *db
 	}
 	entry, listed := gr.Tools[p.Name]
 	mode := g.effectiveMode(entry, listed)
-	if gr.Builtin != "" && !boardToolSet[p.Name] {
+	switch {
+	case gr.Builtin != "" && !builtinToolOffered(p.Name):
 		mode = "off" // a built-in offers its fixed set, whatever a grant row says
+	case gr.Builtin != "" && boardColumnToolSet[p.Name]:
+		mode = ModeAllow // column management: offered by the level, not by a grant row (launches before 0.5.0 have none)
 	}
 	g.guarded(w, r, gr, req, mode, p.Name, func(ctx context.Context, st *grantState) outcome {
 		unknown := refuse(mode, p.Name, "refused", codeInvalidParams, "unknown tool")
@@ -876,8 +902,24 @@ func (g *Gateway) handleToolsCall(w http.ResponseWriter, r *http.Request, gr *db
 		if gr.Builtin != "" {
 			// The session's board level (0.4.4), read on every call: lowering or revoking it holds
 			// at the agent's next call.
-			if level := g.boardGrantLevel(ctx, gr); !BoardLevelAllows(level, p.Name) {
+			level, person := g.boardGrantAccess(ctx, gr)
+			if !BoardLevelAllows(level, p.Name) {
 				return refuse(mode, p.Name, "refused", codeInvalidParams, BoardLevelRefusal(gr.BuiltinRef, level, p.Name))
+			}
+			if boardColumnToolSet[p.Name] {
+				// Column management acts for a person: the current permission's sign-in, or the
+				// launch's when a person launched it. A cron or an unraised token launch has none.
+				if person == nil {
+					return unknown
+				}
+				if gr.ProofKind != "session_id" || gr.ProofValue != person.SessionID {
+					// The launch credential is not the person's: one call with their sign-in.
+					res, err := g.CallBoard(ctx, BoardCall{Proof: *person, BoardID: gr.BuiltinRef, SessionRef: gr.SessionID, Tool: p.Name, Arguments: p.Arguments})
+					if err != nil {
+						return outcome{result: errorResult(UpstreamMessage(err)), tool: p.Name, mode: mode, outcome: "error"}
+					}
+					return outcome{result: res, tool: p.Name, mode: mode, outcome: "ok"}
+				}
 			}
 		}
 		if gr.Builtin == "" {
@@ -952,6 +994,10 @@ func (g *Gateway) handleToolsCall(w http.ResponseWriter, r *http.Request, gr *db
 		if rerr != nil {
 			return upstreamRPCError(mode, p.Name, rerr)
 		}
-		return outcome{result: sanitizeResult(res, g.cfg.MaxResultBytes), tool: p.Name, mode: mode, outcome: "ok"}
+		result := sanitizeResult(res, g.cfg.MaxResultBytes)
+		if o := g.boardObserver(); o != nil && gr.Builtin == BuiltinBoard {
+			o.BoardToolCalled(gr.SessionID, gr.BuiltinRef, p.Name, result)
+		}
+		return outcome{result: result, tool: p.Name, mode: mode, outcome: "ok"}
 	})
 }

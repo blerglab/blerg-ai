@@ -132,21 +132,25 @@ func TestCreateExchangeTokenHasNoColumnWriteAndHonoursProofCaps(t *testing.T) {
 		}
 		return false
 	}
-	// Human session proof (nil): the role's caps intersected with the target, never column.write.
-	if c := caps(nil); len(c) != 2 || !has(c, "card.read") || !has(c, "card.write") {
-		t.Errorf("human proof caps = %v, want card.read, card.write", c)
+	// Human session proof (nil): the role's caps intersected with the target.
+	if c := caps(nil); len(c) != 3 || !has(c, "card.read") || !has(c, "card.write") || !has(c, "column.write") {
+		t.Errorf("human proof caps = %v, want card.read, card.write, column.write", c)
 	}
 	// A read-only token as proof yields read only.
 	if c := caps([]string{"card.read"}); len(c) != 1 || !has(c, "card.read") {
 		t.Errorf("read-only proof caps = %v, want [card.read]", c)
 	}
-	// A board-preset token (card.*, column.write) cannot give column.write either.
-	if c := caps([]string{"card.read", "card.write", "column.write"}); len(c) != 2 || has(c, "column.write") {
+	// A card-only token cannot give column.write.
+	if c := caps([]string{"card.read", "card.write"}); len(c) != 2 || has(c, "column.write") {
+		t.Errorf("card-only proof caps = %v", c)
+	}
+	// A board-preset token (card.*, column.write) gives what it holds.
+	if c := caps([]string{"card.read", "card.write", "column.write"}); len(c) != 3 || !has(c, "column.write") {
 		t.Errorf("board-preset proof caps = %v", c)
 	}
 	// A run-sessions token (session.start): delegating session start is what the exchange is for.
-	if c := caps([]string{"session.start"}); len(c) != 2 {
-		t.Errorf("run-sessions proof caps = %v, want card.read, card.write", c)
+	if c := caps([]string{"session.start"}); len(c) != 3 {
+		t.Errorf("run-sessions proof caps = %v, want card.read, card.write, column.write", c)
 	}
 	// A token with nothing relevant gets nothing: refused.
 	if _, _, err := svc.CreateExchangeToken(ctx, acct, "board", "b", []string{"membership.write"}); err == nil {

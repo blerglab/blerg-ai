@@ -32,13 +32,15 @@ func (b *liveCardBoard) CallBoard(ctx context.Context, c mcpgw.BoardCall) (json.
 	_ = json.Unmarshal(c.Arguments, &args)
 	text := ""
 	switch c.Tool {
+	case "blerg_board_get":
+		text = `{"key":"BLG","key_aliases":["BLG","OLD"]}`
 	case "blerg_card_move":
 		b.column = args["column_id"].(string)
 		text = `{"ok":true}`
 	case "blerg_card_get":
 		names := map[string]string{"col-inbox": "Inbox", "col-doing": "In progress"}
 		card := map[string]any{
-			"id": "card-7", "board_id": "board-a", "number": 7, "title": "Fix the flaky test", "type": "bug",
+			"reference": "BLG-7", "id": "card-7", "board_id": "board-a", "number": 7, "title": "Fix the flaky test", "type": "bug",
 			"priority": "high", "column_id": b.column, "column_name": names[b.column], "tags": []string{"ci"},
 			"repos": []string{"example-org/app"}, "origin": map[string]any{"repo": "example-org/app"},
 			"columns": []map[string]any{{"id": "col-inbox", "name": "Inbox"}, {"id": "col-doing", "name": "In progress"}},
@@ -60,7 +62,7 @@ func newLiveCardAPI(t *testing.T) (*API, *liveCardBoard, func(caps ...string) st
 	api := NewAPI(NewHub(), nil, "fixture-daemon-key", nil, "")
 	api.coreURL = core.URL
 	board := &liveCardBoard{column: "col-inbox"}
-	api.hub.mcpStart.set(&mcpStartConfig{Core: &filingBoardList{}, Board: board})
+	api.hub.mcpStart.set(&mcpStartConfig{Core: &liveKeyBoardList{}, Board: board})
 	return api, board, enableBrowserAuth(t, api)
 }
 
@@ -171,7 +173,7 @@ func TestPinnedBoardCardGetsTheRunnersAddress(t *testing.T) {
 func TestLiveBoardCardAuditNamesOnlyAVisibleSession(t *testing.T) {
 	f := newPrivFixture(t)
 	board := &liveCardBoard{column: "col-inbox"}
-	f.api.hub.mcpStart.set(&mcpStartConfig{Core: &filingBoardList{}, Board: board})
+	f.api.hub.mcpStart.set(&mcpStartConfig{Core: &liveKeyBoardList{}, Board: board})
 	read := func(tok, session string) string {
 		t.Helper()
 		rec := liveCardDo(f.api, f.api.HandleGetLiveBoardCard, http.MethodGet, "/api/board-cards/board-a/7?session="+session, "board-a", "7", tok, "")
@@ -190,5 +192,54 @@ func TestLiveBoardCardAuditNamesOnlyAVisibleSession(t *testing.T) {
 	}
 	if got := read(other, f.pubSession); got != f.pubSession {
 		t.Fatalf("a visible shared session was dropped: %q", got)
+	}
+}
+
+func TestLiveBoardKeyAndAliasUseThePersonsBoardScope(t *testing.T) {
+	api, board, token := newLiveCardAPI(t)
+	tok := token("session.start")
+	for _, key := range []string{"BLG", "OLD"} {
+		rec := liveCardDo(api, api.HandleGetLiveBoardCard, http.MethodGet, "/api/board-cards/"+key+"/7", key, "7", tok, "")
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"reference":"BLG-7"`) {
+			t.Fatalf("key %s = %d %s", key, rec.Code, rec.Body.String())
+		}
+	}
+	board.mu.Lock()
+	board.refuse = true
+	board.mu.Unlock()
+	rec := liveCardDo(api, api.HandleGetLiveBoardCard, http.MethodGet, "/api/board-cards/BLG/7", "BLG", "7", tok, "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("denied key = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+type liveKeyBoardList struct{ filingBoardList }
+
+func (*liveKeyBoardList) ListSessionBoards(context.Context, mcpgw.Proof) ([]SessionBoard, error) {
+	return []SessionBoard{{ID: "board-a", Name: "A", Key: "BLG", KeyAliases: []string{"OLD"}}}, nil
+}
+
+func TestLiveBoardKeyDiscoveryDoesNotProbeBoards(t *testing.T) {
+	api, board, token := newLiveCardAPI(t)
+	tok := token("session.start")
+	for _, key := range []string{"UTF", "ISO", "SHA", "AES", "COVID", "GPT", "BLG", "OLD"} {
+		rec := liveCardDo(api, api.HandleGetLiveBoardCard, http.MethodGet, "/api/board-cards/"+key+"/7", key, "7", tok, "")
+		want := http.StatusNotFound
+		if key == "BLG" || key == "OLD" {
+			want = http.StatusOK
+		}
+		if rec.Code != want {
+			t.Fatalf("%s: %d %s", key, rec.Code, rec.Body.String())
+		}
+	}
+	board.fakeSessionBoard.mu.Lock()
+	defer board.fakeSessionBoard.mu.Unlock()
+	if len(board.calls) != 2 {
+		t.Fatalf("calls: %+v", board.calls)
+	}
+	for _, c := range board.calls {
+		if c.Tool != "blerg_card_get" {
+			t.Fatalf("unexpected probe: %s", c.Tool)
+		}
 	}
 }

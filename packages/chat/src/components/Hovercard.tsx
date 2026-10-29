@@ -17,6 +17,7 @@ import {
   useSyncExternalStore, type CSSProperties, type FocusEvent, type PointerEvent as ReactPointerEvent, type ReactElement, type ReactNode,
 } from 'react'
 import { createPortal } from 'react-dom'
+import { FileIcon } from './FileIcon'
 import { useChat } from './context'
 import { formatSize, type ArtifactInfo } from '../model/artifacts'
 import { INLINE_IMAGE_MAX, INLINE_TEXT_MAX, loadPreviewText } from '../model/artifactPreview'
@@ -26,7 +27,7 @@ import { visibleText } from '../model/visibleText'
 import { visualFile } from '../model/visualKind'
 import { localStorageChatStorage } from '../model/storage'
 import { priorityGlyph, sourceLabel, statusTone } from '../model/worklist'
-import type { CommitDetails, TransportFiles } from '../transport/types'
+import type { CommitDetails, TransportFiles, WorkspaceGitRef } from '../transport/types'
 import type { Ticket } from '../types'
 import { VisualThumb } from './VisualBlock'
 import './worklist.css'
@@ -145,6 +146,7 @@ export interface FileTarget {
 }
 export interface CommitTarget {
   kind: 'commit'
+  member?: WorkspaceGitRef
   sessionId: string
   sha: string
   /** The session's published diff that holds the commit (its message, author and files are read from it).
@@ -156,6 +158,8 @@ export interface CommitTarget {
  *  words and, where the words are a short form, the raw value (a model's id) for its tooltip. */
 export interface RunTarget {
   kind: 'run'
+  /** Extra host facts, such as a session's repository, runtime and started sessions. */
+  details?: { label: string; value: string }[]
   title: string
   facts: Partial<Record<RunField, { value: string; raw?: string }>>
 }
@@ -227,13 +231,14 @@ function useSources(): HovercardSources {
 }
 
 // ── The trigger ──────────────────────────────────────────────────────────────────────────────────
-/** Wraps one chip: on a device that can hover (and with hovercards on), hovering it or focusing it
+/** Optional content lets the host reuse its full card presentation inside the shared popup.
+ *  Wraps one chip: on a device that can hover (and with hovercards on), hovering it or focusing it
  *  from the keyboard opens its hovercard; otherwise the chip is returned as it is. */
-export function Hover({ target, children }: { target: HoverTarget; children: ReactElement }) {
+export function Hover({ target, children, content }: { target: HoverTarget; children: ReactElement; content?: ReactNode }) {
   const on = useHovercardsEnabled()
   const hover = useCanHover()
   if (!on || !hover) return children
-  return <HoverAnchor target={target}>{children}</HoverAnchor>
+  return <HoverAnchor target={target} content={content}>{children}</HoverAnchor>
 }
 
 // Focus opens a card only when the person moved it there with the keyboard (Tab, Shift+Tab or an
@@ -377,8 +382,8 @@ export function useHovercard(target: HoverTarget | null): HovercardBinding {
   return b
 }
 
-function HoverAnchor({ target, children }: { target: HoverTarget; children: ReactElement }) {
-  const b = useHoverAnchor(target, true)
+function HoverAnchor({ target, children, content }: { target: HoverTarget; children: ReactElement; content?: ReactNode }) {
+  const b = useHoverAnchor(target, true, content)
   // The card replaces the chip's own tooltip (both at once would cover each other); while it is
   // open the chip is described by it.
   const chip = isValidElement(children)
@@ -395,7 +400,7 @@ function HoverAnchor({ target, children }: { target: HoverTarget; children: Reac
   )
 }
 
-function useHoverAnchor(target: HoverTarget | null, enabled: boolean): HovercardBinding {
+function useHoverAnchor(target: HoverTarget | null, enabled: boolean, content?: ReactNode): HovercardBinding {
   const sources = useSources()
   const [open, setOpen] = useState(false)
   // Open as of now (the state lags a render): the warm group's close time is written from it.
@@ -527,14 +532,25 @@ function useHoverAnchor(target: HoverTarget | null, enabled: boolean): Hovercard
     if (!onChip(t) || !(t instanceof Element)) return onChip(t)
     return t.closest('.hc-anchor, [data-hc-anchor]') === anchor.current
   }
-  // Esc closes it wherever the focus is. It is taken only when the focus is on the chip (the person
-  // reached it with the keyboard and the card is what Esc is for, so a drawer under it stays open);
-  // anywhere else (the composer, a dialog) the Esc goes on to what has the focus as well.
+  // Focus may cross the portal boundary or move among controls without leaving this preview.
+  const leaveFocus = (e: FocusEvent) => {
+    const next = e.relatedTarget
+    if (next instanceof Node && (anchor.current?.contains(next) || cardRef.current?.contains(next))) return
+    scheduleClose()
+  }
+  // Esc belongs to the preview when focus is on its anchor or controls. Elsewhere (the composer,
+  // a dialog), it also reaches what has focus. Restore popup focus before removing its controls.
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
-      if (anchor.current && document.activeElement && anchor.current.contains(document.activeElement)) e.stopPropagation()
+      const focused = document.activeElement
+      const inPopup = !!focused && !!cardRef.current?.contains(focused)
+      if (inPopup || (focused && anchor.current?.contains(focused))) e.stopPropagation()
+      if (inPopup) {
+        const chip = anchor.current?.classList.contains('hc-anchor') ? anchor.current.firstElementChild : anchor.current
+        if (chip instanceof HTMLElement) chip.focus()
+      }
       shut()
     }
     window.addEventListener('keydown', onKey, true)
@@ -552,12 +568,12 @@ function useHoverAnchor(target: HoverTarget | null, enabled: boolean): Hovercard
       // Events from inside the card (a portal) can reach the anchor through React: only the
       // anchor's own press closes it.
       onPointerDown: (e: ReactPointerEvent) => { if (onChip(e.target)) shut() },
-      onFocus: (e: FocusEvent) => { if (own(e.target) && focusVisible(e.target)) scheduleOpen() },
-      onBlur: (e: FocusEvent) => { if (onChip(e.target)) scheduleClose() },
+      onFocus: (e: FocusEvent) => { if (own(e.target)) { keep(); if (focusVisible(e.target)) scheduleOpen() } },
+      onBlur: (e: FocusEvent) => { if (onChip(e.target)) leaveFocus(e) },
       ...(open ? { 'aria-describedby': id } : {}),
     },
     card: open && target ? createPortal(
-      <Popup id={id} cardRef={cardRef} target={target} sources={sources} anchor={anchor} onEnter={keep} onLeave={shut} />,
+      <Popup id={id} cardRef={cardRef} target={target} content={content} sources={sources} anchor={anchor} onEnter={keep} onLeave={shut} onFocus={keep} onBlur={leaveFocus} />,
       document.body,
     ) : null,
   }
@@ -611,14 +627,17 @@ export function placeCard(chip: DOMRect, around: DOMRect[], w: number, h: number
   }
 }
 
-function Popup({ id, cardRef, target, sources, anchor, onEnter, onLeave }: {
+function Popup({ id, cardRef, target, content, sources, anchor, onEnter, onLeave, onFocus, onBlur }: {
   id: string
   cardRef: { current: HTMLDivElement | null }
   target: HoverTarget
+  content?: ReactNode
   sources: HovercardSources
   anchor: { current: HTMLElement | null }
   onEnter: () => void
   onLeave: () => void
+  onFocus: () => void
+  onBlur: (e: FocusEvent) => void
 }) {
   holdAccount(sources.account?.())
   const ref = cardRef
@@ -661,14 +680,16 @@ function Popup({ id, cardRef, target, sources, anchor, onEnter, onLeave }: {
   }
   return (
     <div ref={ref} id={id} role="tooltip" className={`hc hc-${target.kind}`} data-testid="hovercard" data-kind={target.kind}
-      data-side={place?.side ?? 'below'} style={style} onPointerEnter={onEnter} onPointerLeave={onLeave}
+      data-side={place?.side ?? 'below'} style={style} onPointerEnter={onEnter} onPointerLeave={onLeave} onFocus={onFocus} onBlur={onBlur}
       // A portal: React would carry a press or a click in it up to the chip's ancestors (a row that
       // opens something, a drawer's backdrop). It stays in the card.
       onPointerDown={stop} onMouseDown={stop} onClick={stop}>
-      {target.kind === 'card' && <CardBody target={target} sources={sources} />}
-      {target.kind === 'file' && <FileBody target={target} sources={sources} />}
-      {target.kind === 'commit' && <CommitBody target={target} sources={sources} />}
-      {target.kind === 'run' && <RunBody target={target} />}
+      {content ?? <>
+        {target.kind === 'card' && <CardBody target={target} sources={sources} />}
+        {target.kind === 'file' && <FileBody target={target} sources={sources} />}
+        {target.kind === 'commit' && <CommitBody target={target} sources={sources} />}
+        {target.kind === 'run' && <RunBody target={target} />}
+      </>}
     </div>
   )
 }
@@ -748,8 +769,9 @@ function RunBody({ target }: { target: RunTarget }) {
     <>
       <div className="hc-title" data-testid="hovercard-run-title">{target.title}</div>
       {step?.value && <pre className="hc-step" data-testid="hovercard-step">{step.value}</pre>}
-      {rows.length > 0 && (
+      {(rows.length > 0 || !!target.details?.length) && (
         <dl className="hc-facts">
+          {target.details?.map((fact, index) => <div key={`detail-${index}`}><dt>{fact.label}</dt><dd>{fact.value}</dd></div>)}
           {rows.map(f => (
             <div key={f} data-testid={`hovercard-run-${f}`}>
               <dt>{RUN_LABEL[f]}</dt>
@@ -877,7 +899,7 @@ function FileBody({ target, sources }: { target: FileTarget; sources: HovercardS
         </div>
       )}
       <div className="hc-head">
-        <span className="hc-file-icon" aria-hidden="true">📎</span>
+        <FileIcon name={a.name} className="hc-file-icon" />
         <span className="hc-name" data-testid="hovercard-name">{a.name}</span>
       </div>
       {meta.length > 0 && <div className="hc-meta hc-dots">{meta}</div>}
@@ -937,15 +959,15 @@ function shown(c: CommitPreview): CommitPreview {
 
 /** The commit from the session's workspace, through the transport's commit read; null when it
  *  cannot be read (nothing is said of why). */
-function lookupCommit(files: TransportFiles, sessionId: string, given: string): Promise<CommitPreview | null> {
+function lookupCommit(files: TransportFiles, sessionId: string, given: string, member?: WorkspaceGitRef): Promise<CommitPreview | null> {
   const sha = given.toLowerCase()
   if (!files.commit || !COMMIT_SHA.test(sha)) return Promise.resolve(null)
-  const key = `${sessionId}/${sha}`
+  const key = `${sessionId}/${sha}/${JSON.stringify(member)}`
   let entry = workspaceCommits.get(key)
   if (entry) workspaceCommits.delete(key)
   if (entry?.until !== undefined && Date.now() >= entry.until) entry = undefined
   if (!entry) {
-    const read: Promise<CommitPreview | null> = files.commit(sessionId, sha).then(c => (c ? previewOf(c) : null), () => null)
+    const read: Promise<CommitPreview | null> = (member ? files.commit(sessionId, sha, undefined, member) : files.commit(sessionId, sha)).then(c => (c ? previewOf(c) : null), () => null)
     const fresh: { read: Promise<CommitPreview | null>; until?: number } = { read }
     void read.then(v => { if (!v) fresh.until = Date.now() + COMMIT_MISS_MS })
     entry = fresh
@@ -959,9 +981,9 @@ function lookupCommit(files: TransportFiles, sessionId: string, given: string): 
  *  too large to read here stays 'large' when the workspace cannot say either. */
 async function readAnyCommit(t: CommitTarget, files: TransportFiles, size: number | undefined): Promise<CommitRead> {
   let fromDiff: CommitRead = null
-  if (t.diff) fromDiff = await readCommit(t, files, size).catch(() => null)
+  if (t.diff && !t.member) fromDiff = await readCommit(t, files, size).catch(() => null)
   if (fromDiff && fromDiff !== 'large') return fromDiff
-  return (await lookupCommit(files, t.sessionId, t.sha)) ?? fromDiff
+  return (await lookupCommit(files, t.sessionId, t.sha, t.member)) ?? fromDiff
 }
 /** The commits of a published diff, parsed once per session and diff: every commit chip of that
  *  diff reuses the one read. Only the parsed commits are kept, never the patch's text. */
@@ -1028,7 +1050,7 @@ function CommitBody({ target: given, sources }: { target: CommitTarget; sources:
   const files = sources.files ?? null
   const can = !!files && (!!target.diff || !!files.commit)
   const size = target.diff ? sources.artifact?.(target.sessionId, target.diff)?.size : undefined
-  const read = useRead(can ? () => readAnyCommit(target, files!, size) : null, [target.sessionId, target.diff, target.sha, can])
+  const read = useRead(can ? () => readAnyCommit(target, files!, size) : null, [target.sessionId, target.diff, target.sha, target.member?.member_id, target.member?.launch_generation, target.member?.generation, can])
   const large = read.value === 'large'
   const c = read.value === 'large' || !read.value ? null : shown(read.value)
   const fields = HOVERCARD.fields.commit

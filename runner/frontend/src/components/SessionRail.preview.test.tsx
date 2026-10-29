@@ -104,7 +104,7 @@ async function snapshot(width: number, view: View = 'live'): Promise<string> {
   )
   // The live state arrives, then a task fails (after the server's reply: the panel folds it in, and
   // the server's count drops with it).
-  await waitFor(() => { if (!screen.getByTestId('rail-badge')) throw new Error('not yet') })
+  await waitFor(() => { if (!screen.getByTestId('rail-toggle').querySelector('.icon-btn-count')) throw new Error('not yet') })
   act(() => {
     useTranscriptStore.getState().ingest(failed)
     // What the session loaded: the Capabilities tab's badge counts what is enabled in it.

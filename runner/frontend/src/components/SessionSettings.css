@@ -1,0 +1,10 @@
+/* Model and effort: what can change in a running session, in the session panel. */
+
+.rail-settings.session-settings { gap: 6px; margin-top: 4px; }
+.session-engine-line { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: var(--text-xs); }
+.session-engine-line label { display: flex; min-width: 0; }
+.session-engine-line .session-model { flex: 1; }
+.session-engine-line .session-effort { flex: 0 1 85px; }
+.session-engine-line select { width: 100%; min-width: 0; background: var(--scree); color: var(--chalk); border: 1px solid var(--stone); border-radius: 6px; padding: 4px 2px; font: inherit; }
+.session-control-label { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.session-engine-summary { flex-wrap: wrap; }

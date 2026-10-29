@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { clearHovercardCache, clearPreviewCache, type CardPreview, type CardTarget } from '@blerglab/chat'
+import { clearHovercardCache, clearPreviewCache, clearRefStores, type CardPreview, type CardTarget } from '@blerglab/chat'
 import { apiFetch } from '../apiFetch'
 import { getAccessToken } from '../authClient'
 import { tokenSubject } from '../claims'
@@ -13,7 +13,7 @@ export interface LiveBoardColumn { id: string; name: string; is_terminal?: boole
 export interface LiveBoardTrailEvent { type: string; actor: string; to_column?: string; text?: string; created_at: string }
 export interface LiveBoardOrigin { session_url?: string; repo?: string; commit?: string; engine?: string }
 export interface LiveBoardCard {
-  id: string; board_id: string; number: number; title: string; body?: string | null; type?: string; priority?: string
+  reference?: string; id: string; board_id: string; number: number; title: string; body?: string | null; type?: string; priority?: string
   size?: string | null; column_id?: string | null; column_name?: string; tags?: string[] | null; repos?: string[] | null
   archived_at?: string | null; sensitive?: boolean; origin?: LiveBoardOrigin | null; version?: number; updated_at?: string
   columns?: LiveBoardColumn[] | null; trail?: LiveBoardTrailEvent[] | null
@@ -24,8 +24,16 @@ export interface LiveBoardRead { card: LiveBoardCard; url: string }
 export function boardCardRef(t: { source: string; key: string; boardId?: string; board_id?: string }): { board: string; number: number } | null {
   const board = t.boardId ?? t.board_id
   if (t.source !== 'blerg-board' || !board) return null
-  const number = Number(t.key.replace(/^#/, ''))
+  const qualified = /^board:([A-Za-z0-9_-]{1,64})#/.exec(t.key)
+  if (qualified && qualified[1] !== board) return null
+  const number = cardNumber(t.key)
   return Number.isSafeInteger(number) && number > 0 ? { board, number } : null
+}
+
+/** Card numbers remain per board, across current keys and legacy reference forms. */
+export function cardNumber(key: string): number {
+  const match = /^(?:#|[A-Z][A-Z0-9]{1,4}-|board:[A-Za-z0-9_-]{1,64}#)?([1-9]\d{0,6})$/.exec(key)
+  return match ? Number(match[1]) : 0
 }
 
 /** How long a read stands for the chip before it is read again. */
@@ -42,6 +50,7 @@ let heldFor = ''
 function account(): string {
   const who = tokenSubject(getAccessToken())
   if (who !== heldFor) {
+    clearRefStores()
     reads.clear()
     inflight.clear()
     // What hovercards and file previews read was read under the other sign-in too.
@@ -59,6 +68,13 @@ function account(): string {
 export function checkAccount(): void {
   account()
 }
+
+// Clear synchronously before identity boundaries remount the same session, even when no card
+// request has yet noticed the new account. Retire the old stores and their in-flight lookups too.
+window.addEventListener('blerg-identity-changed', () => {
+  clearRefStores()
+  account()
+})
 
 /** Who is signed in now, for the hovercards' own account check (HovercardSources.account). */
 export function signedInAccount(): string {
@@ -250,7 +266,7 @@ export async function cardPreview(t: CardTarget, sessionId?: string): Promise<Ca
   const card = held && Date.now() - held.at < FRESH_MS ? held.read.card : (await readLiveBoardCard(ref.board, ref.number, sessionId)).card
   const terminal = !!card.columns?.find(c => c.id === card.column_id)?.is_terminal
   return {
-    key: `#${card.number}`,
+    key: card.reference || `#${card.number}`,
     title: card.title,
     status: card.archived_at ? 'Archived' : card.column_name || undefined,
     done: terminal || !!card.archived_at,

@@ -1,0 +1,13 @@
+/* The host's foreground adapts Seti's colors to light, dark and custom themes. */
+.file-icon.artifact-glyph {
+  display: inline-block;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  vertical-align: -3px;
+  color: var(--chat-fg, currentColor);
+  color: color-mix(in srgb, var(--chat-file-icon-color, var(--chat-fg, currentColor)) 60%, var(--chat-fg, currentColor));
+}
+@media (forced-colors: active) {
+  .file-icon.artifact-glyph { color: CanvasText; }
+}

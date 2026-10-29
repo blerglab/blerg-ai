@@ -126,6 +126,14 @@ load the databases while no service is connected, then start everything. Run fro
    done
    ```
 
+   Then give the plugin marketplace policy a new identity, so desktops and pods accept the next
+   change an admin makes after the restore (they keep the highest revision they have seen):
+
+   ```sh
+   docker compose exec -T postgres psql -U blerg -d blerg_core \
+     -c "UPDATE plugin_marketplace_policy SET policy_id=gen_random_uuid() WHERE singleton;"
+   ```
+
 4. Optional: the runner data volume.
 
    ```sh
@@ -217,6 +225,9 @@ for db in blerg_core blerg_board blerg_runner; do
     -c "DROP DATABASE IF EXISTS $db" -c "CREATE DATABASE $db"
   kubectl -n blerg exec -i postgres-0 -- psql -v ON_ERROR_STOP=1 -U blerg -d "$db" < "$dir/$db.sql"
 done
+# New marketplace policy identity, so holders accept the next admin change (see core/docs/CONFIG.md).
+kubectl -n blerg exec postgres-0 -- psql -U blerg -d blerg_core \
+  -c "UPDATE plugin_marketplace_policy SET policy_id=gen_random_uuid() WHERE singleton;"
 kubectl -n blerg scale deploy/blerg-core deploy/blerg-board deploy/blerg-runner --replicas=1
 ```
 

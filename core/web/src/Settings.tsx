@@ -1,3 +1,4 @@
+import "../../../packages/settings/settings.css";
 import { useEffect, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { apiFetch } from "./apiFetch";
@@ -7,7 +8,13 @@ import PluginsSection from "./PluginsSection";
 import { useEngineDescriptors } from "./engineDescriptors";
 import ManagedCredentials, { type ManagedCredentialSummary } from "./ManagedCredentials";
 import McpConnectionsSection from "./McpConnectionsSection";
+import UpdateNoticeSection from "./UpdateNoticeSection";
+import ChildLimitsSection from "./ChildLimitsSection";
+import SessionStorageSection from "./SessionStorageSection";
 import BoardLimitsSection from "./BoardLimitsSection";
+import ShellPolicySection from "./ShellPolicySection";
+import PluginMarketplacesSection from "./PluginMarketplacesSection";
+import DesktopsSection from "./DesktopsSection";
 import Shell, { useSite, type Site } from "./Shell";
 
 // Settings: per-credential paste-in. Talks to POST/GET/DELETE /api/credentials (Task 14),
@@ -388,15 +395,10 @@ function AgentTokens({ site }: { site: Site | null }) {
     : "";
 
   return (
-    <section className="section">
+    <section className="settings-section section">
       <p className="eyebrow">Automation</p>
-      <h2 className="section-title">Agent tokens</h2>
-      <p className="section-help">
-        Tokens for tools and agents that act as you. Each is scoped to one component; shown once.
-        A run-sessions token can only see sessions it started; admins see all. What a token may do
-        is fixed when it is created — changing your role later does not change an existing token,
-        so revoke it instead.
-      </p>
+      <h2 className="settings-heading section-title">Agent tokens</h2>
+      <p className="settings-description">Create tokens that let your tools and agents act as you.</p>
       {error && (
         <p className="field-error" role="alert">
           {error}
@@ -404,9 +406,9 @@ function AgentTokens({ site }: { site: Site | null }) {
       )}
 
       <form className="card card-form" onSubmit={submit}>
-        <label className="field" htmlFor="token-name">
+        <label className="settings-field field" htmlFor="token-name">
           <span className="field-label">Token name</span>
-          <input
+          <input className="settings-field"
             id="token-name"
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -414,9 +416,9 @@ function AgentTokens({ site }: { site: Site | null }) {
             maxLength={64}
           />
         </label>
-        <label className="field" htmlFor="token-preset">
+        <label className="settings-field field" htmlFor="token-preset">
           <span className="field-label">Preset</span>
-          <select
+          <select className="settings-field"
             id="token-preset"
             value={preset}
             onChange={(e) => setPreset(e.target.value as PresetName)}
@@ -428,9 +430,9 @@ function AgentTokens({ site }: { site: Site | null }) {
             ))}
           </select>
         </label>
-        <label className="field" htmlFor="token-days">
+        <label className="settings-field field" htmlFor="token-days">
           <span className="field-label">Expires in (days)</span>
-          <input
+          <input className="settings-field"
             id="token-days"
             type="number"
             min={1}
@@ -440,7 +442,7 @@ function AgentTokens({ site }: { site: Site | null }) {
           />
         </label>
         <div className="card-actions">
-          <button type="submit" className="btn btn-primary" disabled={creating || name.trim() === ""}>
+          <button type="submit" className="settings-action btn btn-primary" disabled={creating || name.trim() === ""}>
             {creating ? "Creating…" : "Create token"}
           </button>
         </div>
@@ -449,7 +451,7 @@ function AgentTokens({ site }: { site: Site | null }) {
       {created && (
         <div className="card token-reveal">
           <div className="card-head">
-            <h3 className="card-title">New token</h3>
+            <h3 className="settings-heading card-title">New token</h3>
             <span className="chip active">
               <span className="dot" aria-hidden="true" />
               <span className="label">Shown once</span>
@@ -459,18 +461,18 @@ function AgentTokens({ site }: { site: Site | null }) {
             Copy it now — <strong>{created.name}</strong> is shown this one time and cannot be
             retrieved again. If you lose it, revoke it and mint another.
           </p>
-          <label className="field" htmlFor="token-value">
+          <label className="settings-field field" htmlFor="token-value">
             <span className="field-label">New token</span>
-            <input id="token-value" className="mono" readOnly value={created.token} />
+            <input id="token-value" className="settings-field mono" readOnly value={created.token} />
           </label>
           <p className="card-help">Try it:</p>
           <pre className="token-curl mono">{curlLine}</pre>
           <div className="card-actions">
-            <button type="button" className="btn" onClick={copy}>
+            <button type="button" className="settings-action btn" onClick={copy}>
               Copy
             </button>
             {copied && <span className="field-help">Copied</span>}
-            <button type="button" className="btn btn-quiet" onClick={() => setCreated(null)}>
+            <button type="button" className="settings-action btn btn-quiet" onClick={() => setCreated(null)}>
               Done
             </button>
           </div>
@@ -532,7 +534,7 @@ function AgentTokens({ site }: { site: Site | null }) {
                         <>
                           <button
                             type="button"
-                            className="btn btn-quiet"
+                            className="settings-action btn btn-quiet"
                             onClick={() => remint(t.id)}
                             disabled={reminting === t.id || revoking === t.id}
                             title="Revoke this token and mint a new one with the same name, preset and lifetime"
@@ -541,7 +543,7 @@ function AgentTokens({ site }: { site: Site | null }) {
                           </button>{" "}
                           <button
                             type="button"
-                            className="btn btn-quiet"
+                            className="settings-action btn btn-quiet"
                             onClick={() => revoke(t.id)}
                             disabled={revoking === t.id || reminting === t.id}
                           >
@@ -668,9 +670,10 @@ function AccountSection() {
   const providerLabel = me ? (PROVIDER_LABELS[me.provider] ?? me.provider) : "";
 
   return (
-    <section className="section">
+    <section className="settings-section section">
       <p className="eyebrow">Settings</p>
-      <h2 className="section-title">Account</h2>
+      <h2 className="settings-heading section-title">Account</h2>
+      <p className="settings-description">Manage your sign-in details.</p>
       {loadError && (
         <p className="field-error" role="alert">
           {loadError}
@@ -688,9 +691,9 @@ function AccountSection() {
             <p className="card-help">Your username comes from {providerLabel}.</p>
           ) : (
             <form className="card-form" onSubmit={submit}>
-              <label className="field" htmlFor="account-username">
+              <label className="settings-field field" htmlFor="account-username">
                 <span className="field-label">New username</span>
-                <input
+                <input className="settings-field"
                   id="account-username"
                   type="text"
                   autoComplete="username"
@@ -705,9 +708,9 @@ function AccountSection() {
               <p className="field-help" id="account-username-help">
                 {USERNAME_HELP}
               </p>
-              <label className="field" htmlFor="account-password">
+              <label className="settings-field field" htmlFor="account-password">
                 <span className="field-label">Current password</span>
-                <input
+                <input className="settings-field"
                   id="account-password"
                   type="password"
                   autoComplete="current-password"
@@ -728,7 +731,7 @@ function AccountSection() {
               <div className="card-actions">
                 <button
                   type="submit"
-                  className="btn btn-primary"
+                  className="settings-action btn btn-primary"
                   disabled={saving || username === "" || password === ""}
                 >
                   {saving ? "Changing…" : "Change username"}
@@ -866,14 +869,13 @@ function SettingsScreen() {
   return (
     <Shell site={site} aside={<a className="btn btn-quiet" href="/app">Home</a>}>
       <AccountSection />
-      <section className="section">
+      <DesktopsSection site={site} />
+      <section className="settings-section section">
         <p className="eyebrow">Sessions</p>
-        <h2 className="section-title">Credentials</h2>
-        <p className="section-help">
-          Used by cluster-runtime sessions, which run as you. Desktop sessions use them differently by kind: the engine credentials aren't needed there, because a desktop session uses the engine login already on your machine; the GitHub and GitLab tokens are, because the launch sheet lists your repositories with them and clones a private one with them (always in a Local sandbox session; on This machine only if the daemon's owner allowed it).
-        </p>
+        <h2 className="settings-heading section-title">Credentials</h2>
+        <p className="settings-description">Connect the accounts your sessions use to run agents and access repositories.</p>
         {!discovery.metadata && !discovery.error && <p className="muted">Loading engine integrations…</p>}
-        {discovery.error && <p role="alert">{discovery.error} <button type="button" onClick={discovery.retry}>Retry engine discovery</button></p>}
+        {discovery.error && <p role="alert">{discovery.error} <button className="settings-action" type="button" onClick={discovery.retry}>Retry engine discovery</button></p>}
         {loading && <p className="muted">Loading…</p>}
         {error && <p className="field-error" role="alert">{error}</p>}
         <ManagedCredentials summaries={summaries} labels={labels} onConnected={async () => { if (!await refresh()) throw new Error("Credential status unavailable"); }} />
@@ -886,7 +888,7 @@ function SettingsScreen() {
                 return (
                   <li key={kind} className="card">
                     <div className="card-head">
-                      <h3 className="card-title">{labels[kind]}</h3>
+                      <h3 className="settings-heading card-title">{labels[kind]}</h3>
                       <span className={isConfigured ? "chip up" : "chip idle"}>
                         <span className="dot" aria-hidden="true" />
                         <span className="label">{isConfigured ? "Configured" : "Not configured"}</span>
@@ -894,10 +896,10 @@ function SettingsScreen() {
                     </div>
                     <p className="card-help">{KIND_HELP[kind] ?? "Import the credential format documented by this engine’s integration. Only add credentials for accounts you control."}</p>
                     <form onSubmit={(e) => submit(kind, e)} className="card-form">
-                      <label className="field" htmlFor={`credential-${kind}`}>
+                      <label className="settings-field field" htmlFor={`credential-${kind}`}>
                         <span className="field-label">{labels[kind]} credential</span>
                       </label>
-                      <textarea
+                      <textarea className="settings-field"
                         id={`credential-${kind}`}
                         value={drafts[kind] ?? ""}
                         onChange={(e) =>
@@ -906,7 +908,7 @@ function SettingsScreen() {
                         placeholder="Paste credential…"
                       />
                       <div className="card-actions">
-                        <button type="submit" className="btn btn-primary" disabled={submitting === kind || (drafts[kind] ?? "").trim() === ""}>
+                        <button type="submit" className="settings-action btn btn-primary" disabled={submitting === kind || (drafts[kind] ?? "").trim() === ""}>
                           {submitting === kind
                             ? "Saving…"
                             : isConfigured
@@ -916,7 +918,7 @@ function SettingsScreen() {
                         {isConfigured && (
                           <button
                             type="button"
-                            className="btn btn-quiet"
+                            className="settings-action btn btn-quiet"
                             onClick={() => remove(kind)}
                             disabled={removing === kind}
                           >
@@ -936,6 +938,8 @@ function SettingsScreen() {
       <McpConnectionsSection site={site} />
       <AgentTokens site={site} />
       {isAdministrator && <BoardLimitsSection />}
+      {isAdministrator && <><ChildLimitsSection /><SessionStorageSection /><UpdateNoticeSection /></>}
+      {isAdministrator && <><ShellPolicySection /><PluginMarketplacesSection /></>}
     </Shell>
   );
 }

@@ -75,6 +75,17 @@ prints are:
     ...
 ```
 
+Before building, the installer also checks whether the runner service account can
+get secrets in `kube-system`, a permission no Blerg Role grants. If allowed, it warns
+that cluster authorization is effectively AlwaysAllow or has overly broad grants:
+Blerg's RBAC boundaries (no `pods/exec`, namespace-scoped Roles) are not enforced.
+Enable RBAC (`microk8s enable rbac` on MicroK8s), remove overly broad grants, and
+rerun the installer. If the check fails, it warns that authorization could not be
+verified; check connectivity and your operator's impersonation permissions. These
+notices continue deployment without another prompt, including with `--yes` and
+without a terminal. A denied probe is expected but does not certify all cluster
+permissions. The check also runs with `CLUSTER_RUNTIME=off`.
+
 On a fresh install only: once an account exists, a re-run prints nothing about
 setup.
 
@@ -128,6 +139,7 @@ from the environment). `.env.example` lists every one.
 | `RUNNER_DATA_SIZE` | `10Gi` | Size of the runner's data claim `blerg-runner-data` (published and attached files, agent-config bundles, mockups). Applies only when `deploy.sh` creates the claim — see [Runner data volume](#runner-data-volume). |
 | `RUNNER_DATA_STORAGE_CLASS` | unset (the cluster's default StorageClass) | StorageClass for that claim, e.g. when the cluster has no default or you want another. Also applies only at creation. |
 | `HERMES_PROVIDERS_FILE` | unset | Path (absolute, or relative to `install/k8s`) of a Hermes `config.yaml` fragment (at most 64 KiB) naming your model servers, e.g. local keyless OpenAI-compatible endpoints. Every cluster Hermes user, and their agent, can read it whole: keep paid provider keys out. When set, `deploy.sh` stores it in Secret `blerg/blerg-hermes-providers`; every Hermes session pod gets it merged into `~/.hermes/config.yaml` and the cluster launch sheet lists its models. Unset: nothing is created. Template: `hermes-providers.example.yaml`; details in [CLUSTER-RUNTIME.md](CLUSTER-RUNTIME.md#shared-hermes-providers). |
+| `WORKSPACE_STORAGE_CLASS` | unset (standard storage) | A StorageClass whose volumes are size- and inode-limited filesystems: cluster workspaces become bounded. Empty: standard storage, in the class of `blerg-runner-data`, with no size limit per workspace. See [Workspace storage](#workspace-storage). |
 | `WEBHOOK_ALLOW_PRIVATE` | unset (`false`) | `1` (or `true`/`yes`) renders `BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE: "true"`, allowing completion webhooks to private, loopback and link-local addresses. |
 
 ### Secret pins (`SECRET_*`)
@@ -183,6 +195,7 @@ of an environment gap.
 | 9 | `envsubst` and `openssl` are installed | `command -v envsubst openssl` | Prints two paths | Install gettext (`envsubst`) and openssl. `deploy.sh` checks for `docker`, `kubectl`, `envsubst` and `openssl` before it builds anything and stops with a message naming the missing one |
 | 10 | The build machine's CPU architecture matches the nodes' (`deploy.sh` builds with plain `docker build`, so images are the builder's architecture) | `kubectl get nodes -o jsonpath='{.items[*].status.nodeInfo.architecture}'` vs. `docker version --format '{{.Server.Arch}}'` | Same value (`amd64` or `arm64`) everywhere | Build on a matching machine; a mismatch shows up as `exec format error` crash loops |
 | 11 | (TLS via cert-manager only) The issuer exists and is ready | `kubectl get clusterissuer` | Your issuer's row shows `READY True` | Install cert-manager and create the issuer first, or leave `CLUSTER_ISSUER` unset |
+| 12 | Advisory cluster authorization check | `(cd install/k8s && . ./deploy_lib.sh && cluster_authorization_notice)` from the repository root | Silent when the runner cannot get secrets in `kube-system` | Relay any warning and continue. Enable RBAC (`microk8s enable rbac` on MicroK8s) and remove overly broad grants; an inconclusive check needs connectivity or impersonation permissions checked. `deploy.sh` also runs this check automatically. |
 
 ### Image registry (check 5, expanded)
 
@@ -277,10 +290,13 @@ $EDITOR .env          # set REGISTRY to your own registry, and DOMAIN if you wan
    `RUNNER_DATA_SIZE`, optional `RUNNER_DATA_STORAGE_CLASS`) if it does not
    exist yet — before the Deployment that mounts it. An existing claim is left
    exactly as it is, and `deploy.sh` never deletes it; it is not in the
-   kustomization. See [Runner data volume](#runner-data-volume).
+   kustomization. See [Runner data volume](#runner-data-volume). It then reads
+   the claim's StorageClass, the class standard workspace claims use (see
+   [Workspace storage](#workspace-storage)).
 6. Renders only the files `kustomization.yaml` lists — substituting
    `${REGISTRY}` / `${TAG}` / `${DOMAIN}` / `${SCHEME}` / `${AGENT_IMAGE}` /
-   `${WEBHOOK_ALLOW_PRIVATE}` in a temp copy with `envsubst` — then
+   `${WEBHOOK_ALLOW_PRIVATE}` / `${TRUSTED_PROXIES}` / `${WORKSPACE_STORAGE_CLASS}` /
+   `${WORKSPACE_DEFAULT_CLASS}` in a temp copy with `envsubst` — then
    `kubectl apply -k <rendered temp dir>`. `AGENT_IMAGE` is
    `${REGISTRY}/blerg-runner-agent:${TAG}`, or empty with `CLUSTER_RUNTIME=off`.
 7. Restarts the runner (`kubectl -n blerg rollout restart
@@ -338,10 +354,24 @@ tag other than `latest`, the default `imagePullPolicy` (`IfNotPresent`) also
 means a node that already has that tag never re-pulls it, so even the
 restarted runner keeps the old image.
 
+### Child session limits
+
+Core Settings → Child session limits lets an administrator set children at once per parent
+(1–50, default 3) and starts per parent per rolling hour (1–10000, default 120). There is no
+lifetime start cap. Saved settings win and runner reads them on the next start request.
+The environment variables `BLERG_RUNNER_MAX_PARALLEL_CHILDREN` and
+`BLERG_RUNNER_MAX_CHILD_STARTS_PER_HOUR` seed those defaults; set them in `configmap.yaml`
+for core and runner before rollout. Invalid values produce a startup warning and fall back
+to 3 or 120. Account limits remain six running children and sixty starts per rolling hour,
+so they can be reached before a higher per-parent limit. Approval requests reserve rate
+budget too. Core migration 024 stores saved settings; runner reads `/internal/child-limits`
+with its internal key. Unavailable core retains runner's last valid values (or its defaults
+before the first successful read).
+
 ### Runner data volume
 
 The runner keeps the bytes of every file a session published (`blerg-runner
-publish`) or a person attached, uploaded agent-config bundles and mockups under
+publish`) or a person attached, historical agent-config bundles (automatic desktop sharing is retired) and mockups under
 `/data` (`BLERG_RUNNER_DATA_DIR`); its database only indexes them. `/data` is the
 PersistentVolumeClaim `blerg-runner-data` (`ReadWriteOnce`, `10Gi` by default),
 so those files survive restarts and deploys.
@@ -673,7 +703,8 @@ through the Ingress. In the foreground, from a checkout of this repository
 
 ```sh
 export BLERG_RUNNER_SERVER_URL=wss://runner.<DOMAIN>/ws/daemon
-export BLERG_RUNNER_DAEMON_TOKEN="$(kubectl -n blerg get secret blerg-secrets -o jsonpath='{.data.BLERG_RUNNER_DAEMON_TOKEN}' | base64 -d)"
+# First save your person-issued credential in the private daemon state file.
+# See docs/desktop-ownership.md; do not copy the cluster shared server secret.
 export BLERG_RUNNER_REPOS_ROOT="$HOME/repositories"
 ( cd runner && GOWORK=off go run ./cmd/daemon )
 ```
@@ -685,13 +716,22 @@ its session checkouts live. Every daemon variable is listed in
 
 To run it as a persistent service instead (systemd `--user` on Linux,
 launchd on macOS), use the desktop installer with those same values — no
-desktop compose stack is needed on the workstation, only these three lines
+desktop compose stack is needed on the workstation. In core's **Settings → Account →
+Your desktops**, select **Add a desktop** and run the command it shows from a checkout of
+this repository on the workstation:
+
+```sh
+BLERG_RUNNER_SERVER_URL=wss://runner.<DOMAIN>/ws/daemon install/desktop/daemon/install.sh install --enroll <code>
+```
+
+The code works once, for 15 minutes, and enrolls the machine to you; the installer creates
+`install/desktop/.env` and keeps the server address there. To set it up by hand instead,
+save a person-issued credential file first (see docs/desktop-ownership.md); then use these lines
 in `install/desktop/.env` (git-ignored; keep it `0600`):
 
 ```sh
 cat > install/desktop/.env <<EOF
 BLERG_RUNNER_SERVER_URL=wss://runner.<DOMAIN>/ws/daemon
-BLERG_RUNNER_DAEMON_TOKEN=<the value in blerg-secrets>
 BLERG_RUNNER_REPOS_ROOT=$HOME/repositories
 EOF
 chmod 600 install/desktop/.env
@@ -762,7 +802,7 @@ The same procedure for both installs, with a restore drill checklist, is in
 |---|---|---|
 | Postgres data: accounts, boards, sessions, encrypted credentials | PVC `postgres-data-postgres-0` in `blerg` (`5Gi`) | Everything. |
 | `blerg-secrets`, above all `BLERG_CORE_LOCAL_KEY` | Secret in `blerg` | **Losing `BLERG_CORE_LOCAL_KEY` loses every stored credential** — there is no recovery; users must re-enter them. Losing `POSTGRES_PASSWORD` locks the components out of the database. |
-| Runner data (uploaded agent-config bundles, published mockups, files agents published with `blerg-runner publish`, files people attached) | PVC `blerg-runner-data` in `blerg` (`10Gi`), at `/data` in the runner pod | Those files: they stay listed in the Files tab, marked "no longer available", but cannot be opened or downloaded. Back it up with a volume snapshot, or copy `/data` from a helper pod that mounts the claim while the runner is scaled to 0 (the runner image has no shell or `tar`). |
+| Runner data (historical agent-config bundles (automatic desktop sharing is retired), published mockups, files agents published with `blerg-runner publish`, files people attached) | PVC `blerg-runner-data` in `blerg` (`10Gi`), at `/data` in the runner pod | Those files: they stay listed in the Files tab, marked "no longer available", but cannot be opened or downloaded. Back it up with a volume snapshot, or copy `/data` from a helper pod that mounts the claim while the runner is scaled to 0 (the runner image has no shell or `tar`). |
 | Retained native conversations (account-owned Claude and Codex Cluster sessions) | one PVC per session in `blerg-runner-sessions` (`1Gi` each, `BLERG_RUNNER_NATIVE_HISTORY_*` in `blerg-config`), reclaimed seven days after the session ends | That session's native conversation: replacing its pod then fails explicitly instead of resuming. See [`CLUSTER-RUNTIME.md`](CLUSTER-RUNTIME.md#retained-native-conversations). |
 | `blerg-runner-agent` | Secret in `blerg-runner-sessions` | Recreated by the next `deploy.sh` run (daemon token copied from `blerg-secrets`; optional keys only if pinned in `.env`). |
 
@@ -919,3 +959,161 @@ this directory hardcodes a real private registry, hostname, or IP.
   `cluster-runtime.yaml` on its own. It never touches a live cluster itself.
 - Every manifest in this directory parses as valid YAML and the container
   images build from these exact Dockerfiles with repo-root contexts.
+
+### Desktop ownership upgrade
+
+Existing unassigned desktops recorded at upgrade keep working automatically in
+0.5, including launches, children and file references. New desktops require a
+personal credential. Update the daemon, then open core's **Settings → Account →
+Your desktops** and select **Enroll** (a session on such a desktop links there). The
+browser receives status; the live desktop stores its credential privately and
+reconnects. A new desktop uses **Add a desktop** there: it shows one command,
+`install/desktop/daemon/install.sh install --enroll <code>`, with a one-time code.
+Core reaches the runner for this page on `BLERG_CORE_RUNNER_URL` (set in
+`core-deployment.yaml`). For offline enrollment, use the private import in
+[desktop ownership](../../docs/desktop-ownership.md).
+`BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS` defaults to `auto` in the ConfigMap. Explicit
+`false` disables shared sockets; `true` permits unowned legacy connections without
+giving fresh desktops launch authority. Compatibility ends in 0.6. Runner
+migrations 077/087/090 and core migrations 026/030 persist authority.
+
+
+Workspace selection and desktop confidentiality in 0.5 are described in
+[workspace selection](../../docs/workspace-selection.md). Automatic desktop config
+uploads are retired. `BLERG_RUNNER_SHARED_AGENT_CONFIG_BUNDLE` optionally names
+an absolute path to an operator-managed, intentionally shared archive; leave it
+unset to serve none. Historical uploaded archives are ignored and should be
+removed from the runner data volume during upgrade. This does not re-enable
+personal desktop configuration sharing.
+
+## Workspace storage
+
+Each cluster workspace session (the file explorer, the owner shell, several repositories, sync
+at the end of each turn) keeps its checkouts on its own claim, `blerg-workspace-<session>`, in the
+sessions namespace (`blerg-runner-sessions` unless you changed `BLERG_RUNNER_AGENT_NAMESPACE`).
+The claim requests 11520Mi and is mounted only at `/workspace/projects`. There are two modes:
+
+- **Standard (the default).** With `WORKSPACE_STORAGE_CLASS` empty, the claim goes in the
+  StorageClass Blerg's own data claim `blerg-runner-data` uses. `deploy.sh` reads that class from
+  the claim on every run and renders it as `BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS` (an explicit
+  value in `.env` wins). When the data claim has no class, workspace claims name none and get the
+  cluster's default class. This works on any cluster that can run Blerg, including MicroK8s
+  (`microk8s-hostpath`) and k3s (`local-path`).
+- **Bounded (opt-in).** Set `WORKSPACE_STORAGE_CLASS` to a StorageClass whose volumes are their own
+  size-limited filesystems. Every workspace is then held to at most 11.25 GiB and 700000 inodes
+  by the filesystem itself, and a session refuses to start on a volume that is not bounded.
+
+At the end of each deploy, `deploy.sh` prints the mode the runner will use, for example
+`Workspace storage: standard (class microk8s-hostpath; no size limit per workspace).` The mode is
+decided once, when a session first starts, and kept for that session: changing the setting
+affects new sessions only, and a bounded session keeps its claim and its limits.
+
+**Security in standard mode.** Nothing physically limits a workspace's size. Blerg counts a
+workspace's bytes and files when it prepares the checkouts and on its sync attempts, against the
+same budget bounded mode uses, and a breach blocks the sync; but that is accounting, not a limit:
+it does not stop the agent, it misses growth between checks and files deleted while still open. An agent, or a hostile repository, can
+fill the node's disk or use up its inodes. Every child session gets its own claim, so a parent
+with many workers multiplies the checkouts (each up to the budget), and there is no cap on the
+number of claims. On MicroK8s, `microk8s-hostpath` stores claims on the same disk as containerd
+and dqlite, so a full disk can take down the cluster, not only the session. If your nodes are
+shared or tight on disk, or the cluster serves more than one team, use bounded storage.
+
+**Classes for bounded storage.** The class needs a CSI driver that gives each volume its own
+filesystem with a byte limit: for example EBS gp3, GCE PD, Azure Disk, Longhorn, OpenEBS LVM
+LocalPV or TopoLVM. A size limit alone may not pass: Blerg also requires the volume to be a
+separate filesystem (its own mount device) with at most 700000 inodes and at most about
+11.25 GiB. Directory provisioners (`microk8s-hostpath`, `local-path`, `hostPath`) never pass. Set
+the inode count when the filesystem is created, for example a StorageClass parameter for ext4
+`mkfs` options with headroom such as `-N 600000` (requested inode counts are rounded up: `-N 700000` on
+an 11520Mi volume gives about 701 280 and fails), or a large `-i` bytes-per-inode, or XFS
+`-i maxpct=` sized well under 700000 inodes. Check the real totals with `df -i` and `df -B1` inside a
+test pod before relying on it.
+
+**Retained claims.** A workspace claim is kept after its session ends, in both modes: it holds
+the session's checkouts, and Blerg never deletes it on its own (an automatic cleanup is planned for
+0.5.1). On a directory provisioner the checkouts stay on the node's disk until you remove them.
+To list them, with the session each belongs to:
+
+```sh
+kubectl -n blerg-runner-sessions get pvc -l app=blerg-workspace -L session
+```
+
+Delete a claim only for a session that has ended and that you no longer need:
+
+```sh
+SESSION_ID=...   # the session's id, from the list above
+kubectl -n blerg-runner-sessions delete pvc "blerg-workspace-$SESSION_ID"
+```
+
+**Resume.** Keeping the claim does not make a cluster workspace session resumable: with native
+history on (the default), a workspace session can't resume after its pod ends; start a new session
+instead. Resuming them is planned for 0.5.1.
+
+**Images.** The agent image must come from the same build as the server: the server tells each
+pod which mode to enforce, and an older agent image ignores that and enforces bounded storage, so
+standard sessions fail to start (closed, never unbounded). `deploy.sh` builds and deploys both
+with the same `TAG`. Use a unique tag for every build (a commit id, not `latest`): session Jobs
+refer to the agent image by tag, and a node can keep running an older cached image under a reused
+tag.
+
+Retained claims survive failures and are never reclaimed just because commits were pushed. No
+pods/exec permission is required or added.
+
+Run the [cluster acceptance matrix](../../docs/cluster-workspace.md) after deployment
+on the designated lab cluster, including provider/CA/proxy behavior, physical
+writer fencing under partitions, replacement and retained-volume recovery. See
+[workspace integration](../../docs/workspace-integration.md) for shared gates and
+migration ordering.
+
+
+## Disposable acceptance installs
+
+Use [acceptance/RUNBOOK.md](acceptance/RUNBOOK.md) for an explicitly owned
+`acceptance-` namespace, server-free rendering, test-only images, required node
+exclusions, private results and UID-checked namespace/PV teardown. Do not use
+`deploy.sh` for this run. The 0.5.0 smoke uses public repositories, fixture-backed
+sync and the default storage class without quota/exhaustion claims. The full
+failure/measurement matrix is deferred to #180 / 0.5.1; both gates remain false.
+`BLERG_RUNNER_POD_EXCLUDE_NODES` is an optional trusted operator scheduling
+policy for session and model-catalog Jobs, not a browser setting or release gate.
+
+## Operator runner settings
+
+Keep optional runner settings in `install/k8s/.env`, using the exact
+`BLERG_RUNNER_*` names listed as optional ConfigMap references in
+`runner-deployment.yaml`. Every optional reference is supported, including pod
+resources, lifetimes, native history, child limits and legacy desktop compatibility.
+Exported values work too; the sourced `.env` takes precedence over exports.
+`deploy.sh` requires Python 3 to render these non-secret settings.
+
+Each redeploy uses an explicit value first, then the live `blerg-config` value,
+then the shipped default. Existing manual ConfigMap patches survive. An explicit
+empty value clears a setting; removing it from `.env` keeps its live value.
+To restore a default, set that default explicitly. Saved administrator settings
+(for example child limits and pod lifetimes) still override environment defaults.
+An unreadable live ConfigMap stops deployment instead of resetting configuration.
+Credentials belong in Secrets, never in this configuration.
+
+The agent image is managed for each deployment: it follows `REGISTRY`/`TAG`,
+and `CLUSTER_RUNTIME=off` always clears it. To choose a custom image, set
+`BLERG_RUNNER_AGENT_IMAGE` explicitly in `.env`; a live image value alone does
+not pin an old deployment tag. The existing `TRUSTED_PROXIES`,
+`WEBHOOK_ALLOW_PRIVATE` and `WORKSPACE_STORAGE_CLASS` aliases remain supported
+when explicitly supplied, including empty values. Exact `BLERG_RUNNER_*`
+settings take precedence over those aliases. Unset aliases keep live values.
+One exception: `BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS` is derived on every deploy from the
+`blerg-runner-data` claim (see [Workspace storage](#workspace-storage)), so a live value never
+survives unless you set it explicitly.
+
+Fresh Kubernetes installs default to an **8Gi memory limit**, a 1Gi memory
+request, a one-CPU limit and a 500m CPU request. Builds and browser tests may
+need more memory: for example `BLERG_RUNNER_POD_MEM_LIMIT=12Gi` and
+`BLERG_RUNNER_POD_CPU_LIMIT=4`. Resource changes apply to newly created pods.
+
+**Upgrading:** an existing installation that never set
+`BLERG_RUNNER_POD_MEM_LIMIT` keeps its effective **4Gi** limit. Explicit live
+ConfigMap values are preserved too. The server binary's fallback remains 4Gi
+for installations configured outside this installer. To raise the limit, add
+`BLERG_RUNNER_POD_MEM_LIMIT=8Gi` (or your chosen size) to `install/k8s/.env`
+and redeploy. This is an explicit opt-in; the new limit applies to newly
+started or resumed pods, including after subsequent redeploys.

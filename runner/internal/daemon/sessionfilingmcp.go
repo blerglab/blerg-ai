@@ -56,12 +56,15 @@ func sessionBoardSpec() map[string]any {
 	str := map[string]any{"type": "string"}
 	return map[string]any{"type": "function", "name": sessionBoardToolName, "description": "Read or change cards on a board your person gave this session access to in its Permissions. " +
 		"Call {\"tool\":\"access\"} first to list the boards and their level. Level read: blerg_board_get, blerg_board_list, blerg_board_schema, blerg_column_list, " +
-		"blerg_card_search, blerg_card_get. Level full adds blerg_card_create, blerg_card_update, blerg_card_move, blerg_card_comment, blerg_card_link. " +
+		"blerg_card_search, blerg_card_get. Level full adds blerg_card_create, blerg_card_update, blerg_card_move, blerg_card_comment, blerg_card_link, " +
+		"and manages columns: blerg_column_create, blerg_column_update (rename, is_terminal), blerg_column_move, blerg_column_delete " +
+		"(an empty column, or with move_cards_to for its cards). " +
 		"The person can change levels while you work: if a board tool you need is not listed or a call is refused, call this tool with {\"tool\":\"access\"} " +
 		"before telling the person you lack permission, and use it for anything the level allows. Without access, use blerg_ticket_file to propose a card; it asks the person.",
 		"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"tool"}, "properties": map[string]any{
 			"tool": map[string]any{"type": "string", "enum": []string{"access", "blerg_board_get", "blerg_board_list", "blerg_board_schema", "blerg_column_list",
-				"blerg_card_search", "blerg_card_get", "blerg_card_create", "blerg_card_update", "blerg_card_move", "blerg_card_comment", "blerg_card_link"}},
+				"blerg_card_search", "blerg_card_get", "blerg_card_create", "blerg_card_update", "blerg_card_move", "blerg_card_comment", "blerg_card_link",
+				"blerg_column_create", "blerg_column_update", "blerg_column_move", "blerg_column_delete"}},
 			"board": str, "arguments": map[string]any{"type": "object"}}}}
 }
 
@@ -70,7 +73,7 @@ func sessionFilingStdio() map[string]any {
 }
 func codexSessionFilingStdio() map[string]any {
 	c := sessionFilingStdio()
-	c["env_vars"] = []string{"BLERG_RUNNER_SESSION_ID", "BLERG_RUNNER_SERVER_HTTP", "BLERG_RUNNER_SESSION_TOKEN", "BLERG_RUNNER_DAEMON_STATE_DIR", "HOME", "PATH"}
+	c["env_vars"] = []string{"BLERG_RUNNER_SESSION_ID", "BLERG_RUNNER_SERVER_HTTP", "BLERG_RUNNER_SESSION_TOKEN", "BLERG_RUNNER_DAEMON_STATE_DIR", "BLERG_RUNNER_ATTACHMENTS_DIR", "HOME", "PATH"}
 	return c
 }
 func sessionFilingSpec() map[string]any {

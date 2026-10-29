@@ -72,6 +72,9 @@ services:
       # The internal service key board/runner present on privileged core calls,
       # and the local (JWT signing) key. Generated once by blerg-up.sh into .env.
       BLERG_CORE_INTERNAL_KEY: ${BLERG_CORE_INTERNAL_KEY:-}
+      # Settings → Account → Your desktops reads and changes desktops through the runner's
+      # internal desktop routes, with the key above.
+      BLERG_CORE_RUNNER_URL: http://blerg-runner:8080
       BLERG_CORE_LOCAL_KEY: ${BLERG_CORE_LOCAL_KEY:-}
       # The key the board presents to mint "Run as me" automation tokens (opens nothing else).
       BLERG_CORE_BOARD_MINT_KEY: ${BLERG_CORE_BOARD_MINT_KEY:-}
@@ -88,6 +91,7 @@ services:
       # every run so a hand-edited port is picked up without you having to.
       BLERG_CORE_ALLOWED_RETURN_ORIGINS: ${BLERG_CORE_ALLOWED_RETURN_ORIGINS:-http://localhost:${BLERG_PORT_CORE:-8081},http://localhost:${BLERG_PORT_BOARD:-8082},http://localhost:${BLERG_PORT_RUNNER:-8083}}
       BLERG_CORE_ORIGIN_AUDIENCES: ${BLERG_CORE_ORIGIN_AUDIENCES:-http://localhost:${BLERG_PORT_CORE:-8081}=blerg-core,http://localhost:${BLERG_PORT_BOARD:-8082}=blerg-board,http://localhost:${BLERG_PORT_RUNNER:-8083}=blerg-runner}
+      BLERG_INSTALL_TYPE: desktop
       BLERG_CORE_COOKIE_SECURE: "false"  # desktop only: Safari drops Secure cookies on http://localhost. Never on a public host.
       # First-run setup: on a fresh install the first account is created at
       # http://localhost:<core port>/setup. With core published on loopback only (the default
@@ -222,6 +226,7 @@ services:
       no_proxy: blerg-core,blerg-board,blerg-runner,postgres,localhost,127.0.0.1${NO_PROXY:+,${NO_PROXY}}${no_proxy:+,${no_proxy}}${BLERG_DOCKER_NO_PROXY:+,${BLERG_DOCKER_NO_PROXY}}
       # Required: the host daemon must present this token on /ws/daemon.
       BLERG_RUNNER_DAEMON_TOKEN: ${BLERG_RUNNER_DAEMON_TOKEN:-}
+      BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS: ${BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS:-auto}
       # Enables the board->runner contract (must equal BLERG_RUNNER_KEY above).
       BLERG_RUNNER_KEY: ${BLERG_RUNNER_KEY:-}
       # Register with, and validate tokens against, the control plane.

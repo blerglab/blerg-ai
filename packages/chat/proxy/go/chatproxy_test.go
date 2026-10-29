@@ -159,6 +159,7 @@ func TestRoutesForward(t *testing.T) {
 		{"artifact download", "GET", "/blerg/sessions/s1/artifacts/a9/download", "", nil, "GET", "/api/runner/sessions/s1/artifacts/a9/download", ""},
 		{"artifact delete", "DELETE", "/blerg/sessions/s1/artifacts/a9", "", nil, "DELETE", "/api/runner/sessions/s1/artifacts/a9", ""},
 		{"uploads", "POST", "/blerg/sessions/s1/uploads", "raw bytes here", map[string]string{"X-Artifact-Name": "notes.txt", "Content-Type": "text/plain"}, "POST", "/api/runner/sessions/s1/uploads", "raw bytes here"},
+		{"storage", "POST", "/blerg/sessions/s1/storage", "", nil, "POST", "/api/runner/sessions/s1/storage", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -728,5 +729,56 @@ func TestPreferencesRefusedWhenNotAuthorized(t *testing.T) {
 	}
 	if len(runner.requests()) != 0 {
 		t.Error("runner contacted after a refusal")
+	}
+}
+
+// The file routes name the person the app vouches for (Options.Acting), so a runner reached with
+// a shared key decides deletes, storage and upload attribution for them; a browser cannot name
+// someone itself, and the other routes never carry a name.
+func TestFileRoutesNameTheActingPerson(t *testing.T) {
+	runner := newStubRunner(t)
+	client := &recordingClient{inner: &HTTPRunnerClient{BaseURL: runner.srv.URL, Token: token}}
+	mux := http.NewServeMux()
+	MountWith(mux, "/blerg", client, Options{
+		Authorize: allow,
+		Acting: func(r *http.Request) (string, bool) {
+			return r.Header.Get("X-Test-Account"), r.Header.Get("X-Test-Admin") == "yes"
+		},
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	forged := map[string]string{"X-Blerg-Acting-Account": "someone-else", "X-Blerg-Acting-Admin": "1"}
+	for _, tc := range []struct{ method, path, body string }{
+		{"GET", "/blerg/sessions/s1/artifacts", ""},
+		{"DELETE", "/blerg/sessions/s1/artifacts/a9", ""},
+		{"POST", "/blerg/sessions/s1/uploads", "bytes"},
+		{"POST", "/blerg/sessions/s1/storage", ""},
+	} {
+		before := len(runner.requests())
+		hdr := map[string]string{"X-Test-Account": "acct-1", "X-Test-Admin": "yes", "X-Artifact-Name": "a.txt"}
+		call(t, srv, tc.method, tc.path, tc.body, hdr)
+		got := runner.requests()[before]
+		if got.Headers.Get("X-Blerg-Acting-Account") != "acct-1" || got.Headers.Get("X-Blerg-Acting-Admin") != "1" {
+			t.Errorf("%s %s: acting = %q/%q", tc.method, tc.path, got.Headers.Get("X-Blerg-Acting-Account"), got.Headers.Get("X-Blerg-Acting-Admin"))
+		}
+		// A browser that names someone itself, with nobody vouched: nothing reaches the runner.
+		before = len(runner.requests())
+		call(t, srv, tc.method, tc.path, tc.body, forged)
+		got = runner.requests()[before]
+		if got.Headers.Get("X-Blerg-Acting-Account") != "" || got.Headers.Get("X-Blerg-Acting-Admin") != "" {
+			t.Errorf("%s %s: a browser-sent name reached the runner", tc.method, tc.path)
+		}
+	}
+	// A member is named without the administrator flag.
+	before := len(runner.requests())
+	call(t, srv, "DELETE", "/blerg/sessions/s1/artifacts/a9", "", map[string]string{"X-Test-Account": "member"})
+	if got := runner.requests()[before]; got.Headers.Get("X-Blerg-Acting-Account") != "member" || got.Headers.Get("X-Blerg-Acting-Admin") != "" {
+		t.Errorf("member: %q/%q", got.Headers.Get("X-Blerg-Acting-Account"), got.Headers.Get("X-Blerg-Acting-Admin"))
+	}
+	// Reads of a session's conversation never carry a name.
+	before = len(runner.requests())
+	call(t, srv, "GET", "/blerg/sessions/s1", "", map[string]string{"X-Test-Account": "acct-1"})
+	if got := runner.requests()[before]; got.Headers.Get("X-Blerg-Acting-Account") != "" {
+		t.Error("the session read carried a name")
 	}
 }

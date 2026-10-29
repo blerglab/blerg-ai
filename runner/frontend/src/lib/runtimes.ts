@@ -17,9 +17,9 @@ export type RunRuntime = 'cluster' | 'docker' | 'daemon'
 export type RunKind = 'agent' | 'tmux'
 export type RunEngine = string
 
-// ─── Copy (verbatim from the spec; exported so tests assert one source) ──────
+// Short launch summaries, with longer runtime details available on demand.
 
-export const RUNTIME_CARDS: { id: RunRuntime; title: string; body: string }[] = [
+export const RUNTIME_CARDS: { id: RunRuntime; title: string; body: string; details?: string }[] = [
   {
     id: 'cluster',
     title: 'Cluster pod',
@@ -28,7 +28,8 @@ export const RUNTIME_CARDS: { id: RunRuntime; title: string; body: string }[] = 
   {
     id: 'docker',
     title: 'Local sandbox',
-    body: 'A container on the connected daemon, working in a clone of your repo: never your checkout or its .git. Its commits land on the branch wip/<session-id> in your repo (uncommitted work is committed for it when it stops); nothing is merged or pushed. Your ~/.claude and ~/.codex are mounted so the engine can use them; the rest of the machine is not.',
+    body: 'Works in a separate clone on this desktop.',
+    details: 'A container on the connected daemon, working in a clone of your repo: never your checkout or its .git. Its commits land on the branch wip/<session-id> in your repo (uncommitted work is committed for it when it stops); nothing is merged or pushed. Your ~/.claude and ~/.codex are mounted so the engine can use them; the rest of the machine is not.',
   },
   {
     id: 'daemon',
@@ -45,7 +46,7 @@ export const RUNTIME_LABELS: Record<string, string> = {
 }
 
 export const TERMINAL_NEEDS_DAEMON = 'Terminal sessions run on a daemon.'
-export const AGENT_NO_PROMPTS = 'Agent sessions run without permission prompts.'
+export const AGENT_NO_PROMPTS = 'No prompts'
 export const ACK_AGENT =
   'I understand this runs unsandboxed on this machine, as me, with no permission prompts'
 export const ACK_TERMINAL =
@@ -98,3 +99,10 @@ export function runtimeDisabledReason(
 
 /** Compact engine badges; unknown future engines retain their identifier. */
 export const ENGINE_SHORT: Record<string, string> = { claude: 'Cl', codex: 'Cx', hermes: 'H', openclaw: 'OC' }
+
+export function runtimeSentence(runtime?: string, machine = 'this machine') {
+  if (runtime === 'cluster') return "Runs in a Kubernetes pod with your (or the cluster's) credentials"
+  if (runtime === 'docker' || runtime === 'sandbox') return `Runs in a sandbox on ${machine}, using your engine login`
+  if (runtime === 'daemon' || runtime === 'host') return `Runs unsandboxed on ${machine} as you, using your engine login`
+  return 'Execution type unavailable'
+}

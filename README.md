@@ -45,6 +45,17 @@ session those sessions start, in one live view.
 <td width="33%"><img src="docs/media/ui/doc-review.jpg" alt="A margin comment on a Markdown document under review."><br><sub><b>Review anything.</b></sub></td>
 </tr></table>
 
+**A real workspace, not just a chat.** Browse the project, open code and documents side by side,
+and run a shell, in the browser, while the agent works.
+
+<table><tr>
+<td width="50%"><img src="docs/media/loops/explorer.gif" alt="Browsing a project in the file explorer and opening a Python file with syntax highlighting."><br><sub><b>Browse the project</b> while the agent works.</sub></td>
+<td width="50%"><img src="docs/media/loops/split.gif" alt="A design document and the code it describes, open side by side in a split view."><br><sub><b>Code and docs side by side.</b></sub></td>
+</tr><tr>
+<td width="50%"><img src="docs/media/loops/palette.gif" alt="The command palette: Ctrl+K for actions, sessions and cards, and quick open finding a file by name."><br><sub><b>Ctrl+K for everything,</b> Ctrl+P to open a file.</sub></td>
+<td width="50%"><img src="docs/media/loops/switch.gif" alt="Switching between sessions: each one's chat, shell and open files are back at once."><br><sub><b>Switch sessions instantly:</b> chat, shell and files come back at once.</sub></td>
+</tr></table>
+
 It is for one developer who wants agents working on real repositories without handing a laptop
 over to them, and for a team that wants the same thing on a cluster. Blerg is built with Blerg:
 most of it was written by agents running inside it.
@@ -176,12 +187,13 @@ full model, and how to report a problem, is in [`SECURITY.md`](SECURITY.md).
 | [Your own session image](docs/sandbox-image.md) | [Proposals](docs/proposals.md) | [The chat package](packages/chat/README.md) |
 | [Backup and restore](docs/backup-and-restore.md) | [Telemetry](docs/telemetry.md) | [Design notes](docs/design/) |
 | [Install with an AI agent](install/k8s/AGENT-INSTALL.md) | | [Runner configuration](runner/README.md#configuration-env) |
-| | | [Changelog](CHANGELOG.md) |
+| | | [Changelog](CHANGELOG.md) · [Roadmap](ROADMAP.md) |
 
 ## Project status
 
 Blerg is pre-1.0: breaking changes may land in any minor release and are called out in
-[`CHANGELOG.md`](CHANGELOG.md). Only the current `main` receives security fixes.
+[`CHANGELOG.md`](CHANGELOG.md). Only the current `main` receives security fixes. Where it is
+heading next is in [`ROADMAP.md`](ROADMAP.md).
 
 ## Contributing
 

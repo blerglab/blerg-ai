@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/idempotency"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -45,7 +46,7 @@ var ErrNotRunnable = errors.New("the cron can no longer run")
 // Starter starts the agent session for one run (spec 7.5). It must be
 // idempotent on run.IdempotencyKey(): a repeat call for the same run returns the
 // session the first call started and never a second one. The idempotency scope
-// it uses is Config.IdempotencyScope (default "cron:<cron id>": stable for the
+// it uses is Config.IdempotencyScope (default idempotency.Scope("cron", cron ID): stable for the
 // cron's life, so a renewed token never orphans an open run's key).
 //
 // A capacity problem must be reported BEFORE any session row or idempotency key
@@ -117,7 +118,7 @@ type Config struct {
 	StartTimeout            time.Duration // bound on one Starter call; default 45s
 	Workers                 int           // runs started in parallel; default 4
 	// IdempotencyScope names the runner_idempotency scope the Starter uses for
-	// a cron's runs; the reaper looks keys up there. Default "cron:<cron id>",
+	// a cron's runs; the reaper looks keys up there. Default StableIdempotencyScope,
 	// which does not change when the cron's token is renewed.
 	IdempotencyScope func(*db.Cron) string
 	// OnPaused is called when the scheduler pauses a cron (three failures, an
@@ -131,7 +132,7 @@ type Config struct {
 // StableIdempotencyScope is the runner_idempotency scope of a cron's runs (spec 7.3): per cron and
 // independent of its token, so renewing the token between a start and the reaper cannot make the
 // reaper look in a different place than the Starter wrote.
-func StableIdempotencyScope(c *db.Cron) string { return "cron:" + c.ID }
+func StableIdempotencyScope(c *db.Cron) string { return idempotency.Scope("cron", c.ID) }
 
 // accountStarts serialises "check the account's concurrent sessions, then start" per account in
 // this process, so two crons of one account cannot both pass the check for the last slot.
@@ -503,8 +504,18 @@ func (s *Scheduler) attemptStart(ctx context.Context, c *db.Cron, run *db.CronRu
 // keyMayExist reports whether the run's idempotency key exists, or cannot be looked up: either way
 // a session may have been started for the run.
 func (s *Scheduler) keyMayExist(ctx context.Context, c *db.Cron, run *db.CronRun) bool {
-	row, err := db.GetIdempotencyKey(context.WithoutCancel(ctx), s.cfg.Pool, s.cfg.IdempotencyScope(c), run.IdempotencyKey())
+	row, err := s.lookupKey(context.WithoutCancel(ctx), c, run.IdempotencyKey())
 	return err != nil || row != nil
+}
+
+// lookupKey also adopts claims from before the scope upgrade. Cron IDs are server UUIDs,
+// so the legacy cron namespace is unambiguous. Remove the fallback in 0.6, after one release.
+func (s *Scheduler) lookupKey(ctx context.Context, c *db.Cron, key string) (*db.IdempotencyRow, error) {
+	row, err := db.GetIdempotencyKey(ctx, s.cfg.Pool, s.cfg.IdempotencyScope(c), key)
+	if err != nil || row != nil {
+		return row, err
+	}
+	return db.GetIdempotencyKey(ctx, s.cfg.Pool, "cron:"+c.ID, key)
 }
 
 func (s *Scheduler) markStarted(ctx context.Context, c *db.Cron, run *db.CronRun, sid string, now time.Time) {
@@ -630,8 +641,8 @@ func (s *Scheduler) reapOne(ctx context.Context, run *db.CronRun, now time.Time)
 // crash came after the start: adopt the session. A key with no session row means
 // the crash came in between: release the key so the retry can claim it again.
 func (s *Scheduler) recoverKey(ctx context.Context, c *db.Cron, run *db.CronRun, now time.Time) (adopted bool, err error) {
-	scope, key := s.cfg.IdempotencyScope(c), run.IdempotencyKey()
-	row, err := db.GetIdempotencyKey(ctx, s.cfg.Pool, scope, key)
+	key := run.IdempotencyKey()
+	row, err := s.lookupKey(ctx, c, key)
 	if err != nil || row == nil {
 		return false, err
 	}
@@ -643,7 +654,7 @@ func (s *Scheduler) recoverKey(ctx context.Context, c *db.Cron, run *db.CronRun,
 		s.markStarted(ctx, c, run, row.SessionID, now)
 		return true, nil
 	}
-	return false, db.ReleaseIdempotencyKey(ctx, s.cfg.Pool, scope, key, row.SessionID)
+	return false, db.ReleaseIdempotencyKey(ctx, s.cfg.Pool, row.Scope, key, row.SessionID)
 }
 
 // retryHeld retries the runs that were held when the tick began (a run held

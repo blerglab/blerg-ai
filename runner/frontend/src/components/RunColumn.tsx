@@ -1,14 +1,20 @@
+import { ModelReconnectAction } from './ModelCatalogNotice'
+import RuntimeIcon from './RuntimeIcon'
+import '../../../../packages/settings/settings.css'
 import type { ReactNode, CSSProperties } from 'react'
 import {
   RUNTIME_CARDS,
   ENGINE_LABELS,
-  AGENT_NO_PROMPTS,
   runtimeDisabledReason,
 } from '../lib/runtimes'
 import type { RunDaemon, RunRuntime, RunKind, RunEngine } from '../lib/runtimes'
 import type { EngineModel } from '../types'
+import { launchPermission } from '../lib/capabilities'
+import PermissionChip from './PermissionChip'
 import ModelPicker, { type ModelPickerFreeText } from './ModelPicker'
 import ReposRootEditor from './ReposRootEditor'
+import EngineStatusList from './EngineStatusList'
+import type { EngineStatusRow } from '../lib/engineStatus'
 
 // RunColumn is the launch sheet's third column: every "where and how does this
 // session run" choice, visible at once. Nothing here is collapsed — the
@@ -23,7 +29,7 @@ const sectionLabel: CSSProperties = {
   fontWeight: 700,
   letterSpacing: '0.1em',
   textTransform: 'uppercase',
-  marginBottom: 8,
+  marginBottom: 6,
   display: 'block',
 }
 
@@ -50,7 +56,7 @@ function pillStyle(selected: boolean, dimmed = false): CSSProperties {
     borderRadius: 6,
     color: selected ? 'var(--selected-text)' : dimmed ? 'var(--fog-dim)' : 'var(--fog)',
     opacity: dimmed ? 0.6 : 1,
-    padding: '5px 14px',
+    padding: '5px 10px',
     cursor: 'pointer',
     fontSize: '0.85rem',
     fontFamily: 'inherit',
@@ -75,6 +81,7 @@ export interface RunColumnProps {
   modelsLoading?: boolean
   modelsFallback?: boolean
   modelsError?: string
+  modelsReconnect?: boolean
   modelsRefreshing?: boolean
   onModelsRetry?: () => void
   model: string
@@ -99,6 +106,8 @@ export interface RunColumnProps {
   engineDiscoveryState?: 'loading' | 'known' | 'unknown'
   engineDiscoveryError?: string
   onEngineDiscoveryRetry?: () => void
+  // Known engines this target can't run, each with its reason, fix and Check again.
+  unavailableEngines?: EngineStatusRow[]
 
   // Preflight, computed by the sheet and rendered here under Where it runs.
   clusterEngineBlocked: boolean
@@ -120,7 +129,7 @@ export interface RunColumnProps {
 
 export default function RunColumn(props: RunColumnProps) {
   const {
-    runtime, onRuntimeChange, kind, onKindChange, engine, onEngineChange,
+    runtime, onRuntimeChange, kind, engine, onEngineChange,
     models, modelsLoading, modelsFallback, modelsError, modelsRefreshing, onModelsRetry, model, onModelChange, effort, onEffortChange, modelFreeText,
     daemons, selectedDaemon, onDaemonChange, clusterConfigured,
     availableEnginesHere, clusterEngineBlocked, clusterGitMissing, settingsLink, engineMissingNote,
@@ -137,15 +146,15 @@ export default function RunColumn(props: RunColumnProps) {
   return (
     <div className="launch-col-run" data-testid="launch-col-run" data-phone-order="2">
       {/* 1. Where it runs */}
-      <div style={{ marginBottom: 20 }}>
+      <div style={{ marginBottom: 14 }}>
         <span style={sectionLabel}>Where it runs</span>
         <div role="radiogroup" aria-label="Where it runs">
           {RUNTIME_CARDS.map(card => {
             const reason = runtimeDisabledReason(card.id, { clusterConfigured, daemons, engine, kind })
             const selected = runtime === card.id
             return (
-              <button
-                key={card.id}
+              <div key={card.id} className="launch-runtime">
+              <button className="settings-action"
                 type="button"
                 role="radio"
                 data-testid={`runtime-${card.id}`}
@@ -159,7 +168,7 @@ export default function RunColumn(props: RunColumnProps) {
                   background: selected ? 'var(--selected-bg)' : 'var(--scree)',
                   border: `1px solid ${selected ? 'var(--selected-border)' : 'var(--stone)'}`,
                   borderRadius: 8,
-                  padding: '10px 12px',
+                  padding: '8px 10px',
                   marginBottom: 6,
                   cursor: reason ? 'not-allowed' : 'pointer',
                   opacity: reason ? 0.55 : 1,
@@ -167,8 +176,8 @@ export default function RunColumn(props: RunColumnProps) {
                   fontFamily: 'inherit',
                 }}
               >
-                <span style={{ fontWeight: 600, fontSize: '0.9rem', color: selected ? 'var(--selected-text)' : 'var(--chalk)' }}>
-                  {card.title}
+                <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600, fontSize: '0.9rem', color: selected ? 'var(--selected-text)' : 'var(--chalk)' }}>
+                  <RuntimeIcon runtime={card.id} machine={selectedDaemon?.name} /> {card.title}
                 </span>
                 <span style={{ display: 'block', fontSize: '0.75rem', marginTop: 3, color: 'var(--fog)' }}>
                   {card.body}
@@ -182,6 +191,8 @@ export default function RunColumn(props: RunColumnProps) {
                   </span>
                 )}
               </button>
+              {card.details && <details className="launch-help"><summary>Sandbox details</summary><p>{card.details}</p></details>}
+              </div>
             )
           })}
         </div>
@@ -202,7 +213,7 @@ export default function RunColumn(props: RunColumnProps) {
           <div data-testid="daemon-picker" style={{ marginTop: 10 }}>
             <span style={sectionLabel}>Daemon</span>
             {daemons.map(d => (
-              <button
+              <button className="settings-action"
                 key={d.id}
                 type="button"
                 role="radio"
@@ -278,39 +289,24 @@ export default function RunColumn(props: RunColumnProps) {
         )}
       </div>
 
-      {/* 2. Session type */}
-      <div style={{ marginBottom: 20 }}>
-        <span style={sectionLabel}>Session type</span>
-        <div role="radiogroup" aria-label="Session type" style={{ display: 'flex', gap: 6 }}>
-          <button
-            type="button"
-            role="radio"
-            data-testid="kind-agent"
-            aria-checked={kind === 'agent'}
-            onClick={() => onKindChange('agent')}
-            style={pillStyle(kind === 'agent')}
-          >
-            Agent
-          </button>
-        </div>
-      </div>
-
       {/* Only target-available engines are actionable; a sole engine needs no selector. */}
-      <div style={{ marginBottom: 20 }}>
+      <div style={{ marginBottom: 14 }}>
         {props.engineDiscoveryState === 'loading' || (availableEnginesHere === null && props.engineDiscoveryState !== 'unknown') ? (
           <p role="status" style={noteStyle}>Checking available engines…</p>
         ) : props.engineDiscoveryState === 'unknown' ? (
           <p role="status" style={warnStyle}>{props.engineDiscoveryError ?? 'Engine availability is unknown.'}{' '}
-            {props.onEngineDiscoveryRetry && <button type="button" onClick={props.onEngineDiscoveryRetry}>Retry engines</button>}
+            {props.onEngineDiscoveryRetry && <button type="button" className="settings-action btn small" onClick={props.onEngineDiscoveryRetry}>Retry engines</button>}
           </p>
         ) : (availableEnginesHere ?? []).length === 0 ? (
-          <p role="status" style={warnStyle}>No engines available for this runtime. Connect an engine in Settings or choose another runtime.</p>
+          <p role="status" style={warnStyle}>{(props.unavailableEngines?.length ?? 0) > 0
+            ? 'No engine can run here yet. Each one below says why and how to fix it.'
+            : 'No engines available for this runtime. Connect an engine in Settings or choose another runtime.'}</p>
         ) : (availableEnginesHere ?? []).length > 1 ? (
           <>
             <span style={sectionLabel}>Engine</span>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
               {(props.engineChoices ?? (availableEnginesHere ?? []).map(id => ({ id, name: ENGINE_LABELS[id] ?? id }))).map(choice => (
-                <button key={choice.id} type="button" data-testid={`engine-${choice.id}`} aria-pressed={engine === choice.id}
+                <button className="settings-action" key={choice.id} type="button" data-testid={`engine-${choice.id}`} aria-pressed={engine === choice.id}
                   onClick={() => onEngineChange(choice.id)} style={pillStyle(engine === choice.id)}>
                   {choice.name}
                 </button>
@@ -318,9 +314,16 @@ export default function RunColumn(props: RunColumnProps) {
             </div>
           </>
         ) : null}
+        {props.engineDiscoveryState === 'known' && (props.unavailableEngines?.length ?? 0) > 0 && (
+          <div data-testid="engines-unavailable">
+            <span style={{ ...sectionLabel, marginTop: 10 }}>Not available here</span>
+            <EngineStatusList rows={props.unavailableEngines ?? []} pills settingsLink={settingsLink}
+              onChecked={() => props.onEngineDiscoveryRetry?.()} />
+          </div>
+        )}
         {props.engineDiscoveryState === 'known' && props.engineDiscoveryError && <p role="status" style={noteStyle}>
           {props.engineDiscoveryError}{' '}
-          {props.onEngineDiscoveryRetry && <button type="button" onClick={props.onEngineDiscoveryRetry}>Retry engines</button>}
+          {props.onEngineDiscoveryRetry && <button type="button" className="settings-action btn small" onClick={props.onEngineDiscoveryRetry}>Retry engines</button>}
         </p>}
         {/* OpenClaw pins the session to the daemon host — with no daemon
             connected that leaves all three cards greyed out and no
@@ -352,7 +355,8 @@ export default function RunColumn(props: RunColumnProps) {
       {modelsRefreshing && <p role="status" style={noteStyle}>Refreshing {props.engineChoices?.find(e => e.id === engine)?.name ?? ENGINE_LABELS[engine] ?? engine} models… You can launch with the default model.</p>}
       {modelsError && <p role="status" data-testid="models-error" style={noteStyle}>
         {modelsError}{' '}
-        {onModelsRetry && <button type="button" onClick={onModelsRetry}>Retry</button>}
+        {props.modelsReconnect && <ModelReconnectAction />}{' '}
+        {onModelsRetry && <button type="button" className="settings-action btn small" onClick={onModelsRetry}>Retry</button>}
       </p>}
       {props.modelNotice && (
         <p role="status" data-testid="model-keep-notice" className="model-keep-notice"
@@ -380,10 +384,10 @@ export default function RunColumn(props: RunColumnProps) {
       </>}
 
       {/* 5. Permissions */}
-      <div style={{ marginBottom: 20 }}>
+      <div style={{ marginBottom: 14 }}>
         <span style={sectionLabel}>Permissions</span>
         {kind === 'agent' ? (
-          <p data-testid="agent-permissions-note" style={{ ...noteStyle, margin: 0 }}>{AGENT_NO_PROMPTS}</p>
+          <p data-testid="agent-permissions-note" style={{ ...noteStyle, margin: 0 }}><PermissionChip permission={launchPermission(engine, kind)} /></p>
         ) : runtime === 'docker' && engine !== 'openclaw' ? (
           <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}>
             <div
@@ -401,7 +405,9 @@ export default function RunColumn(props: RunColumnProps) {
                   onSkipPermissionsChange(!dangerouslySkipPermissions)
                 }
               }}
-              title={engine === 'codex' ? '--dangerously-bypass-approvals-and-sandbox' : engine === 'hermes' ? '--yolo' : '--dangerously-skip-permissions'}
+              title={`When enabled: ${launchPermission(engine, kind, true).description}`}
+              aria-label="No prompts"
+              aria-description={`When enabled: ${launchPermission(engine, kind, true).description}`}
               style={{
                 width: 36,
                 height: 20,
@@ -426,11 +432,11 @@ export default function RunColumn(props: RunColumnProps) {
               }} />
             </div>
             <span style={{ fontSize: '0.85rem', color: dangerouslySkipPermissions ? 'var(--chalk)' : 'var(--fog)' }}>
-              Bypass all permission prompts (Docker sandbox only)
+              No prompts
             </span>
           </label>
         ) : (
-          <p style={{ ...noteStyle, margin: 0 }}>Permission prompts stay on.</p>
+          <p style={{ ...noteStyle, margin: 0 }}>Uses the engine’s configured permission prompts.</p>
         )}
       </div>
     </div>

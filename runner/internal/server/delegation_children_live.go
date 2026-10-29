@@ -13,6 +13,7 @@ import (
 )
 
 type liveChild struct {
+	Runtime        string     `json:"runtime,omitempty"`
 	UsageStatus    string     `json:"usage_status"`
 	ToolCalls      int64      `json:"tool_calls"`
 	Activity       string     `json:"activity,omitempty"`
@@ -30,6 +31,9 @@ type liveChild struct {
 	Asking         bool       `json:"asking"`
 	Tokens         *int64     `json:"tokens"`
 	CostUSD        *float64   `json:"cost_usd,omitempty"`
+	// Usage is Tokens broken down for the Running now chip's tooltip (live_usage.go); present
+	// exactly when Tokens is.
+	Usage *liveUsage `json:"usage,omitempty"`
 	// Ticket is the started session's current pin (the newest it pinned and still holds): the
 	// parent's panel shows it on the child's row.
 	Ticket *liveChildTicket `json:"ticket,omitempty"`
@@ -108,6 +112,9 @@ func (a *API) readChildrenSnapshot(ctx context.Context, parent *db.SessionRow, a
 		}
 		daemonNames := make(map[string]string)
 		for _, g := range grants {
+			if g.DaemonID != clusterDaemonID && !a.hub.ownsDesktopID(ctx, account, g.DaemonID) {
+				continue
+			}
 			name, known := daemonNames[g.DaemonID]
 			if !known && g.DaemonID == clusterDaemonID {
 				name, known = clusterDaemonLabel, true
@@ -142,7 +149,7 @@ func (a *API) liveChildren(ctx context.Context, rows []db.ChildLiveRow, account 
 	out := make([]liveChild, 0, len(rows))
 	var allUsage []db.SessionTokenRow
 	for _, row := range rows {
-		c := liveChild{ID: row.ID, Title: row.Title, Engine: row.Engine, Model: row.Model, Effort: row.Effort, Status: row.Status,
+		c := liveChild{Runtime: row.Runtime, ID: row.ID, Title: row.Title, Engine: row.Engine, Model: row.Model, Effort: row.Effort, Status: row.Status,
 			StartedAt: row.StartedAt, EndedAt: row.EndedAt, Asking: row.OpenAsks > 0}
 		snapshot, err := db.ReadChildTelemetry(ctx, a.dbPool, row.ID, row.MaxSeq)
 		if err != nil {
@@ -183,6 +190,15 @@ func (a *API) liveChildren(ctx context.Context, rows []db.ChildLiveRow, account 
 			}
 			if len(summary.UnpricedModels) == 0 && c.Tokens != nil {
 				c.CostUSD = summary.Totals.CostUSD
+			}
+			if c.Tokens != nil {
+				turn, inFlight := turnUsage(snapshot.Events, c.EndedAt == nil && (c.Status == "running" || c.Status == "waiting"))
+				c.Usage = summariseLiveUsage(usage, inFlight, turn, prices)
+				if c.Usage != nil {
+					if c.Usage.Context, err = a.readLiveContext(ctx, row.ID, row.MaxSeq); err != nil {
+						return nil, nil, err
+					}
+				}
 			}
 			c.Local = row.Local
 			allUsage = append(allUsage, usage...)

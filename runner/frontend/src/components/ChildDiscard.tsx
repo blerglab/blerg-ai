@@ -1,5 +1,7 @@
-import {useEffect, useId, useRef, useState, type RefObject} from 'react'
-import {createPortal} from 'react-dom'
+import { forgetSessionAttachments } from '@blerglab/chat'
+import { ConfirmPopover } from '@blerglab/chat'
+import { usePaletteCommands } from '../commands/context'
+import {useEffect, useRef, useState, type RefObject} from 'react'
 import {apiFetch} from '../apiFetch'
 import {refreshChildren} from '../hooks/useChildrenSignal'
 import './ChildDiscard.css'
@@ -8,6 +10,7 @@ interface Props {
   parentId: string
   childId: string
   title: string
+  palette?: boolean
   menu?: boolean
   focusTarget?: RefObject<HTMLButtonElement | null>
   onOpen?(): void
@@ -30,7 +33,7 @@ export function ParentDiscardAction(props: SessionProps) {
 }
 
 /** A human-only action: never changes local session records ahead of the server's update. */
-function DiscardAction({parentId, sessionId, title, menu = false, focusTarget, onOpen, onDiscarded, running = false, hint}: SessionProps & {parentId?: string}) {
+function DiscardAction({parentId, sessionId, title, palette = false, menu = false, focusTarget, onOpen, onDiscarded, running = false, hint}: SessionProps & {parentId?: string}) {
   const child = !!parentId
   const actionName = child ? 'Discard child session' : 'Discard session and children'
   const [open, setOpen] = useState(false)
@@ -40,16 +43,6 @@ function DiscardAction({parentId, sessionId, title, menu = false, focusTarget, o
   const mounted = useRef(true)
   useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
   const trigger = useRef<HTMLButtonElement>(null)
-  const dialog = useRef<HTMLDivElement>(null)
-  const heading = useId()
-  const description = useId()
-  useEffect(() => {
-    if (!open) return
-    const restore = focusTarget?.current ?? trigger.current
-    dialog.current?.querySelector<HTMLButtonElement>('button')?.focus()
-    return () => {restore?.focus()}
-  }, [open, focusTarget])
-  useEffect(() => {if (open && busy) dialog.current?.focus()}, [open, busy])
   async function discard() {
     if (busy) return
     setBusy(true); setError('')
@@ -68,37 +61,24 @@ function DiscardAction({parentId, sessionId, title, menu = false, focusTarget, o
         if (receipt?.status !== 'discarded' || receipt.session_id !== sessionId || typeof receipt.archived_at !== 'string' || !Number.isFinite(Date.parse(receipt.archived_at))) throw new Error('discard not confirmed')
       }
       refreshChildren(parentId || sessionId)
+      // A discarded session takes no more files: forget any waiting on this device.
+      void forgetSessionAttachments(sessionId)
       if (!mounted.current) return
       setRequested(true); setOpen(false)
       onDiscarded?.()
     } catch {if (mounted.current) setError(child ? 'Could not discard this child session. Try again.' : 'Could not finish discarding this session and its children. Retry to complete any remaining steps.')}
     finally {if (mounted.current) setBusy(false)}
   }
+  usePaletteCommands(palette ? [{ id: `discard-session:${sessionId}`, title: 'Discard session…', destructive: true, run: () => { setError(''); setOpen(true) } }] : [])
   return <>
-    <button ref={trigger} type="button" role={menu ? 'menuitem' : undefined} className={hint ? 'icon-menu-item danger child-discard-trigger' : 'rail-link child-discard-trigger'} data-testid={hint ? 'discard-menuitem' : undefined} aria-label={menu ? actionName : `Discard ${title}`} title={menu ? actionName : `Discard ${title}`} disabled={busy || requested} onClick={() => {setError(''); setOpen(true); onOpen?.()}}>{menu ? (hint ? <><span className="icon-menu-label">Discard</span><span className="icon-menu-hint">{hint}</span></> : 'Discard') : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg>}</button>
+    {!palette && <button ref={trigger} type="button" role={menu ? 'menuitem' : undefined} className={hint ? 'icon-menu-item danger child-discard-trigger' : 'rail-link child-discard-trigger'} data-testid={hint ? 'discard-menuitem' : undefined} aria-label={menu ? actionName : `Discard ${title}`} title={menu ? actionName : `Discard ${title}`} disabled={busy || requested} onClick={() => {setError(''); setOpen(true); onOpen?.()}}>{menu ? (hint ? <><span className="icon-menu-label">Discard</span><span className="icon-menu-hint">{hint}</span></> : 'Discard') : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg>}</button>}
     {requested && !menu && <span className="child-discard-status" role="status">Discard requested. Updating session list…</span>}
-    {open && createPortal(<div className="child-discard-backdrop" onClick={event => {event.stopPropagation(); if (event.target === event.currentTarget && !busy) setOpen(false)}}>
-      <div ref={dialog} className="child-discard-dialog" role="dialog" tabIndex={-1} aria-modal="true" aria-labelledby={heading} aria-describedby={description} onKeyDown={event => {
-        if (event.key === 'Escape') {event.stopPropagation(); event.preventDefault(); if (!busy) setOpen(false)}
-        if (event.key === 'Tab') {
-          const buttons = [...(dialog.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])]
-          if (!buttons.length) {event.preventDefault(); return}
-          const first = buttons[0], last = buttons[buttons.length - 1]
-          if (event.shiftKey && document.activeElement === first) {event.preventDefault(); last?.focus()}
-          else if (!event.shiftKey && document.activeElement === last) {event.preventDefault(); first?.focus()}
-        }
-      }}>
-        <h3 id={heading}>{child ? 'Discard child session?' : 'Discard session and all children?'}</h3>
-        <p className="child-discard-title">{title}</p>
-        {running && <p className="child-discard-running" data-testid="discard-running"><strong>It is running now.</strong> Discarding stops the work it is doing.</p>}
-        <p id={description}>{child ? 'This stops any running work and removes this child from the active session lists. Its conversation, history and insights remain available.' : 'This stops and archives this session and every child, including children marked Keep running and work in progress. Their conversations, files, history and insights remain available. This cannot be resumed.'}</p>
-        {error && <p role="alert">{error}</p>}
-        <div className="child-discard-buttons">
-          <button type="button" className="rail-link" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
-          <button type="button" className="rail-link child-discard-confirm" disabled={busy} onClick={() => {void discard()}}>{busy ? 'Discarding…' : actionName}</button>
-        </div>
-      </div>
-    </div>, document.body)}
+    {(open || error) && <ConfirmPopover anchor={focusTarget ?? trigger}
+      title={error ? "Discard didn't finish" : child ? 'Discard child session?' : 'Discard session and all children?'}
+      description={error || <>{title}. {running && <strong data-testid="discard-running">It is running now. Discarding stops the work it is doing. </strong>}{child ? 'Stops this child; its conversation, history, files and insights stay available.' : 'Stops and archives this session and all children, including children marked Keep running and work in progress. Conversations, files, history and insights remain available; work cannot resume.'}</>}
+      busy={busy} closeOnConfirm={false} confirmLabel={busy ? 'Discarding…' : error ? 'Retry' : actionName} cancelLabel={error ? 'Dismiss' : 'Cancel'}
+      onConfirm={() => { void discard() }} onCancel={() => { setOpen(false); setError('') }} testId="discard-confirm" />}
+
   </>
 }
 

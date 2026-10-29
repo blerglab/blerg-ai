@@ -29,3 +29,19 @@ export function usePrefersReducedMotion(): boolean {
   }, [])
   return reduced
 }
+
+/** useMinuteClock returns server time (Date.now() - offset) floored to the minute, refreshed at each
+ *  minute boundary while active (like useTicker, it holds its last value while not). A view that
+ *  needs the time only to judge what has gone stale (12 h) uses it instead of useTicker, so the
+ *  second-by-second clock stays in the components that show elapsed time and does not re-render
+ *  the whole view. */
+export function useMinuteClock(active: boolean, offset: number): number {
+  const [now, setNow] = useState(() => Date.now())
+  const minute = Math.floor((now - offset) / 60_000) * 60_000
+  useEffect(() => {
+    if (!active) return
+    const t = setTimeout(() => setNow(Date.now()), Math.max(1, minute + 60_000 + offset - Date.now()))
+    return () => clearTimeout(t)
+  }, [active, now, minute, offset]) // now: a timer that fires early is set again, not dropped
+  return minute
+}

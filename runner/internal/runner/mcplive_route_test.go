@@ -39,7 +39,7 @@ for line in sys.stdin:
 	}
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 	t.Setenv("HOME", t.TempDir()) // Run changes HOME; t.Cleanup restores it after the runner has stopped.
-	t.Setenv("CODEX_AUTH_JSON", `{}`)
+	t.Setenv("CODEX_AUTH_JSON", `{"auth_mode":"apikey","OPENAI_API_KEY":"fixture-api-key"}`)
 	t.Setenv("BLERG_RUNNER_MCP_PROMPT_WAIT_S", "30")
 	frames := make(chan json.RawMessage, 256)
 	connections := make(chan *websocket.Conn, 1)

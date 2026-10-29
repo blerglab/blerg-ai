@@ -1,9 +1,11 @@
+import { BoardKeySettings } from "./BoardKeySettings";
+import "../../../packages/settings/settings.css";
 import BoardRunTarget from "./BoardRunTarget";
 import { modelDisplayName } from "@blerglab/chat";
 import { FormEvent, Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, ApiError, Board } from "./api";
 import { coreOrigin } from "./authClient";
-import { useMe } from "./me";
+import { useBoardAdmin, useMe } from "./me";
 import { useBoardLaunchOptions } from "./launchOptions";
 
 // expiryNote: "expires in 12 days" / "expired" — the one thing a human needs
@@ -93,7 +95,8 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
 
   return (
     <>
-      <p className="sign pop-head">Automation</p>
+      <h3 className="settings-heading">Automation</h3>
+      <p className="settings-description">Choose whose account and which engine this board uses to run sessions.</p>
       <dl className="settings-grid">
         <dt title="the blerg-core agent token every session this board starts runs under">runs as</dt>
         <dd>
@@ -118,7 +121,7 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
       </dl>
       {offerRunAsMe && (
         <div className={`run-as-me-cta${board.automation_token_set ? "" : " prominent"}`}>
-          <button className="btn small" type="button" disabled={busy} onClick={() => void runAsMe()}>
+          <button className="settings-action btn small" type="button" disabled={busy} onClick={() => void runAsMe()}>
             {busy && !pasting ? "Setting up…" : "Run as me"}
           </button>
           <p className="pop-foot">
@@ -150,11 +153,11 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
             </p>
           )}
           {(discovery.state === "loading" || (discovery.refreshing && discovery.state !== "known")) && <p role="status">Loading available engines…</p>}
-          {discovery.error && <p role="alert">{discovery.error} <button type="button" onClick={discovery.retry}>Retry engine discovery</button></p>}
+          {discovery.error && <p role="alert">{discovery.error} <button className="settings-action" type="button" onClick={discovery.retry}>Retry engine discovery</button></p>}
           {board.automation_token_set && discovery.state === "known" && discovery.engines.length === 0 && <p role="status">No engines are available for this board's automation account and target.</p>}
           {discovery.engines.length > 1 && (
-            <label className="field">Engine
-              <select value={selected} onChange={(e) => setEngine(e.target.value)} disabled={busy}>
+            <label className="settings-field field">Engine
+              <select className="settings-field" value={selected} onChange={(e) => setEngine(e.target.value)} disabled={busy}>
                 {discovery.engines.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
               </select>
             </label>
@@ -163,24 +166,24 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
           {selected && selected !== (board.automation_engine || "claude") && <p role="status">Save to use {label(selected)} for new sessions. Changing engines clears model and effort overrides for this board and its cards. Existing sessions keep their engine.</p>}
           {token.trim() && <p>Save the token first, then choose from its available engines.</p>}
           {showPaste && (
-            <label className="field">
+            <label className="settings-field field">
               Automation token {board.automation_token_set && "(leave empty to keep the current one)"}
-              <input type="password" autoComplete="off" spellCheck={false} value={token}
+              <input className="settings-field" type="password" autoComplete="off" spellCheck={false} value={token}
                 placeholder="paste a run-sessions agent token" disabled={busy}
                 onChange={(e) => setToken(e.target.value)} />
             </label>
           )}
           <div className="row">
             {(showPaste || selected) && (
-              <button className="btn small" type="submit" disabled={busy || (!selected && !token.trim())}>Save</button>
+              <button className="settings-action btn small" type="submit" disabled={busy || (!selected && !token.trim())}>Save</button>
             )}
             {canRunAsMe && !pasting && (
-              <button className="btn ghost small" type="button" disabled={busy} onClick={() => setPasting(true)}>
+              <button className="settings-action btn ghost small" type="button" disabled={busy} onClick={() => setPasting(true)}>
                 Use a different token…
               </button>
             )}
             {board.automation_token_set && (
-              <button className="btn ghost small" type="button" disabled={busy}
+              <button className="settings-action btn ghost small" type="button" disabled={busy}
                 onClick={() => void save({ automation_token: "" })}>
                 Remove token
               </button>
@@ -207,13 +210,13 @@ function ComponentVersionSetting({ board, onChanged }: { board: Board; onChanged
     } catch (e) { setError(e instanceof Error ? e.message : "Couldn't save version collection."); }
     finally { setBusy(false); }
   }
-  return <section>
-    <p className="sign pop-head">Filed ticket context</p>
-    {me?.is_admin ? <label style={{ display: "flex", gap: 8, fontSize: 13 }}>
-      <input type="checkbox" checked={enabled} disabled={busy} onChange={e => void change(e.target.checked)} />
+  return <section className="settings-section">
+    <h3 className="settings-heading">Filed ticket context</h3>
+    {me?.is_admin ? <label className="settings-field" style={{ display: "flex", gap: 8, fontSize: 13 }}>
+      <input className="settings-toggle-control" type="checkbox" checked={enabled} disabled={busy} onChange={e => void change(e.target.checked)} />
       Include component version on filed tickets
     </label> : <p>Component version collection: {board.include_component_version ? "on" : "off"}</p>}
-    <p style={{ fontSize: 12 }}>When available, attach the originating component's version and commit to tickets filed on this board.</p>
+    <p className="settings-description">Include the Blerg version when filing tickets on this board.</p>
     {error && <p role="alert">{error}</p>}
   </section>;
 }
@@ -258,6 +261,13 @@ export function BoardSettings({ board, onChanged }: { board: Board; onChanged?: 
     if (over > 0) setShift(-Math.min(over, Math.max(0, r.left - 12)));
   }, [open]);
 
+  // Something elsewhere on the board (the board session's start error) asks for the settings.
+  useEffect(() => {
+    const onOpen = () => { setShift(0); setOpen(true); };
+    window.addEventListener("blerg-board:open-settings", onOpen);
+    return () => window.removeEventListener("blerg-board:open-settings", onOpen);
+  }, []);
+
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
@@ -272,6 +282,7 @@ export function BoardSettings({ board, onChanged }: { board: Board; onChanged?: 
     };
   }, [open]);
 
+  const canAdminKey = useBoardAdmin(board.id);
   const roles = roleModels(board);
   const worker = board.model;
   const reviewer = board.reviewer_model || worker;
@@ -283,15 +294,16 @@ export function BoardSettings({ board, onChanged }: { board: Board; onChanged?: 
   return (
     <div className="board-settings" ref={ref}>
       <button
-        className={`chip model-chip${open ? " open" : ""}`}
+        className={'settings-action ' + (`chip model-chip${open ? " open" : ""}`)}
         aria-expanded={open}
         onClick={() => {
           setShift(0); // measure a fresh opening from the unshifted position
           setOpen((o) => !o);
         }}
-        title={`Board models — worker: ${worker || "runner default"} · reviewer: ${reviewer || "runner default"}. Click for all four${board.automation_token_set ? "" : " — and to set the automation token this board needs to start sessions"}.`}
+        title={`Board settings — worker: ${worker || "runner default"} · reviewer: ${reviewer || "runner default"}. Click for all four${board.automation_token_set ? "" : " — and to set the automation token this board needs to start sessions"}.`}
       >
         <span className="lede">model</span>
+        {!board.key && canAdminKey && <span className="mono"> · confirm board key</span>}
         <span className="mono">{chipLabel}</span>
         {!board.automation_token_set && <span className="warn-dot" aria-label="no automation token" />}
         {reviewerDiffers && (
@@ -301,7 +313,9 @@ export function BoardSettings({ board, onChanged }: { board: Board; onChanged?: 
       {open && (
         <div className="settings-pop" role="dialog" aria-label="Board settings"
           ref={popRef} style={shift ? { marginLeft: shift } : undefined}>
-          <p className="sign pop-head">Board models</p>
+          <BoardKeySettings board={board} onChanged={onChanged} />
+          <h3 className="settings-heading">Board models</h3>
+          <p className="settings-description">See which model each type of session uses.</p>
           <dl className="settings-grid">
             {roles.map((r) => {
               const effective = r.set || worker;
@@ -321,14 +335,16 @@ export function BoardSettings({ board, onChanged }: { board: Board; onChanged?: 
               );
             })}
           </dl>
-          <p className="sign pop-head">Repos</p>
+          <h3 className="settings-heading">Repos</h3>
+          <p className="settings-description">See the repositories available to this board.</p>
           <dl className="settings-grid">
             <dt title="sessions clone the first repo as their working directory">repos</dt>
             <dd className="mono">{board.repos?.length ? board.repos.join(", ") : <span className="unset">none</span>}</dd>
             <dt title="sessions clone from git_base/<repo>.git">git base</dt>
             <dd className="mono">{board.git_base || <span className="unset">server default</span>}</dd>
           </dl>
-          <p className="sign pop-head">Board run</p>
+          <h3 className="settings-heading">Board run</h3>
+          <p className="settings-description">See how this board runs and checks its work.</p>
           <dl className="settings-grid">
             <dt title="how many cards the run dispatcher keeps in flight on this board at once — the cross-board priority dial. Applies to the run already going.">
               concurrency

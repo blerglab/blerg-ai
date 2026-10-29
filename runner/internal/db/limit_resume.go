@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"sync"
@@ -14,7 +15,18 @@ import (
 
 var ErrLimitResumeBusy = errors.New("limit resume busy")
 
+// The session UUID supplies stable random staggering across replicas/restarts.
+// The same expression gates both SQL selection and the atomic claim.
+const limitResumeDueSQL = "reset_at + (60 + (get_byte(sha256(convert_to(session_id::text,'UTF8')),0) % 31)) * interval '1 second'"
+
+func LimitResumeDueAt(id string, reset time.Time) time.Time {
+	sum := sha256.Sum256([]byte(id))
+	return reset.Add(time.Minute + time.Duration(sum[0]%31)*time.Second)
+}
+
 type LimitResume struct {
+	WindowID          string     `json:"-"`
+	RefusedAt         *time.Time `json:"-"`
 	LastAttemptTurnID string     `json:"-"`
 	DispatchedAt      *time.Time `json:"-"`
 	Provider          string     `json:"-"`
@@ -37,7 +49,7 @@ func GetLimitResume(ctx context.Context, q Querier, id string) (*LimitResume, er
 	if q == nil {
 		return r, nil
 	}
-	err := q.QueryRow(ctx, `SELECT last_attempt_turn_id,dispatched_at,provider,enabled,state,reason,reset_at,attempts,auth_session_id,turn_id,cancelled_turn_id,event_seq,cancelled_at,expires_at,attempt_id FROM session_limit_resume WHERE session_id=$1`, id).Scan(&r.LastAttemptTurnID, &r.DispatchedAt, &r.Provider, &r.Enabled, &r.State, &r.Reason, &r.ResetAt, &r.Attempts, &r.AuthSessionID, &r.TurnID, &r.CancelledTurnID, &r.EventSeq, &r.CancelledAt, &r.ExpiresAt, &r.AttemptID)
+	err := q.QueryRow(ctx, `SELECT window_id,refused_at,last_attempt_turn_id,dispatched_at,provider,enabled,state,reason,reset_at,attempts,auth_session_id,turn_id,cancelled_turn_id,event_seq,cancelled_at,expires_at,attempt_id FROM session_limit_resume WHERE session_id=$1`, id).Scan(&r.WindowID, &r.RefusedAt, &r.LastAttemptTurnID, &r.DispatchedAt, &r.Provider, &r.Enabled, &r.State, &r.Reason, &r.ResetAt, &r.Attempts, &r.AuthSessionID, &r.TurnID, &r.CancelledTurnID, &r.EventSeq, &r.CancelledAt, &r.ExpiresAt, &r.AttemptID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return r, nil
 	}
@@ -199,7 +211,7 @@ func SetLimitResume(ctx context.Context, q Querier, id string, enabled bool, sid
 func setLimitResume(ctx context.Context, q Querier, id string, enabled bool, sid string) error {
 	_, err := q.Exec(ctx, `INSERT INTO session_limit_resume(session_id,enabled,auth_session_id,state) VALUES($1,$2,$3,CASE WHEN $2 THEN 'armed' ELSE 'disabled' END)
  ON CONFLICT(session_id) DO UPDATE SET enabled=$2,auth_session_id=$3,
- state=CASE WHEN NOT $2 THEN 'disabled' WHEN session_limit_resume.reset_at IS NOT NULL AND session_limit_resume.expires_at>now() AND session_limit_resume.turn_id<>session_limit_resume.cancelled_turn_id AND session_limit_resume.attempts<3 AND session_limit_resume.state IN ('pending','disabled','unknown','armed') THEN 'pending' WHEN session_limit_resume.state IN ('unknown','dispatched','dispatching','blocked','expired','exhausted') THEN session_limit_resume.state ELSE 'armed' END,
+ state=CASE WHEN NOT $2 THEN 'disabled' WHEN session_limit_resume.reset_at IS NOT NULL AND session_limit_resume.expires_at>now() AND session_limit_resume.turn_id<>session_limit_resume.cancelled_turn_id AND session_limit_resume.attempts<3 AND session_limit_resume.state IN ('pending','disabled','unknown','armed') THEN 'pending' WHEN session_limit_resume.refused_at IS NOT NULL AND session_limit_resume.reset_at IS NULL AND session_limit_resume.expires_at>now() AND session_limit_resume.turn_id<>session_limit_resume.cancelled_turn_id AND session_limit_resume.attempts<3 AND session_limit_resume.state IN ('disabled','unknown','armed') THEN 'unknown' WHEN session_limit_resume.state IN ('unknown','dispatched','dispatching','blocked','expired','exhausted') THEN session_limit_resume.state ELSE 'armed' END,
  cancelled_turn_id=CASE WHEN $2 THEN session_limit_resume.cancelled_turn_id ELSE session_limit_resume.turn_id END,
  cancelled_at=CASE WHEN $2 THEN session_limit_resume.cancelled_at ELSE now() END`, id, enabled, sid)
 	return err
@@ -208,16 +220,20 @@ func TrackLimitResumeTurn(ctx context.Context, q Querier, id, turnID, source str
 	_, err := q.Exec(ctx, `INSERT INTO session_limit_resume(session_id,turn_id,event_seq) VALUES($1,$2,$3)
  ON CONFLICT(session_id) DO UPDATE SET turn_id=$2,event_seq=$3,
  state=CASE WHEN session_limit_resume.enabled THEN 'armed' ELSE 'disabled' END,
- reset_at=NULL,expires_at=CASE WHEN $4 IN ('limit_resume','system') THEN session_limit_resume.expires_at ELSE NULL END,reason='',attempts=CASE WHEN $4 IN ('limit_resume','system') THEN session_limit_resume.attempts ELSE 0 END,
+ reset_at=NULL,window_id='',refused_at=NULL,next_meter_poll_at=NULL,expires_at=CASE WHEN $4 IN ('limit_resume','system') THEN session_limit_resume.expires_at ELSE NULL END,reason='',attempts=CASE WHEN $4 IN ('limit_resume','system') THEN session_limit_resume.attempts ELSE 0 END,
  attempt_id=CASE WHEN $4 IN ('limit_resume','system') THEN session_limit_resume.attempt_id ELSE '' END
  WHERE session_limit_resume.event_seq<$3 AND session_limit_resume.turn_id<>$2 AND (session_limit_resume.cancelled_at IS NULL OR session_limit_resume.cancelled_at<$5)`, id, turnID, seq, source, at)
 	return err
 }
-func RecordLimitRefusal(ctx context.Context, q Querier, id, provider, turnID string, reset *time.Time, seq int64, at time.Time) error {
-	_, err := q.Exec(ctx, `UPDATE session_limit_resume SET provider=$6,event_seq=$3,reset_at=$4,expires_at=coalesce(expires_at,$5::timestamptz+interval '8 days'),
- state=CASE WHEN NOT enabled THEN 'disabled' WHEN $4::timestamptz IS NULL THEN 'unknown' WHEN attempts>=3 THEN 'exhausted' WHEN coalesce(expires_at,$5::timestamptz+interval '8 days')<=now() THEN 'expired' ELSE 'pending' END,
+func RecordLimitRefusal(ctx context.Context, q Querier, id, provider, turnID string, reset *time.Time, seq int64, at time.Time, windowID ...string) error {
+	window := ""
+	if len(windowID) > 0 {
+		window = windowID[0]
+	}
+	_, err := q.Exec(ctx, `UPDATE session_limit_resume SET window_id=$7,refused_at=$5,next_meter_poll_at=NULL,provider=$6,event_seq=$3,reset_at=$4,expires_at=coalesce(expires_at,$5::timestamptz+interval '8 days'),
+ state=CASE WHEN NOT enabled THEN 'disabled' WHEN attempts>=3 THEN 'exhausted' WHEN $4::timestamptz IS NULL THEN 'unknown' WHEN coalesce(expires_at,$5::timestamptz+interval '8 days')<=now() THEN 'expired' ELSE 'pending' END,
  reason=CASE WHEN $4::timestamptz IS NULL THEN 'Reset time unavailable' ELSE '' END
- WHERE session_id=$1 AND turn_id=$2 AND turn_id<>last_attempt_turn_id AND turn_id<>cancelled_turn_id AND event_seq<$3 AND (cancelled_at IS NULL OR cancelled_at<$5)`, id, turnID, seq, reset, at, provider)
+ WHERE session_id=$1 AND turn_id=$2 AND turn_id<>last_attempt_turn_id AND turn_id<>cancelled_turn_id AND event_seq<$3 AND (cancelled_at IS NULL OR cancelled_at<$5)`, id, turnID, seq, reset, at, provider, window)
 	return err
 }
 func CancelLimitResume(ctx context.Context, q Querier, id string) error {
@@ -225,7 +241,7 @@ func CancelLimitResume(ctx context.Context, q Querier, id string) error {
 	return err
 }
 func ClaimLimitResumeAttempt(ctx context.Context, q Querier, id, attemptID string) (bool, error) {
-	tag, err := q.Exec(ctx, `UPDATE session_limit_resume SET state='dispatched',reason='Continuation sent; awaiting runtime acknowledgement. If interrupted, continue manually.',dispatched_at=now(),last_attempt_turn_id=turn_id,attempts=attempts+1,attempt_id=$2 WHERE session_id=$1 AND enabled AND state='pending' AND reset_at+interval '1 minute'<=now() AND expires_at>now() AND attempts<3 AND turn_id<>cancelled_turn_id AND EXISTS (SELECT 1 FROM sessions s WHERE s.id=session_limit_resume.session_id AND s.kind='agent' AND s.status IN ('idle','disconnected') AND coalesce(s.paused_reason,'')='' AND s.background_tasks=0 AND s.ended_at IS NULL)`, id, attemptID)
+	tag, err := q.Exec(ctx, `UPDATE session_limit_resume SET state='dispatched',reason='Continuation sent; awaiting runtime acknowledgement. If interrupted, continue manually.',dispatched_at=now(),last_attempt_turn_id=turn_id,attempts=attempts+1,attempt_id=$2 WHERE session_id=$1 AND enabled AND state='pending' AND `+limitResumeDueSQL+`<=now() AND expires_at>now() AND attempts<3 AND turn_id<>cancelled_turn_id AND EXISTS (SELECT 1 FROM sessions s WHERE s.id=session_limit_resume.session_id AND s.kind='agent' AND s.status IN ('idle','disconnected') AND coalesce(s.paused_reason,'')='' AND s.background_tasks=0 AND s.ended_at IS NULL)`, id, attemptID)
 	return tag.RowsAffected() == 1, err
 }
 func SetLimitResumeState(ctx context.Context, q Querier, id, state, reason string) error {
@@ -233,7 +249,7 @@ func SetLimitResumeState(ctx context.Context, q Querier, id, state, reason strin
 	return err
 }
 func ListDueLimitResumes(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
-	rows, err := pool.Query(ctx, `SELECT session_id FROM session_limit_resume WHERE enabled AND state IN ('pending','awaiting_host') AND (reset_at+interval '1 minute'<=now() OR expires_at<=now()) ORDER BY reset_at`)
+	rows, err := pool.Query(ctx, `SELECT session_id FROM session_limit_resume WHERE enabled AND (state='unknown' OR (state='pending' AND (`+limitResumeDueSQL+`<=now() OR expires_at<=now()))) ORDER BY reset_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -252,12 +268,29 @@ func ListDueLimitResumes(ctx context.Context, pool *pgxpool.Pool) ([]string, err
 // HasPendingLimitResume bounds retention to the original refusal's expiry.
 func HasPendingLimitResume(ctx context.Context, q Querier, id string) (bool, error) {
 	var pending bool
-	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM session_limit_resume WHERE session_id=$1 AND enabled AND (state IN ('pending','awaiting_host') OR (state='dispatched' AND dispatched_at>now()-interval '2 minutes')) AND expires_at>now() AND attempts<=3 AND turn_id<>cancelled_turn_id)`, id).Scan(&pending)
+	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM session_limit_resume WHERE session_id=$1 AND enabled AND (state IN ('pending','unknown') OR (state='dispatched' AND dispatched_at>now()-interval '2 minutes')) AND expires_at>now() AND attempts<=3 AND turn_id<>cancelled_turn_id)`, id).Scan(&pending)
 	return pending, err
 }
 
 // CancelPendingLimitResume fences delayed events while retaining the session preference.
 func CancelPendingLimitResume(ctx context.Context, q Querier, id string) error {
-	_, err := q.Exec(ctx, `INSERT INTO session_limit_resume(session_id,cancelled_at) VALUES($1,now()) ON CONFLICT(session_id) DO UPDATE SET state=CASE WHEN session_limit_resume.enabled THEN 'armed' ELSE 'disabled' END,cancelled_turn_id=session_limit_resume.turn_id,cancelled_at=now(),attempts=0,reset_at=NULL,expires_at=NULL,attempt_id='',reason=''`, id)
+	_, err := q.Exec(ctx, `INSERT INTO session_limit_resume(session_id,cancelled_at) VALUES($1,now()) ON CONFLICT(session_id) DO UPDATE SET state=CASE WHEN session_limit_resume.enabled THEN 'armed' ELSE 'disabled' END,cancelled_turn_id=session_limit_resume.turn_id,cancelled_at=now(),attempts=0,reset_at=NULL,window_id='',refused_at=NULL,next_meter_poll_at=NULL,expires_at=NULL,attempt_id='',reason=''`, id)
 	return err
+}
+
+// ResolveUnknownLimitReset keeps the original event/turn/expiry fences intact.
+func ResolveUnknownLimitReset(ctx context.Context, q Querier, id string, reset time.Time) error {
+	_, err := q.Exec(ctx, `UPDATE session_limit_resume SET reset_at=$2,state='pending',reason=''
+ WHERE session_id=$1 AND enabled AND state='unknown' AND attempts<3
+ AND expires_at>now() AND turn_id<>cancelled_turn_id`, id, reset)
+	return err
+}
+
+// ClaimLimitResumeMeterPoll spaces on-demand requests across replicas and restarts.
+// The scheduler holds the session lock and still checks newly arrived readings on
+// every tick; this deadline only throttles the requests sent to the daemon.
+func ClaimLimitResumeMeterPoll(ctx context.Context, q Querier, id string, delay time.Duration) (bool, error) {
+	tag, err := q.Exec(ctx, `UPDATE session_limit_resume SET next_meter_poll_at=now()+$2*interval '1 second'
+ WHERE session_id=$1 AND enabled AND state='unknown' AND (next_meter_poll_at IS NULL OR next_meter_poll_at<=now())`, id, delay.Seconds())
+	return tag.RowsAffected() == 1, err
 }

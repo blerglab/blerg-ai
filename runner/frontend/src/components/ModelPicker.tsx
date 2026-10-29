@@ -1,3 +1,4 @@
+import '../../../../packages/settings/settings.css'
 import { modelDisplayNames } from '@blerglab/chat'
 import type { CSSProperties } from 'react'
 import type { EngineModel } from '../types'
@@ -48,7 +49,7 @@ export default function ModelPicker({
     return (
       <div style={{ marginBottom: 20 }} data-testid="model-free-text">
         <label style={labelStyle} htmlFor="launch-model-free-text">Model name (optional)</label>
-        <input
+        <input className="settings-field"
           id="launch-model-free-text"
           data-testid="model-free-text-input"
           value={freeText.value}
@@ -102,7 +103,7 @@ export default function ModelPicker({
       <span style={labelStyle}>Model</span>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         {main.map(m => (
-          <button
+          <button className="settings-action"
             key={m.id}
             type="button"
             data-testid={`model-${m.id}`}
@@ -115,12 +116,12 @@ export default function ModelPicker({
           </button>
         ))}
         {overflow.length > 0 && (
-          <select
+          <select className="settings-field"
             data-testid="model-more"
             aria-label="More models"
             value={overflowSelected ? model : ''}
             onChange={e => { if (e.target.value) onModelChange(e.target.value) }}
-            style={{ ...pillStyle(overflowSelected), paddingRight: 8 }}
+            style={{ ...pillStyle(overflowSelected), width: 'auto', paddingRight: 8 }}
           >
             <option value="">More models…</option>
             {overflow.map(m => (
@@ -169,7 +170,7 @@ function EffortRow({ label, efforts, auto, effort, onEffortChange, titleFor, lab
       <span style={labelStyle}>{label}</span>
       <div role="radiogroup" aria-label="Effort" style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         {auto && (
-          <button
+          <button className="settings-action"
             type="button"
             role="radio"
             data-testid="effort-auto"
@@ -182,7 +183,7 @@ function EffortRow({ label, efforts, auto, effort, onEffortChange, titleFor, lab
           </button>
         )}
         {efforts.map(e => (
-          <button
+          <button className="settings-action"
             key={e}
             type="button"
             role="radio"

@@ -126,9 +126,12 @@ export default function Shell({
               {build.commit && <span className="build-commit"> · {build.commit}</span>}
             </span>
             {build.update && (
-              <a className="build-update" href={build.update.href} target="_blank" rel="noopener noreferrer" title={build.update.title}>
-                {build.update.label} ↗
-              </a>
+              <>
+                <a className="build-update" href={build.update.href} target="_blank" rel="noopener noreferrer" title={build.update.title}>
+                  {build.update.label} ↗
+                </a>
+                <a href="/upgrade">How to upgrade</a>
+              </>
             )}
             <span className="sep" aria-hidden="true">
               ·

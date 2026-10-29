@@ -1,3 +1,7 @@
+import { WrapScopeContext } from '../model/lineWrap'
+import {WaitingSpaceActions} from './FreeSpace'
+import { createPortal } from 'react-dom'
+import { HostedViewers, useViewerHost } from './ViewerHost'
 import { useTranscriptStore } from '../hooks/useTranscriptStore'
 import { modelDisplayName } from '../model/modelDisplay'
 // ChatView: a whole chat with one session over a Transport — the toolbar, the transcript, the
@@ -11,7 +15,7 @@ import { useSession, type PendingTurn, type SessionHandle } from '../hooks/useSe
 import { useBackgroundLiveStore } from '../hooks/useBackgroundTasks'
 import { useWorkingLineStore } from '../hooks/useWorkingLine'
 import { useChatReportStore, type ChatFiles } from '../hooks/useLiveState'
-import { useTicker } from '../hooks/useTicker'
+import { useMinuteClock } from '../hooks/useTicker'
 import { attachmentAt, findLatest, groupArtifacts, fileCount } from '../model/artifacts'
 import { resolveArtifactLink } from '../model/artifactLinks'
 import { MAX_ATTACHMENT_BYTES, type MessageAttachment } from '../model/attachments'
@@ -28,15 +32,17 @@ import { isTurnError } from '../model/notices'
 import { mergeReviews, parseReviewFile, reviewFileName, type ReviewFile } from '../model/review'
 import { describeSessionEnd } from '../model/sessionEnd'
 import { latestStartAttempt, placeholderAttempt, startPanelVisible, withSessionOutcome } from '../model/startStages'
-import { getDraft, loadCompact, localStorageChatStorage, saveCompact, setDraft as saveDraft, type ChatStorage } from '../model/storage'
+import { loadCompact, localStorageChatStorage, saveCompact, type ChatStorage } from '../model/storage'
 import { themeStyle, type ThemeTokens } from '../theme'
 import type { ArtifactInfo, SessionMeta, Transport } from '../transport/types'
 import type { AgentEvent, ArtifactPayload, ChecklistItem, FiledCard, ReviewRequestPayload, StatusPayload, UserMessagePayload } from '../types'
 import ArtifactViewer from './ArtifactViewer'
 import { loadDiffSummary } from '../model/artifactPreview'
 import WorkspaceFileViewer from './WorkspaceFileViewer'
-import Composer from './Composer'
+import SessionComposer from './SessionComposer'
 import { AskContext, type AskContextValue, type OwnerOnlyAnswer } from './askContext'
+import { RestartContext, type RestartContextValue } from './restartContext'
+import { RESUME_PROMPT, restartRowStates } from '../model/userMessages'
 import { DelegationContext, type DelegationContextValue } from './delegationContext'
 import { delegationStates } from '../model/delegations'
 import { proposalStates } from '../model/proposals'
@@ -45,8 +51,8 @@ import { ReviewRequestContext, type ReviewRequestContextValue } from './reviewRe
 import { newerReview, reviewForArtifact, reviewRequestStates } from '../model/reviewRequests'
 import { ChatContext, type ChatContextValue } from './context'
 import FilesPanel from './FilesPanel'
-import Transcript, { WINDOW, type BackgroundLine } from './Transcript'
-import WorkingIndicator from './WorkingIndicator'
+import Transcript, { TurnClock, type BackgroundLine, type TranscriptScroll } from './Transcript'
+import { contentKeeper, peekContent } from '../model/viewCache'
 import type { DescribeUserMessage, MessageFooter } from './cards/EventCards'
 import { RefContext, type RefContextValue } from './RefLinks'
 import { refStoreFor, type ChatRefs } from '../model/refs'
@@ -57,12 +63,13 @@ import './chat.css'
 // no daemon, a socket that died between the check and the write).
 const PENDING_ACK_MS = 20_000
 
-const NO_EVENTS: AgentEvent[] = []
 const NO_CHECKLIST_ITEMS: ChecklistItem[] = []
 
 export interface ChatSlots {
   /** Leads the toolbar (the runner's model and effort pickers, its Rules button). */
   header?: ReactNode
+  /** Wraps the transcript with a host's alternate panes; the composer stays outside them. */
+  transcript?: (content: ReactNode) => ReactNode
   /** Beside Send. */
   composerActions?: ReactNode
   /** Under a user or assistant card. */
@@ -117,6 +124,8 @@ export interface ChatViewProps {
   /** The toolbar's Files button and the dialog it opens (default true). False: the host shows the
    *  Files elsewhere, from what the chat reports (useLiveState's `files`: the list, its operations,
    *  the message box's file picker). */
+  /** A host restoring per-session focus may own the composer focus itself. */
+  composerAutoFocus?: boolean
   filesButton?: boolean
   /** Commands that change a setting without starting a turn (default /model <x> and /effort <x>). */
   noTurnCommands?: RegExp
@@ -193,8 +202,28 @@ function lastRunningSince(events: AgentEvent[]): number | null {
 
 // ReadyCard heads the timeline once a session is live: what it is running,
 // where, and since when — the answer to "did it start?".
-export function ReadyCard({ meta, readyAt, children }: { meta: SessionMeta; readyAt: number; children?: ReactNode }) {
-  const model = meta.model ? modelDisplayName(meta.model) : 'engine default'
+/** The model the session's own turns last reported (a top-level turn's end or a model change), and
+ *  whether it was chosen in the session (a top-level model change happened). A viewer that is not
+ *  told the configured model (the board, for a desktop session) can still name what is running. */
+export function reportedModel(events: AgentEvent[]): { model: string; chosen: boolean } {
+  let model = '', chosen = false
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i]
+    if (ev.kind !== 'turn_done' && ev.kind !== 'model_changed') continue
+    const p = ev.payload as { model?: unknown; parent_call_id?: unknown } | undefined
+    if (!p || p.parent_call_id) continue
+    if (ev.kind === 'model_changed') chosen = true
+    if (!model && typeof p.model === 'string' && p.model) model = p.model
+    if (model && chosen) break
+  }
+  return { model, chosen }
+}
+
+export function ReadyCard({ meta, readyAt, reportedModel: reported, children }: { meta: SessionMeta; readyAt: number; reportedModel?: { model: string; chosen: boolean }; children?: ReactNode }) {
+  const configured = meta.model || ''
+  const shown = configured || reported?.model || ''
+  const onDefault = !configured && !!reported?.model && !reported.chosen
+  const model = shown ? modelDisplayName(shown) : 'engine default'
   return (
     <div className="agent-card ready-card" data-testid="ready-card">
       <div className="ready-title">
@@ -206,7 +235,7 @@ export function ReadyCard({ meta, readyAt, children }: { meta: SessionMeta; read
       </div>
       <dl className="ready-facts">
         <div><dt>Engine</dt><dd>{meta.engine || 'claude'}</dd></div>
-        <div><dt>Model</dt><dd><span title={meta.model}>{model}</span>{meta.effort && <span className="model-effort" title="Configured effort">{meta.effort}</span>}</dd></div>
+        <div><dt>Model</dt><dd><span title={shown || undefined}>{model}</span>{onDefault && <span className="model-effort" title="No model was chosen for this session: the engine's default">engine default</span>}{meta.effort && <span className="model-effort" title="Configured effort">{meta.effort}</span>}</dd></div>
         {children}
         {meta.runtime && <div><dt>Runs on</dt><dd>{meta.runtime}</dd></div>}
       </dl>
@@ -225,46 +254,32 @@ export default function ChatView(props: ChatViewProps) {
   const sessionId = props.session
   const s: SessionHandle = useSession(transport, sessionId, { meta: props.meta, noTurnCommands: props.noTurnCommands })
   const { events, streaming, status, meta } = s
-  // Opening a session whose long transcript is already held (a revisit): the first render draws
-  // the skeleton, so the switch is painted at once, and the transcript follows on the next frame.
-  // That second render is an ordinary update, not a transition, so store updates and the clock's
-  // tick cannot restart it. A short one is drawn at once, as it always was. Only that first paint
-  // waits: after it the transcript gets the events as they are.
-  const [painted, setPainted] = useState(() => events.length <= WINDOW)
-  useEffect(() => {
-    if (painted) return
-    const frame = requestAnimationFrame(() => setPainted(true))
-    return () => cancelAnimationFrame(frame)
-  }, [painted])
-  const catchingUp = !painted
-  const shownEvents = catchingUp ? NO_EVENTS : events
+  // Opening a session whose transcript is already held (a revisit) draws it in the first paint: the
+  // transcript draws at most its newest WINDOW rows, and the person sees the conversation at once,
+  // never a placeholder (#281; was a skeleton for one frame since chat 0.5.0).
+  const shownEvents = events
+  const viewerHost = useViewerHost()
+  const outputSignature = useMemo(() => JSON.stringify([events.filter(e => e.kind === 'assistant_text' && !(e.payload as { parent_call_id?: string })?.parent_call_id).at(-1), streaming]), [events, streaming])
+  useEffect(() => { if (s.replayDone) viewerHost?.agentOutput?.(outputSignature) }, [viewerHost, outputSignature, s.replayDone])
   const files = transport.files ?? null
   // References in messages: one store per session (lookups batched and kept); its readers follow
   // the host's (the board, once known) and the transport's commit read, for a viewer who may use it.
   const refStore = refStoreFor(sessionId)
   const refsProp = props.refs
   const commitRead = refsProp?.commits && files?.commit ? files : null
+  const commitUnknown = refsProp?.commits === undefined
   useEffect(() => {
     refStore.setResolvers({
       cards: refsProp?.cards,
-      commit: commitRead ? (sha: string) => commitRead.commit!(sessionId, sha).then(d => d?.sha ?? null) : null,
+      boardCards: refsProp?.boardCards,
+      commit: commitRead ? (sha: string) => commitRead.commit!(sessionId, sha).then(d => d?.sha ?? null) : commitUnknown ? undefined : null,
     })
-  }, [refStore, refsProp?.cards, commitRead, sessionId])
+  }, [refStore, refsProp?.cards, refsProp?.boardCards, commitRead, commitUnknown, sessionId])
   const refContext = useMemo<RefContextValue | null>(() => (refsProp ? { store: refStore, sessionId, refs: refsProp } : null), [refStore, sessionId, refsProp])
 
-  const [draft, setDraftState] = useState(() => getDraft(storage, sessionId))
-  // Another session: its own draft.
-  const [draftFor, setDraftFor] = useState(sessionId)
-  if (draftFor !== sessionId) {
-    setDraftFor(sessionId)
-    setDraftState(getDraft(storage, sessionId))
-  }
-  function setDraft(text: string) {
-    setDraftState(text)
-    saveDraft(storage, sessionId, text)
-  }
   const maxFileBytes = positive(props.maxFileBytes) ?? positive(meta?.limits?.max_file_bytes) ?? MAX_ATTACHMENT_BYTES
-  const attachments = useAttachments(sessionId, files, maxFileBytes)
+  // A stopped or ended session takes no more files: waiting ones stop checking for room.
+  const attachments = useAttachments(sessionId, files, maxFileBytes, {ended: status === 'stopped' || status === 'ended'})
   const attachInput = useRef<HTMLInputElement | null>(null)
   const [dragging, setDragging] = useState(false)
   const dragDepth = useRef(0)
@@ -442,7 +457,10 @@ export default function ChatView(props: ChatViewProps) {
   // clockOffset (from the replay's server_time) maps the browser's onto it.
   const clockOffset = s.clockOffset
   const turnSince = pendingActive ? pending!.since : lastRunningSince(events)
-  const now = useTicker(working) - clockOffset
+  // No second-by-second clock here: a tick would re-render this whole view and the composer. The
+  // elapsed labels tick on their own (TurnClock, StartProgress); this view needs the time only to
+  // judge what has gone stale, to the minute.
+  const nowMinute = useMinuteClock(working, clockOffset)
   // Tool calls in flight: only while the session runs or waits, and only in
   // the turn now running, so a replayed orphan never shows a ticking clock.
   const turn = useMemo(
@@ -453,10 +471,9 @@ export default function ChatView(props: ChatViewProps) {
   const liveIds = useMemo(() => new Set(inFlight.map(c => c.callId)), [inFlight])
   // No call in flight but a foreground subagent running (a resumed one, whose SendMessage call has
   // returned): the line names the subagent. A call in flight wins.
-  const nowMinute = Math.floor(now / 60_000)
   const subWaitingOn = useMemo(
     () => (working && inFlight.length === 0
-      ? subagentWaitingOn(liveSubagents(events, { inFlight: true, live: true }, nowMinute * 60_000, evs => sharedTimeline(sessionId, evs, { groupTools: compact })))
+      ? subagentWaitingOn(liveSubagents(events, { inFlight: true, live: true }, nowMinute, evs => sharedTimeline(sessionId, evs, { groupTools: compact })))
       : null),
     [working, inFlight.length, events, nowMinute, sessionId, compact],
   )
@@ -464,7 +481,6 @@ export default function ChatView(props: ChatViewProps) {
   // whose result is on a page not loaded, or an orphan of a turn long over, would be named. Either
   // suffix is then held like the rest of the line while a history loads (below).
   const waitingOnNow = working ? (turn.bounded ? oldestLive(inFlight) : null) ?? subWaitingOn : null
-  const since = turnSince ?? now
   // What the agent is on when the line names no call: thinking (live only), or the engine retrying
   // the model's API (its notice is the newest word of the turn, and nothing live has come since).
   const retryNotice = useMemo(() => modelRetry(events, status === 'running'), [events, status])
@@ -479,7 +495,7 @@ export default function ChatView(props: ChatViewProps) {
   // What the agent left running in the background, for the working line (the host lists them). A
   // session that is not live runs nothing (whatever it started ended with it).
   const bgTasks = useMemo(() => backgroundTasks(events), [events])
-  const bgRunning = useMemo(() => runningTasks(bgTasks, live, now), [bgTasks, live, now])
+  const bgRunning = useMemo(() => runningTasks(bgTasks, live, nowMinute), [bgTasks, live, nowMinute])
   const bgCount = bgRunning.length
   const bgDescription = bgCount === 1 ? bgRunning[0].description : ''
   const bgCommand = bgCount === 1 ? bgRunning[0].command : ''
@@ -556,26 +572,25 @@ export default function ChatView(props: ChatViewProps) {
   const loadingOlder = !loadingHistory && s.loadingOlder
   // Until the transcript is complete, show placeholder bubbles instead of an empty or filling-in
   // area (a session that is still starting has its own progress panel).
-  const showSkeleton = (loadingHistory || catchingUp) && !starting
+  const showSkeleton = loadingHistory && !starting
 
-  async function submit() {
-    const typed = draft.trim()
+  async function submit(typed: string): Promise<boolean> {
     const done = attachments.done
-    if ((!typed && done.length === 0) || attachments.uploading || inputLocked) return
+    if ((!typed && done.length === 0) || attachments.uploading || inputLocked) return false
     if (!transport.connected()) {
       // Not connected: nothing was sent. Keep the text; don't pretend.
       setNotice('Not connected — your message was not sent. It is still in the box; send it again once reconnected.')
-      return
+      return false
     }
     const r = await s.send(typed, done)
     if (!r.queued) {
       setNotice('Not connected — your message was not sent. It is still in the box; send it again once reconnected.')
-      return
+      return false
     }
     setNotice(null)
-    setDraft('')
     attachments.clear()
     setPin(n => n + 1)
+    return true
   }
 
   const hasFiles = (e: React.DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes('Files')
@@ -615,6 +630,35 @@ export default function ChatView(props: ChatViewProps) {
       }
     : undefined, [canAnswer, transport, send])
   const askContext = useMemo<AskContextValue>(() => ({ states: asks.byEvent, answer: answerAsk, ownerOnly: ownerOnlyAnswer(props.canAnswerApprovals) }), [asks.byEvent, answerAsk, props.canAnswerApprovals])
+  // ─── Restart rows ─────────────────────────────────────────────────────────
+  // A row a restart left paused has Resume: it sends what the daemon sends a session it continues
+  // by itself (and what the person's next message would do). Resumed here, the row says so at once,
+  // before the message reaches the transcript.
+  const [resumedRows, setResumedRows] = useState<ReadonlySet<string>>(() => new Set())
+  const restartStates = useMemo(() => {
+    const states = restartRowStates(shownEvents)
+    for (const id of resumedRows) if (states.get(id) === 'paused') states.set(id, 'resumed')
+    return states
+  }, [shownEvents, resumedRows])
+  const canResume = !props.readOnly && !inputLocked && !terminal
+  const resumeRow = useMemo(() => canResume
+    ? async (eventId: string) => {
+        if (!transport.connected()) {
+          setNotice('Not connected — the session was not resumed. Try again once reconnected.')
+          return false
+        }
+        const r = await send(RESUME_PROMPT)
+        if (!r.queued) {
+          setNotice('Not connected — the session was not resumed. Try again once reconnected.')
+          return false
+        }
+        setNotice(null)
+        setResumedRows(prev => new Set(prev).add(eventId))
+        setPin(n => n + 1)
+        return true
+      }
+    : undefined, [canResume, transport, send])
+  const restartContext = useMemo<RestartContextValue>(() => ({ states: restartStates, resume: resumeRow }), [restartStates, resumeRow])
   const delegationFns = useMemo(() => ({
     decide: transport.decideDelegation && !props.readOnly ? transport.decideDelegation.bind(transport) : undefined,
     fullPrompt: transport.delegationRequest ? async (id: string) => (await transport.delegationRequest!(id)).prompt : undefined,
@@ -679,14 +723,16 @@ export default function ChatView(props: ChatViewProps) {
   const filesReport = useMemo<ChatFiles | undefined>(() => (files
     ? { ops: files, items: artifacts.items, status: artifacts.status, refresh: refreshArtifacts, attach: readOnly ? undefined : attachFiles }
     : undefined), [files, artifacts.items, artifacts.status, refreshArtifacts, readOnly, attachFiles])
+  // The agent is working (a turn runs or waits, or a message just sent has not settled): the host's
+  // Stop shows (the runner's is in the session header, far from Send) and calls interrupt.
+  const busy = status === 'running' || status === 'waiting' || pendingActive
+  const interrupt = readOnly ? undefined : s.interrupt
   useEffect(() => {
-    setReport(sessionId, { inFlight: inFlightNow, live, ended: over, closedAsks, answer: answerAsk, openFiles, compact, filesKey, files: filesReport })
-  }, [setReport, sessionId, inFlightNow, live, over, closedAsks, answerAsk, openFiles, compact, filesKey, filesReport])
+    setReport(sessionId, { inFlight: inFlightNow, live, ended: over, closedAsks, answer: answerAsk, openFiles, compact, filesKey, files: filesReport, busy, interrupt })
+  }, [setReport, sessionId, inFlightNow, live, over, closedAsks, answerAsk, openFiles, compact, filesKey, filesReport, busy, interrupt])
   // A chat that goes (another session, the page left) takes its report with it.
   useEffect(() => () => clearReport(sessionId), [clearReport, sessionId])
 
-  const interrupt = s.interrupt ? () => { void s.interrupt!().catch(() => {}) } : undefined
-  const busy = status === 'running' || status === 'waiting' || pendingActive
 
   const placeholder = ended
     ? 'This session has ended — start a new session to keep working'
@@ -701,25 +747,71 @@ export default function ChatView(props: ChatViewProps) {
         : 'Message the agent… (/model, /effort, /<skill>)'
 
   // Everything handed to the transcript is kept stable between renders that do not change it (a
-  // keystroke, a tick of the clock), so the memoised timeline is not drawn again for nothing.
-  const startedAt = (meta ? Date.parse(meta.started_at) : NaN) || now
+  // tick of the clock), so the memoised timeline is not drawn again for nothing.
+  const [mountedAt] = useState(() => Date.now())
+  const startedAt = (meta ? Date.parse(meta.started_at) : NaN) || mountedAt - clockOffset
   const readyAt = rawAttempt?.readyAt ?? startedAt
   const readyCardSlot = slots.readyCard
   const showReady = !!meta && (live || hasUserMessage)
+  const lastReportedModel = useMemo(() => (meta?.model ? undefined : reportedModel(events)), [meta?.model, events])
   const readyCard = useMemo(() => meta && showReady
-    ? (readyCardSlot ? readyCardSlot(meta, readyAt) : <ReadyCard meta={meta} readyAt={readyAt} />)
-    : null, [meta, showReady, readyCardSlot, readyAt])
+    ? (readyCardSlot ? readyCardSlot(meta, readyAt) : <ReadyCard meta={meta} readyAt={readyAt} reportedModel={lastReportedModel} />)
+    : null, [meta, showReady, readyCardSlot, readyAt, lastReportedModel])
   const startAttempt = useMemo(
     () => (starting ? (attempt ?? placeholderAttempt(startedAt)) : null),
     [starting, attempt, startedAt],
   )
   const transcriptSession = useMemo(() => (status ? { id: sessionId, status, runtime: meta?.runtime } : undefined), [sessionId, status, meta?.runtime])
 
+  // Where the reader was in this session's transcript when they last left it (model/viewCache, #281).
+  const scrollScope: object = transport.files ?? transport
+  const [scrollFrom] = useState(() => peekContent<TranscriptScroll>(scrollScope, sessionId, 'scroll:transcript') ?? null)
+  const keepScroll = useCallback((scroll: TranscriptScroll) => contentKeeper<TranscriptScroll>(scrollScope, sessionId, 'scroll:transcript')(scroll, 64), [scrollScope, sessionId])
+  const transcript = (
+    <Transcript
+      scrollFrom={scrollFrom}
+      onScrollLeave={keepScroll}
+      sessionId={sessionId}
+      events={shownEvents}
+      streaming={streaming}
+      compact={compact}
+      thinking={props.thinking}
+      cards={cards}
+      messageFooter={slots.messageFooter}
+      describeUserMessage={props.describeUserMessage}
+      liveIds={liveIds}
+      showSkeleton={showSkeleton}
+      loadingOlder={loadingOlder}
+      hasOlder={hasOlder}
+      onLoadOlder={s.loadOlder}
+      starting={starting}
+      attempt={startAttempt}
+      startSession={transcriptSession}
+      onStopSession={s.stop}
+      clockOffset={clockOffset}
+      readyCard={readyCard}
+      working={working}
+      waiting={waiting}
+      since={turnSince}
+      waitingOn={waitingOn}
+      activity={activity}
+      reasoning={s.thinking ? reasoning : null}
+      background={background}
+      queued={s.queued}
+      queueState={queueState}
+      steers={steers}
+      pin={pin}
+    />
+  )
+
+  const placeChat = (content: ReactNode) => viewerHost?.chatTarget ? createPortal(content, viewerHost.chatTarget) : content
   return (
     <ClockOffsetContext.Provider value={clockOffset}>
+    {/* The account's namespace for the line wrap choice of code opened from the chat (#265). */}
+    <WrapScopeContext.Provider value={files?.queueScope?.() ?? ''}>
     <ChatContext.Provider value={chatContext}>
     <RefContext.Provider value={refContext}>
-    <div className={`agent-chat${props.className ? ` ${props.className}` : ''}`} data-testid="agent-chat" style={props.theme ? themeStyle(props.theme) : undefined} onCopy={e => handleChatCopy(e.nativeEvent, e.currentTarget)} {...dropProps}>
+    {placeChat(<div className={`agent-chat${props.className ? ` ${props.className}` : ''}`} data-testid="agent-chat" style={props.theme ? themeStyle(props.theme) : undefined} onCopy={e => handleChatCopy(e.nativeEvent, e.currentTarget)} {...dropProps}>
       {dragging && <div className="drop-zone" role="status" data-testid="drop-zone">Drop files to attach</div>}
       <div className="agent-toolbar">
         {slots.header}
@@ -750,13 +842,7 @@ export default function ChatView(props: ChatViewProps) {
             <span className="tb-label">Compact tool calls</span>
           </label>
         )}
-        {working && streaming && <WorkingIndicator since={since} now={now} waitingOn={waitingOn} activity={activity} reasoning={s.thinking ? reasoning : null} compact />}
-        {busy && interrupt && (
-          <button className="agent-stop" onClick={interrupt} aria-label="Stop" title="Stop (Esc)">
-            <span className="tb-icon" aria-hidden="true">⏹</span>
-            <span className="tb-label">Stop</span>
-          </button>
-        )}
+        {working && streaming && <TurnClock since={turnSince} clockOffset={clockOffset} waitingOn={waitingOn} activity={activity} reasoning={s.thinking ? reasoning : null} compact />}
       </div>
 
       {showFiles && files && props.filesButton !== false && (
@@ -772,6 +858,7 @@ export default function ChatView(props: ChatViewProps) {
           publishHint={props.publishHint}
         />
       )}
+      {files && <ReviewRequestContext.Provider value={reviewContext}><HostedViewers sessionId={sessionId} files={files} artifacts={artifacts.items} onSaved={refreshArtifacts} /></ReviewRequestContext.Provider>}
       {openArtifact && files && (
         <ReviewRequestContext.Provider value={reviewContext}>
         <ArtifactViewer
@@ -807,46 +894,18 @@ export default function ChatView(props: ChatViewProps) {
       )}
 
       <AskContext.Provider value={askContext}>
+      <RestartContext.Provider value={restartContext}>
       <DelegationContext.Provider value={delegationContext}>
       <ProposalContext.Provider value={proposalContext}>
       <ReviewRequestContext.Provider value={reviewContext}>
-      <Transcript
-        sessionId={sessionId}
-        events={shownEvents}
-        streaming={streaming}
-        compact={compact}
-        thinking={props.thinking}
-        cards={cards}
-        messageFooter={slots.messageFooter}
-        describeUserMessage={props.describeUserMessage}
-        liveIds={liveIds}
-        showSkeleton={showSkeleton}
-        loadingOlder={loadingOlder}
-        hasOlder={hasOlder}
-        onLoadOlder={s.loadOlder}
-        starting={starting}
-        attempt={startAttempt}
-        startSession={transcriptSession}
-        onStopSession={s.stop}
-        clockOffset={clockOffset}
-        readyCard={readyCard}
-        working={working}
-        waiting={waiting}
-        since={turnSince}
-        waitingOn={waitingOn}
-        activity={activity}
-        reasoning={s.thinking ? reasoning : null}
-        background={background}
-        queued={s.queued}
-        queueState={queueState}
-        steers={steers}
-        pin={pin}
-      />
+      {slots.transcript ? slots.transcript(transcript) : transcript}
       </ReviewRequestContext.Provider>
       </ProposalContext.Provider>
       </DelegationContext.Provider>
+      </RestartContext.Provider>
       </AskContext.Provider>
 
+      <div className="chat-composer-surface" hidden={!!viewerHost && !(viewerHost.visible ?? [viewerHost.active]).includes('chat')}>
       {ended && (
         <div className="agent-offline ended" role="status" data-testid="ended-banner">
           <span className="agent-offline-dot" aria-hidden="true" />
@@ -876,7 +935,7 @@ export default function ChatView(props: ChatViewProps) {
       )}
       {working && !askOpen && !props.readOnly && (
         <div className="agent-composer-hint" data-testid="composer-hint">
-          {steers ? 'Working — Enter sends it to the agent · Esc interrupts' : 'Working — Enter queues your message · Esc interrupts'}
+          {steers ? 'Working — Enter sends it to the agent' : 'Working — Enter queues your message'}
         </div>
       )}
       {slots.aboveComposer}
@@ -896,21 +955,25 @@ export default function ChatView(props: ChatViewProps) {
           }}
         />
       )}
-      {!props.readOnly && <Composer
-        draft={draft}
-        onDraft={setDraft}
+      {!props.readOnly && <SessionComposer
+        key={sessionId}
+        sessionId={sessionId}
+        storage={storage}
         placeholder={placeholder}
         locked={inputLocked}
-        busy={busy}
-        onSubmit={() => { void submit() }}
-        onInterrupt={interrupt}
+        onSubmit={submit}
+        autoFocus={props.composerAutoFocus}
         attachments={attachments}
+        waitingActions={files && <WaitingSpaceActions sessionId={sessionId} files={files} waitingBytes={attachments.waitingBytes}
+          waitingForSpace={attachments.waitingForSpace} space={attachments.space} onChanged={refreshArtifacts} />}
         onAttach={files ? () => attachInput.current?.click() : undefined}
         actions={slots.composerActions}
       />}
-    </div>
+      </div>
+    </div>)}
     </RefContext.Provider>
     </ChatContext.Provider>
+    </WrapScopeContext.Provider>
     </ClockOffsetContext.Provider>
   )
 }

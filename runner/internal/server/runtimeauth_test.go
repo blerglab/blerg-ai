@@ -215,7 +215,7 @@ func TestRuntimeJobHasNoMasterOrForeignProvider(t *testing.T) {
 		t.Run(engine, func(t *testing.T) {
 			f := &fakeK8s{}
 			jm := newTestJobManager(t, f)
-			if err := jm.CreateSessionJob(SessionJobSpec{SessionID: "fixture-session", Repo: "fixture", Engine: engine, ExtraEnv: map[string]string{"BLERG_RUNNER_DAEMON_TOKEN": "fixture-master", "ANTHROPIC_API_KEY": "fixture-anthropic", "CODEX_AUTH_JSON": "fixture-codex", "HERMES_ENV_CONTENTS": "fixture-hermes"}}); err != nil {
+			if err := jm.CreateSessionJob(SessionJobSpec{SessionID: "fixture-session", Repo: "fixture", Engine: engine, ExtraEnv: map[string]string{"BLERG_RUNNER_DAEMON_TOKEN": "fixture-master", "ANTHROPIC_API_KEY": "fixture-anthropic", "CODEX_AUTH_JSON": `{"OPENAI_API_KEY":"fixture-codex"}`, "HERMES_ENV_CONTENTS": "fixture-hermes"}}); err != nil {
 				t.Fatal(err)
 			}
 			raw, _ := json.Marshal(f.created)

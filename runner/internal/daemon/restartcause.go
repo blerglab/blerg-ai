@@ -12,8 +12,10 @@ package daemon
 //     or launchd, SIGINT). A previous run that left neither marker crashed or was killed.
 //
 // Either marker makes the restart planned; neither makes it unplanned.
+// Update recovery is same-user bookkeeping; see updaterestart.go.
 
 import (
+	"github.com/blerglab/blerg-ai/runner/internal/updatehandoff"
 	"log"
 	"os"
 	"path/filepath"
@@ -32,6 +34,7 @@ const (
 
 // RestartCause is why the previous run of the daemon ended.
 type RestartCause struct {
+	update *updatehandoff.Receipt
 	// Planned: the installer said it was restarting the daemon, or the previous run was told to
 	// stop rather than crashing.
 	Planned bool
@@ -136,7 +139,8 @@ func mayHaveStopped(c RestartCause, calls []OpenCall) bool {
 		if !strings.EqualFold(call.Tool, "Bash") { // Codex names it "bash"
 			continue
 		}
-		if daemonCommand.MatchString(call.Detail) || (c.Reason == "" && signalCommand.MatchString(call.Detail)) {
+		if call.DaemonCommand || (c.Reason == "" && call.SignalCommand) ||
+			(call.CommandHash == "" && (daemonCommand.MatchString(call.Detail) || (c.Reason == "" && signalCommand.MatchString(call.Detail)))) {
 			return true
 		}
 	}

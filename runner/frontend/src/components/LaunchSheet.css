@@ -14,6 +14,8 @@
 
 .launch-panel {
   background: var(--basalt);
+  font-size: var(--text-sm);
+  line-height: 1.4;
   width: 100%;
   max-height: 90vh;
   border-radius: 16px 16px 0 0;
@@ -73,8 +75,8 @@
 
   .launch-panel {
     width: 92%;
-    max-width: 1120px;
-    max-height: 80vh;
+    max-width: 1360px;
+    max-height: 90vh;
     border-radius: 16px;
     border-bottom: 1px solid var(--stone);
     padding: 24px;
@@ -93,8 +95,8 @@
      container width resolve to the same tracks as .launch-body. */
   .launch-footer {
     display: grid;
-    grid-template-columns: minmax(240px, 300px) minmax(0, 1fr) minmax(280px, 340px);
-    gap: 24px;
+    grid-template-columns: minmax(260px, 1fr) minmax(0, 1.05fr) minmax(280px, 1fr);
+    gap: 20px;
     align-items: end;
   }
 
@@ -121,8 +123,8 @@
        runtime choice is visible beside the repo instead of behind a
        disclosure triangle. Below 900px the grid never applies and the three
        stack in the phone order set above: Repository → Run → Details. */
-    grid-template-columns: minmax(240px, 300px) minmax(0, 1fr) minmax(280px, 340px);
-    gap: 24px;
+    grid-template-columns: minmax(260px, 1fr) minmax(0, 1.05fr) minmax(280px, 1fr);
+    gap: 20px;
     align-items: start;
   }
 
@@ -181,3 +183,25 @@
 .launch-permissions-button:hover { border-color: var(--fog-dim); }
 .launch-permissions-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .launch-permissions-hint { font-size: var(--text-xs); color: var(--fog-dim); min-width: 0; }
+
+/* Keep shared controls compact within the launch sheet. */
+.launch-panel .settings-action, .launch-panel select.settings-field { line-height: normal; }
+.launch-repo-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.launch-repo-actions .btn { min-width: 0; white-space: normal; }
+.launch-repo-actions [aria-pressed="true"] { border-color: var(--selected-border); color: var(--selected-text); background: var(--selected-bg); }
+.launch-help { font-size: var(--text-xs); color: var(--fog-dim); line-height: 1.5; margin: 4px 0 10px; overflow-wrap: anywhere; }
+.launch-help summary, .launch-tools summary { cursor: pointer; }
+.launch-help p { margin: 6px 0; }
+.launch-runtime { margin-bottom: 6px; }
+.launch-runtime .launch-help { margin: 0 2px 8px; }
+.launch-tools { border: 1px solid var(--stone); border-radius: 8px; padding: 8px 10px; font-size: var(--text-sm); }
+.launch-tools > summary { color: var(--fog); }
+.launch-panel input[type=checkbox] { accent-color: var(--selected-border); flex-shrink: 0; }
+.launch-panel :is(input, textarea, select) { min-width: 0; }
+.launch-panel :is(button, input, textarea, select, summary):focus-visible { outline: 2px solid var(--blaze); outline-offset: 2px; }
+.launch-col-config > [data-testid="launch-unattended"] { margin-bottom: 0 !important; }
+.launch-col-config > .launch-help { margin-left: 0; }
+@media (min-width: 2400px) {
+  .launch-panel { width: 60%; max-width: 1800px; }
+  .workspace-picker .workspace-tree { max-height: 480px; }
+}

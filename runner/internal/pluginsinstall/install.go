@@ -104,6 +104,10 @@ type Runner func(ctx context.Context, name string, args ...string) (string, erro
 
 // Options configure an install run.
 type Options struct {
+	// PrivateOutput suppresses native diagnostics that may contain account data.
+	PrivateOutput bool
+	// StartCommand installs the pod UID/containment boundary; nil uses exec.Start.
+	StartCommand func(*exec.Cmd) error
 	// Bin is the CLI to run ("claude").
 	Bin string
 	// Env is the complete child environment (see ChildEnv); it must carry no secrets.
@@ -122,18 +126,20 @@ type Options struct {
 
 // installer installs a plugin list with the claude CLI.
 type installer struct {
-	bin      string
-	env      []string
-	allow    pluginspec.Allowlist
-	secrets  []string // scrubbed from anything logged
-	run      Runner
-	cmdLimit time.Duration
-	total    time.Duration
-	logp     string
+	privateOutput bool
+	startCommand  func(*exec.Cmd) error
+	bin           string
+	env           []string
+	allow         pluginspec.Allowlist
+	secrets       []string // scrubbed from anything logged
+	run           Runner
+	cmdLimit      time.Duration
+	total         time.Duration
+	logp          string
 }
 
 func newInstaller(o Options) *installer {
-	p := &installer{bin: o.Bin, env: o.Env, allow: o.Allow, secrets: o.Secrets, run: o.Run,
+	p := &installer{privateOutput: o.PrivateOutput, startCommand: o.StartCommand, bin: o.Bin, env: o.Env, allow: o.Allow, secrets: o.Secrets, run: o.Run,
 		cmdLimit: o.CmdTimeout, total: o.Total, logp: o.LogPrefix}
 	if p.bin == "" {
 		p.bin = "claude"
@@ -232,7 +238,14 @@ func (p *installer) execRunner(ctx context.Context, name string, args ...string)
 	cmd.Stderr = out
 	// A survivor may still hold the pipes after the kill; don't wait on it forever.
 	cmd.WaitDelay = 5 * time.Second
-	err = cmd.Run()
+	if p.startCommand != nil {
+		err = p.startCommand(cmd)
+	} else {
+		err = cmd.Start()
+	}
+	if err == nil {
+		err = cmd.Wait()
+	}
 	return out.buf.String(), err
 }
 
@@ -290,7 +303,11 @@ func (p *installer) step(ctx context.Context, label string, args ...string) (str
 	defer cancel()
 	out, err := p.run(cctx, p.bin, args...)
 	if err != nil {
-		log.Printf("%s: %s failed: %v: %s", p.logp, label, err, p.scrub(out))
+		if p.privateOutput {
+			log.Printf("%s: %s failed", p.logp, label)
+		} else {
+			log.Printf("%s: %s failed: %v: %s", p.logp, label, err, p.scrub(out))
+		}
 	} else {
 		log.Printf("%s: %s ok", p.logp, label)
 	}

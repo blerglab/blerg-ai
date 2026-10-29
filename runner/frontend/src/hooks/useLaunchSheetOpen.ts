@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 // Whether the New-session sheet is open, remembered for this tab across a
 // page reload (sessionStorage: per tab, gone when the tab closes).
@@ -13,6 +13,9 @@ import { useCallback, useState } from 'react'
 // press works" — by then the token is fresh). Remembering "open" here makes
 // the reloaded page reopen the sheet instead.
 const KEY = 'blerg.launch.open'
+const OPEN_EVENT = 'blerg:open-launch-sheet'
+
+export function openLaunchSheet() { window.dispatchEvent(new Event(OPEN_EVENT)) }
 
 function read(): boolean {
   try {
@@ -37,5 +40,10 @@ export function useLaunchSheetOpen(): [boolean, (open: boolean) => void] {
     write(next)
     setOpenState(next)
   }, [])
+  useEffect(() => {
+    const show = () => setOpen(true)
+    window.addEventListener(OPEN_EVENT, show)
+    return () => window.removeEventListener(OPEN_EVENT, show)
+  }, [setOpen])
   return [open, setOpen]
 }

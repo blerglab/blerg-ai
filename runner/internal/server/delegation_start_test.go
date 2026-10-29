@@ -155,7 +155,7 @@ func TestChildrenCredentialTable(t *testing.T) {
 		"daemon disconnected":     {gone, goneTok, 409, "the session's daemon is not connected"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			code, out, _ := fx.postChild(c.sid, c.tok, codexBody(), "k-"+name)
+			code, out, _ := fx.postChild(c.sid, c.tok, codexBody(), newUUID())
 			if code != c.want {
 				t.Fatalf("status = %d (%v), want %d", code, out, c.want)
 			}
@@ -222,8 +222,8 @@ func TestChildrenBodyValidation(t *testing.T) {
 		"bad effort":          {map[string]any{"repo": "app", "prompt": "x", "effort": "bogus"}, "k", 422, "effort must be"},
 		"wrong type":          {map[string]any{"repo": "app", "prompt": 3}, "k", 422, "wrong type"},
 		"not an object":       {`["x"]`, "k", 400, "JSON object"},
-		"missing key":         {map[string]any{"repo": "app", "prompt": "x"}, "", 400, "Idempotency-Key"},
-		"key longer than 128": {map[string]any{"repo": "app", "prompt": "x"}, strings.Repeat("k", 129), 400, "Idempotency-Key"},
+		"missing key":         {map[string]any{"repo": "app", "prompt": "x"}, "", 400, idempotencyKeyMessage},
+		"key longer than 128": {map[string]any{"repo": "app", "prompt": "x"}, strings.Repeat("k", 129), 400, idempotencyKeyMessage},
 	} {
 		t.Run(name, func(t *testing.T) {
 			code, out, _ := fx.postChild(fx.parent, fx.parentTok, c.body, c.key)
@@ -589,7 +589,7 @@ func TestDelegationLimits(t *testing.T) {
 			fx.childOf(fx.parent)
 		}
 		code, out, hdr := fx.postChild(fx.parent, fx.parentTok, claudeBody("x"), "a")
-		if code != http.StatusTooManyRequests || hdr.Get("Retry-After") != "60" {
+		if code != http.StatusTooManyRequests || hdr.Get("Retry-After") != "60" || asString(out["error"]) != "this session already runs 3 sessions at once (the limit is 3); stop one first" {
 			t.Fatalf("%d %v %v", code, out, hdr)
 		}
 		// The request path is limited too.
@@ -599,17 +599,17 @@ func TestDelegationLimits(t *testing.T) {
 		}
 		fx.noSpawn()
 	})
-	t.Run("20 starts are final", func(t *testing.T) {
+	t.Run("120 starts in the last hour", func(t *testing.T) {
 		fx := newDelegFx(t)
 		fx.rule("claude", runnerRuntimeDocker, false)
-		for range maxStartsPerParent - 3 {
+		for range defaultMaxChildStartsPerHour - 3 {
 			fx.session(sessOpts{owner: "owner-1", parent: fx.parent, status: "stopped"})
 		}
 		for range 3 {
 			fx.pendingRequest(fx.parent) // pending requests count as starts
 		}
 		code, out, hdr := fx.postChild(fx.parent, fx.parentTok, claudeBody("x"), "a")
-		if code != http.StatusTooManyRequests || hdr.Get("Retry-After") != "" || !strings.Contains(asString(out["error"]), "does not reset") {
+		if code != http.StatusTooManyRequests || hdr.Get("Retry-After") == "" || !strings.Contains(asString(out["error"]), "the next start is possible at") {
 			t.Fatalf("%d %v %v", code, out, hdr)
 		}
 		fx.noSpawn()
@@ -726,11 +726,18 @@ func TestDelegationLockNeverExhaustsThePool(t *testing.T) {
 	// Many accounts at once: each holds its own lock; none waits on another.
 	for i := range n {
 		owner := "acct-" + strconv.Itoa(i)
+		dc := workspaceOwnedDesktop(t, fx.hub, fx.pool, owner, "desktop-"+strconv.Itoa(i))
+		dc.DiscoveryVersion = 0 // Pool concurrency is tested with legacy single-repository children; reference selection has separate transport tests.
+		dc.SetCheckedOutRepos([]string{"app"})
+		dc.SetSandboxAvailable(true)
+		dc.SetSandboxClones(true)
+		dc.RecoveryReadyCapable = true
+		dc.SetAvailableEngines([]string{"claude"})
 		if _, err := db.InsertDelegationRule(context.Background(), fx.pool, db.DelegationRule{AccountID: owner, Engine: "claude",
-			Runtime: runnerRuntimeDocker, DaemonID: fx.dc.ID, CreatedVia: "settings"}); err != nil {
+			Runtime: runnerRuntimeDocker, DaemonID: dc.ID, CreatedVia: "settings"}); err != nil {
 			t.Fatal(err)
 		}
-		parents[i], toks[i] = fx.session(sessOpts{owner: owner})
+		parents[i], toks[i] = fx.session(sessOpts{owner: owner, daemonID: dc.ID})
 	}
 	for i, c := range posts(parents, toks) {
 		if c != http.StatusCreated {
@@ -829,6 +836,12 @@ func TestDaemonStartRecordsStartedByForEveryPrincipal(t *testing.T) {
 	} {
 		resp, apiErr := fx.api.StartSession(context.Background(), p,
 			runnerStartRequest{Repo: "app", Prompt: "x", Runtime: runnerRuntimeDocker, Interaction: protocol.InteractionInteractive}, "")
+		if kind == "runner_key" {
+			if apiErr == nil {
+				t.Fatal("install-wide key launched on a personal desktop")
+			}
+			continue
+		}
 		if apiErr != nil {
 			t.Fatalf("%s: %d %s", kind, apiErr.Status, apiErr.Message)
 		}
@@ -903,7 +916,7 @@ func TestCrossRepoSessionGrantStillEnforcesEveryLimit(t *testing.T) {
 			}
 		}},
 		{"parent starts", func(fx *delegFx) {
-			for range maxStartsPerParent {
+			for range defaultMaxChildStartsPerHour {
 				fx.session(sessOpts{owner: "owner-1", parent: fx.parent, status: "stopped"})
 			}
 		}},

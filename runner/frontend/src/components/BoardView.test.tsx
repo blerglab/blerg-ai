@@ -2,7 +2,7 @@
 // Run: cd frontend && npm test -- src/components/BoardView.test.tsx
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom'
 import type { Board, Column, Ticket } from '../types'
 import { useBoardStore } from '../hooks/useBoardStore'
@@ -221,45 +221,14 @@ describe('BoardView', () => {
     })
   })
 
-  describe('Assist button', () => {
-    it('calls spawnAssist with the board id when Assist is clicked', async () => {
+  // Terminal (tmux) sessions were removed in 0.5.0, and this view's Assist started one: it has no
+  // Assist button any more (the Board app's Assist starts an agent session).
+  describe('Assist', () => {
+    it('offers no Assist button and never starts a terminal session', async () => {
       renderBoardView('b1')
       await waitFor(() => expect(screen.getByText('Sprint Board')).toBeInTheDocument())
-
-      fireEvent.click(screen.getByTestId('assist-button'))
-
-      await waitFor(() => expect(boardApi.spawnAssist).toHaveBeenCalledWith('b1', expect.any(Object)))
-    })
-
-    it('navigates to the session terminal after Assist completes', async () => {
-      renderBoardView('b1')
-      await waitFor(() => expect(screen.getByText('Sprint Board')).toBeInTheDocument())
-
-      fireEvent.click(screen.getByTestId('assist-button'))
-
-      await waitFor(() => {
-        expect(screen.getByTestId('location')).toHaveTextContent('/sessions/sess-assist-1')
-      })
-    })
-  })
-
-  describe('Assist start errors', () => {
-    it('shows why a refused Assist start failed, and clears it on the next try', async () => {
-      vi.mocked(boardApi.spawnAssist).mockRejectedValueOnce(new Error('no daemon connected'))
-      renderBoardView('b1')
-      await waitFor(() => expect(screen.getByText('Sprint Board')).toBeInTheDocument())
-
-      fireEvent.click(screen.getByTestId('assist-button'))
-
-      const alert = await screen.findByTestId('assist-error')
-      expect(alert).toHaveAttribute('role', 'alert')
-      expect(alert).toHaveTextContent('Assist failed: no daemon connected')
-      expect(screen.getByTestId('assist-button')).toHaveTextContent('Assist')
-      expect(screen.getByTestId('location')).not.toHaveTextContent('/sessions/')
-
-      fireEvent.click(screen.getByTestId('assist-button'))
-      await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/sessions/sess-assist-1'))
-      expect(screen.queryByTestId('assist-error')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('assist-button')).toBeNull()
+      expect(boardApi.spawnAssist).not.toHaveBeenCalled()
     })
   })
 
@@ -305,4 +274,25 @@ describe('BoardView', () => {
       )
     })
   })
+})
+
+it('confirms column deletion in the shared popover and anchors a retryable failure', async () => {
+  const nativeConfirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+  const nativeAlert = vi.spyOn(window, 'alert').mockImplementation(() => {})
+  vi.mocked(boardApi.deleteColumn).mockRejectedValueOnce(new Error('Column is not empty')).mockResolvedValueOnce(undefined)
+  renderBoardView(); await screen.findByText('Sprint Board')
+  const menu = screen.getByTestId('column-menu-col-todo')
+  fireEvent.click(menu); fireEvent.click(screen.getByRole('button', { name: 'Delete column' }))
+  expect(nativeConfirm).not.toHaveBeenCalled()
+  fireEvent.click(within(screen.getByRole('alertdialog', { name: 'Delete column?' })).getByRole('button', { name: 'Cancel' }))
+  expect(boardApi.deleteColumn).not.toHaveBeenCalled()
+  expect(menu).toHaveFocus()
+  fireEvent.click(menu); fireEvent.click(screen.getByRole('button', { name: 'Delete column' }))
+  fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Delete column' }))
+  const error = await screen.findByRole('alertdialog', { name: 'Column could not be deleted' })
+  expect(nativeAlert).not.toHaveBeenCalled()
+  fireEvent.click(within(error).getByRole('button', { name: 'Retry' }))
+  await waitFor(() => expect(boardApi.deleteColumn).toHaveBeenCalledTimes(2))
+  expect(boardApi.deleteColumn).toHaveBeenLastCalledWith('col-todo')
+  nativeConfirm.mockRestore(); nativeAlert.mockRestore()
 })

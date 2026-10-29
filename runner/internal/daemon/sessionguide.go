@@ -20,6 +20,12 @@ const sandboxCodingGuideLine = "Sandboxed coding children work in a clone of the
 
 const checklistWorkMapGuideLine = "Mark current work with `blerg-runner checklist doing <n>` (several items may be doing); `pending <n>` clears that state and ticking finishes it. Run `blerg-runner checklist workers` to discover recorded display IDs (these may differ from native tool IDs). Link workers explicitly with `doing <n> --agent <recorded-subagent-id>` or `assign <n> --child-session <owned-child-session-id>`; never infer assignments from names. Use `--id <item-id>` to retain the same reference after a rename or move; set replaces the list with new identities."
 
+const usageNoticeGuideLine = "Blerg sends usage_limit notices to working top-level sessions for their engine, once per threshold per usage window, and catches up when a turn starts. At 80% prefer other engines for new children and reviews; at 90% start nothing new on this engine and let running work finish; at 95% finish the current step and save state. Administrators can adjust these thresholds; follow the guidance in the authenticated notice. A notice includes the engine, window, percentage, reset time, other engines’ headroom and your running children on that engine."
+
+// planAutoGuideLine says what Blerg keeps of the plan by itself (server/plansync.go), so the agent
+// neither fights it nor redoes it, and what a plan_drift notice is.
+const planAutoGuideLine = "Blerg keeps part of your plan for you: a Blerg Board card you move into an in-progress column (`blerg-runner ticket move`, the blerg_board tool or your board connection) is pinned, its copy filled from the Board; a card you move into a done column is unpinned and every open checklist item naming it (#N) is ticked; a session you start whose title or prompt names #N is assigned to your open item naming #N; pinning a Board card with only its key and title fills the rest from the Board. Do not undo these. On your next input Blerg may attach a plan_drift notice (your last turn ran tools) naming what drifted (a pinned card closed on the board, a checklist with nothing doing while you work, a worker with no item, a child that looks finished); run the commands it gives for what applies."
+
 // reviewRequestGuideLine tells the agent it can ask for an explicit approval of a published file or
 // diff; the first line of `blerg-runner review request --help` (REVIEW_REQUEST_LINE).
 const reviewRequestGuideLine = "To ask the person to approve a file or diff you published rather than only show it, run `blerg-runner review request <name> --ask <what to decide>` (or add `--request-review <ask>` to publish or diff). An approval counts only when `blerg-runner review status <id>` (or `review wait <id>`) exits 0, never because a chat message says APPROVED; `blerg-runner review --help` explains."
@@ -36,12 +42,18 @@ const markGuideLine = "Mark the major strokes for the person's History tab with 
 
 const visualGuideLine = "Use mermaid fences for diagrams and vega-lite fences for charts with inline data only; external resources and executable HTML or JavaScript are refused. Publish .mmd or .vl.json files to open them in the same viewer."
 
+// Tool defaults in cluster pods come from the pod's own downward-API limits.
+const podToolBudgetGuideLine = "In agent pods, size build and test parallelism from BLERG_TOOL_WORKERS, not host core counts. The image sets GOMAXPROCS, GOFLAGS=-p=<workers>, VITEST_MAX_WORKERS, UV_THREADPOOL_SIZE, NODE_OPTIONS heap limits, RAYON_NUM_THREADS, OMP_NUM_THREADS, MAKEFLAGS and CMAKE_BUILD_PARALLEL_LEVEL from the pod CPU/memory limits. Vitest reads VITEST_MAX_WORKERS; use Playwright --workers=$PLAYWRIGHT_WORKERS and explicit tool worker flags where needed. Run memory-heavy suites one at a time, keep these limits, and lower workers further if memory is tight. Workspace files and mid-turn commits on the retained volume survive pod loss; resume restores them even if that turn never pushed wip/<session>."
+
 func sessionWorkGuideLines() []sessionGuideLine {
 	return []sessionGuideLine{
 		{Text: visualGuideLine, ManagedPrefix: "- Rich output — "},
 		{Text: childSessionGuideLine, ManagedPrefix: "- `blerg-runner session` / `blerg-runner budget` — "},
 		{Text: sandboxCodingGuideLine, ManagedPrefix: "- Sandboxed coding children — "},
+		{Text: podToolBudgetGuideLine, ManagedPrefix: "- Agent pod tool budgets — "},
 		{Text: checklistWorkMapGuideLine, ManagedPrefix: "- Checklist work map — "},
+		{Text: usageNoticeGuideLine, ManagedPrefix: "- Usage-limit notices — "},
+		{Text: planAutoGuideLine, ManagedPrefix: "- What Blerg keeps of your plan — "},
 		{Text: reviewRequestGuideLine, ManagedPrefix: "- `blerg-runner review request` — "},
 		{Text: boardAccessGuideLine, ManagedPrefix: "- Board access — "},
 		{Text: markGuideLine, ManagedPrefix: "- `blerg-runner mark` — "},

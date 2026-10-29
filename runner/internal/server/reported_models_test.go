@@ -36,7 +36,7 @@ func reportingDaemon(hub *Hub, id string, reports map[string]models.Report) *Dae
 
 // A daemon's report is re-validated on arrival, whatever the daemon did.
 func TestDaemonConnSanitizesReportedModels(t *testing.T) {
-	dc := &DaemonConn{ID: "d1"}
+	dc := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006b"}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc.SetEngineModels(map[string]models.Report{
 		"codex": {Models: []models.Model{
@@ -71,27 +71,27 @@ func TestReportedModelListDaemonSelection(t *testing.T) {
 	hub := NewHub()
 	old := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	recent := old.Add(time.Hour)
-	reportingDaemon(hub, "d2", map[string]models.Report{
+	reportingDaemon(hub, "00000000-0000-4000-8000-00000000006c", map[string]models.Report{
 		"codex": rep(recent, mdl("gpt-b", "high"), mdl("gpt-shared", "low")),
 	})
-	reportingDaemon(hub, "d1", map[string]models.Report{
+	reportingDaemon(hub, "00000000-0000-4000-8000-00000000006b", map[string]models.Report{
 		"codex":  rep(old, mdl("gpt-a", "low"), mdl("gpt-shared", "max")),
 		"hermes": rep(old, mdl("qwen3-30b", "none", "ultra")),
 	})
-	reportingDaemon(hub, "d3", map[string]models.Report{"codex": rep(recent)}) // probed, nothing
+	reportingDaemon(hub, "00000000-0000-4000-8000-00000000006d", map[string]models.Report{"codex": rep(recent)}) // probed, nothing
 
 	// Named daemon: its own list, never another's.
-	l := reportedModelList(hub, "codex", "d2")
-	if l.Source != models.SourceDaemon || l.DaemonID != "d2" || !slices.Equal(ids(l.Models), []string{"gpt-b", "gpt-shared"}) || !l.FetchedAt.Equal(recent) {
+	l := reportedModelList(hub, "codex", "00000000-0000-4000-8000-00000000006c")
+	if l.Source != models.SourceDaemon || l.DaemonID != "00000000-0000-4000-8000-00000000006c" || !slices.Equal(ids(l.Models), []string{"gpt-b", "gpt-shared"}) || !l.FetchedAt.Equal(recent) {
 		t.Errorf("d2 = %+v", l)
 	}
-	for _, d := range []string{"d3", "gone"} {
+	for _, d := range []string{"00000000-0000-4000-8000-00000000006d", "gone"} {
 		if l := reportedModelList(hub, "codex", d); l.Source != models.SourceNone || len(l.Models) != 0 || l.Models == nil {
 			t.Errorf("%s = %+v", d, l)
 		}
 	}
 	// One reporter: that daemon's list, named.
-	if l := reportedModelList(hub, "hermes", ""); l.DaemonID != "d1" || len(l.Models) != 1 {
+	if l := reportedModelList(hub, "hermes", ""); l.DaemonID != "00000000-0000-4000-8000-00000000006b" || len(l.Models) != 1 {
 		t.Errorf("hermes = %+v", l)
 	}
 	// Several: the union in daemon-id order, the lowest id winning a model
@@ -122,30 +122,30 @@ func ids(ms []models.Model) []string {
 func TestModelsEndpointServesDaemonReports(t *testing.T) {
 	hub := NewHub()
 	fetched := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
-	reportingDaemon(hub, "d1", map[string]models.Report{
+	reportingDaemon(hub, "00000000-0000-4000-8000-00000000006b", map[string]models.Report{
 		"hermes": rep(fetched, models.Model{ID: "qwen3-30b", Name: "qwen3-30b", Section: "main",
 			Efforts: models.EffortsFor("hermes"), EffortKind: "reasoning"}),
 	})
-	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
+	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 	api.SetRunnerKey("runner-key")
 	api.SetModelSources(NewModelSources(nil, hub))
 	get := func(path string) (int, string) {
 		req := httptest.NewRequest("GET", path, nil)
-		req.Header.Set("Authorization", "Bearer runner-key")
+		req.Header.Set("Authorization", "Bearer "+enableBrowserAuth(t, api)("session.start"))
 		rec := httptest.NewRecorder()
 		mux := http.NewServeMux()
 		RegisterRunnerContractRoutes(mux, api)
 		mux.ServeHTTP(rec, req)
 		return rec.Code, rec.Body.String()
 	}
-	code, body := get("/api/models/hermes?daemon_id=d1")
+	code, body := get("/api/models/hermes?daemon_id=00000000-0000-4000-8000-00000000006b")
 	var l models.List
 	_ = json.Unmarshal([]byte(body), &l)
-	if code != http.StatusOK || l.Source != "daemon" || l.DaemonID != "d1" || l.FetchedAt == nil || !l.FetchedAt.Equal(fetched) ||
+	if code != http.StatusOK || l.Source != "daemon" || l.DaemonID != "00000000-0000-4000-8000-00000000006b" || l.FetchedAt == nil || !l.FetchedAt.Equal(fetched) ||
 		len(l.Models) != 1 || l.Models[0].DefaultEffort != "" || len(l.Models[0].Efforts) != 8 {
 		t.Errorf("hermes d1 = %d %s", code, body)
 	}
-	if !strings.Contains(body, `"daemon_id":"d1"`) || strings.Contains(body, "default_effort") {
+	if !strings.Contains(body, `"daemon_id":"00000000-0000-4000-8000-00000000006b"`) || strings.Contains(body, "default_effort") {
 		t.Errorf("wire shape: %s", body)
 	}
 	// The engine's allowlist rides along (for a model typed by hand), from
@@ -156,13 +156,13 @@ func TestModelsEndpointServesDaemonReports(t *testing.T) {
 	if _, body := get("/api/models/openclaw"); !strings.Contains(body, `"engine_efforts":[]`) {
 		t.Errorf("openclaw engine_efforts: %s", body)
 	}
-	if code, body := get("/api/models/hermes?daemon_id=d9"); code != http.StatusOK || !strings.Contains(body, `"source":"none"`) || !strings.Contains(body, `"models":[]`) {
+	if code, body := get("/api/models/hermes?daemon_id=d9"); code != http.StatusNotFound {
 		t.Errorf("unknown daemon = %d %s", code, body)
 	}
 	if _, body := get("/api/models/codex"); !strings.Contains(body, `"source":"none"`) {
 		t.Errorf("codex unreported = %s", body)
 	}
-	if _, body := get("/api/models/claude?daemon_id=d1"); !strings.Contains(body, `"source":"builtin"`) {
+	if _, body := get("/api/models/claude?daemon_id=00000000-0000-4000-8000-00000000006b"); !strings.Contains(body, `"source":"builtin"`) {
 		t.Errorf("claude = %s", body)
 	}
 }
@@ -172,14 +172,14 @@ func TestModelsEndpointServesDaemonReports(t *testing.T) {
 // cluster session) only the engine rules apply.
 func TestEffortCheckedAgainstTheDaemonsReportedList(t *testing.T) {
 	hub := NewHub()
-	dc := reportingDaemon(hub, "d1", map[string]models.Report{
+	dc := reportingDaemon(hub, "00000000-0000-4000-8000-00000000006b", map[string]models.Report{
 		"codex": rep(time.Now(), mdl("gpt-5.5", "low", "medium", "high", "xhigh")),
 	})
-	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
+	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 	api.SetModelSources(NewModelSources(nil, hub))
 	tok := enableBrowserAuth(t, api)("session.start")
 	post := func(body map[string]any) int {
-		body["daemon_id"], body["repo"], body["runtime"], body["engine"], body["kind"] = "d1", "app", "docker", "codex", "agent"
+		body["daemon_id"], body["repo"], body["runtime"], body["engine"], body["kind"] = "00000000-0000-4000-8000-00000000006b", "app", "docker", "codex", "agent"
 		raw, _ := json.Marshal(body)
 		req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(string(raw)))
 		req.Header.Set("Authorization", "Bearer "+tok)
@@ -205,10 +205,10 @@ func TestEffortCheckedAgainstTheDaemonsReportedList(t *testing.T) {
 		}
 	}
 	// No daemon named: rules only.
-	if msg := api.modelEffortProblem(t.Context(), "codex", "gpt-5.5", "ultra", ""); msg != "" {
+	if msg := api.modelEffortProblem(withDesktopViewer(t.Context(), "user-1"), "codex", "gpt-5.5", "ultra", ""); msg != "" {
 		t.Errorf("without a daemon: %q", msg)
 	}
-	if msg := api.modelEffortProblem(t.Context(), "codex", "gpt-5.5", "ultra", "d1"); !strings.Contains(msg, "must be one of low, medium, high, xhigh") {
+	if msg := api.modelEffortProblem(withDesktopViewer(t.Context(), "user-1"), "codex", "gpt-5.5", "ultra", "00000000-0000-4000-8000-00000000006b"); !strings.Contains(msg, "must be one of low, medium, high, xhigh") {
 		t.Errorf("on d1: %q", msg)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"slices"
 
 	"github.com/blerglab/blerg-ai/contracts/engines"
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
 // HostSelection is shared by placement and discovery. An unknown legacy report
@@ -61,6 +62,10 @@ func hostEngineState(dc *DaemonConn, selection HostSelection) string {
 				}
 				return "unavailable"
 			}
+		} else if st, reported := reportedEngineStatus(dc, "claude"); reported && st.Status != protocol.EngineAvailable {
+			// A daemon that reports statuses says when its Claude is not logged in:
+			// the launch sheet shows why instead of offering a launch that fails.
+			return "unavailable"
 		} else if cli, key := dc.HostClaude(); cli || key {
 			return "available"
 		}
@@ -77,4 +82,14 @@ func hostEngineState(dc *DaemonConn, selection HostSelection) string {
 func engineSteeringSupported(engine, kind string) bool {
 	descriptor, ok := engines.Lookup(engine)
 	return ok && kind == "agent" && descriptor.Steering
+}
+
+// reportedEngineStatus is the daemon's own status for engine, when it reports statuses.
+func reportedEngineStatus(dc *DaemonConn, engine string) (protocol.EngineStatus, bool) {
+	for _, st := range dc.EngineStatuses() {
+		if st.Engine == engine {
+			return st, true
+		}
+	}
+	return protocol.EngineStatus{}, false
 }

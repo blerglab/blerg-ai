@@ -166,7 +166,7 @@ export function PodLimits({ status, onSaved }: { status: ClusterStatusApi; onSav
           {status.active_sessions >= 0 && <span style={{ color: 'var(--fog)', fontSize: '0.75rem' }}>{status.active_sessions} in use</span>}
           {capDefault != null && <span style={{ color: 'var(--fog)', fontSize: '0.75rem' }}>default {capDefault}</span>}
           {capOverridden && !resetCap && (
-            <button type="button" onClick={() => { setCap(String(capDefault)); setResetCap(true) }}>Use default</button>
+            <button type="button" className="btn small" onClick={() => { setCap(String(capDefault)); setResetCap(true) }}>Use default</button>
           )}
           <input
             id="max-session-pods" type="number" min={MIN_SESSIONS} max={MAX_SESSIONS} step={1} value={cap}
@@ -180,7 +180,7 @@ export function PodLimits({ status, onSaved }: { status: ClusterStatusApi; onSav
           <> Each session pod asks for about {fmtCPU(status.cpu_request)} and {fmtMem(status.mem_request)}, so more pods need more cluster capacity.</>
         )}
       </p>
-      <button onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+      <button className="btn primary" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
       {msg && <span role="status" style={{ marginLeft: 10, fontSize: '0.8rem', color: msg.ok ? 'var(--fog)' : 'var(--danger)' }}>{msg.text}</span>}
     </div>
   )

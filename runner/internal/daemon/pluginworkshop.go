@@ -37,6 +37,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
@@ -67,10 +68,15 @@ const (
 // pluginWorkshop is one daemon's plugin install area. nil means "no
 // workshop" (no state dir): sessions start without plugins.
 type pluginWorkshop struct {
-	dir   string // CLAUDE_CONFIG_DIR of the install children
-	bin   string
-	allow pluginspec.Allowlist
-	home  string // HOME of the install children (the real home: git config and credential helpers)
+	startCommand func(*exec.Cmd) error
+	dir          string // CLAUDE_CONFIG_DIR of the install children
+	bin          string
+	allow        pluginspec.Allowlist
+	policy       *pluginspec.LivePolicy
+	// Pod authority must be refreshed from Core even when local state exists.
+	requireBootstrap bool
+	bootstrapped     atomic.Bool
+	home             string // HOME of the install children (the real home: git config and credential helpers)
 
 	refreshEvery time.Duration
 	run          pluginsinstall.Runner // nil = exec
@@ -129,7 +135,11 @@ func NewPluginWorkshop(stateDir string) *pluginWorkshop {
 }
 
 func newPluginWorkshop(dir, home string, allow pluginspec.Allowlist) *pluginWorkshop {
-	return &pluginWorkshop{dir: dir, bin: "claude", allow: allow, home: home,
+	policy, err := pluginspec.NewLivePolicy(filepath.Join(dir, "marketplace-policy.json"))
+	if err != nil {
+		log.Printf("daemon: plugins: %v; refusing plugin installs", err)
+	}
+	return &pluginWorkshop{policy: policy, dir: dir, bin: "claude", allow: allow, home: home,
 		refreshEvery: pluginRefreshInterval, now: time.Now}
 }
 
@@ -149,12 +159,13 @@ func (w *pluginWorkshop) sessionDir(sessionID string) string {
 func (w *pluginWorkshop) options() pluginsinstall.Options {
 	extra := append([]string{"CLAUDE_CONFIG_DIR=" + w.dir}, gitSafetyEnv()...)
 	return pluginsinstall.Options{
-		Bin:       w.bin,
-		Env:       pluginsinstall.ChildEnv(w.home, extra...),
-		Allow:     w.allow,
-		Secrets:   []string{os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"), os.Getenv("BLERG_RUNNER_DAEMON_TOKEN")},
-		Run:       w.run,
-		LogPrefix: "daemon: plugins",
+		Bin:          w.bin,
+		StartCommand: w.startCommand,
+		Env:          pluginsinstall.ChildEnv(w.home, extra...),
+		Allow:        w.currentAllow(),
+		Secrets:      []string{os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"), os.Getenv("BLERG_RUNNER_DAEMON_TOKEN")},
+		Run:          w.run,
+		LogPrefix:    "daemon: plugins",
 	}
 }
 
@@ -507,3 +518,6 @@ func safeFileName(s string) string {
 	}
 	return b.String()
 }
+
+// SetStartCommand installs the owning pod's process boundary before use.
+func (w *pluginWorkshop) SetStartCommand(start func(*exec.Cmd) error) { w.startCommand = start }

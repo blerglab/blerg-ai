@@ -10,10 +10,11 @@ import {
   type AgentEvent, type AskLive, type BackgroundTask, type ChecklistItem, type ChecklistLive, type PinnedLive, type McpHold, type McpLive, type PlanLive,
   type LiveState, type PlanStatus, type SubagentLive, type Ticket, type TicketLive, type TicketSummaryLive,
 } from '@blerglab/chat'
+import { readParts, readUsage, type LiveUsage, type UsageParts } from './liveUsage'
 
 /** Engine-neutral progress supplied by the server; no command-output inference. */
 export interface LiveProgress { completed: number; total: number; label: string; updated_at?: string }
-export type ProgressSubagent = SubagentLive & { progress?: LiveProgress; reasoning?: Reasoning }
+export type ProgressSubagent = SubagentLive & { progress?: LiveProgress; reasoning?: Reasoning; usage?: UsageParts }
 /** The checklist with the names of its assignees, keyed "<kind>:<id>" (the server reads them). */
 export type PanelChecklist = ChecklistLive & { workerTitles?: Record<string, string> }
 export type SessionPanelLiveState = Omit<LiveState, 'subagents' | 'checklist'> & {
@@ -22,6 +23,8 @@ export type SessionPanelLiveState = Omit<LiveState, 'subagents' | 'checklist'> &
   progress?: LiveProgress | null
   /** The viewer may see token counts; absent (the chat's own reading): no live reasoning count. */
   reasoningTokens?: boolean
+  /** The session's own token usage for its Main row (owner or administrator only); null or absent: none. */
+  usage?: LiveUsage | null
 }
 
 export function readProgress(value: unknown): LiveProgress | null {
@@ -47,6 +50,8 @@ export interface LiveSubagentReply {
   effort?: string
   progress?: LiveProgress
   tokens: number | null
+  /** tokens by part (input, output, cache read and write); a server older than it leaves it out. */
+  usage?: unknown
   doing: string
   started_at: string
   /** Its newest sign of life: it stops counting STALE_RUNNING_MS after it. */
@@ -65,8 +70,10 @@ export interface LiveTicketSummaryReply { source: string; key: string; title: st
 export type LiveTicketReply = Ticket & { event_id: string; updated_at: string }
 
 export interface LiveChildSession {
-  id: string; title: string; engine: string; model: string; effort?: string; status: string
+  id: string; title: string; engine: string; model: string; effort?: string; status: string; runtime?: string
   started_at: string; ended_at?: string | null; archived_at?: string | null; asking: boolean; tokens: number | null; cost_usd?: number
+  /** tokens broken down for the Running now chip (present when tokens is). */
+  usage?: unknown
   /** Reported current-turn telemetry, separate from the completed-turn billing ledger. */
   usage_status?: 'pending' | 'reported' | 'hidden'; tool_calls?: number; activity?: string
   activity_since?: string; last_activity_at?: string; local?: boolean
@@ -109,6 +116,8 @@ export interface LiveReply {
   mcp?: unknown
   mcp_hold?: { since: string; until: string } | null
   can_release_prompt?: boolean
+  /** The session's own token usage (owner or administrator only). */
+  usage?: unknown
 }
 
 /** The events that change the live state: each brings a new read (folded meanwhile when it can be).
@@ -165,6 +174,8 @@ export interface LiveView {
   /** The viewer may see token counts (the owner or an administrator): a live reasoning count
    *  shows only then; anyone else sees the reasoning clock. */
   reasoningTokens: boolean
+  /** The session's own token usage; null when hidden or none is recorded. */
+  usage: LiveUsage | null
 }
 
 type Rec = Record<string, unknown>
@@ -218,6 +229,7 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
       ...(s.resumed ? { resumed: true } : {}),
       ...(readProgress(s.progress) ? { progress: readProgress(s.progress)! } : {}),
       ...(readReasoning(s.reasoning) ? { reasoning: readReasoning(s.reasoning)! } : {}),
+      ...(readParts(s.usage) && !reply.tokens_hidden ? { usage: readParts(s.usage)! } : {}),
     })
   }
   const tasks = new Map<string, BackgroundTask>()
@@ -319,7 +331,11 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
         if (typeof p.effort === 'string') s.effort = p.effort
         else if (p.effort === null) s.effort = ''
         const tokens = usageTotal(p.usage)
-        if (tokens !== null && !reply.tokens_hidden) s.tokens = tokens
+        if (tokens !== null && !reply.tokens_hidden) {
+          s.tokens = tokens
+          const parts = readParts(p.usage)
+          if (parts) s.usage = parts
+        }
         s.activeAt = at ?? s.activeAt
         break
       }
@@ -349,11 +365,11 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
         let k = -1
         // A question the agent did not wait on closes only with the answer naming it.
         if (source === 'ask_answer') k = id ? asks.findIndex(a => a.messageId === id) : asks.map(a => !a.noWait).lastIndexOf(true)
-        else if (source !== 'system' && source !== 'question_answer') k = asks.map(a => a.messageId === '').lastIndexOf(true)
+        else if (source !== 'system' && source !== 'question_answer' && source !== 'plan_drift' && source !== 'usage_limit') k = asks.map(a => a.messageId === '').lastIndexOf(true)
         if (k >= 0) asks.splice(k, 1)
         // The chat's liveCalls (and the server's rule): a message that is not the system's ends the
         // calls in flight, so a foreground subagent stops counting; a background one runs on.
-        if (source !== 'system') for (const sub of [...subs.values()]) if (!sub.background && !sub.resumed) subs.delete(sub.key)
+        if (source !== 'system' && source !== 'usage_limit') for (const sub of [...subs.values()]) if (!sub.background && !sub.resumed) subs.delete(sub.key)
         break
       }
     }
@@ -380,6 +396,7 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
       ...(s.resumed ? { resumed: true } : {}),
       ...(s.progress ? { progress: s.progress } : {}),
       ...(s.reasoning ? { reasoning: s.reasoning } : {}),
+      ...(s.usage ? { usage: s.usage } : {}),
     })
   }
   const listed = new Set(subagents.map(s => s.key))
@@ -395,5 +412,6 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
     mcpHold: mcpHold && Number.isFinite(now) && mcpHold.until <= now ? null : mcpHold,
     canReleasePrompt: reply.can_release_prompt === true,
     reasoningTokens: reply.tokens_hidden === false,
+    usage: reply.tokens_hidden === false ? readUsage(reply.usage) : null,
   }
 }

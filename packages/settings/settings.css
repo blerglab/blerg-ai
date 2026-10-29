@@ -1,0 +1,19 @@
+/* Shared settings primitives. App classes may coexist with these. */
+.settings-section { margin-block: 1.5rem; min-width: 0; }
+:is(h2, h3).settings-heading { margin: 0 0 .5rem; font: 600 1.05rem/1.4 var(--display, var(--body, sans-serif)); color: var(--chalk, inherit); text-transform: none; letter-spacing: normal; }
+.settings-description { margin: 0 0 1rem; line-height: 1.5; color: var(--fog, inherit); max-width: 75ch; }
+.settings-field { min-width: 0; max-width: 100%; font: inherit; }
+label.settings-field { display: grid; gap: .4rem; }
+:is(input, select, textarea).settings-field { box-sizing: border-box; width: 100%; padding: .55rem .7rem; border: 1px solid var(--stone, #777); border-radius: 8px; background-color: var(--scree, #fff); color: inherit; }
+.settings-action { appearance: none; display: inline-flex; align-items: center; justify-content: center; gap: .4rem; font: inherit; padding: .5rem .8rem; border: 1px solid var(--stone, #777); border-radius: 8px; background: var(--scree, #fff); color: inherit; cursor: pointer; }
+.settings-action:is(.primary, .btn-primary) { background: var(--blaze, #365ebd); color: var(--basalt, #fff); }
+.settings-action:disabled, .settings-toggle-control:disabled { opacity: .5; cursor: default; }
+.settings-action:focus-visible, .settings-field:focus-visible, .settings-toggle-control:focus-visible { outline: 2px solid var(--blaze, #365ebd); outline-offset: 3px; }
+/* The anonymous label text stays left; the control moves right. */
+label.settings-field:has(.settings-toggle-control), .settings-toggle { display: flex; align-items: center; justify-content: space-between; gap: 1rem; width: 100%; max-width: 48rem; margin-block: .65rem; }
+input.settings-toggle-control, button.settings-toggle-control { appearance: none; flex: 0 0 2.75rem; order: 1; box-sizing: border-box; width: 2.75rem; min-width: 2.75rem; height: 1.6rem; padding: 2px; margin: 0; border: 1px solid var(--stone, #777); border-radius: 2rem; background: var(--stone, #808080); cursor: pointer; }
+.settings-toggle-control::before { content: ''; display: block; width: 1.2rem; height: 1.2rem; border-radius: 50%; background: #fff; transition: transform .15s; }
+.settings-toggle-control:checked, .settings-toggle-control[aria-checked=true] { background: var(--blaze, #365ebd); }
+.settings-toggle-control:checked::before, .settings-toggle-control[aria-checked=true]::before { transform: translateX(1.1rem); }
+@media (prefers-reduced-motion: reduce) { .settings-toggle-control::before { transition: none; } }
+@media (max-width: 640px) { .settings-action { min-height: 40px; } }

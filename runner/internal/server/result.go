@@ -50,12 +50,14 @@ type sessionResult struct {
 	// EndReason is why the session ended (a fixed code, "" while it has not
 	// or when nothing was recorded); EndedBy the kind of actor that ended it,
 	// null when none did. The actor's account is never included here.
-	EndReason string            `json:"end_reason"`
-	EndedBy   *protocol.EndedBy `json:"ended_by"`
-	AutoStop  bool              `json:"auto_stop"`
-	StartedAt string            `json:"started_at"`
-	EndedAt   *string           `json:"ended_at"`
-	Artifacts []map[string]any  `json:"artifacts"`
+	EndReason        string                           `json:"end_reason"`
+	EndedBy          *protocol.EndedBy                `json:"ended_by"`
+	AutoStop         bool                             `json:"auto_stop"`
+	StartedAt        string                           `json:"started_at"`
+	EndedAt          *string                          `json:"ended_at"`
+	Artifacts        []map[string]any                 `json:"artifacts"`
+	Workspace        *protocol.WorkspaceManifest      `json:"workspace,omitempty"`
+	WorkspaceResults []protocol.WorkspaceMemberResult `json:"workspace_results"`
 }
 
 // runnerLifecycle projects a sessions.status value onto the five documented
@@ -137,7 +139,7 @@ func sessionWorkBranch(row *db.SessionRow) string {
 // error when the session does not exist (the handler turns that into a 404) or
 // when the lookup fails — never a zero-valued result, which a caller could
 // mistake for a real one.
-func (a *API) buildSessionResult(ctx context.Context, sessionID string) (sessionResult, error) {
+func (a *API) buildSessionResult(ctx context.Context, sessionID string, viewers ...string) (sessionResult, error) {
 	row, err := db.GetSession(ctx, a.dbPool, sessionID)
 	if err != nil {
 		return sessionResult{}, fmt.Errorf("session lookup: %w", err)
@@ -145,7 +147,17 @@ func (a *API) buildSessionResult(ctx context.Context, sessionID string) (session
 	if row == nil {
 		return sessionResult{}, fmt.Errorf("session %s not found", sessionID)
 	}
-	runtime := a.runnerRuntimeAxis(sessionID, derefOrEmpty(row.Runtime)) //nolint:contextcheck // cluster calls are bounded by the JobManager client timeout and deliberately not tied to the caller: a Job or Secret half-made because the caller went away would be orphaned
+	visible := len(viewers) == 0 || a.hub.desktopSessionVisible(ctx, viewers[0], row)
+	if !visible {
+		row.Repo = ""
+		row.GitURL = nil
+		row.ProjectPath = ""
+		row.ErrorReason = nil
+	}
+	runtime := "none"
+	if visible {
+		runtime = a.runnerRuntimeAxis(sessionID, derefOrEmpty(row.Runtime)) //nolint:contextcheck // JobManager bounds this cluster status probe independently
+	}
 	lifecycle := runnerLifecycle(row.Status, runtime == "job_finished")
 	res := sessionResult{
 		SessionID:   row.ID,
@@ -160,12 +172,49 @@ func (a *API) buildSessionResult(ctx context.Context, sessionID string) (session
 		StartedAt:   row.StartedAt.UTC().Format(time.RFC3339),
 		Artifacts:   []map[string]any{},
 	}
+	viewer := ""
+	if len(viewers) > 0 {
+		viewer = viewers[0]
+	}
+	res.ErrorReason = podErrorReasonFor(row, viewer, res.ErrorReason)
+	res.WorkspaceResults = []protocol.WorkspaceMemberResult{}
+	ws, err := db.GetSessionWorkspace(ctx, a.dbPool, sessionID)
+	if err != nil {
+		return sessionResult{}, fmt.Errorf("workspace result lookup: %w", err)
+	}
+	if ws != nil && ws.Kind == "folder" {
+		res.Repo, res.GitURL, res.Branch = "", "", ""
+	}
+	expectedRuntime := derefOrEmpty(row.Runtime)
+	switch expectedRuntime {
+	case "daemon":
+		expectedRuntime = "host"
+	case "docker":
+		expectedRuntime = "sandbox"
+	}
+	// A missing viewer is an internal caller, not permission to expose desktop
+	// member or recovery metadata. Callbacks supply their persisted recipient.
+	if visible && ws != nil && ws.Manifest != nil && len(viewers) > 0 && viewers[0] != "" &&
+		ws.Manifest.OwnerID == derefOrEmpty(row.SpawningAccountID) && ws.Manifest.Runtime == expectedRuntime &&
+		ownsSession(viewers[0], row) {
+		res.Workspace = ws.Manifest
+		res.WorkspaceResults = ws.Results
+		if res.WorkspaceResults == nil {
+			res.WorkspaceResults = []protocol.WorkspaceMemberResult{}
+		}
+	}
+	if !visible {
+		res.Branch = ""
+	}
 	var turnErr string
 	res.LastAssistantMessage, turnErr = a.lastTurnAnswer(ctx, sessionID)
 	if res.ErrorReason == "" {
 		// The session did not fail, but its last turn did: that is the reason the caller lacks
 		// an answer.
 		res.ErrorReason = turnErr
+	}
+	if !visible {
+		res.ErrorReason = ""
 	}
 	if row.EndedAt != nil {
 		ended := row.EndedAt.UTC().Format(time.RFC3339)
@@ -208,7 +257,7 @@ scan:
 				Message string `json:"message"`
 				Code    string `json:"code"`
 			}
-			if json.Unmarshal([]byte(ev.Payload), &p) == nil && lastErr == "" && p.Message != "" && p.Code != "api_retry" && p.Code != childSyncErrorCode {
+			if json.Unmarshal([]byte(ev.Payload), &p) == nil && lastErr == "" && p.Message != "" && p.Code != "api_retry" && p.Code != "session_recovery" && p.Code != childSyncErrorCode {
 				lastErr = p.Message
 			}
 		case assistantTextKind:
@@ -248,9 +297,16 @@ func (a *API) Result(ctx context.Context, principal RunnerPrincipal, sessionID s
 	if _, apiErr := a.requireSessionAccess(ctx, principal, sessionID); apiErr != nil {
 		return SessionResult{}, apiErr
 	}
-	res, err := a.buildSessionResult(ctx, sessionID)
+	res, err := a.buildSessionResult(ctx, sessionID, desktopViewer(ctx, principal.spawningAccountID()))
 	if err != nil {
 		return SessionResult{}, apiErrorf(http.StatusNotFound, "session not found")
+	}
+	// A parent read its child's result: a child that does nothing after this looks finished to
+	// the parent's plan check (plansync.go).
+	if principal.Kind == sessionDelegateKind && principal.Sub != "" && principal.Sub != sessionID && a.dbPool != nil {
+		if err := db.RecordChildResultRead(ctx, a.dbPool, principal.Sub, sessionID); err != nil {
+			log.Printf("record child result read %s: %v", sessionID, err)
+		}
 	}
 	return res, nil
 }
@@ -261,10 +317,49 @@ func (a *API) HandleRunnerResult(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	res, apiErr := a.Result(r.Context(), principal, r.PathValue("id"))
+	ctx, sid := r.Context(), r.PathValue("id")
+	row, apiErr := a.requireSessionAccess(ctx, principal, sid)
 	if apiErr != nil {
 		writeAPIError(w, apiErr)
 		return
 	}
-	writeJSON(w, http.StatusOK, res)
+	viewer := desktopViewer(ctx, principal.spawningAccountID())
+	dc, sessionDC := a.hub.GetDaemon(row.DaemonID), a.hub.FindDaemonForSession(sid)
+	visible := a.hub.desktopSessionVisible(ctx, viewer, row)
+	res, apiErr := a.Result(ctx, principal, sid)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
+	// Build the complete body before taking authority; only bounded local
+	// recipient/connection checks and socket delivery belong under the fence.
+	raw, err := json.Marshal(res)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "session result unavailable")
+		return
+	}
+	raw = append(raw, '\n')
+	started := false
+	err = a.sessionReadFence(ctx, sid, func(fenced context.Context) error {
+		latest, accessErr := a.requireSessionAccess(fenced, principal, sid)
+		if accessErr != nil || latest.DaemonID != row.DaemonID ||
+			derefOrEmpty(latest.Runtime) != derefOrEmpty(row.Runtime) ||
+			derefOrEmpty(latest.SpawningAccountID) != derefOrEmpty(row.SpawningAccountID) ||
+			latest.Private != row.Private || a.hub.GetDaemon(row.DaemonID) != dc ||
+			a.hub.FindDaemonForSession(sid) != sessionDC ||
+			a.hub.desktopSessionVisible(fenced, viewer, latest) != visible {
+			return errWorkspaceUnavailable
+		}
+		if visible && derefOrEmpty(row.Runtime) != runnerRuntimeCluster && dc != nil && a.hub.ownedHostDaemon(fenced, viewer, dc.ID) != dc {
+			return errWorkspaceUnavailable
+		}
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.Header().Set("Content-Type", "application/json")
+		var writeErr error
+		started, writeErr = writeFencedResponse(fenced, w, http.StatusOK, raw)
+		return writeErr
+	})
+	if err != nil && !started {
+		writeError(w, http.StatusConflict, "session source changed; refresh")
+	}
 }

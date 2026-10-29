@@ -52,7 +52,7 @@ describe('UsageLimitResume', () => {
     request.mockImplementation(() => response({ ...state, enabled: true, state: 'unknown' }))
     const view = render(<UsageLimitResume sessionId="s1" />)
     await act(async () => { await vi.advanceTimersByTimeAsync(0) })
-    expect(screen.getByRole('status')).toHaveTextContent('Reset time unknown')
+    expect(screen.getByRole('status')).toHaveTextContent('Reset time unknown; checking the usage meter.')
     await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
     expect(request).toHaveBeenCalledTimes(2)
     view.unmount()

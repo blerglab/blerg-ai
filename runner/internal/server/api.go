@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
@@ -20,6 +21,7 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/gitprovider"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
+	"github.com/blerglab/blerg-ai/runner/internal/ownershell"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/blerglab/blerg-ai/runner/internal/scratch"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -91,6 +93,11 @@ func validateRepoNames(repos []string) error {
 
 // API groups the dependencies shared by all REST handlers.
 type API struct {
+	clusterStopTimeout time.Duration
+	workspaceCluster   WorkspaceClusterConsumer
+
+	shells            *ownershell.Manager
+	shellRuntime      *remoteShell
 	launchReady       launchReadinessCache
 	permissionSignIns permissionSignInCache
 	// beforeMarkPrivate is a test seam: it runs at the top of MarkPrivate, that is
@@ -100,7 +107,13 @@ type API struct {
 	delegationPush func(heading, body, link string)
 	// reviewPush is the same seam for a review request (reviewrequests.go).
 	reviewPush func(heading, body, link string)
-	// delegLocks serializes delegated starts per account in this process (delegation_start.go).
+	// childLimits holds environment defaults, then the last valid core settings.
+	childLimitsMu sync.Mutex
+	childLimits   childStartLimits
+	// sessionStorage caches core's session storage settings (session_storage.go).
+	sessionStorageMu sync.Mutex
+	sessionStorage   sessionStorageCache
+	// delegLocks serializes delegated starts per account in this process.
 	delegLocks     delegationLocks
 	hub            *Hub
 	dbPool         *pgxpool.Pool
@@ -112,10 +125,20 @@ type API struct {
 	// delegationWaiters wakes long polls on a delegation request (delegation_requests.go).
 	delegationWaiters *delegationWaiters
 	// reviewWaiters wakes long polls on a review request (reviewrequests.go).
-	reviewWaiters  *delegationWaiters
-	delegationLife delegationLifecycle
-	children       childrenNotifier
-	childTurns     childTurnSeen // child-turn notes already relayed (child_turn_notes.go)
+	reviewWaiters      *delegationWaiters
+	delegationLife     delegationLifecycle
+	children           childrenNotifier
+	usageNoticesMu     sync.Mutex
+	usageNoticeTimeout time.Duration // zero uses childTurnNoteTimeout
+	childTurns         childTurnSeen // child-turn notes already relayed (child_turn_notes.go)
+	// planTurns deduplicates turn checks; planMovedHook reports completed move/start rules in tests.
+	planFlights   planFlightState
+	planMergeScan planMergeScan
+	planReads     planReadCache
+	planTurns     childTurnSeen
+	planMovedHook func(sessionID string)
+	// planChildMerged replaces the daemon read of whether a child's branch is merged (tests).
+	planChildMerged func(ctx context.Context, row *db.SessionRow, child string) (bool, time.Time)
 	// questionAttempts counts failed deliveries of each question's answer (questions.go).
 	questionAttempts questionAttempts
 	// questionDeliveryFailed is a test seam: it is told of each failed delivery of a question's
@@ -180,10 +203,10 @@ type API struct {
 	// Tests set it.
 	createRepo func(ctx context.Context, p gitprovider.Provider, token string, ref gitprovider.Ref, private bool) error
 
-	// pluginAllow is this server's marketplace allow-list (BLERG_RUNNER_PLUGIN_MARKETPLACES), read
-	// once at construction, for sessions sent to a workstation daemon (daemonPlugins). The cluster
-	// path keeps its own copy on the JobManager, which a desktop install does not have.
+	// pluginAllow is the server environment fallback. marketplacePolicy replaces
+	// it after the first Core delivery and is shared with the cluster manager.
 	pluginAllow         pluginspec.Allowlist
+	marketplacePolicy   *pluginspec.LivePolicy
 	sessionOriginLookup func(context.Context, string) (string, error)
 	// grantCapOverride, when positive, is the hourly cap of a session permission's automatic
 	// approvals (a test seam; BLERG_RUNNER_GRANT_HOURLY_CAP otherwise).
@@ -251,6 +274,7 @@ func (a *API) authBrowser(w http.ResponseWriter, r *http.Request) (identity.Prin
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return identity.Principal{}, false
 	}
+	*r = *r.WithContext(withDesktopViewer(r.Context(), a.desktopRecipient(r, runnerPrincipalFromIdentity(p).spawningAccountID())))
 	return p, true
 }
 
@@ -296,7 +320,19 @@ func NewAPI(hub *Hub, dbPool *pgxpool.Pool, daemonToken string, repos *RepoListe
 		delegationWaiters: newDelegationWaiters(),
 		reviewWaiters:     newDelegationWaiters(),
 	}
+	api.childLimits = childStartLimitsFromEnv()
+	if hub != nil {
+		hub.desktopAuthenticate = api.authenticateDesktop
+		hub.desktopPool = dbPool
+	}
 	api.pluginAllow, _ = pluginAllowlistFromEnv()
+	api.marketplacePolicy = &pluginspec.LivePolicy{}
+	if hub != nil {
+		hub.marketplacePolicy = api.marketplacePolicy
+		if jm := hub.JobManager(); jm != nil {
+			jm.MarketplacePolicy = api.marketplacePolicy
+		}
+	}
 	// Several paths that end a session are package functions on the hub side
 	// of the server (daemon message handling, disconnect, reconciliation) with
 	// no API to call. Registering the notifier on the Hub — the one object
@@ -311,6 +347,12 @@ func NewAPI(hub *Hub, dbPool *pgxpool.Pool, daemonToken string, repos *RepoListe
 		hub.SetDelegationHooks(api.onParentTerminalEnd, api.onParentPaused)
 		hub.SetChildActivityHook(api.noteChildActivity)
 		hub.SetChildTurnHook(api.onChildTurnEnded)
+		hub.mu.Lock()
+		hub.usageNotices = api.onUsageNotices
+		hub.mu.Unlock()
+		hub.SetPlanTurnHook(api.onPlanTurnEnded)
+		hub.planInput = api.preparePlanNudge
+		hub.planInitialInput = func(dc *DaemonConn, raw []byte) ([]byte, func(bool)) { return api.preparePlanNudgeMode(dc, raw, true) }
 		hub.SetDelegationHelloHook(api.onDelegationDaemonHello)
 		hub.SetDelegationInputGuard(func(ctx context.Context, id string, enqueue func() error) error {
 			if dbPool == nil {
@@ -380,7 +422,7 @@ func sessionRowToInfo(row db.SessionRow, viewer string) protocol.SessionInfo {
 	info.Kind = row.Kind
 	info.SkipPermissions = row.SkipPermissions
 	if row.ErrorReason != nil {
-		info.ErrorReason = *row.ErrorReason
+		info.ErrorReason = podErrorReasonFor(&row, viewer, *row.ErrorReason)
 	}
 	info.EndReason, info.EndedBy = endAttribution(&row, viewer)
 	if row.CronID != nil {
@@ -430,10 +472,11 @@ func messageRowToInfo(row db.MessageRow) protocol.MessageInfo {
 
 // HandleGetDaemons returns a JSON array of all connected daemons.
 func (a *API) HandleGetDaemons(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.authBrowser(w, r); !ok {
+	principal, ok := a.authBrowser(w, r)
+	if !ok {
 		return
 	}
-	daemons := a.hub.GetHostDaemons()
+	daemons := a.hub.ownedHostDaemons(r.Context(), principal.Sub)
 	result := make([]protocol.DaemonInfo, 0, len(daemons))
 	for _, d := range daemons {
 		// Cluster-runtime session pods connect as their own ephemeral
@@ -445,7 +488,10 @@ func (a *API) HandleGetDaemons(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		claudeCLI, apiKey := d.HostClaude()
-		result = append(result, protocol.DaemonInfo{
+		result = append(result, protocol.DaemonInfo{Compatibility: d.Compatibility,
+			RepoInventoryLimited: d.InventoryLimited(),
+			DiscoveryVersion:     d.DiscoveryVersion, WorkspaceCapabilities: d.WorkspaceCapabilities,
+			OwnershipRevision: d.ownershipRevision(), ConnectionGeneration: d.DesktopGeneration,
 			ID:                  d.ID,
 			Name:                d.Name,
 			Mode:                d.Mode,
@@ -454,6 +500,7 @@ func (a *API) HandleGetDaemons(w http.ResponseWriter, r *http.Request) {
 			Version:             d.Version,
 			SandboxAvailable:    d.SandboxAvailable(),
 			AvailableEngines:    d.AvailableEngines(),
+			EngineStatuses:      describedEngineStatuses(d),
 			MCPGateway:          d.CanMCPGateway(),
 			MCPGatewayViaServer: d.CanMCPGatewayViaServer(),
 			RestrictTools:       d.CanRestrictTools(),
@@ -469,7 +516,10 @@ func (a *API) HandleGetDaemons(w http.ResponseWriter, r *http.Request) {
 			UsageLimits: nilIfEmpty(d.UsageLimits()),
 		})
 	}
-	writeJSON(w, http.StatusOK, result)
+	a.hub.deliverDesktopInventory(r.Context(), principal.Sub, daemons, w, func(out http.ResponseWriter) {
+		out.Header().Set("Cache-Control", "private, no-store")
+		writeJSON(out, 200, result)
+	})
 }
 
 // ─── GET /api/cluster/status ──────────────────────────────────────────────────
@@ -649,6 +699,10 @@ func (a *API) HandleGetSessions(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	status := r.URL.Query().Get("status")
 	daemonID := r.URL.Query().Get("daemon_id")
+	if daemonID != "" && !a.hub.ownsDesktopID(r.Context(), principal.Sub, daemonID) {
+		writeError(w, http.StatusNotFound, "desktop unavailable")
+		return
+	}
 	runtime := r.URL.Query().Get("runtime")
 	var (
 		rows []db.SessionRow
@@ -678,14 +732,40 @@ func (a *API) HandleGetSessions(w http.ResponseWriter, r *http.Request) {
 		if !canSeeAccount(principal.Sub, &row) { // a private session is its owner's alone
 			continue
 		}
-		result = append(result, sessionRowToInfo(row, principal.Sub))
+		result = append(result, a.hub.sessionInfoFor(r.Context(), row, principal.Sub))
 	}
-	writeJSON(w, http.StatusOK, result)
+	ids := []string{}
+	for _, info := range result {
+		if info.DaemonID != "" && info.Runtime != "cluster" {
+			ids = append(ids, info.DaemonID)
+		}
+	}
+	if err := db.WithDesktopSnapshotFences(ctx, a.dbPool, ids, func(fenced context.Context) error {
+		for i := range result {
+			if result[i].Runtime != "cluster" && result[i].DaemonID != "" && !a.hub.ownsDesktopID(fenced, principal.Sub, result[i].DaemonID) {
+				result[i].DaemonID = ""
+				result[i].ProjectPath = ""
+				result[i].Repo = ""
+				result[i].Workspace = nil
+				result[i].WorkspaceResults = nil
+			}
+		}
+		w.Header().Set("Cache-Control", "private, no-store")
+		writeJSON(w, 200, result)
+		return nil
+	}); err != nil {
+		discoveryProblem(w)
+	}
 }
 
 // ─── POST /api/sessions ───────────────────────────────────────────────────────
 
 type spawnSessionRequest struct {
+	Permissions json.RawMessage `json:"permissions,omitempty"`
+
+	Selection *protocol.WorkspaceSelectionRequest `json:"selection,omitempty"`
+	workspace *protocol.WorkspaceManifest
+
 	DaemonID                   string `json:"daemon_id"`
 	Repo                       string `json:"repo"`
 	Title                      string `json:"title"`
@@ -777,10 +857,55 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := withFilingProject(withCoreProof(r.Context(), proofFromPrincipal(principal)), principal.Project)
 	var req spawnSessionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
+	if req.Selection != nil {
+		if req.Runtime == "cluster" {
+			a.startSelectedCluster(w, r.WithContext(ctx), principal, req)
+			return
+		}
+		dc := a.discoveryTarget(ctx, principal.Sub, *req.Selection)
+		if dc == nil {
+			discoveryProblem(w)
+			return
+		}
+		manifest, err := a.prepareWorkspaceSelection(ctx, principal.Sub, dc, req)
+		if err == nil && !dc.WorkspaceCapabilities.Supports(manifest.Runtime, false) {
+			a.hub.releaseWorkspaceSelection(dc, manifest)
+			err = errDiscoveryUnavailable
+		}
+		if err == nil {
+			err = db.WithDesktopFence(ctx, a.dbPool, dc.ID, func(fenced context.Context) error {
+				if a.discoveryTarget(fenced, principal.Sub, *req.Selection) != dc {
+					return errDiscoveryUnavailable
+				}
+				req.DaemonID = dc.ID
+				req.workspace = manifest
+				req.Repo = "workspace"
+				a.postSessions(w, r.WithContext(fenced), principal, req)
+				return nil
+			})
+		}
+
+		if err != nil {
+			discoveryProblem(w)
+		}
+		return
+	}
+	a.postSessions(w, r.WithContext(ctx), principal, req)
+}
+func (a *API) postSessions(w http.ResponseWriter, r *http.Request, principal identity.Principal, req spawnSessionRequest) {
+	ctx := r.Context()
+	dispatched := false
+	defer func() {
+		if req.workspace != nil && !dispatched {
+			a.hub.releaseWorkspaceSelection(a.hub.ownedHostDaemon(ctx, principal.Sub, req.DaemonID), req.workspace)
+		}
+	}()
 	if problem := newSessionKindProblem(req.Kind); problem != "" {
 		writeError(w, http.StatusUnprocessableEntity, problem)
 		return
@@ -895,7 +1020,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		// whose origin is on GitLab resolves to GitLab, never to a same-named
 		// GitHub guess.
 		if !req.NewRepo && req.GitURL == "" {
-			repo, provider, problem := a.resolveClusterRepo(req.Repo, req.Provider, req.DaemonID)
+			repo, provider, problem := a.resolveClusterRepo(ctx, req.Repo, req.Provider, req.DaemonID, principal.Sub)
 			if problem != "" {
 				writeError(w, 422, problem)
 				return
@@ -1073,7 +1198,11 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	daemon := a.hub.GetHostDaemon(req.DaemonID)
+	daemon := a.hub.ownedHostDaemon(ctx, principal.Sub, req.DaemonID)
+	if daemon != nil && daemon.DiscoveryVersion == 1 && req.workspace == nil && !req.NoRepo && !req.NewRepo && !req.Clone {
+		writeError(w, 409, "Select an existing repository using fresh source references.")
+		return
+	}
 	if daemon == nil {
 		writeError(w, http.StatusNotFound, "daemon not found or not connected")
 		return
@@ -1131,6 +1260,8 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 
 	sessionID := newUUID()
 	msg := protocol.SpawnSession{
+		Workspace:                  req.workspace,
+		WorkspaceCapabilities:      daemon.WorkspaceCapabilities,
 		Provider:                   req.Provider,
 		CloneFrom:                  cloneFrom,
 		GitToken:                   gitToken,
@@ -1140,7 +1271,7 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		Title:                      req.Title,
 		Cols:                       80,
 		Rows:                       24,
-		InitialPrompt:              req.InitialPrompt,
+		InitialPrompt:              workspacePrompt(req.InitialPrompt, req.workspace),
 		Model:                      req.Model,
 		Effort:                     req.Effort,
 		DangerouslySkipPermissions: req.DangerouslySkipPermissions,
@@ -1194,6 +1325,14 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		recordLaunchAuthSession(ctx, a.dbPool, sessionID, proofFromPrincipal(principal).SessionID)
 	}
 
+	if req.workspace != nil {
+		if msg.SessionToken == "" || db.InsertSessionWorkspace(ctx, a.dbPool, sessionID, *req.workspace) != nil {
+			a.abortGrantSession(ctx, sessionID)
+			writeError(w, 409, "The authorized workspace could not be saved.")
+			return
+		}
+	}
+
 	if grant != nil {
 		// The spawning account is recorded above; the session becomes private after it, and
 		// the tokens travel only in this spawn message.
@@ -1221,13 +1360,12 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	select {
-	case daemon.send <- data:
-	default:
+	if !a.hub.trySendToDaemon(daemon, data) {
 		abortSpawnSessionToken(ctx, a.dbPool, sessionID)
 		writeError(w, http.StatusServiceUnavailable, "daemon send buffer full")
 		return
 	}
+	dispatched = true
 	if req.Kind == "agent" {
 		announceDaemonAgentStart(ctx, a.hub, a.dbPool, sessionID, daemon.Name, req.Runtime == "docker", pluginStage(msg.Plugins, pluginNote))
 	}
@@ -1384,9 +1522,6 @@ const sessionTokenTTL = 24 * time.Hour
 // browser WS, board-driven). Returns "" — logged, spawn proceeds, the session
 // simply cannot message — when there is no DB or minting fails. The raw
 // token is never logged.
-func mintSpawnSessionToken(ctx context.Context, pool *pgxpool.Pool, sessionID string, dc *DaemonConn, repo, title, model string) string {
-	return mintSpawnSessionTokenAs(ctx, pool, sessionID, dc, repo, title, model, db.SessionOrigin{})
-}
 
 // spawnSessionToken is mintSpawnSessionTokenAs that first tells the hub the
 // session is private (notePrivateInsert), so even its first broadcast is scoped.
@@ -1487,6 +1622,25 @@ func (a *API) deleteSessionUnlocked(w http.ResponseWriter, r *http.Request) {
 	if !a.browserCanSee(r.Context(), principal.Sub, sessionID) {
 		writeError(w, http.StatusNotFound, "session not found or daemon not connected")
 		return
+	}
+
+	// Workspace DELETE uses the same trusted settlement/cleanup coordinator as
+	// runner Stop, including orphaned, terminal and recoverable observations.
+	// It must not report 204 after dropping an incomplete cleanup error.
+	if a.dbPool != nil {
+		workspace, err := db.GetSessionWorkspace(r.Context(), a.dbPool, sessionID)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "workspace state unavailable; retry shortly")
+			return
+		}
+		if workspace != nil && workspace.Manifest != nil && workspace.Manifest.Runtime == "cluster" {
+			if err := a.stopSessionWithDelivery(r.Context(), sessionID, end, true); err != nil {
+				writeError(w, http.StatusServiceUnavailable, "stop cleanup is incomplete; retry shortly")
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 	}
 
 	daemon := a.hub.FindDaemonForSession(sessionID)

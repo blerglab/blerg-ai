@@ -170,15 +170,7 @@ describe("Settings — agent tokens", () => {
     await screen.findByText("Agent tokens");
 
     expect(screen.getByText("Automation")).toBeInTheDocument();
-    expect(screen.getByText(/Tokens for tools and agents that act as you\./)).toBeInTheDocument();
-    // The two rules a user cannot infer from the table: per-owner session scope, and caps
-    // frozen at mint.
-    expect(
-      screen.getByText(/A run-sessions token can only see sessions it started; admins see all\./),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/changing your role later does not change an existing token/),
-    ).toBeInTheDocument();
+    expect(screen.getByText("Create tokens that let your tools and agents act as you.")).toBeInTheDocument();
 
     const select = screen.getByLabelText("Preset") as HTMLSelectElement;
     const options = Array.from(select.options).map((o) => o.textContent);
@@ -528,21 +520,18 @@ describe("Settings", () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it("explains these credentials are for cluster-runtime sessions, which run as you", async () => {
+  it("explains credentials in one plain sentence", async () => {
     render(<Settings />);
     await screen.findByText("Claude");
     expect(
-      screen.getByText(/Used by cluster-runtime sessions, which run as you\./),
+      screen.getByText("Connect the accounts your sessions use to run agents and access repositories."),
     ).toBeInTheDocument();
   });
 
-  it("says per kind what desktop sessions use: git tokens yes, engine credentials no", async () => {
+  it("keeps per-kind git credential instructions alongside the plain section description", async () => {
     render(<Settings />);
     await screen.findByText("Claude");
-    const help = screen.getByText(/Used by cluster-runtime sessions/);
-    expect(help.textContent).toMatch(/engine credentials aren't needed there/);
-    expect(help.textContent).toMatch(/GitHub and GitLab tokens are/);
-    expect(help.textContent).not.toMatch(/nothing here is needed/);
+    expect(screen.getByText("Connect the accounts your sessions use to run agents and access repositories.")).toBeInTheDocument();
     // The sandbox has no git credentials: never promise a push from it.
     expect(screen.queryByText(/clone and push as you/)).toBeNull();
     expect(screen.getAllByText(/can commit but not push/).length).toBe(2);

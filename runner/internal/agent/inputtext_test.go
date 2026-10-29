@@ -8,7 +8,7 @@ import (
 const testNonce = "0123456789abcdef"
 
 func TestInputSystemMarkerUsesSourceMetadata(t *testing.T) {
-	for _, source := range []string{"review", "proposal", "child_turn", "question_answer"} {
+	for _, source := range []string{"review", "proposal", "child_turn", "question_answer", "plan_drift", "usage_limit"} {
 		in := Input{Text: "Decision fixture", Source: source}
 		got := in.ModelText(testNonce)
 		if !strings.HasPrefix(got, "<system-reminder>\n[Blerg system message: "+source+" · "+testNonce+"]\n") ||
@@ -103,5 +103,16 @@ func assertNoMarker(t *testing.T, got string) {
 	}
 	if markerTagRE.MatchString(got) || markerHeaderRE.MatchString(got) {
 		t.Fatalf("model input still carries a marker: %q", got)
+	}
+}
+
+func TestInputCarriesPlanNudgeInOneMarkedInput(t *testing.T) {
+	in := Input{Text: "Continue", Source: "chat", PlanNudge: "Your last turn ran tools."}
+	got := in.ModelText(testNonce)
+	if !strings.HasPrefix(got, "Continue\n\n<system-reminder>") || !strings.Contains(got, "plan_drift · "+testNonce) {
+		t.Fatalf("composite input: %q", got)
+	}
+	if in.Payload().Text != "Continue" {
+		t.Fatal("changed person's transcript text")
 	}
 }

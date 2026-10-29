@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest'
-import { getFocus, setFocus } from './sidebarPrefs'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { act, renderHook } from '@testing-library/react'
+import { getFocus, setFocus, useChildrenExpanded, setChildrenExpanded } from './sidebarPrefs'
 
 const FOCUS_KEY = 'blerg-runner.sidebar.focus'
 
@@ -45,4 +46,36 @@ describe('sidebarPrefs', () => {
       expect(localStorage.getItem(FOCUS_KEY)).toBeNull()
     })
   })
+})
+
+it('updates mounted card and tile choices while leaving unrelated parents alone', () => {
+  localStorage.clear()
+  const card = renderHook(() => useChildrenExpanded('parent'))
+  const tile = renderHook(() => useChildrenExpanded('parent'))
+  let siblingRenders = 0
+  const sibling = renderHook(() => { siblingRenders++; return useChildrenExpanded('other') })
+  const before = siblingRenders
+  act(() => setChildrenExpanded('parent', false))
+  expect(card.result.current).toBe(false)
+  expect(tile.result.current).toBe(false)
+  expect(sibling.result.current).toBe(true)
+  expect(siblingRenders).toBe(before)
+  act(() => setChildrenExpanded('parent', true))
+  expect(card.result.current).toBe(true)
+  expect(tile.result.current).toBe(true)
+})
+
+it.each([false, true])('keeps collapse controls usable when storage writes fail (reads blocked=%s)', blockedReads => {
+  localStorage.clear()
+  const read = vi.spyOn(localStorage, 'getItem')
+  if (blockedReads) read.mockImplementation(() => { throw new Error('blocked') })
+  const write = vi.spyOn(localStorage, 'setItem').mockImplementation(() => { throw new Error('blocked') })
+  try {
+    const card = renderHook(() => useChildrenExpanded('storage-blocked-parent'))
+    expect(card.result.current).toBe(true)
+    act(() => setChildrenExpanded('storage-blocked-parent', false))
+    expect(card.result.current).toBe(false)
+    act(() => setChildrenExpanded('storage-blocked-parent', true))
+    expect(card.result.current).toBe(true)
+  } finally { read.mockRestore(); write.mockRestore() }
 })

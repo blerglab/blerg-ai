@@ -30,7 +30,10 @@ function show(view: TopicsView, over: { onJump?: (k: string, go: () => boolean) 
 
 const ready = (reply: TopicsReply = reelReply(NOW)): TopicsView => ({ status: 'ready', reply })
 const cards = () => screen.getAllByTestId('reel-card')
-const expand = (i: number) => fireEvent.click(within(cards()[i]).getByTestId('reel-head'))
+const expand = (i: number) => {
+  const head = within(cards()[i]).getByTestId('reel-head')
+  if (head.getAttribute('aria-expanded') !== 'true') fireEvent.click(head)
+}
 
 beforeEach(() => {
   useTranscriptStore.setState({ sessions: {} })
@@ -76,6 +79,7 @@ describe('History tab', () => {
     expect(document.getElementById(head.getAttribute('aria-controls')!)).toBe(within(line).getByRole('list'))
     const docs = within(line).getAllByTestId('reel-document')
     expect(docs.map(d => d.querySelector('.rail-item-title')!.textContent)).toEqual(['notes.md', 'drawer.png'])
+    expect(docs[0].querySelector('.reel-icon')).toHaveAttribute('data-file-icon', 'markdown')
     const chips = within(docs[0]).getAllByTestId('reel-chip')
     expect(chips.map(c => c.textContent)).toEqual(['v1', 'v2'])
     expect(chips[1]).toHaveAttribute('title', 'v2, published outside a topic')
@@ -300,7 +304,7 @@ describe('History tab', () => {
 
 describe('History tab: cards an approved proposal created', () => {
   const card = { proposal_id: 'p1', id: 'c1', board_id: 'b1', board_name: 'Product', number: 42, title: 'Export button is stale', column: 'Backlog', auto: true }
-  it('shows a chip in its topic that opens the card on its Board page, in Blerg', () => {
+  it('shows a chip in its topic that opens the in-app card modal', () => {
     const reply = reelReply(NOW)
     reply.topics[0].items.push({ type: 'card', seq: 399, event_id: 'ev-card', ts: NOW.toISOString(), card })
     reply.topics[0].counts.cards = 1
@@ -309,8 +313,9 @@ describe('History tab: cards an approved proposal created', () => {
     expand(0)
     const chip = within(cards()[0]).getByTestId('reel-card-chip')
     expect(chip).toHaveTextContent('Product #42 Export button is stale')
-    expect(chip.getAttribute('href')).toMatch(/\/boards\/b1\/cards\/42$/)
-    expect(chip.getAttribute('href')).not.toMatch(/^https?:\/\/(?!localhost|board\.)/)
+    expect(chip.tagName).toBe('BUTTON')
+    expect(chip).toHaveAccessibleName(/Open card.*#42/)
+    expect(chip.getAttribute('href')).toBeNull()
     expect(chip.getAttribute('title')).toContain('approved by a session permission')
   })
   it('lists a card filed outside every topic under Unmarked work', () => {
@@ -342,4 +347,51 @@ describe('History tab: renames', () => {
     fireEvent.click(within(line).getByTestId('reel-unmarked-head'))
     expect(within(line).getByTestId('reel-rename')).toHaveTextContent('Renamed by the agent: Untitled → Review the billing PR')
   })
+})
+
+describe('bounded topic history (#215)', () => {
+  it('opens the current topic, collapses completed topics and shows their stroke counts', () => {
+    const reply = reelReply(NOW)
+    reply.strokes = reply.topics.flatMap(t => Array.from({ length: 1000 }, (_, i) => ({ id: `${t.id}-${i}`, kind: 'finding' as const, source: 'mark' as const, text: `Finding ${i}`, topic_id: t.id, seq: 1000-i, at: NOW.toISOString(), jump: null })))
+    show(ready(reply))
+    const [current, done] = cards()
+    expect(within(current).getByTestId('reel-head')).toHaveAttribute('aria-expanded', 'true')
+    expect(within(done).getByTestId('reel-head')).toHaveAttribute('aria-expanded', 'false')
+    expect(within(done).queryAllByTestId('stroke')).toHaveLength(0)
+    expect(within(done).getByText('1000 strokes')).toBeTruthy()
+    expect(within(current).getAllByTestId('stroke').length).toBeLessThanOrEqual(100)
+    for (let i = 0; i < 9; i++) fireEvent.click(within(current).getByRole('button', { name: /Show earlier strokes/ }))
+    expect(within(current).getAllByTestId('stroke').length).toBeLessThanOrEqual(100)
+    expect(within(current).getByText('Finding 999')).toBeTruthy()
+    fireEvent.click(within(current).getByRole('button', { name: /Show newer strokes/ }))
+    expect(within(current).getByText('Finding 800')).toBeTruthy()
+  })
+})
+
+
+it('keeps a thousand completed topics in bounded, reversible windows', () => {
+  const reply = reelReply(NOW)
+  reply.topics = Array.from({ length: 1001 }, (_, i) => ({ ...reply.topics[1], id: `topic-${i}`, title: `Topic ${i}`, items: [] }))
+  reply.strokes = []
+  show(ready(reply))
+  expect(cards()).toHaveLength(100)
+  for (let i = 0; i < 10; i++) fireEvent.click(screen.getByRole('button', { name: /Show earlier entries/ }))
+  expect(cards()).toHaveLength(1)
+  expect(cards()[0]).toHaveTextContent('Topic 1000')
+  fireEvent.click(screen.getByRole('button', { name: /Show newer entries/ }))
+  expect(cards()).toHaveLength(100)
+  expect(cards()[0]).toHaveTextContent('Topic 900')
+})
+
+it('bounds the strokes inside an expanded fold as well as inside a topic', () => {
+  const reply = reelReply(NOW)
+  const items = Array.from({ length: 2000 }, (_, i) => ({ id: `fold-${i}`, kind: 'attention' as const, source: 'ask' as const, text: `Approval ${i}`, state: 'resolved' as const, seq: i, at: NOW.toISOString(), jump: null }))
+  reply.strokes = [{ ...items[0], id: 'fold', text: '2000 approvals', items, topic_id: 'tp_open' }]
+  show(ready(reply))
+  fireEvent.click(screen.getByTestId('stroke-text'))
+  const fold = screen.getByTestId('stroke-fold-items')
+  expect(within(fold).getAllByTestId('stroke-item')).toHaveLength(100)
+  fireEvent.click(within(fold).getByRole('button', { name: /Show earlier strokes/ }))
+  expect(within(fold).getAllByTestId('stroke-item')).toHaveLength(100)
+  expect(within(fold).getByText('Approval 100')).toBeTruthy()
 })

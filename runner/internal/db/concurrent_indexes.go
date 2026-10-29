@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -22,14 +23,15 @@ import (
 // "CREATE INDEX CONCURRENTLY IF NOT EXISTS <name>".
 type concurrentIndex struct {
 	name, def string
+	columns   []string
 }
 
 // concurrentIndexes are built in this order.
 var concurrentIndexes = []concurrentIndex{
 	// The History tab's rename rows (ListSessionRenamedEvents), as 067's index serves its card chips.
-	{"agent_events_session_renamed_idx", "ON agent_events (session_id, seq) WHERE kind = 'session_renamed'"},
+	{"agent_events_session_renamed_idx", "ON agent_events (session_id, seq) WHERE kind = 'session_renamed'", []string{"session_id", "seq"}},
 	// The History feed's strokes (ListStrokeEvents): marks, asks, approvals, proposals and reviews.
-	{"agent_events_strokes_idx", "ON agent_events (session_id, seq) WHERE kind IN " + StrokeKindsSQL},
+	{"agent_events_strokes_idx", "ON agent_events (session_id, seq) WHERE kind IN " + StrokeKindsSQL, []string{"session_id", "seq"}},
 }
 
 var literalRe = regexp.MustCompile(`'([^']*)'`)
@@ -102,14 +104,19 @@ func EnsureConcurrentIndexes(ctx context.Context, pool *pgxpool.Pool) error {
 			return fmt.Errorf("check index %s: %w", ix.name, err)
 		}
 		if valid != nil && *valid {
-			// A valid index built from an older definition (its kind list changed) no longer serves the
+			// A valid index with an older predicate or column list no longer serves the
 			// read whose predicate names the new list: drop it and build the current one.
 			var def string
-			if err := conn.QueryRow(ctx, `SELECT pg_get_indexdef(c.oid) FROM pg_class c
-				WHERE c.relname = $1 AND c.relnamespace = current_schema()::regnamespace`, ix.name).Scan(&def); err != nil {
+			var columns []string
+			var target bool
+			if err := conn.QueryRow(ctx, `SELECT pg_get_indexdef(c.oid),
+				ARRAY(SELECT pg_get_indexdef(c.oid, k, false) FROM generate_series(1, i.indnatts) AS k),
+				i.indrelid = 'agent_events'::regclass AND am.amname = 'btree'
+				FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid JOIN pg_am am ON am.oid = c.relam
+				WHERE c.relname = $1 AND c.relnamespace = current_schema()::regnamespace`, ix.name).Scan(&def, &columns, &target); err != nil {
 				return fmt.Errorf("read index %s: %w", ix.name, err)
 			}
-			if sameLiterals(def, ix.def) {
+			if target && slices.Equal(columns, ix.columns) && sameLiterals(def, ix.def) {
 				continue
 			}
 			log.Printf("db: index %s has an older definition; building it again", ix.name)

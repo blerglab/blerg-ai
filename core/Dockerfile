@@ -25,10 +25,11 @@ RUN CGO_ENABLED=0 go build \
 # frontend is same-origin with core, so the derivation already works unset —
 # they exist here for parity with board/runner and for unusual topologies.
 FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS web-builder
-WORKDIR /web
+WORKDIR /src/core/web
 COPY core/web/package.json core/web/package-lock.json ./
 RUN npm ci
 COPY core/web/ ./
+COPY packages/settings/ /src/packages/settings/
 ARG VITE_CORE_URL=""
 ARG VITE_CORE_PORT=""
 ENV VITE_CORE_URL=$VITE_CORE_URL
@@ -39,7 +40,7 @@ RUN npm run build
 FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
 WORKDIR /app
 COPY --from=build /blerg-core /blerg-core
-COPY --from=web-builder /web/dist ./web/dist
+COPY --from=web-builder /src/core/web/dist ./web/dist
 # webDistDir() (core/cmd/blerg-core/main.go) reads this; the default "web/dist"
 # is relative to the process's working directory, which is /app here.
 ENV BLERG_CORE_WEB_DIST=/app/web/dist

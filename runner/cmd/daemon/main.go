@@ -2,25 +2,77 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 
 	"github.com/blerglab/blerg-ai/runner/internal/daemon"
+	"github.com/blerglab/blerg-ai/runner/internal/hostgit"
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/shellruntime"
+	"github.com/blerglab/blerg-ai/runner/internal/updatehandoff"
 )
 
 var version = "dev"
+var commit = "dev"
 
 func main() {
+	if len(os.Args) == 2 && (os.Args[1] == "begin-update" || os.Args[1] == "prepare-update" || os.Args[1] == "cancel-update") {
+		binary, err := os.Executable()
+		if err == nil {
+			if os.Args[1] == "begin-update" {
+				err = updatehandoff.Begin(daemon.DaemonStateDir())
+			} else {
+				err = updatehandoff.Notify(daemon.DaemonStateDir(), binary, commit, os.Args[1] == "cancel-update")
+			}
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "update recovery:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) == 3 && os.Args[1] == "workspace-runtime" && os.Args[2] == "--probe" {
+		if daemon.ProbeWorkspaceRuntime(os.Stdout) != nil {
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "cluster-writer" {
+		os.Exit(daemon.ServeHostWriter(os.Args[2:]))
+	}
+	if daemon.WorkspaceWorkerMain(os.Args[1:]) {
+		return
+	}
+	if len(os.Args) == 3 && os.Args[1] == "shell-supervisor" && os.Args[2] == "--probe" {
+		if shellruntime.Probe(os.Stdout) != nil {
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "shell-supervisor" {
+		if err := shellruntime.ServeHelper(os.Stdin, os.Stdout); err != nil {
+			if errors.Is(err, shellruntime.ErrIdentityChanged) {
+				os.Exit(3)
+			}
+			os.Exit(1)
+		}
+		return
+	}
 	// A subcommand (the installer's question before a reinstall) runs and exits before anything
 	// a running daemon does: no provisioning, no records lock, no connection.
 	if len(os.Args) > 1 {
 		os.Exit(runCommand(os.Args[1:], os.Stdout, os.Stderr))
+	}
+	if err := hostgit.Initialize(); err != nil {
+		log.Printf("hardened Git unavailable: %v", err)
 	}
 
 	// Systemd user services start with a minimal PATH that omits ~/.local/bin,
@@ -28,6 +80,9 @@ func main() {
 	// fails and every spawned/recovered session execs a non-existent binary,
 	// dying instantly. Prepend it so child tmux/claude processes inherit it.
 	ensureLocalBinOnPath()
+	// A PATH the owner re-detected from the app (engine discovery's "Re-detect PATH") goes
+	// ahead of the service's own, so an engine found by it stays found after a restart.
+	daemon.ApplySavedLoginPath(daemon.DaemonStateDir())
 
 	// Systemd user services also start with no TERM. The session PTY runs
 	// `tmux attach`, and a tmux client with an empty TERM aborts with
@@ -58,13 +113,31 @@ func main() {
 	settingsPath := daemon.DaemonSettingsPath(daemon.DaemonStateDir())
 	reposRoot, reposRootSource := daemon.LoadReposRootSetting(settingsPath, envReposRoot)
 
+	desktopToken := os.Getenv("BLERG_RUNNER_DAEMON_TOKEN")
+	enrollmentLegacyToken := desktopToken
+	desktopID := os.Getenv("BLERG_RUNNER_DESKTOP_ID")
+	credential, err := daemon.LoadDesktopCredential(daemon.DaemonStateDir())
+	if err != nil {
+		log.Fatalf("desktop credential: %v", err)
+	}
+	if credential != nil {
+		desktopToken, desktopID = credential.Token, credential.DesktopID
+	}
+	if desktopToken == "" {
+		log.Fatal("enroll this desktop with the installer first")
+	}
+	var workspaces *daemon.LocalWorkspaceService
 	cfg := daemon.Config{
-		ServerURL:   requireEnv("BLERG_RUNNER_SERVER_URL"),
-		DaemonToken: requireEnv("BLERG_RUNNER_DAEMON_TOKEN"),
-		DaemonName:  envOr("BLERG_RUNNER_DAEMON_NAME", hostname()),
-		DaemonMode:  envOr("BLERG_RUNNER_DAEMON_MODE", "local"),
-		ReposRoot:   reposRoot.Get(),
-		Version:     version,
+		WorkspaceCapabilitiesProvider: func(ctx context.Context) protocol.WorkspaceCapabilities { return workspaces.Capabilities(ctx) },
+		ServerURL:                     requireEnv("BLERG_RUNNER_SERVER_URL"),
+		DaemonToken:                   desktopToken,
+		DesktopID:                     desktopID,
+		CredentialStateDir:            daemon.DaemonStateDir(),
+		EnrollmentLegacyToken:         enrollmentLegacyToken,
+		DaemonName:                    envOr("BLERG_RUNNER_DAEMON_NAME", hostname()),
+		DaemonMode:                    envOr("BLERG_RUNNER_DAEMON_MODE", "local"),
+		ReposRoot:                     reposRoot.Get(),
+		Version:                       version,
 		// Only on a daemon nobody else uses: see DAEMON.md "Cloning a
 		// repository you name".
 		AllowHostCredentialClone: os.Getenv("BLERG_RUNNER_ALLOW_HOST_CREDENTIAL_CLONE") == "true",
@@ -88,6 +161,19 @@ func main() {
 
 	client := daemon.NewWSClient(cfg)
 	restartCause := daemon.ReadRestartCause(stateDir)
+	binary, _ := os.Executable()
+	if runtime.GOOS == "linux" {
+		binary = "/proc/self/exe"
+	}
+	restartCause = daemon.WithUpdateReceipt(restartCause, updatehandoff.Take(stateDir, binary, commit, restartCause.Planned && (restartCause.Reason == "update" || restartCause.Reason == "reinstall")))
+	observer := &updatehandoff.Observer{}
+	daemon.SetUpdateObserver(observer)
+	closeUpdates, err := observer.Serve(stateDir)
+	if err != nil {
+		log.Printf("update recovery unavailable: %v", err)
+	} else {
+		defer closeUpdates()
+	}
 
 	serverHTTP, fromPreviewURL := serverHTTPSetting(os.Getenv("BLERG_RUNNER_SERVER_HTTP"), os.Getenv("BLERG_RUNNER_PREVIEW_URL"))
 	if fromPreviewURL {
@@ -104,8 +190,12 @@ func main() {
 		log.Printf("claude usage meter: off (BLERG_RUNNER_CLAUDE_USAGE); Claude shows only a cap when it refuses a call")
 	}
 	limits := daemon.NewUsageLimitsTracker(client.Send, daemon.UsageLimitsOptions{ClaudeUsage: claudeUsage, Version: version})
+	client.OnMessage("usage_limits_request", func([]byte) { limits.Kick() })
 
-	mgr := daemon.NewManager(client, daemon.ManagerConfig{
+	var mgr *daemon.Manager
+	workspaces = daemon.NewIntegratedWorkspaceService(client, func() *daemon.Manager { return mgr })
+	mgr = daemon.NewManager(client, daemon.ManagerConfig{
+		Workspaces:       workspaces,
 		ReposRoot:        cfg.ReposRoot,
 		ReposRootSetting: reposRoot,
 		DaemonName:       cfg.DaemonName,
@@ -147,10 +237,14 @@ func main() {
 	prober := daemon.NewModelProber()
 	go prober.Run(ctx)
 	client.SetEngineModels(prober)
+	// "Check again" / "Re-detect PATH" from the launch sheet and Settings (enginestatus.go).
+	client.OnMessage("engine_check", daemon.EngineCheckHandler(client, daemon.DaemonStateDir(), prober.Kick))
 	go limits.Run(ctx)
 
 	// Reattach to any persistent tmux sessions left by a prior run on every
 	// (re)connect, so Claude sessions survive a daemon restart.
+	attachmentCleaner := daemon.NewAttachmentCleaner(client, mgr.ActiveSessionIDs, stateDir)
+	go attachmentCleaner.Run(ctx)
 	client.SetOnConnect(func() {
 		prober.Kick()
 		// The server keeps limits per connection: say them again, and read them now (the first
@@ -161,6 +255,7 @@ func main() {
 		// moves a session the server marked lost straight to its real state.
 		client.RequestHeartbeat()
 		mgr.ReattachSessions()
+		attachmentCleaner.Sweep()
 	})
 
 	// Report per-session detector state in each heartbeat so the server can

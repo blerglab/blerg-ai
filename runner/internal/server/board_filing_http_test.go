@@ -199,3 +199,46 @@ func TestBoardFilingHTTPCreateRejectsCoreRedirectOversizeAndMalformedReceipt(t *
 		})
 	}
 }
+
+func TestBoardFilingHTTPSearchKeepsCardReferenceAndDropsPrivateFields(t *testing.T) {
+	board := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/boards/"+filingHTTPBoard+"/cards/search" {
+			t.Error("search changed the selected board")
+		}
+		if r.URL.Query().Get("cursor") != "fixture-cursor" || r.URL.Query().Get("page") != "true" {
+			t.Error("search did not forward the paging request")
+		}
+		_, _ = w.Write([]byte(`{"cards":[{"id":"` + filingHTTPCard + `","board_id":"untrusted-board","number":7,"title":"Work","body":"private-fixture-body","type":"task"}],"next_cursor":"next-fixture"}`))
+	}))
+	defer board.Close()
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/internal/tokens/exchange" {
+			_ = json.NewEncoder(w).Encode(map[string]string{"token": filingReadFixtureToken(), "expires_at": time.Now().Add(time.Minute).UTC().Format(time.RFC3339)})
+		} else {
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer core.Close()
+	up := &httpBoardFiling{base: board.URL, core: &HTTPMCPCoreClient{BaseURL: core.URL, InternalKey: "fixture-internal", HTTP: core.Client()}}
+	raw, err := up.Search(t.Context(), filingHTTPProof, filingHTTPBoard, "Work", "fixture-cursor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reply struct {
+		NextCursor string `json:"next_cursor"`
+		Truncated  bool   `json:"truncated"`
+		Cards      []struct {
+			BoardID string `json:"board_id"`
+			Number  int    `json:"number"`
+		} `json:"cards"`
+	}
+	if err := json.Unmarshal(raw, &reply); err != nil {
+		t.Fatal(err)
+	}
+	if !reply.Truncated || reply.NextCursor != "next-fixture" || len(reply.Cards) != 1 || reply.Cards[0].BoardID != filingHTTPBoard || reply.Cards[0].Number != 7 {
+		t.Fatal("search lost paging metadata or the selected board/card reference")
+	}
+	if strings.Contains(string(raw), "private-fixture") || strings.Contains(string(raw), "untrusted-board") {
+		t.Fatal("search leaked private fields or trusted an upstream board id")
+	}
+}

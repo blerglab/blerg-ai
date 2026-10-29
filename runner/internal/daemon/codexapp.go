@@ -12,6 +12,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
@@ -266,6 +267,7 @@ func (a *codexApp) interrupt() {
 }
 
 func (d *codexDriver) runApp(ctx context.Context) {
+	var connectionFailure string
 	appCtx, cancelApp := context.WithCancel(ctx)
 	defer cancelApp()
 	bin := resolveEngineBinary("codex", d.prefix.enabled())
@@ -276,6 +278,12 @@ func (d *codexDriver) runApp(ctx context.Context) {
 	}
 	cmd := d.prefix.command(ctx, d.workDir, bin, args...)
 	cmd.Env = d.launchEnv()
+	if !d.prefix.enabled() && d.startCommand == nil {
+		// Own the app-server's native MCP/helper descendants across planned
+		// restarts too. Pod launchers install their stronger containment instead.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	}
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		d.emit("error", agent.ErrorPayload{Message: "Codex input pipe failed", Retryable: true})
@@ -288,9 +296,14 @@ func (d *codexDriver) runApp(ctx context.Context) {
 	}
 	// stderr can contain credentials from third-party MCP processes. Only fixed
 	// diagnostics for recognized native login failures may reach the session.
-	cmd.Stderr = &codexAuthDiagnostic{emit: d.emit}
+	diagnostic := &codexAuthDiagnostic{recovery: d.codexAuthRecovery(), emit: func(_ string, payload any) {
+		if p, ok := payload.(agent.ErrorPayload); ok {
+			d.emitCodexError(p.Message, false)
+		}
+	}}
+	cmd.Stderr = diagnostic
 	d.recordProjectMCP()
-	if err = cmd.Start(); err != nil {
+	if err = startEngineCommand(cmd, d.startCommand); err != nil {
 		d.emit("error", agent.ErrorPayload{Message: "Codex app-server could not start: " + err.Error(), Retryable: true})
 		return
 	}
@@ -304,7 +317,7 @@ func (d *codexDriver) runApp(ctx context.Context) {
 	d.mu.Unlock()
 	defer func() {
 		_ = in.Close()
-		_ = cmd.Process.Kill()
+		_ = cancelEngineCommand(cmd, d.startCommand != nil || !d.prefix.enabled())
 		_ = cmd.Wait()
 		d.prefix.clearTurnPID()
 		d.mu.Lock()
@@ -318,7 +331,18 @@ func (d *codexDriver) runApp(ctx context.Context) {
 			d.stopChildren()
 		}
 		if wasActive && ctx.Err() == nil {
-			d.emit("turn_done", agent.TurnDonePayload{StopReason: "interrupted", Model: turnModel})
+			if cause := diagnostic.failure(); cause != "" {
+				connectionFailure = cause
+			}
+			stop := "interrupted"
+			a.mu.Lock()
+			interrupted := a.interruptRequested
+			a.mu.Unlock()
+			if connectionFailure != "" && !interrupted {
+				stop = "error"
+				d.emitCodexError(connectionFailure, false)
+			}
+			d.emit("turn_done", agent.TurnDonePayload{StopReason: stop, Model: turnModel})
 			d.emit("status_changed", agent.StatusPayload{Status: "idle", Reason: "engine_restart"})
 		}
 	}()
@@ -419,6 +443,9 @@ func (d *codexDriver) runApp(ctx context.Context) {
 			reportedEffort = a.defaultEffort(reportedModel)
 		}
 	}
+	if !d.confirmSessionPlugins() {
+		return
+	}
 	d.settingsMu.Lock()
 	d.mu.Lock()
 	d.threadID = response.Thread.ID
@@ -460,9 +487,14 @@ func (d *codexDriver) runApp(ctx context.Context) {
 	var active, turnModel string
 	var usage agent.Usage
 	var rootUsage *codexRootUsage
+	// The context meter's reading for the active turn (agent.ContextUsage).
+	var turnContext agent.ContextUsage
 	var retryDeadline <-chan time.Time
 	var heldInput chan queuedMsg
 	for {
+		if active == "" && heldInput == nil && a.restartForPlugins() {
+			return
+		}
 		input := (<-chan queuedMsg)(d.queue)
 		retrying := false
 		d.mu.Lock()
@@ -483,6 +515,10 @@ func (d *codexDriver) runApp(ctx context.Context) {
 			retrying = false
 		}
 		select {
+		case <-d.pluginWake:
+			continue
+		case <-d.pluginUpdateWake():
+			continue
 		case <-retryDeadline:
 			// The rejection proved this input was not accepted. Preserve it across
 			// reconnection if the matching completion notification never arrives.
@@ -501,6 +537,12 @@ func (d *codexDriver) runApp(ctx context.Context) {
 			}
 			return
 		case msg := <-input:
+			if active == "" && heldInput == nil && a.restartForPlugins() {
+				d.mu.Lock()
+				d.retryInput = &msg
+				d.mu.Unlock()
+				return
+			}
 			passedGate := heldInput != nil
 			heldInput = nil
 			if passedGate {
@@ -644,6 +686,7 @@ func (d *codexDriver) runApp(ctx context.Context) {
 					} `json:"turn"`
 				}
 				_ = json.Unmarshal(result, &r)
+				connectionFailure = ""
 				active = r.Turn.ID
 				if active == "" {
 					d.emit("error", agent.ErrorPayload{Message: "Codex returned no turn identity", Retryable: true, ClientID: msg.ClientID})
@@ -655,6 +698,7 @@ func (d *codexDriver) runApp(ctx context.Context) {
 				nativeSettings = codexSettingsFence{generation: settingsGeneration}
 				usage = agent.Usage{}
 				rootUsage = newCodexRootUsage(model)
+				turnContext = agent.ContextUsage{}
 				d.mu.Lock()
 				d.usageTurnID = ccUUID()
 				d.activeTurn = true
@@ -754,20 +798,18 @@ func (d *codexDriver) runApp(ctx context.Context) {
 				Delta   string          `json:"delta"`
 				Item    json.RawMessage `json:"item"`
 				Turn    struct {
-					ID     string `json:"id"`
-					Status string `json:"status"`
-					Error  *struct {
-						Message string `json:"message"`
-					} `json:"error"`
+					ID     string          `json:"id"`
+					Status string          `json:"status"`
+					Error  *codexTurnError `json:"error"`
 				} `json:"turn"`
 				TokenUsage struct {
 					Last  codexTokenUsage  `json:"last"`
 					Total *codexTokenUsage `json:"total"`
+					// ModelContextWindow is the model's window, when Codex knows it.
+					ModelContextWindow *int64 `json:"modelContextWindow"`
 				} `json:"tokenUsage"`
-				Error struct {
-					Message string `json:"message"`
-				} `json:"error"`
-				WillRetry bool `json:"willRetry"`
+				Error     codexTurnError `json:"error"`
+				WillRetry bool           `json:"willRetry"`
 			}
 			if json.Unmarshal(ev.Params, &n) != nil {
 				continue
@@ -807,6 +849,9 @@ func (d *codexDriver) runApp(ctx context.Context) {
 				if n.ThreadSettings.Model != "" {
 					// Native reports describe the active turn even when a person has
 					// already selected different settings for the next one.
+					if n.ThreadSettings.Model != turnModel {
+						turnContext.Window = 0 // the earlier model's window; the next report gives this one's
+					}
 					turnModel = n.ThreadSettings.Model
 					if rootUsage != nil {
 						rootUsage.changeModel(turnModel)
@@ -832,6 +877,9 @@ func (d *codexDriver) runApp(ctx context.Context) {
 				if parent != "" && n.ToModel != "" {
 					d.childStatus(parent, n.ToModel, "", "")
 				} else if n.ToModel != "" {
+					if n.ToModel != turnModel {
+						turnContext.Window = 0 // the earlier model's window; the next report gives this one's
+					}
 					turnModel = n.ToModel
 					if rootUsage != nil {
 						rootUsage.changeModel(turnModel)
@@ -847,6 +895,10 @@ func (d *codexDriver) runApp(ctx context.Context) {
 				if json.Unmarshal(n.Item, &activity) == nil && activity.Type == "subAgentActivity" && a.childNeedsDeferral(activity.AgentThreadID) {
 					a.deferChildEvent(appCtx, activity.AgentThreadID, ev)
 					continue
+				}
+				if parent == "" && active != "" && ev.Method == "item/completed" && activity.Type == "contextCompaction" {
+					// The reading before it no longer describes the conversation; the next call's does.
+					turnContext.Tokens, turnContext.Compacted = 0, true
 				}
 				d.appItem(n.Item, ev.Method == "item/completed", parent)
 			case "item/agentMessage/delta":
@@ -884,16 +936,17 @@ func (d *codexDriver) runApp(ctx context.Context) {
 				}
 				rootUsage.observe(latest, total)
 				usage, _ = rootUsage.snapshot()
+				turnContext = n.TokenUsage.Last.context(turnContext, n.TokenUsage.ModelContextWindow)
 
 			case "error":
 				if parent == "" {
 					d.appUsageRefusal(n.Error.Message)
 				}
-				code := agent.ErrorCodeAPI
-				if n.WillRetry {
-					code = agent.ErrorCodeAPIRetry
+				message := d.safeCodexError(n.Error)
+				if parent == "" && active != "" && (n.TurnID == "" || n.TurnID == active) {
+					connectionFailure = message
 				}
-				d.emit("error", agent.ErrorPayload{Message: n.Error.Message, Retryable: true, Code: code})
+				d.emitCodexError(message, n.WillRetry)
 			case "turn/completed":
 				if parent != "" {
 					a.mu.Lock()
@@ -930,18 +983,32 @@ func (d *codexDriver) runApp(ctx context.Context) {
 				if n.Turn.Status == "interrupted" {
 					stop = "interrupted"
 				}
-				if n.Turn.Status == "failed" {
+				a.mu.Lock()
+				interrupted := a.interruptRequested
+				a.mu.Unlock()
+				if n.Turn.Status == "failed" || (n.Turn.Status == "interrupted" && !interrupted && connectionFailure != "") {
 					stop = "error"
 					if n.Turn.Error != nil {
 						d.appUsageRefusal(n.Turn.Error.Message)
-						d.emit("error", agent.ErrorPayload{Message: n.Turn.Error.Message, Retryable: true, Code: agent.ErrorCodeAPI})
+						message := d.safeCodexError(*n.Turn.Error)
+						if message != "" {
+							connectionFailure = message
+						}
 					}
+					if cause := diagnostic.failure(); cause != "" {
+						connectionFailure = cause
+					}
+					if connectionFailure == "" {
+						connectionFailure = "Codex turn failed without an engine diagnostic"
+					}
+					d.emitCodexError(connectionFailure, false)
 				}
+				connectionFailure = ""
 				var partition map[string]agent.Usage
 				if rootUsage != nil {
 					usage, partition = rootUsage.snapshot()
 				}
-				d.emit("turn_done", agent.TurnDonePayload{StopReason: stop, Model: turnModel, Usage: usage, UsageByModel: partition})
+				d.emit("turn_done", agent.TurnDonePayload{StopReason: stop, Model: turnModel, Usage: usage, UsageByModel: partition, Context: turnContext.Reported()})
 				active = ""
 				a.mu.Lock()
 				a.turn = ""
@@ -1097,6 +1164,11 @@ func (d *codexDriver) appUsageRefusal(message string) {
 		return
 	}
 	if p, ok := codexUsageRefusal(codexEvent{Type: "error", Message: message}, turn); ok && turn != "" {
+		if d.prefix.enabled() && explicitResetTimestamp.FindString(message) == "" {
+			// A sandbox's bare local clock need not use the desktop daemon's zone.
+			// Let the owning account meter supply the unambiguous reset instead.
+			p.ResetAt = nil
+		}
 		d.mu.Lock()
 		d.lastLimitTurn = turn
 		d.mu.Unlock()
@@ -1111,6 +1183,27 @@ type codexTokenUsage struct {
 	Cached int `json:"cachedInputTokens"`
 	Write  int `json:"cacheWriteInputTokens"`
 	Output int `json:"outputTokens"`
+	Total  int `json:"totalTokens"`
+}
+
+// context folds a token report of the main thread into the turn's context reading: the last
+// call's token count as Codex reports it (its total, else input and output) and the window this
+// report gives for its model. A report without a count keeps the count it had; the window is
+// always this report's, so one it leaves out or reports as unknown is unknown (never an earlier
+// model's).
+func (u codexTokenUsage) context(c agent.ContextUsage, window *int64) agent.ContextUsage {
+	tokens := u.Total
+	if tokens <= 0 {
+		tokens = u.Input + u.Output
+	}
+	if tokens > 0 && tokens <= rootUsageCountCap {
+		c.Tokens = tokens
+	}
+	c.Window = 0
+	if window != nil && *window > 0 && *window <= rootUsageCountCap {
+		c.Window = int(*window)
+	}
+	return c
 }
 
 func (u codexTokenUsage) usage() agent.Usage {
@@ -1131,7 +1224,7 @@ func (a *codexApp) stop() {
 	same := a.d.app == a
 	a.d.mu.Unlock()
 	if same && cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
+		_ = cancelEngineCommand(cmd, a.d.startCommand != nil)
 	}
 }
 
@@ -1201,12 +1294,17 @@ func (a *codexApp) dynamicTool(ctx context.Context, ev codexRPC) {
 // codexAuthDiagnostic discards raw stderr. Its bounded window recognizes native
 // authentication failures even when the process splits a diagnostic across writes.
 type codexAuthDiagnostic struct {
+	mu       sync.Mutex
 	window   string
 	reported bool
+	message  string
+	recovery string
 	emit     func(string, any)
 }
 
 func (w *codexAuthDiagnostic) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	size := len(p)
 	if w.reported {
 		return size, nil
@@ -1220,7 +1318,12 @@ func (w *codexAuthDiagnostic) Write(p []byte) (int, error) {
 		if strings.Contains(w.window, signature) {
 			w.reported = true
 			w.window = ""
-			w.emit("error", agent.ErrorPayload{Message: "Codex login expired and could not be refreshed. Reconnect your Codex credential in Settings, then retry.", Retryable: true, Code: agent.ErrorCodeAPI})
+			recovery := w.recovery
+			if recovery == "" {
+				recovery = "Reconnect your Codex credential in Settings, then retry."
+			}
+			w.message = "Codex login expired and could not be refreshed. " + recovery
+			w.emit("error", agent.ErrorPayload{Message: w.message, Retryable: true, Code: agent.ErrorCodeAPI})
 			break
 		}
 		if len(w.window) > len(signature) {
@@ -1228,6 +1331,12 @@ func (w *codexAuthDiagnostic) Write(p []byte) (int, error) {
 		}
 	}
 	return size, nil
+}
+
+func (w *codexAuthDiagnostic) failure() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.message
 }
 
 func (a *codexApp) completionQueued(thread, turn string) bool {
@@ -1275,4 +1384,17 @@ func (d *codexDriver) observeNativeSettings(fence *codexSettingsFence, model, ef
 	d.mu.Unlock()
 	d.emit("model_changed", payload)
 	d.emitRuntimeCapsLocked()
+}
+
+// A Settings connection cannot rebind an already-running snapshot pod. Only a
+// newly authorized launch installs the managed source and runtime binding.
+func (d *codexDriver) codexAuthRecovery() string {
+	if d.CredentialSource == nil {
+		for _, item := range d.env {
+			if strings.HasPrefix(item, "CODEX_AUTH_JSON=") {
+				return "Connect Codex in Settings → Managed connections, then start a new person-owned cluster session. Retrying this snapshot session cannot use that connection. For operator launches, configure an API key and start a replacement session, or use a person-owned launch."
+			}
+		}
+	}
+	return "Reconnect your Codex credential in Settings, then retry."
 }

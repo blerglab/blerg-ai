@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,7 +31,18 @@ import (
 
 // AgentHostConfig configures agent-kind session hosting inside the daemon.
 type AgentHostConfig struct {
-	CredentialSource EngineCredentialSource
+	// AttachmentsStateDir is the pod's private home state, outside /workspace.
+	// Empty uses the host daemon state directory.
+	AttachmentsStateDir string
+	// BeforeDriverStop obtains the pod containment receipt before a CLI driver
+	// can kill its transport/helper process.
+	BeforeDriverStop func(sessionID string) error
+	// StartCommand installs the trusted pod process boundary before any engine starts.
+	StartCommand         func(*exec.Cmd) error
+	Workspaces           *LocalWorkspaceService
+	PrepareHostWorkspace func(context.Context, protocol.SpawnSession) (string, WorkspaceExplorer, error)
+	PlanNudges           func() bool
+	CredentialSource     EngineCredentialSource
 	// SpawnKilled, when set, reports whether a kill_session arrived for a spawn that is still being prepared.
 	// The Manager sets it; the cluster pod has no such window. It is checked after the plugin install, which
 	// can run for minutes after the Manager's own kill checks.
@@ -99,8 +111,13 @@ func (c AgentHostConfig) reposRoot() string {
 // session, events shipped to the server over the existing WS with
 // client-event-ID idempotency and resend-on-reconnect.
 type AgentHost struct {
-	sender Sender
-	cfg    AgentHostConfig
+	explorer WorkspaceExplorerRouter
+	// sandboxWatches tracks watcher teardown independently of driver teardown.
+	sandboxWatches sync.WaitGroup
+	initialPlanMu  sync.Mutex
+	initialPlans   map[string]chan string
+	sender         Sender
+	cfg            AgentHostConfig
 
 	mu       sync.Mutex
 	sessions map[string]*agentSession
@@ -126,6 +143,8 @@ type AgentHost struct {
 }
 
 type agentSession struct {
+	workspaceV2          bool // immutable launch version; never inferred from request generations
+	localWorkspace       *LocalWorkspace
 	requireRecoveryReady bool
 	// incomingNoted: the session was told once that its commits go to wip/<id>.incoming while
 	// the person has wip/<id> checked out.
@@ -458,15 +477,16 @@ func (e *wsEmitter) pendingCount() int {
 // — the same endpoints the blerg-runner CLI uses, so the Chat tab, push
 // notifications, and answer routing work unchanged.
 type httpMessenger struct {
-	base      string
-	token     string
-	sessionID string
-	turnID    string // optional native-question turn, recorded atomically with its server ask
-	client    *http.Client
-	ctx       context.Context     // session lifetime; bounds answer polling
-	onAnswer  func(answer string) // called from the answer-poll goroutine
-	onPollEnd func()              // optional: lets native requests stop waiting when the ask expires
-	ownerOnly bool                // asks are answerable only by the session's signed-in owner (approvals)
+	base        string
+	token       string
+	tokenSource func() string
+	sessionID   string
+	turnID      string // optional native-question turn, recorded atomically with its server ask
+	client      *http.Client
+	ctx         context.Context     // session lifetime; bounds answer polling
+	onAnswer    func(answer string) // called from the answer-poll goroutine
+	onPollEnd   func()              // optional: lets native requests stop waiting when the ask expires
+	ownerOnly   bool                // asks are answerable only by the session's signed-in owner (approvals)
 	// markerNonce is the session's marker code, taken out of every body posted (the model's
 	// update, note or question).
 	markerNonce string
@@ -486,6 +506,37 @@ func (e *messagesAPIError) Error() string {
 	return fmt.Sprintf("messages api: %d: %s", e.status, e.body)
 }
 
+func (m *httpMessenger) authToken() string {
+	if m.tokenSource != nil {
+		return m.tokenSource()
+	}
+	return m.token
+}
+
+// A personal daemon never lends its desktop credential to agent HTTP helpers.
+// Session credentials rotate independently and are read on each request.
+func (h *AgentHost) nativeHTTPToken(msg protocol.SpawnSession) func() string {
+	if !strings.HasPrefix(h.cfg.DaemonToken, "bdt_") {
+		return func() string { return h.cfg.DaemonToken }
+	}
+	return func() string {
+		token := msg.SessionToken
+		if name := SessionTokenPath(DaemonStateDir(), msg.SessionID); name != "" {
+			if f, err := os.Open(name); err == nil { //nolint:gosec // daemon-owned private token path, derived from a validated session ID
+				raw, err := io.ReadAll(io.LimitReader(f, 8193))
+				_ = f.Close()
+				if err != nil || len(raw) > 8192 {
+					return ""
+				}
+				if current := strings.TrimSpace(string(raw)); current != "" {
+					token = current
+				}
+			}
+		}
+		return token
+	}
+}
+
 func (m *httpMessenger) post(kind, body string) (string, error) {
 	fields := map[string]any{
 		"session_id": m.sessionID, "kind": kind, "body": agent.ScrubCode(body, m.markerNonce), "turn_id": m.turnID,
@@ -503,7 +554,7 @@ func (m *httpMessenger) post(kind, body string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+m.token)
+	req.Header.Set("Authorization", "Bearer "+m.authToken())
 	resp, err := m.client.Do(req)
 	if err != nil {
 		return "", err
@@ -574,7 +625,7 @@ func (m *httpMessenger) CloseAsk(id, answer string) {
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+m.token)
+		req.Header.Set("Authorization", "Bearer "+m.authToken())
 		resp, err := m.client.Do(req)
 		if err != nil {
 			log.Printf("agent session %s: closing ask %s: %v", m.sessionID, id, err)
@@ -604,7 +655,7 @@ func (m *httpMessenger) pollAnswer(ctx context.Context, id string) {
 		if err != nil {
 			return
 		}
-		req.Header.Set("Authorization", "Bearer "+m.token)
+		req.Header.Set("Authorization", "Bearer "+m.authToken())
 		resp, err := m.client.Do(req)
 		if err != nil {
 			select {
@@ -715,6 +766,15 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		}
 		h.sendError(msg.SessionID, reason)
 	}
+	var local *LocalWorkspace
+	if msg.Sandbox && msg.Workspace != nil {
+		var err error
+		local, err = h.cfg.Workspaces.Prepare(context.Background(), msg)
+		if err != nil {
+			fail(err.Error())
+			return
+		}
+	}
 	h.mu.Lock()
 	if _, dup := h.sessions[msg.SessionID]; dup {
 		h.mu.Unlock()
@@ -729,6 +789,32 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		return
 	}
 	workDir := msg.ProjectPath
+	var productionExplorer WorkspaceExplorer
+	if msg.Workspace != nil && !msg.Sandbox {
+		if h.cfg.PrepareHostWorkspace == nil {
+			fail("host workspace reader authority unavailable")
+			return
+		}
+		var err error
+		workDir, productionExplorer, err = h.cfg.PrepareHostWorkspace(context.Background(), msg)
+		if err != nil {
+			fail(err.Error())
+			return
+		}
+		defer func() {
+			if productionExplorer != nil {
+				if c, ok := productionExplorer.(interface{ Close() error }); ok {
+					_ = c.Close()
+				}
+			}
+		}()
+	}
+	if prepared, ok := productionExplorer.(*authorizedHostExplorer); ok {
+		local = prepared.workspace
+	}
+	if local != nil && !local.state.Host {
+		workDir = local.state.Root
+	}
 	if workDir == "" {
 		// Applied here too, not just in Manager.handleSpawnSession: agent-kind
 		// spawns branch off before that check runs, so this is the only guard
@@ -745,7 +831,14 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	// before every spawn_session reaches here, so this only fires for callers
 	// that bypass it (recovery with a stale path). Name the repo, not just the
 	// path — this text becomes the session's error_reason.
-	workspaceInfo, workspaceErr := os.Stat(workDir)
+	var workspaceInfo os.FileInfo
+	var workspaceErr error
+	// A VM allocation has no host pathname. Its mount and root are verified by
+	// Runtime before any engine/discovery starts, never by a host mirror.
+	remoteWorkspace := local != nil && !local.state.Host && local.state.RemoteMountSource != ""
+	if !remoteWorkspace {
+		workspaceInfo, workspaceErr = os.Stat(workDir)
+	}
 	if workspaceErr != nil {
 		fail(fmt.Sprintf("workspace not found for repo %q: %s is missing — clone it under this daemon's repos root", msg.Repo, workDir))
 		return
@@ -755,7 +848,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	// or cron sandbox as much as a child. Made once, at the start; a recovery (ad) already has the
 	// clone's path in its record. No fallback: a session that cannot have its own clone does not
 	// start.
-	if msg.Sandbox && ad == nil && !isSandboxClone(workDir, msg.SessionID) {
+	if msg.Sandbox && local == nil && ad == nil && !isSandboxClone(workDir, msg.SessionID) {
 		clone, err := createSandboxClone(workDir, msg.SessionID, h.cfg.reposRoot())
 		if err != nil {
 			fail(err.Error())
@@ -826,8 +919,12 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		}
 	}()
 
-	skillList, _ := skills.Discover(workDir, h.cfg.HomeDir)
-	agentTypes := agent.DiscoverAgentTypes(workDir, h.cfg.HomeDir)
+	var skillList []skills.Skill
+	var agentTypes []agent.AgentTypeDef
+	if !remoteWorkspace {
+		skillList, _ = skills.Discover(workDir, h.cfg.HomeDir)
+		agentTypes = agent.DiscoverAgentTypes(workDir, h.cfg.HomeDir)
+	}
 
 	journalDir := ""
 	if h.cfg.RecordsDir != "" {
@@ -841,7 +938,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		fail("the session's message receipt journal could not be opened")
 		return
 	}
-	sess := &agentSession{skills: skillList, engine: msg.Engine, inputs: inputs, workspace: workDir, workspaceInfo: workspaceInfo, requireRecoveryReady: msg.RequireRecoveryReady}
+	sess := &agentSession{workspaceV2: msg.Workspace != nil, localWorkspace: local, skills: skillList, engine: msg.Engine, inputs: inputs, workspace: workDir, workspaceInfo: workspaceInfo, requireRecoveryReady: msg.RequireRecoveryReady}
 	// A new session is idle until its first turn starts (the driver says
 	// "running" then). Reporting "running" here made a session with no
 	// initial prompt look busy — spinner, working indicator — while it was
@@ -894,10 +991,16 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 				sess.record.setStatus(p.Status)
 			}
 		}
-		if ev.Kind == "turn_done" && isSandboxClone(workDir, msg.SessionID) {
+		if ev.Kind == "turn_done" && (local != nil || isSandboxClone(workDir, msg.SessionID)) {
 			// The session's commits reach the repository before its turn's end does, so a person
 			// (or a parent) told the turn ended finds them on wip/<id>.
-			err := syncSandboxAtTurnEnd(workDir, msg.SessionID)
+			var err error
+			if local != nil {
+				_, err = local.Sync(context.Background())
+				err = errors.Join(err, h.cfg.Workspaces.Report(context.Background(), local))
+			} else {
+				err = syncSandboxAtTurnEnd(workDir, msg.SessionID)
+			}
 			var checkedOut *sandboxCheckedOutError
 			if errors.As(err, &checkedOut) {
 				// Fetched, to wip/<id>.incoming: said once, not at every turn.
@@ -997,13 +1100,14 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	// is still filtered (extraEnvPairs); h.cfg.DaemonToken stays with the
 	// host's own server calls below and never enters a child process.
 	env := buildSessionEnv(sessionEnvOpts{
-		SessionID:    msg.SessionID,
-		ServerHTTP:   h.cfg.ServerHTTP,
-		Assist:       msg.Assist,
-		BoardID:      msg.BoardID,
-		BoardToken:   msg.BoardToken,
-		SessionToken: msg.SessionToken,
-		Extra:        msg.ExtraEnv,
+		AttachmentsStateDir: h.cfg.AttachmentsStateDir,
+		SessionID:           msg.SessionID,
+		ServerHTTP:          h.cfg.ServerHTTP,
+		Assist:              msg.Assist,
+		BoardID:             msg.BoardID,
+		BoardToken:          msg.BoardToken,
+		SessionToken:        msg.SessionToken,
+		Extra:               msg.ExtraEnv,
 	})
 	env = append(env, selectedBoardCLIEnv(msg.BoardID, msg.MCPGateway)...)
 
@@ -1117,9 +1221,15 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		}
 	}
 
+	guide := workspaceGuideForRuntime(msg.Workspace, local)
+	startCommand := h.cfg.StartCommand
+	if local != nil && local.host != nil {
+		startCommand = local.host.writers.Start
+	}
 	var prefix sandboxExec
 	if msg.Sandbox {
 		sbOpts := h.cfg.Sandbox
+		sbOpts.Workspace = local
 		if runtimeHome != "" {
 			sbOpts.CodexHome = runtimeHome
 			sbOpts.CodexSourceHome = grantSource
@@ -1132,6 +1242,14 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			sbOpts.PluginCache = h.cfg.Plugins.sessionDir(msg.SessionID)
 			pluginDirs = translatePluginDirs(pluginDirs, sbOpts.PluginCache)
 		}
+		if local != nil {
+			if err := h.cfg.Workspaces.BeginRuntime(ctx, local); err != nil {
+				cancel()
+				releasePlugins()
+				fail("workspace launch authority: " + err.Error())
+				return
+			}
+		}
 		container, err := startSandboxContainer(msg.SessionID, workDir, env, sandboxCred, sbOpts)
 		if err != nil {
 			cancel()
@@ -1139,6 +1257,34 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			releaseSandboxHome(msg.SessionID)
 			fail("could not start the sandbox container: " + err.Error())
 			return
+		}
+		if local != nil {
+			runtime, runtimeErr := h.cfg.Workspaces.Runtime(ctx, local, container)
+			if runtimeErr != nil {
+				cancel()
+				releasePlugins()
+				fail("workspace runtime authority: " + runtimeErr.Error())
+				return
+			}
+			container = runtime.ID
+			if remoteWorkspace {
+				instructions, discoverErr := runtime.discoverInstructions(ctx)
+				if discoverErr != nil {
+					cancel()
+					releasePlugins()
+					fail("workspace runtime discovery unavailable")
+					return
+				}
+				skillList, agentTypes = instructions.Skills, instructions.Agents
+				sess.skills = skillList
+			}
+			productionExplorer, runtimeErr = local.runtimeExplorer(ctx, runtime)
+			if runtimeErr != nil {
+				cancel()
+				releasePlugins()
+				fail("workspace explorer: " + runtimeErr.Error())
+				return
+			}
 		}
 		prefix = sandboxExecPrefix(container)
 		sess.sandboxed = true
@@ -1221,8 +1367,8 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			SessionID: msg.SessionID, MarkerNonce: markerNonce, Emitter: emitter, Env: env,
 		})
 		if cx, ok := driver.(*codexDriver); ok {
-			cx.DeveloperInstructions = ccSystemPromptFor(msg.Interaction)
-			cx.AskUser = h.questionAsker(msg.SessionID, emitter, markerNonce, func() string { cx.mu.Lock(); defer cx.mu.Unlock(); return cx.usageTurnID })
+			cx.DeveloperInstructions = ccSystemPromptFor(msg.Interaction) + guide
+			cx.AskUser = h.questionAsker(msg.SessionID, emitter, markerNonce, func() string { cx.mu.Lock(); defer cx.mu.Unlock(); return cx.usageTurnID }, msg.SessionToken)
 			cx.CodexHome = pluginHome
 			if pluginConfig != nil {
 				cx.RuntimeConfig = pluginConfig
@@ -1283,19 +1429,20 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			if sess.record != nil {
 				hx.onOpenWork = sess.record.setOpenWork
 			}
-			hx.DeveloperInstructions = ccSystemPromptFor(msg.Interaction)
+			hx.DeveloperInstructions = ccSystemPromptFor(msg.Interaction) + guide
 			if ad != nil {
 				hx.adoptionNote = cutOffNotice(ad.rec.OpenCalls, ad.rec.OpenTasks, ad.rec.OpenSubagents)
 				if hx.adoptionNote != "" {
 					hx.adoptionNote += "\n\n" + h.restartCauseWords(ad.rec)
 				}
 			}
-			hx.AskUser = h.questionAsker(msg.SessionID, emitter, markerNonce, nil)
+			hx.AskUser = h.questionAsker(msg.SessionID, emitter, markerNonce, nil, msg.SessionToken)
 		}
 	case useClaudeCode:
 		log.Printf("agent session %s: claude-code driver (the engine's own login)", msg.SessionID)
 		cc := newClaudeCodeDriver(workDir, model, msg.Effort, emitter, env, ccOpts...)
 		cc.skills, cc.home = skillList, h.cfg.HomeDir
+		cc.workspaceGuide = guide
 		if h.cfg.UsageLimits != nil {
 			cc.onRateLimit = h.cfg.UsageLimits.ClaudeRateLimited
 		}
@@ -1323,7 +1470,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		// enabled plugins' SessionStart hook context) are built here, after the engine decision:
 		// a CLI engine never uses them, and preparing them runs plugin hook commands.
 		messenger := &httpMessenger{
-			base: h.cfg.ServerHTTP, token: h.cfg.DaemonToken, sessionID: msg.SessionID, markerNonce: markerNonce,
+			base: h.cfg.ServerHTTP, tokenSource: h.nativeHTTPToken(msg), sessionID: msg.SessionID, markerNonce: markerNonce,
 			client: &http.Client{Timeout: 60 * time.Second},
 			ctx:    ctx,
 			onAnswer: func(answer string) {
@@ -1333,7 +1480,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			},
 		}
 		loopCfg := h.nativeLoopConfig(msg, nativeLoopInputs{
-			workDir: workDir, env: env, model: model, skills: skillList, agentTypes: agentTypes,
+			workDir: workDir, env: env, model: model, skills: skillList, agentTypes: agentTypes, workspaceGuide: guide, startCommand: startCommand,
 			emitter: emitter, messenger: messenger, confined: msg.Sandbox || msg.RestrictTools || prefix.enabled(),
 		})
 		loopCfg.MarkerNonce = markerNonce
@@ -1341,6 +1488,20 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		loop.AddTool(agent.AgentTool(loop, agentTypes, agent.DefaultSpawn))
 		loop.InstallMessagingTools()
 		driver = loop
+	}
+	if startCommand != nil {
+		bounded, ok := driver.(interface{ useCommandBoundary(func(*exec.Cmd) error) })
+		_, native := driver.(*agent.Loop)
+		if !ok && !native {
+			cancel()
+			mcpFile.Remove()
+			releasePlugins()
+			fail("engine cannot enter the cluster process boundary")
+			return
+		}
+		if ok {
+			bounded.useCommandBoundary(startCommand)
+		}
 	}
 	if prefix.enabled() {
 		// Belt and braces: the refusals above mean only a containable driver
@@ -1380,6 +1541,14 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		}
 	}
 
+	if local != nil && local.host != nil {
+		if err := local.host.driverStarting(); err != nil {
+			cancel()
+			releasePlugins()
+			fail("host lifecycle journal unavailable")
+			return
+		}
+	}
 	runDone := make(chan struct{})
 	sess.runDone = runDone
 	sess.loop = driver
@@ -1388,6 +1557,14 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	sess.pluginSpecs = appliedPluginSpecs
 	if ad != nil {
 		sess.pluginRequests = maps.Clone(ad.rec.PluginRequests)
+		// A queued selection was never confirmed by the replacement engine.
+		// Let the server replay its durable approval after adoption; only
+		// terminal results can suppress a new attempt on this driver.
+		for id, result := range sess.pluginRequests {
+			if result.State == "queued" {
+				delete(sess.pluginRequests, id)
+			}
+		}
 	}
 	sess.pluginHome = pluginHome != ""
 
@@ -1395,6 +1572,12 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	h.sessions[msg.SessionID] = sess
 	h.mu.Unlock()
 	clonePath = "" // the session owns it now: kill releases it
+	if productionExplorer != nil {
+		h.BindWorkspaceExplorer(msg.SessionID, productionExplorer)
+		productionExplorer = nil
+	} else if sess.sandboxed {
+		h.BindWorkspaceExplorer(msg.SessionID, &legacySandboxExplorer{id: msg.SessionID, alias: workDir, live: h.workspaceFileBinding(msg.SessionID).live})
+	}
 
 	// Periodic resend covers lost acks and transient server-side persist
 	// failures (the server acks only after a successful DB append).
@@ -1452,10 +1635,26 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		}
 		gated.SetRecoveryInputGate(h.waitRecoveryReady, h.recoveryInputReady)
 	}
+	var initialInput agent.Input
+	if ad == nil && strings.TrimSpace(msg.InitialPrompt) != "" {
+		source := msg.InitialPromptSource
+		if source == "" {
+			source = "chat"
+		}
+		initialInput = agent.Input{Text: msg.InitialPrompt, Source: source, ClientID: msg.InitialPromptClientID}
+		initialInput.PlanNudge = h.initialPlanNudge(ctx, msg.SessionID, initialInput)
+	}
+	if ctx.Err() != nil {
+		return
+	}
 	driver.Start()
 	if prefix.enabled() {
 		// A container that stops ends the session with Docker's reason, whatever the engine.
-		go h.watchSandbox(ctx, msg.SessionID, sess, prefix.container(), sess.sandboxCheck)
+		h.sandboxWatches.Add(1)
+		go func() {
+			defer h.sandboxWatches.Done()
+			h.watchSandbox(ctx, msg.SessionID, sess, prefix.container(), sess.sandboxCheck)
+		}()
 	}
 	if source, ok := driver.(mcpStatusSource); ok {
 		if gate, supported := driver.(interface{ SetMCPInputGate(func(context.Context)) }); supported {
@@ -1481,7 +1680,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			driver.Run(ctx)
 		}()
 		if ctx.Err() == nil {
-			h.runtimeStopped(msg.SessionID, sess)
+			h.runtimeStopped(msg.SessionID, sess) //nolint:contextcheck // teardown deliberately uses its own bounded deadline after engine cancellation
 		}
 	}()
 	if ad != nil {
@@ -1493,11 +1692,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		driver.EnqueueInput(agent.Input{Text: note, Source: "system"})
 	}
 	if strings.TrimSpace(msg.InitialPrompt) != "" {
-		source := msg.InitialPromptSource
-		if source == "" {
-			source = "chat"
-		}
-		h.UserInput(msg.SessionID, agent.Input{Text: msg.InitialPrompt, Source: source, ClientID: msg.InitialPromptClientID})
+		h.UserInput(msg.SessionID, initialInput)
 	} else if note == "" {
 		// Nothing queued: the session is ready and waiting for its first
 		// message. Say so now — otherwise the row sits at "starting" until
@@ -1649,12 +1844,40 @@ func (h *AgentHost) kill(sessionID string, exitCode int) { h.killWith(sessionID,
 
 // killWith is kill with the reason a failed session's end carries (SessionEnded.Message).
 func (h *AgentHost) killWith(sessionID string, exitCode int, reason string) {
+	h.explorer.Unbind(sessionID)
 	h.mu.Lock()
 	sess := h.sessions[sessionID]
 	delete(h.sessions, sessionID)
 	h.mu.Unlock()
 	if sess == nil {
 		return
+	}
+	if sess.localWorkspace != nil {
+		message := protocol.SessionEnded{Type: "session_ended", SessionID: sessionID, ExitCode: exitCode, Message: reason}
+		if err := sess.localWorkspace.RequestStop(message); err != nil {
+			h.mu.Lock()
+			if h.sessions[sessionID] == nil {
+				h.sessions[sessionID] = sess
+			}
+			h.mu.Unlock()
+			log.Printf("workspace stop intent retained: %v", err)
+			return
+		}
+	}
+	if sess.localWorkspace != nil && sess.localWorkspace.host != nil {
+		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := sess.localWorkspace.host.writers.Stop(cleanup)
+		cancel()
+		if err != nil {
+			exitCode = 1
+			reason = "host writer cleanup unproven"
+		}
+	}
+	if h.cfg.BeforeDriverStop != nil {
+		if err := h.cfg.BeforeDriverStop(sessionID); err != nil {
+			exitCode = 1
+			reason = "workspace writer cleanup unproven; storage retained"
+		}
 	}
 	sess.emitter.close() // release any Emit blocked on a full buffer
 	sess.loop.Interrupt()
@@ -1675,7 +1898,24 @@ func (h *AgentHost) killWith(sessionID string, exitCode int, reason string) {
 	if sess.codexRestricted != nil {
 		sess.codexRestricted.Close()
 	}
-	if sess.sandboxed {
+	if sess.localWorkspace != nil && sess.localWorkspace.host != nil {
+		if sess.runDone != nil {
+			select {
+			case <-sess.runDone:
+				_ = sess.localWorkspace.host.driverStopped()
+			default:
+			}
+		}
+	}
+	if sess.localWorkspace != nil {
+		var stopErr error
+		_, stopErr = sess.localWorkspace.Stop(context.Background())
+
+		if stopErr != nil {
+			exitCode = 1
+			reason = "workspace stop retained unresolved work"
+		}
+	} else if sess.sandboxed {
 		// The clone's leftover work is committed inside the container before it goes, the
 		// container is removed, then the branch is fetched into the repository and the clone
 		// removed if it holds nothing else (sandboxclone.go). Work is never deleted.
@@ -1689,10 +1929,24 @@ func (h *AgentHost) killWith(sessionID string, exitCode int, reason string) {
 	}
 	for _, generation := range sess.pluginGenerations {
 		h.cfg.Plugins.release(generation)
+		h.cfg.Plugins.releaseCodex(generation)
+	}
+	if sess.localWorkspace != nil {
+		message := protocol.SessionEnded{Type: "session_ended", SessionID: sessionID, ExitCode: exitCode, Message: reason}
+		if err := h.cfg.Workspaces.Finalize(context.Background(), sess.localWorkspace, message, func(message protocol.SessionEnded) error { return h.sender.Send(message) }); err != nil {
+			log.Printf("workspace final delivery retained for %s: %v", sessionID, err)
+			return
+		}
+		sess.record.delete()
+		sess.inputs.close()
+		removeSessionTokenFile(DaemonStateDir(), sessionID)
+		removeSessionAttachments(attachmentsStateDir(h.cfg.AttachmentsStateDir), sessionID)
+		return
 	}
 	sess.record.delete() // killed for good: nothing to host again after a restart
 	sess.inputs.close()
 	removeSessionTokenFile(DaemonStateDir(), sessionID)
+	removeSessionAttachments(attachmentsStateDir(h.cfg.AttachmentsStateDir), sessionID)
 	_ = h.sender.Send(protocol.SessionEnded{Type: "session_ended", SessionID: sessionID, ExitCode: exitCode, Message: reason})
 }
 
@@ -1758,7 +2012,7 @@ func (h *AgentHost) ActiveIDs() []string {
 			ids = append(ids, id)
 		}
 	}
-	return ids
+	return mergeSessionIDs(ids, h.cfg.Workspaces.PendingIDs())
 }
 
 // States reports each agent session's protocol-derived status for heartbeats.
@@ -1817,13 +2071,15 @@ func DefaultPricing() map[string]agent.Price {
 
 // nativeLoopInputs is what the native loop's configuration is built from.
 type nativeLoopInputs struct {
-	workDir    string
-	env        []string
-	model      string
-	skills     []skills.Skill
-	agentTypes []agent.AgentTypeDef
-	emitter    agent.Emitter
-	messenger  agent.Messenger
+	startCommand   func(*exec.Cmd) error
+	workspaceGuide string
+	workDir        string
+	env            []string
+	model          string
+	skills         []skills.Skill
+	agentTypes     []agent.AgentTypeDef
+	emitter        agent.Emitter
+	messenger      agent.Messenger
 	// confined: a restricted or sandboxed session. Its preparation runs no plugin hook command
 	// on the host (today a confined session never reaches the native loop: this is the backstop).
 	confined bool
@@ -1838,24 +2094,24 @@ func (h *AgentHost) nativeLoopConfig(msg protocol.SpawnSession, in nativeLoopInp
 	}
 	registryTools := []agent.Tool{
 		tools.ReadFile(in.workDir), tools.Glob(in.workDir), tools.Grep(in.workDir),
-		tools.WriteFile(in.workDir), tools.EditFile(in.workDir), tools.BashEnv(in.workDir, in.env),
+		tools.WriteFile(in.workDir), tools.EditFile(in.workDir), tools.BashEnvWithStart(in.workDir, in.env, in.startCommand),
 		agent.SkillTool(in.skills),
 	}
 	dataPlaneCtx := ""
 	if h.cfg.ServerHTTP != "" {
-		pub := tools.PublishConfig{Base: h.cfg.ServerHTTP, Token: h.cfg.DaemonToken}
-		dp := tools.DataPlaneConfig{Base: h.cfg.ServerHTTP, Token: h.cfg.DaemonToken, Project: msg.Repo}
+		pub := tools.PublishConfig{Base: h.cfg.ServerHTTP, TokenSource: h.nativeHTTPToken(msg)}
+		dp := tools.DataPlaneConfig{Base: h.cfg.ServerHTTP, TokenSource: h.nativeHTTPToken(msg), Project: msg.Repo}
 		registryTools = append(registryTools,
 			tools.PushMockup(in.workDir, pub), tools.PushScreenshot(in.workDir, pub),
 			tools.MemoryWrite(dp), tools.MemoryDelete(dp),
-			tools.RulePropose(dp), tools.KnowledgeSearch(dp))
-		dataPlaneCtx = fetchDataPlaneContext(h.cfg.ServerHTTP, h.cfg.DaemonToken, msg.Repo)
+			tools.KnowledgeSearch(dp))
+		dataPlaneCtx = fetchDataPlaneContext(h.cfg.ServerHTTP, h.nativeHTTPToken(msg)(), msg.Repo)
 	}
 	return agent.Config{
 		Provider:  provider,
 		Emitter:   in.emitter,
 		Registry:  agent.NewRegistry(registryTools...),
-		System:    BuildSystemPrompt(in.workDir, h.cfg.HomeDir, in.skills, in.agentTypes, msg.Interaction, !in.confined) + dataPlaneCtx,
+		System:    BuildSystemPrompt(in.workDir, h.cfg.HomeDir, in.skills, in.agentTypes, msg.Interaction, !in.confined) + dataPlaneCtx + in.workspaceGuide,
 		Model:     in.model,
 		Effort:    msg.Effort,
 		Messenger: in.messenger,
@@ -1864,7 +2120,7 @@ func (h *AgentHost) nativeLoopConfig(msg protocol.SpawnSession, in nativeLoopInp
 	}
 }
 
-// fetchDataPlaneContext pulls the project's enabled rules and memory index
+// fetchDataPlaneContext pulls the project's memory index
 // for system-prompt injection. Best-effort with a short timeout — a server
 // hiccup must not block session spawn.
 func fetchDataPlaneContext(base, token, project string) string {
@@ -1887,24 +2143,6 @@ func fetchDataPlaneContext(base, token, project string) string {
 	}
 
 	var b strings.Builder
-	var rules []struct {
-		Content string `json:"content"`
-		Enabled bool   `json:"enabled"`
-	}
-	if get("/api/agent/rules?project="+url.QueryEscape(project), &rules) {
-		var enabled []string
-		for _, r := range rules {
-			if r.Enabled {
-				enabled = append(enabled, r.Content)
-			}
-		}
-		if len(enabled) > 0 {
-			b.WriteString("\n\n## Project rules (user-approved standing instructions)\n\n")
-			for _, r := range enabled {
-				b.WriteString("- " + r + "\n")
-			}
-		}
-	}
 	var memories []struct {
 		Name    string `json:"name"`
 		Kind    string `json:"kind"`

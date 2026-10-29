@@ -41,11 +41,17 @@ export function BoardFilterBar({ counts, activeColumn, onPickColumn, applied, ch
   const total = counts.reduce((n, c) => n + c.total, 0);
   const summary = filtering ? `${shown} of ${total} card${total === 1 ? "" : "s"} shown` : "";
   const [said, setSaid] = useState("");
+  const wasFiltering = useRef(false);
   useEffect(() => {
-    const t = setTimeout(() => setSaid(summary || (said ? `All ${total} cards shown` : "")), 700);
+    const cleared = wasFiltering.current && !filtering;
+    wasFiltering.current = filtering;
+    if (!filtering && !cleared) return;
+    const t = setTimeout(() => setSaid(summary || `All ${total} cards shown`), 700);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `said` only decides the "all shown" wording
-  }, [summary, total]);
+    // Only a filter transition announces "All". Unfiltered count changes must neither repeat
+    // that announcement nor cancel one waiting to be spoken; total is captured at Clear.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- summary tracks every filtered count; unfiltered counts are intentionally ignored
+  }, [summary]);
 
   return (
     <div className="board-sticky">
@@ -53,6 +59,7 @@ export function BoardFilterBar({ counts, activeColumn, onPickColumn, applied, ch
         {counts.map(({ column, shown, total }) => {
           const on = column.id === activeColumn;
           return (
+            // button-guard-ignore: column tabs show only under the phone media query, where .column-tab (styles.css) styles them.
             <button
               key={column.id} role="tab" type="button"
               id={`tab-${column.id}`} aria-controls={`column-${column.id}`}

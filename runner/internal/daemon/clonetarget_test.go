@@ -6,7 +6,6 @@ package daemon
 // Authorization header when told to, and writes an origin like a real clone.
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -310,7 +309,7 @@ func TestSpawnCloneFromNeverKeepsTheToken(t *testing.T) {
 	claudeDir := writeScript(t, "claude", "printenv > "+envOut+"\nsleep 60\n")
 	t.Setenv("PATH", claudeDir+":"+os.Getenv("PATH"))
 
-	var logBuf bytes.Buffer
+	var logBuf syncBuffer
 	log.SetOutput(&logBuf)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
@@ -324,6 +323,7 @@ func TestSpawnCloneFromNeverKeepsTheToken(t *testing.T) {
 	mgr.handleSpawnSession(raw)
 	t.Cleanup(func() {
 		mgr.handleKillSession(mustJSON(t, protocol.KillSession{Type: "kill_session", SessionID: "s-clone-" + sock}))
+		waitManagerLifecycle(t, mgr, "s-clone-"+sock)
 	})
 
 	var started bool
@@ -379,7 +379,7 @@ func TestSpawnCloneFromFailureReportsWithoutToken(t *testing.T) {
 	const token = "ghp_FAILSECRET0123456789"
 	t.Setenv("FAKE_GIT_FAIL", "acme")
 	t.Setenv("FAKE_GIT_ECHO", token)
-	var logBuf bytes.Buffer
+	var logBuf syncBuffer
 	log.SetOutput(&logBuf)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 

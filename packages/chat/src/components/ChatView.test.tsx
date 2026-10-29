@@ -2,11 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import ChatView from './ChatView'
 import { useTranscriptStore } from '../hooks/useTranscriptStore'
+import { useChatReportStore } from '../hooks/useLiveState'
 import { createCardRegistry, defineCard, type CardProps } from '../cards/registry'
 import { createFakeTransport } from '../test/fakeTransport'
 import { COMPACT, SESSION, ev, ingest, meta, resetChatState, seed } from '../test/chat'
 import { useChat, type ChatContextValue } from './context'
 import { splitAttachmentNote } from '../model/attachments'
+
+// Stop lives in the host's session header now: the chat reports busy and interrupt for it.
+const report = () => useChatReportStore.getState().reports[SESSION]
 import type { ArtifactInfo } from '../transport/types'
 
 describe('ChatView', () => {
@@ -88,21 +92,30 @@ describe('ChatView', () => {
     expect(box.value).toBe('')
   })
 
-  it('shows streaming text and a Stop button while running; Stop interrupts', () => {
+  it('shows streaming text while running and reports busy with an interrupt for the host’s Stop; no Stop of its own', async () => {
     const t = createFakeTransport()
     render(<ChatView session={SESSION} transport={t.transport} meta={meta({ status: 'running' })} />)
     act(() => t.emit(ev({ kind: 'assistant_text', transient: true, payload: { text: 'thinking…', done: false } })))
     expect(screen.getByTestId('streaming').textContent).toContain('thinking…')
-    fireEvent.click(screen.getByText(/Stop/))
+    expect(screen.queryByRole('button', { name: /^Stop/ })).toBeNull()
+    expect(report().busy).toBe(true)
+    await act(async () => { await report().interrupt!() })
     expect(t.interrupts).toBe(1)
   })
 
-  it('shows no Stop when the transport cannot interrupt', () => {
+  it('reports no interrupt when the transport cannot interrupt', () => {
     const t = createFakeTransport({ interrupt: false })
     render(<ChatView session={SESSION} transport={t.transport} meta={meta({ status: 'running' })} />)
-    expect(screen.queryByText(/Stop/)).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Stop/ })).toBeNull()
+    expect(report().busy).toBe(true)
+    expect(report().interrupt).toBeUndefined()
     fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' })
     expect(t.interrupts).toBe(0)
+  })
+
+  it('reports not busy when idle', () => {
+    render(<ChatView session={SESSION} transport={createFakeTransport().transport} meta={meta({ status: 'idle' })} />)
+    expect(report().busy).toBe(false)
   })
 
   it('reads the session row from the transport when the host has none, and follows status messages', async () => {
@@ -373,7 +386,8 @@ describe('ChatView working indicator', () => {
     const w = screen.getByTestId('working')
     expect(within(w).getByRole('status')).toHaveAttribute('aria-live', 'polite')
     expect(w).toHaveTextContent('Working… 0:00')
-    expect(screen.getByText(/Stop/)).toBeInTheDocument()
+    // A message just sent counts as working: the host's Stop shows.
+    expect(report().busy).toBe(true)
     act(() => { vi.advanceTimersByTime(2_000) })
     expect(screen.getByTestId('working')).toHaveTextContent('Working… 0:02')
     // The server picks the turn up; the clock keeps counting from the send.
@@ -399,7 +413,7 @@ describe('ChatView working indicator', () => {
     render(<ChatView session={SESSION} transport={t.transport} meta={meta()} />)
     await sendMessage('go')
     expect(screen.getByTestId('working')).toBeInTheDocument()
-    await act(async () => { fireEvent.click(screen.getByText(/Stop/)) })
+    await act(async () => { await report().interrupt!() })
     expect(t.interrupts).toBe(1)
     expect(screen.queryByTestId('working')).not.toBeInTheDocument()
   })

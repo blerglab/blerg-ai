@@ -431,7 +431,7 @@
 
 /* A card number or a commit hash in chat text, once confirmed (RefLinks.tsx): a link in place, the
    same size as the text it was (no box, no padding), so nothing moves when it turns into one. */
-.md button.md-ref {
+button.md-ref {
   display: inline;
   margin: 0;
   padding: 0;
@@ -447,7 +447,7 @@
   cursor: pointer;
 }
 
-.md button.md-ref:hover,
-.md button.md-ref:focus-visible {
+button.md-ref:hover,
+button.md-ref:focus-visible {
   text-decoration-style: solid;
 }

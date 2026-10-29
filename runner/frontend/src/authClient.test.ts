@@ -10,6 +10,28 @@ describe("authClient", () => {
     expect(getAccessToken()).toBeNull();
   });
 
+  it('notifies desktop consumers only when the signed-in subject changes', () => {
+    const token = (sub: string, revision: number) => `h.${btoa(JSON.stringify({ sub, revision }))}.s`;
+    const receive = (raw: string) => { window.history.replaceState(null, '', `/#access_token=${raw}`); consumeAccessTokenFromFragment(); };
+    receive(token('person-a', 1));
+    const changed = vi.fn(); window.addEventListener('blerg-identity-changed', changed);
+    receive(token('person-a', 2)); expect(changed).not.toHaveBeenCalled();
+    receive(token('person-b', 1)); expect(changed).toHaveBeenCalledTimes(1);
+    window.removeEventListener('blerg-identity-changed', changed);
+  });
+
+  it('tells login-scoped caches when the login session changes, even for the same subject', () => {
+    const token = (sub: string, sid: string, revision: number) => `h.${btoa(JSON.stringify({ kind: 'user', sub, sid, revision }))}.s`;
+    const receive = (raw: string) => { window.history.replaceState(null, '', `/#access_token=${raw}`); consumeAccessTokenFromFragment(); };
+    receive(token('person-a', 'one', 1));
+    const login = vi.fn(), subject = vi.fn();
+    window.addEventListener('blerg-login-changed', login); window.addEventListener('blerg-identity-changed', subject);
+    receive(token('person-a', 'one', 2)); expect(login).not.toHaveBeenCalled();
+    receive(token('person-a', 'two', 1)); expect(login).toHaveBeenCalledTimes(1); expect(subject).not.toHaveBeenCalled();
+    receive(token('person-b', 'two', 1)); expect(login).toHaveBeenCalledTimes(2); expect(subject).toHaveBeenCalledTimes(1);
+    window.removeEventListener('blerg-login-changed', login); window.removeEventListener('blerg-identity-changed', subject);
+  });
+
   it("consumes an access token from the URL fragment and strips it", () => {
     window.history.replaceState(null, "", "/#access_token=abc123");
     consumeAccessTokenFromFragment();
@@ -209,6 +231,7 @@ describe("silent renewal", () => {
   });
 
   it("says the sign-in has ended when core sends the frame back with signin_error", async () => {
+    const ended = vi.fn(); window.addEventListener("blerg-signed-out", ended);
     for (const reason of ["signed_out", "expired"]) {
       const p = renewSilently();
       const f = frames[frames.length - 1];
@@ -219,6 +242,9 @@ describe("silent renewal", () => {
       f.dispatchEvent(new Event("load"));
       await expect(p).resolves.toBe("signed-out");
     }
+    // Login-scoped caches (kept shell scrollback) hear that it ended.
+    expect(ended).toHaveBeenCalledTimes(2);
+    window.removeEventListener("blerg-signed-out", ended);
     // and for the callers that only want a yes or no, it is a no
     const q = ensureFreshToken();
     const f = frames[frames.length - 1];

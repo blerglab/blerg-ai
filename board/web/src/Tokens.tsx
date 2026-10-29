@@ -1,3 +1,4 @@
+import "../../../packages/settings/settings.css";
 import { useEffect, useState } from "react";
 import { api, Board, Token } from "./api";
 import { useMe } from "./me";
@@ -70,19 +71,19 @@ export function Tokens() {
     <main>
       <h1 className="page">Agent tokens</h1>
       <form className="stack" onSubmit={mint} style={{ marginBottom: 12 }}>
-        <label className="field">
+        <label className="settings-field field">
           Label — who is this credential? (shows up in every audit row)
-          <input type="text" value={label} placeholder="blerg-runner nightly sweep"
+          <input className="settings-field" type="text" value={label} placeholder="blerg-runner nightly sweep"
             onChange={(e) => setLabel(e.target.value)} />
         </label>
-        <label className="field">
+        <label className="settings-field field">
           Board scope
-          <select value={boardId} onChange={(e) => setBoardId(e.target.value)}>
+          <select className="settings-field" value={boardId} onChange={(e) => setBoardId(e.target.value)}>
             <option value="">all boards</option>
             {boards.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
         </label>
-        <button className="btn" type="submit">Mint token</button>
+        <button className="settings-action btn" type="submit">Mint token</button>
       </form>
       {error && <p className="form-error">{error}</p>}
       {secret && (
@@ -107,7 +108,7 @@ export function Tokens() {
               <td className="mono">{state(t)}</td>
               <td>
                 {state(t) === "live" && (
-                  <button className="btn ghost small" onClick={() => revoke(t.id)}>Revoke</button>
+                  <button className="settings-action btn ghost small" onClick={() => revoke(t.id)}>Revoke</button>
                 )}
               </td>
             </tr>

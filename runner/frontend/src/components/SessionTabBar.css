@@ -1,0 +1,54 @@
+.session-tabbar{box-sizing:border-box;height:42px;display:flex;align-items:center;gap:4px;padding:0 6px;border-bottom:1px solid var(--stone);background:var(--basalt);flex-shrink:0;min-width:0}
+.session-tabbar>.icon-btn{height:28px;min-width:30px;padding:0 6px;flex:none}.session-shell-toggle{font-family:var(--mono);font-weight:600}
+.session-tabs{position:relative;display:flex;align-self:stretch;flex:1;min-width:0;overflow:auto;scrollbar-width:none}
+/* Where a dragged tab will land in the strip (VS Code's insertion marker). */
+.session-tab-insert{position:absolute;top:4px;bottom:4px;width:2px;margin-left:-1px;background:var(--selected-border);pointer-events:none;z-index:1}
+.session-tab{display:flex;flex-shrink:0;border-right:1px solid var(--scree-2);border-bottom:2px solid transparent;max-width:260px;color:var(--fog-dim);padding:0 8px;gap:6px;font-size:12px;min-width:0}
+.session-tab.active{border-bottom-color:var(--selected-border);color:var(--chalk);background:var(--scree)}
+.session-tab button{border:0;background:transparent;color:inherit;font:inherit;cursor:pointer}.session-tab>[role=tab]{display:flex;gap:6px;align-items:center;min-width:0;white-space:nowrap;padding:0;height:100%}.session-tab>[role=tab]>span{overflow:hidden;text-overflow:ellipsis}.session-tab.preview>[role=tab]>span{font-style:italic}.session-tab-close{padding:2px}.session-tab-pin{color:var(--fog-dim)}
+.session-tab-unread{border-radius:99px;background:var(--blaze);color:var(--basalt);font-size:10px;font-weight:700;padding:0 5px;line-height:16px}
+.session-file-view{position:relative;display:flex;flex:1;min-height:0;min-width:0;flex-direction:column;overflow:clip}.session-file-view[hidden],.hosted-view[hidden]{display:none}.session-keep-bar{display:flex;gap:12px;align-items:center;padding:6px 12px;border-bottom:1px solid var(--stone);font-size:12px;color:var(--fog)}.session-keep-bar span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-file-target,.hosted-view{display:flex;flex-direction:column;flex:1;min-height:0;overflow:clip}
+.session-mobile-tools{box-sizing:border-box;position:relative;display:flex;border-bottom:1px solid var(--stone);flex-shrink:0}.session-mobile-tools .icon-btn{height:34px;min-width:34px}.session-back-chat{flex:1;border:0;background:none;text-align:left;color:var(--selected-text);font:inherit;font-size:13px;min-height:36px}.session-kept{position:absolute;right:8px;top:44px;max-width:calc(100vw - 16px);background:var(--scree);border:1px solid var(--stone);border-radius:8px;z-index:30;padding:8px;box-shadow:var(--shadow)}.session-kept>div{display:flex}.session-kept button{border:0;background:none;color:var(--chalk);padding:8px;text-align:left;font:inherit;font-size:12px;overflow-wrap:anywhere}
+@media(max-width:767px){.embedded-viewer .artifact-header{padding:8px 10px}.embedded-viewer .artifact-meta{font-size:10px}.embedded-viewer .artifact-header-text h2{font-size:12px}.session-keep-bar{padding:6px 10px}}
+.session-showing-file>[data-testid=posture-banner],.session-showing-file>[data-testid=end-reason],.session-showing-file>[data-testid=session-failure]{display:none}
+.session-file-view{height:100%}.shell-chat>.session-file-view{position:absolute;inset:0}.session-file-target[hidden]{display:none}
+
+/* Alternate content uses the chat height while its composer remains mounted and hidden. */
+.session-agent-pane{display:flex;flex-direction:column;height:100%;min-height:0;min-width:0;overflow:hidden}
+.session-transcript-pane{display:flex;flex-direction:column;flex:1;min-height:0;min-width:0;overflow:hidden}
+.agent-chat>.session-file-view{height:auto}
+.session-file-target,.hosted-view{min-width:0}
+
+/* The board button's menu (several boards): the shared popover surface, one row per board. */
+.session-board-menu { width: min(320px, calc(100vw - 16px)); padding: 10px 8px; }
+.session-board-menu .confirm-popover-title { padding: 0 8px; }
+.session-board-menu [role=menu] { display: flex; flex-direction: column; max-height: min(60vh, 480px); overflow: auto; }
+.session-board-menu [role=menuitem] { display: flex; align-items: baseline; gap: 8px; min-height: 32px; padding: 6px 8px; border-radius: 6px; color: var(--chat-fg); text-decoration: none; font-size: 13px; }
+.session-board-menu [role=menuitem]:hover, .session-board-menu [role=menuitem]:focus-visible { background: var(--chat-selected-bg); color: var(--chat-selected-text); outline: none; }
+.session-board-menu [role=menuitem]:focus-visible { box-shadow: inset 0 0 0 2px var(--chat-selected-border); }
+.session-board-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.session-board-launch { flex: none; font-size: 11px; color: var(--chat-muted); }
+@media (max-width: 640px) { .confirm-popover.session-board-menu { width: 100%; padding: 14px 8px calc(14px + env(safe-area-inset-bottom)); } .session-board-menu [role=menuitem] { min-height: 44px; align-items: center; font-size: 15px; } }
+
+/* The scroll viewport and overflow button share only the space left by pinned tools. */
+.session-tabstrip{display:flex;flex:1;min-width:0;align-self:stretch;overflow:hidden}
+.session-tabstrip>.session-tabs{overflow-x:auto;overflow-y:hidden;container-type:inline-size;touch-action:pan-x;scrollbar-width:thin;scrollbar-color:transparent transparent}
+.session-tabstrip>.session-tabs:hover,.session-tabstrip>.session-tabs:focus-within{scrollbar-color:var(--scree-2) transparent}
+.session-tabs::-webkit-scrollbar{height:4px}.session-tabs::-webkit-scrollbar-thumb{background:transparent;border-radius:4px}
+.session-tabs:hover::-webkit-scrollbar-thumb,.session-tabs:focus-within::-webkit-scrollbar-thumb{background:var(--scree-2)}
+.session-tabstrip .session-tab{box-sizing:border-box;max-width:min(260px,100cqw)}
+.session-tabstrip>.session-tab-overflow{flex:none;align-self:center;width:28px;min-width:28px;height:28px;padding:4px}
+.session-mobile-tools{height:auto;min-height:46px;flex-direction:column;align-items:stretch;gap:0;padding:0}
+.session-mobile-controls{display:flex;align-items:center;gap:4px;min-height:46px;padding:4px 8px;box-sizing:border-box}
+.session-mobile-controls>.icon-btn,.session-mobile-controls>.artifact-btn{flex:none}
+.session-mobile-tools.has-file .session-back-chat{flex:1}
+.session-mobile-tools.has-file .session-mobile-controls>.icon-btn>span{display:none}
+.session-mobile-tools>.session-tabstrip{flex:none;height:38px;border-top:1px solid var(--stone);padding:0 4px}
+.session-tab-menu{position:fixed;z-index:10000;width:min(360px,calc(100vw - 16px));max-height:min(60vh,480px);overflow:auto;box-sizing:border-box;padding:6px;background:var(--scree);border:1px solid var(--stone);border-radius:8px;box-shadow:var(--shadow)}
+.session-tab-menu-item{display:flex;align-items:center;gap:8px;width:100%;min-height:36px;padding:8px;border:0;border-radius:4px;background:transparent;color:var(--chalk);font:inherit;font-size:12px;text-align:left;cursor:pointer}
+.session-tab-menu-item>span:nth-child(2){flex:1;min-width:0;overflow-wrap:anywhere}
+.session-tab-menu-icon{flex:none;width:16px;display:flex;align-items:center;justify-content:center}
+.session-tab-menu-item em{flex:none;font-size:11px;color:var(--fog-dim)}
+.session-tab-menu-item:hover,.session-tab-menu-item:focus-visible{background:var(--scree-2);outline:2px solid var(--selected-border);outline-offset:-2px}
+.session-tab-menu-item[aria-checked=true]{color:var(--selected-text)}
+@media(max-width:899px){.session-tab-menu-item{min-height:44px;font-size:13px}}

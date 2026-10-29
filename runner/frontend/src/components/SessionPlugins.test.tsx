@@ -53,6 +53,59 @@ describe('session plugin controls', () => {
       ),
     )
   })
+  it.each([
+    { sessionApply: true, scope: 'session', action: 'Add to session' },
+    { sessionApply: true, scope: 'always', action: 'Save always on' },
+    { sessionApply: false, scope: 'always', action: 'Save always on' },
+  ])('submits native Codex sources for $scope with live loading $sessionApply', async ({ sessionApply, scope, action }) => {
+    const native = { ...settings, engine: 'codex', session_apply: sessionApply, allowed_marketplaces: ['codex:openai-curated'] }
+    apiFetch.mockImplementation((_url: string, init?: RequestInit) =>
+      init?.method === 'POST' ? reply({ id: 'p1', state: 'executing' }, 202) : reply(native),
+    )
+    render(<Harness />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add plugin or skill' }))
+    fireEvent.change(await screen.findByLabelText('Plugin name'), { target: { value: 'helper' } })
+    fireEvent.change(screen.getByLabelText('Apply plugin'), { target: { value: scope } })
+    const add = screen.getByRole('button', { name: action })
+    expect(add).toBeEnabled()
+    fireEvent.click(add)
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/api/sessions/s1/plugins', expect.objectContaining({
+      body: JSON.stringify({ marketplace: 'codex:openai-curated', plugin: 'helper', scope }),
+    })))
+  })
+  it.each([
+    { engine: 'claude', source: 'codex:openai-curated', any: true, reason: 'This marketplace requires Codex.' },
+    ...['codex:', 'codex:-flag', 'codex:../path', 'codex:Uppercase', 'codex:name@other', `codex:${'a'.repeat(101)}`, '../plugins', '-owner/plugins', 'example/..', 'https://github.com/example/plugins'].map(source => ({
+      engine: 'codex', source, any: true, reason: 'Enter a GitHub owner/repo or codex:<marketplace> (1–100 lowercase letters, digits, dots, underscores or hyphens, starting with a letter or digit).',
+    })),
+  ])('explains rejected source $source for $engine (wildcard $any)', async ({ engine, source, any, reason }) => {
+    apiFetch.mockImplementation(() => reply({ ...settings, engine, any_marketplace: any, allowed_marketplaces: ['example/plugins'] }))
+    render(<Harness />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add plugin or skill' }))
+    const marketplace = await screen.findByLabelText('Marketplace')
+    fireEvent.change(marketplace, { target: { value: source } })
+    fireEvent.change(screen.getByLabelText('Plugin name'), { target: { value: 'helper' } })
+    const add = screen.getByRole('button', { name: 'Add to session' })
+    expect(add).toBeDisabled()
+    expect(add).toHaveAccessibleDescription(reason)
+    expect(screen.getByText(reason)).toBeVisible()
+    fireEvent.click(add)
+    expect(apiFetch.mock.calls.filter(c => c[1]?.method === 'POST')).toHaveLength(0)
+  })
+  it('blocks a native source visibly if refreshed policy no longer allows it', () => {
+    const model = { sessionId: 's1', data: { ...settings, engine: 'codex', any_marketplace: true }, error: null, refresh: vi.fn() }
+    const view = render(<PluginAddForm model={model} />)
+    fireEvent.change(screen.getByLabelText('Marketplace'), { target: { value: 'codex:openai-curated' } })
+    fireEvent.change(screen.getByLabelText('Plugin name'), { target: { value: 'helper' } })
+    expect(screen.getByRole('button', { name: 'Add to session' })).toBeEnabled()
+    view.rerender(<PluginAddForm model={{ ...model, data: { ...model.data, any_marketplace: false } }} />)
+    const add = screen.getByRole('button', { name: 'Add to session' })
+    expect(add).toBeDisabled()
+    expect(add).toHaveAccessibleDescription('This marketplace is not allowed by this install.')
+    expect(screen.getByText('This marketplace is not allowed by this install.')).toBeVisible()
+    fireEvent.click(add)
+    expect(apiFetch).not.toHaveBeenCalled()
+  })
   it('makes unsupported live application explicitly always-on for new sessions', async () => {
     apiFetch.mockImplementation(() =>
       reply({

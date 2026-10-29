@@ -124,13 +124,18 @@ func TestDelegationDecisionChecksExpiryAfterAcquiringRow(t *testing.T) {
 	deadline := time.After(30 * time.Second)
 	for {
 		var waiting bool
-		if err := blocker.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%delegation_requests%' AND pid<>pg_backend_pid())`).Scan(&waiting); err != nil {
+		// Poll from the pool: inside the blocker's transaction pg_stat_activity
+		// stays the snapshot of its first read, so a worker that starts waiting
+		// after that read would never be seen.
+		if err := pool.QueryRow(t.Context(), `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%delegation_requests%' AND pid<>pg_backend_pid())`).Scan(&waiting); err != nil {
 			t.Fatal(err)
 		}
 		if waiting {
 			break
 		}
 		select {
+		case err := <-result:
+			t.Fatalf("decision finished before waiting for the row lock: %v", err)
 		case <-deadline:
 			t.Fatal("decision did not wait for row lock")
 		case <-time.After(time.Millisecond):

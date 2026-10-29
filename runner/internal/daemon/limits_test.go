@@ -313,6 +313,7 @@ func TestAgentHostTellsTheTrackerACodexTurnEnded(t *testing.T) {
 	sender := &agentTestSender{}
 	limits := &recordingLimits{}
 	host := NewAgentHost(sender, AgentHostConfig{ReposRoot: reposRoot, HomeDir: t.TempDir(), UsageLimits: limits})
+	t.Cleanup(func() { host.Kill("s1") })
 	host.Spawn(protocol.SpawnSession{
 		Type: "spawn_session", SessionID: "s1", Repo: "proj",
 		InitialPrompt: "hello", Kind: "agent", Engine: "codex",

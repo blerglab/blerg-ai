@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
@@ -78,7 +79,11 @@ func TestAutomaticCodexClusterResumeUsesOnlyPersonalCredentials(t *testing.T) {
 			if err != nil || message.SessionID != resp.SessionID || message.ID == runtime.ID || len(message.Capabilities) != 1 || message.Capabilities[0] != "message" {
 				t.Fatal("replacement lost separate messaging authority")
 			}
-			if secret.StringData["CODEX_AUTH_JSON"] != personalCodex {
+			var auth struct {
+				Tokens map[string]string `json:"tokens"`
+			}
+			snapshot := secret.StringData["CODEX_AUTH_JSON"]
+			if json.Unmarshal([]byte(snapshot), &auth) != nil || auth.Tokens["access_token"] != "invented-codex-fixture" || strings.Contains(snapshot, "refresh_token") {
 				t.Fatal("replacement Secret lost the owner's Codex credential")
 			}
 			expectedSecret := sessionSecretName(resp.SessionID)

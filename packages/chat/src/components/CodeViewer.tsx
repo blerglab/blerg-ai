@@ -6,9 +6,10 @@ import { createPortal } from 'react-dom'
 import { useBackdropClose } from '../hooks/useBackdropClose'
 import { useSelectAllIn } from '../hooks/useSelectAllIn'
 import { langLabel, type CodeLang } from '../model/codeLang'
-import { useHighlight } from '../model/highlight'
 import { countLines } from '../model/lineCap'
-import CodeText from './CodeText'
+import { WRAP_MAX_LINES, WrapHostContext, isWrapShortcut, toggleWrapIn, type WrapKind } from '../model/lineWrap'
+import CodeLines from './CodeLines'
+import { WrapToggle } from './ViewerToolbar'
 
 export default function CodeViewer({ text, lang, title, onClose }: {
   text: string
@@ -21,7 +22,8 @@ export default function CodeViewer({ text, lang, title, onClose }: {
   useSelectAllIn(dialogRef)
   const backdrop = useBackdropClose(onClose)
   const [copied, setCopied] = useState(false)
-  const highlighted = useHighlight(lang, text, true)
+  // A block of no language (pasted text) or Markdown reads as prose; anything else as code (#265).
+  const kind: WrapKind = lang === null || lang === 'markdown' ? 'prose' : 'code'
   const lines = countLines(text)
   const canCopy = typeof navigator !== 'undefined' && !!navigator.clipboard
   useEffect(() => dialogRef.current?.focus(), [])
@@ -35,7 +37,7 @@ export default function CodeViewer({ text, lang, title, onClose }: {
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); onClose() } }}
+        onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); onClose() } else if (isWrapShortcut(e) && toggleWrapIn(e.currentTarget)) { e.preventDefault(); e.stopPropagation() } }}
       >
         <header className="artifact-header">
           <div className="artifact-header-text">
@@ -56,13 +58,11 @@ export default function CodeViewer({ text, lang, title, onClose }: {
               {copied ? 'Copied' : 'Copy'}
             </button>
           )}
+          <WrapToggle kind={kind} available={lines <= WRAP_MAX_LINES} text />
           <button type="button" className="artifact-close" aria-label="Close" onClick={onClose}>✕</button>
         </header>
         <div className="artifact-body">
-          <div className="code-viewer-scroll" data-testid="code-viewer-text">
-            <pre className="code-viewer-gutter" aria-hidden="true">{Array.from({ length: lines }, (_, i) => i + 1).join('\n')}</pre>
-            <pre className="code-viewer-code"><code><CodeText text={text} diff={lang === 'diff'} highlighted={highlighted} /></code></pre>
-          </div>
+          <WrapHostContext.Provider value={null}><CodeLines text={text} lang={lang} kind={kind} diff={lang === 'diff'} scrollTestId="code-viewer-text" codeTestId={null} /></WrapHostContext.Provider>
         </div>
       </div>
     </div>,

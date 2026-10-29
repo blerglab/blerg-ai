@@ -60,14 +60,16 @@ func TestHandleGetReposListsLocalFoldersWithoutGitHubConfigured(t *testing.T) {
 
 	hub := NewHub()
 	dc := &DaemonConn{
-		ID:        "d1",
+		ID:        newUUID(),
 		Name:      "dev-laptop",
 		ReposRoot: "/home/dev/repositories",
 	}
 	dc.SetCheckedOutRepos([]string{"blerg", "clarity", "example"})
 	hub.Register(dc)
 
-	api := NewAPI(hub, nil, "", nil /* no GitHub org configured */, "")
+	pool := connectSrvTestDB(t)
+	api := NewAPI(hub, pool, "", nil /* no GitHub org configured */, "")
+	fixtureOwnDesktop(t, pool, dc, "human:test-user")
 	api.SetCoreAuth(coreAuth)
 
 	// Create a valid token with session.start capability
@@ -80,7 +82,7 @@ func TestHandleGetReposListsLocalFoldersWithoutGitHubConfigured(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/repos", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
-	api.HandleGetRepos(rec, req)
+	api.HandleGetRepos(&reviewDeadlineWriter{ResponseRecorder: rec}, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusOK, rec.Body.String())
@@ -122,7 +124,7 @@ func TestBrowserEndpointsRequireAuth(t *testing.T) {
 	// Test each endpoint returns 401 without credential
 	req := httptest.NewRequest("GET", "/api/daemons", nil)
 	w := httptest.NewRecorder()
-	api.HandleGetDaemons(w, req)
+	api.HandleGetDaemons(&reviewDeadlineWriter{ResponseRecorder: w}, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("GET /api/daemons: got status %d, want %d", w.Code, http.StatusUnauthorized)
 	}
@@ -166,7 +168,7 @@ func TestBrowserEndpointsRequireAuth(t *testing.T) {
 
 	req = httptest.NewRequest("GET", "/api/repos", nil)
 	w = httptest.NewRecorder()
-	api.HandleGetRepos(w, req)
+	api.HandleGetRepos(&reviewDeadlineWriter{ResponseRecorder: w}, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("GET /api/repos: got status %d, want %d", w.Code, http.StatusUnauthorized)
 	}
@@ -198,7 +200,7 @@ func TestBrowserEndpointsSucceedWithValidAuth(t *testing.T) {
 	req := httptest.NewRequest("GET", "/api/daemons", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
-	api.HandleGetDaemons(w, req)
+	api.HandleGetDaemons(&reviewDeadlineWriter{ResponseRecorder: w}, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("GET /api/daemons with valid token: got status %d, want %d", w.Code, http.StatusOK)
 	}
@@ -433,6 +435,9 @@ func TestGetSessionsReportsRuntimeAndKind(t *testing.T) {
 	host := newUUID()
 	if err := db.InsertSession(ctx, pool, host, dc.ID, "running", "/repos/my-app", "my-app", "Existing terminal", ""); err != nil {
 		t.Fatal(err)
+	}
+	if err := db.SetSessionKind(ctx, pool, host, "tmux"); err != nil {
+		t.Fatalf("SetSessionKind tmux: %v", err)
 	}
 	if err := db.SetSessionPosture(ctx, pool, host, "daemon", false); err != nil {
 		t.Fatal(err)

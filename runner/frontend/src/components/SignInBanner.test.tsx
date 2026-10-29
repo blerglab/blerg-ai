@@ -11,6 +11,8 @@ const { redirectToRefresh, getAccessToken, connected, renewSilently, startTokenR
 
 vi.mock('../authClient', () => ({ redirectToRefresh, getAccessToken, renewSilently, startTokenRenewal }))
 vi.mock('../ws', () => ({ connected }))
+const { resetKeptAttachments } = vi.hoisted(() => ({ resetKeptAttachments: vi.fn(async () => {}) }))
+vi.mock('@blerglab/chat', async (original) => ({ ...(await original<typeof import('@blerglab/chat')>()), resetKeptAttachments }))
 
 import SignInBanner from './SignInBanner'
 import { SIGN_IN_GRACE_MS, bounceToRefresh, clearSignInStuck, markSignInStuck } from '../signIn'
@@ -19,6 +21,7 @@ import { MAX_ATTEMPTS, markRefreshAttempted, refreshAlreadyAttempted, refreshRet
 describe('SignInBanner', () => {
   beforeEach(() => {
     redirectToRefresh.mockClear()
+    resetKeptAttachments.mockClear()
     getAccessToken.mockReturnValue(null)
     connected.mockReturnValue(false)
     renewSilently.mockReset()
@@ -104,6 +107,7 @@ describe('SignInBanner', () => {
     expect(renewSilently).toHaveBeenCalledTimes(2)
     expect(screen.queryByTestId('sign-in-banner')).not.toBeInTheDocument()
     expect(redirectToRefresh).not.toHaveBeenCalled()
+    expect(resetKeptAttachments).not.toHaveBeenCalled()
   })
 
   it('says the sign-in has ended, stops trying, and Sign in does the full redirect', async () => {
@@ -115,6 +119,8 @@ describe('SignInBanner', () => {
       await vi.advanceTimersByTimeAsync(5_000)
     })
     expect(screen.getByTestId('sign-in-banner')).toHaveTextContent('Your sign-in has ended')
+    // Files waiting on this device go with the sign-in (#231 review, finding 7).
+    expect(resetKeptAttachments).toHaveBeenCalled()
     await act(async () => {
       await vi.advanceTimersByTimeAsync(600_000)
     })

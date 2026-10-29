@@ -55,6 +55,8 @@ var toolScopes = map[string]toolScope{
 	"blerg_column_list":          {toolBoardArg, "columns of the board"},
 	"blerg_column_create":        {toolBoardArg, "create column"},
 	"blerg_column_move":          {toolColumnArg, "column must be on the board"},
+	"blerg_column_update":        {toolColumnArg, "column must be on the board"},
+	"blerg_column_delete":        {toolColumnArg, "column must be on the board (the move target is checked against the column's board)"},
 	"blerg_card_search":          {toolBoardArg, "search within the board"},
 	"blerg_card_get":             {toolCardRef, "card read"},
 	"blerg_card_create":          {toolBoardArg, "create card"},

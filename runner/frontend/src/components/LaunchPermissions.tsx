@@ -1,3 +1,4 @@
+import '../../../../packages/settings/settings.css'
 // LaunchPermissions: the launch sheet's "Permissions…" button. It opens the Permissions modal in
 // pre-authorize mode: the same permissions as the session panel's (start children without asking
 // where this runtime can, a board's access level, run an MCP tool set to approval mode), held here
@@ -49,7 +50,7 @@ export default function LaunchPermissions({ kind, runtime, boards, boardsLoading
   ]
   return (
     <div className="launch-permissions" data-testid="launch-permissions">
-      <button type="button" className="launch-permissions-button" aria-haspopup="dialog" onClick={() => setOpen(true)}>
+      <button type="button" className="settings-action launch-permissions-button" aria-haspopup="dialog" onClick={() => setOpen(true)}>
         Permissions…{count > 0 && <>{' '}<span data-testid="launch-permissions-count">({count})</span></>}
       </button>
       <span className="launch-permissions-hint">{count > 0 ? 'Given as the session starts; revoke them in the session panel.' : 'What the session may do without asking you.'}</span>

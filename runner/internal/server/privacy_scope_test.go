@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
@@ -28,7 +29,11 @@ const scopeSecretID = "9c0a1b2c-3d4e-4f50-8a6b-7c8d9e0f1a2b"
 
 func newScopeHub(t *testing.T) (hub *Hub, owner, foreign *BrowserConn) {
 	t.Helper()
-	hub = NewHub()
+	f := newPrivFixture(t)
+	hub = f.hub
+	if err := db.InsertSessionAs(t.Context(), f.pool, scopeSecretID, f.dc.ID, "running", "/repos/app", "app", "Scope session", "", db.SessionOrigin{SpawningAccount: privAcctA, Private: true}); err != nil {
+		t.Fatal(err)
+	}
 	hub.notePrivate(scopeSecretID, privAcctA)
 	owner = &BrowserConn{ID: "owner", AccountID: privAcctA, send: make(chan []byte, 8)}
 	foreign = &BrowserConn{ID: "foreign", AccountID: privAcctB, send: make(chan []byte, 8)}
@@ -98,20 +103,24 @@ func TestScopeFailsClosedOnAnyDecodeProblem(t *testing.T) {
 func protoSessionStructNames(t *testing.T) []string {
 	t.Helper()
 	fset := token.NewFileSet()
-	entries, err := os.ReadDir("../protocol")
-	if err != nil {
-		t.Fatal(err)
-	}
 	var files []*ast.File
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(fset, "../protocol/"+e.Name(), nil, 0)
+	// Shared shell DTOs are protocol aliases: scan their definitions too so moving
+	// a schema to contracts cannot bypass the session-scope completeness gate.
+	for _, dir := range []string{"../protocol", "../../../contracts/shellpolicy", "../../../contracts/runtimelifecycle"} {
+		entries, err := os.ReadDir(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		files = append(files, f)
+		for _, e := range entries {
+			if !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+				continue
+			}
+			f, err := parser.ParseFile(fset, dir+"/"+e.Name(), nil, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			files = append(files, f)
+		}
 	}
 	var names []string
 	for _, f := range files {
@@ -160,20 +169,31 @@ func types2str(e ast.Expr) string {
 // scopeRegistry has one zero value of every protocol struct that names a
 // session. TestScopeRegistryIsComplete fails when a new one is missing.
 var scopeRegistry = map[string]any{
-	"ResolveProgressOrigin": protocol.ResolveProgressOrigin{},
-	"ProgressOriginResult":  protocol.ProgressOriginResult{},
-	"ReadSessionOrigin":     protocol.ReadSessionOrigin{},
-	"SessionOriginResult":   protocol.SessionOriginResult{},
-	"ReadCommit":            protocol.ReadCommit{},
-	"CommitResult":          protocol.CommitResult{},
-	"ReadPluginCatalog":     protocol.ReadPluginCatalog{},
-	"PluginCatalogResult":   protocol.PluginCatalogResult{},
-	"MCPSignIn":             protocol.MCPSignIn{},
-	"MCPSignInResult":       protocol.MCPSignInResult{},
-	"ReadWorkspaceFile":     protocol.ReadWorkspaceFile{},
-	"WorkspaceFileResult":   protocol.WorkspaceFileResult{},
-	"SessionStarted":        protocol.SessionStarted{},
-	"SessionOutput":         protocol.SessionOutput{}, "SessionStateChanged": protocol.SessionStateChanged{},
+	"PluginMarketplacePolicy":     protocol.PluginMarketplacePolicy{},
+	"AttachmentCleanupRequest":    protocol.AttachmentCleanupRequest{},
+	"LocalWorkspaceControl":       protocol.LocalWorkspaceControl{},
+	"LocalWorkspaceControlResult": protocol.LocalWorkspaceControlResult{},
+	"Launch":                      protocol.SupervisorLaunch{},
+	"WorkspaceRuntimePrepared":    protocol.WorkspaceRuntimePrepared{},
+	"ShellGrant":                  protocol.ShellGrant{},
+	"ResolveProgressOrigin":       protocol.ResolveProgressOrigin{},
+	"ProgressOriginResult":        protocol.ProgressOriginResult{},
+	"ReadSessionOrigin":           protocol.ReadSessionOrigin{},
+	"SessionOriginResult":         protocol.SessionOriginResult{},
+	"ReadCommit":                  protocol.ReadCommit{},
+	"PlanInputRequest":            protocol.PlanInputRequest{},
+	"PlanInputResult":             protocol.PlanInputResult{},
+	"CommitResult":                protocol.CommitResult{},
+	"ReadPluginCatalog":           protocol.ReadPluginCatalog{},
+	"PluginCatalogResult":         protocol.PluginCatalogResult{},
+	"MCPSignIn":                   protocol.MCPSignIn{},
+	"MCPSignInResult":             protocol.MCPSignInResult{},
+	"WorkspaceExplorerRequest":    protocol.WorkspaceExplorerRequest{},
+	"WorkspaceExplorerResult":     protocol.WorkspaceExplorerResult{},
+	"ReadWorkspaceFile":           protocol.ReadWorkspaceFile{},
+	"WorkspaceFileResult":         protocol.WorkspaceFileResult{},
+	"SessionStarted":              protocol.SessionStarted{},
+	"SessionOutput":               protocol.SessionOutput{}, "SessionStateChanged": protocol.SessionStateChanged{},
 	"ApplySessionPlugins":  protocol.ApplySessionPlugins{},
 	"SessionPluginsResult": protocol.SessionPluginsResult{},
 	"SessionMetaChanged":   protocol.SessionMetaChanged{}, "SessionBackgroundChanged": protocol.SessionBackgroundChanged{},
@@ -300,6 +320,12 @@ func TestPrivateSessionNeverReachesAForeignAccount(t *testing.T) {
 				if name != "DaemonDisconnected" || strings.Contains(got, scopeSecretID) {
 					t.Fatalf("a foreign account received a private session's %s: %s", name, got)
 				}
+			}
+			if name == "DaemonDisconnected" {
+				if len(owner.send) != 0 {
+					t.Fatal("unowned daemon metadata was delivered")
+				}
+				return
 			}
 			if len(owner.send) != 1 {
 				t.Fatalf("the owner did not receive its own %s", name)

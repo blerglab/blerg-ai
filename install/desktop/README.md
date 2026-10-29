@@ -129,7 +129,7 @@ disabled until you tick the acknowledgement.
 
 Sessions the board starts through the runner's API get the same default: the sandbox when the daemon has its image, where the agent reaches the board and runner
 over the `blerg-sandbox` network but has no git credentials (it can commit, not push). Opt out
-onto the host with `runtime: daemon`, or `BLERG_BOARD_RUNNER_RUNTIME=daemon` on the board. A v1
+onto the host with `runtime: daemon`; a board runs on a host only where its owner chose it in Where it runs. A v1
 start never *asks* to bypass permission prompts, but an Agent session runs non-interactively and
 its engine bypasses them regardless, on either runtime.
 
@@ -161,6 +161,11 @@ container and ends with the `docker rm`.
 
 - **Stop:** `docker compose down` (from `install/desktop`). The daemon keeps running and
   reconnects on its own; `./daemon/install.sh uninstall` removes it.
+- **WSL2 after Windows restart:** setup offers an optional Windows logon task to start and
+  keep the distro running at sign-in, including on battery (default No; `--yes` does not opt in).
+  Enable it with `./daemon/install.sh wsl-startup enable`; inspect or remove it with
+  `wsl-startup status` / `wsl-startup disable`. The enabled daemon service and user lingering
+  handle distro boot separately. See [WSL startup prerequisites and diagnostics](DAEMON.md#wsl2-return-after-windows-restart).
 - **Start again:** `./blerg-up.sh` (rebuilds by default so a `git pull` takes effect; `--no-build`
   to skip, `--no-open` to keep the browser closed).
 - **Upgrade:** `git pull && ./blerg-up.sh`; database migrations run automatically. On a large
@@ -173,7 +178,7 @@ container and ends with the `docker rm`.
   saying why it restarted, Codex agent sessions, resuming after a usage limit, the usage meters),
   and a session left with a revoked messaging token is given a new one only when both the stack
   and the daemon are updated;
-  `docker build --build-arg UID=$(id -u) -t blerg-runner-sandbox:latest ../../runner/sandbox`
+  `docker build -f ../../runner/sandbox/Dockerfile --build-arg UID=$(id -u) -t blerg-runner-sandbox:latest ../..`
   rebuilds the sandbox image (keep the `UID` argument, or files the sandbox writes into your repos
   may end up owned by the wrong user). The engines inside it are pinned, so a rebuild only changes
   them when the pins changed; [`docs/sandbox-image.md`](../../docs/sandbox-image.md) covers
@@ -220,3 +225,21 @@ and `rm -rf ../../bin`. These are left for you to remove by hand, on purpose:
   `BLERG_RUNNER_PROVISION_CLAUDE_MD`, remove the block between the `blerg-runner-messaging`
   markers in `~/.claude/CLAUDE.md`.
 - Repositories cloned into your repos root: they are yours and stay.
+
+## Workspace 0.5.0 upgrade status
+
+Update core, runner and the desktop daemon together and retain database backups.
+Core migrations 026/027 add desktop credentials and shell policy; runner migrations
+076–083 add selection, ownership, runtime, settlement, consent and completion state.
+The installer builds the contained Linux workspace worker (protocol 3). Sandbox
+builds use the repository root as their Docker build context.
+
+Workspace v2 and owner shells remain gated off. Existing single-repository sessions
+retain scalar contracts. A discovery-capable peer without workspace v2 refuses
+checked-out selections, including a single repository, rather than losing source
+identity through a bare-name downgrade. Sandbox file viewing requires an in-container
+reader and returns unavailable when that binding is absent. Do not enable a
+capability from discovery availability or a successful image build. See
+[workspace integration](../../docs/workspace-integration.md) for remaining gates,
+including physical Mac and Docker engine restart acceptance. Reinstalling does
+not authorize deleting retained workspace allocations.

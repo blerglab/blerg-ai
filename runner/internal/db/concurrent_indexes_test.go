@@ -186,3 +186,22 @@ func TestStrokeKindsMatchTheIndex(t *testing.T) {
 		t.Errorf("StrokeKindsSQL = %s, topics.StrokeKinds = %s", db.StrokeKindsSQL, want)
 	}
 }
+
+// The right predicate on the wrong columns is still an obsolete definition (#121).
+func TestConcurrentIndexWithWrongColumnsIsRebuilt(t *testing.T) {
+	ctx := context.Background()
+	pool := migratedPool(t, 2)
+	if _, err := pool.Exec(ctx, `CREATE INDEX agent_events_strokes_idx ON agent_events (seq, session_id) WHERE kind IN `+db.StrokeKindsSQL); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureConcurrentIndexes(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	var def string
+	if err := pool.QueryRow(ctx, `SELECT pg_get_indexdef('agent_events_strokes_idx'::regclass)`).Scan(&def); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(def, "(session_id, seq)") {
+		t.Fatalf("wrong index columns survived: %s", def)
+	}
+}

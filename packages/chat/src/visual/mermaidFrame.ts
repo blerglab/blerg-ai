@@ -21,6 +21,57 @@ export const MERMAID_FRAME_CSP =
 const BOOT = `
 (() => {
   const scratch = document.getElementById('scratch')
+  // Some renderers (event modeling) hardcode XHTML labels and ignore htmlLabels:false.
+  // Convert their already laid-out boxes to measured SVG text inside the isolated document.
+  // No XHTML crosses the port or reaches the image; the parent still sanitizes every SVG.
+  function textLabels(source, host, config) {
+    const doc = new DOMParser().parseFromString(source, 'image/svg+xml')
+    // Mermaid's XHTML may contain HTML-only <br> or named entities. Parse that form as HTML
+    // before serializing valid XML; the parent's SVG allowlist still checks the final result.
+    const root = doc.querySelector('parsererror') && source.includes('<foreignObject')
+      ? new DOMParser().parseFromString(source, 'text/html').querySelector('svg')
+      : doc.documentElement
+    if (!root) return source
+    const labels = [...root.querySelectorAll('foreignObject')]
+    if (!labels.length) return source
+    host.append(root)
+    const ns = 'http://www.w3.org/2000/svg'
+    for (const label of labels) {
+      const content = label.querySelector('div')
+      const lines = (content ? content.innerText : label.textContent).split('\\n').map(line => line.trim()).filter(Boolean)
+      const x = Number(label.getAttribute('x') || 0)
+      const y = Number(label.getAttribute('y') || 0)
+      const width = Number(label.getAttribute('width'))
+      const text = document.createElementNS(ns, 'text')
+      text.setAttribute('font-family', config.fontFamily || 'sans-serif')
+      text.setAttribute('font-size', '14')
+      // Preserve the label's computed foreground (some diagram types use fixed light boxes).
+      text.setAttribute('fill', content ? getComputedStyle(content).color : 'currentColor')
+      if (label.hasAttribute('transform')) text.setAttribute('transform', label.getAttribute('transform'))
+      label.replaceWith(text)
+      let row = 0
+      for (const line of lines) {
+        let span = document.createElementNS(ns, 'tspan')
+        function append() {
+          span.setAttribute('x', String(x))
+          span.setAttribute('y', String(y + 14 + row++ * 17))
+          text.append(span)
+        }
+        append()
+        for (const word of line.split(/\\s+/)) {
+          const before = span.textContent
+          span.textContent = before ? before + ' ' + word : word
+          if (before && width > 0 && span.getComputedTextLength() > width) {
+            span.textContent = before
+            span = document.createElementNS(ns, 'tspan')
+            span.textContent = word
+            append()
+          }
+        }
+      }
+    }
+    return new XMLSerializer().serializeToString(root)
+  }
   let serial = 0
   let port = null
   addEventListener('message', event => {
@@ -33,7 +84,8 @@ const BOOT = `
       scratch.append(host)
       try {
         mermaid.initialize(data.config)
-        const { svg } = await mermaid.render('blerg-diagram-' + (++serial), data.source, host)
+        const { svg: drawn } = await mermaid.render('blerg-diagram-' + (++serial), data.source, host)
+        const svg = data.normalizeTextLabels === false ? drawn : textLabels(drawn, host, data.config)
         port.postMessage({ type: 'rendered', id: data.id, svg })
       } catch (error) {
         port.postMessage({ type: 'error', id: data.id, message: String((error && error.message) || error) })
@@ -124,8 +176,9 @@ function start(): Frame {
   return current
 }
 
-/** Draws `source` with `config` inside the sandboxed frame and returns Mermaid's SVG, unsanitized. */
-export async function renderInFrame(source: string, config: Record<string, unknown>): Promise<string> {
+/** Draws inside the sandbox and returns unsanitized SVG. Compatibility controls can request
+ *  unmodified bundle output; production converts hardcoded XHTML labels to SVG text. */
+export async function renderInFrame(source: string, config: Record<string, unknown>, normalizeTextLabels = true): Promise<string> {
   const current = start()
   await current.ready
   if (frame !== current) throw new Error('the diagram renderer was replaced')
@@ -138,6 +191,6 @@ export async function renderInFrame(source: string, config: Record<string, unkno
       discard(current, 'the diagram renderer was restarted')
     }, timeouts.render)
     waiting.set(id, { resolve, reject, timer })
-    current.port.postMessage({ type: 'render', id, source, config })
+    current.port.postMessage({ type: 'render', id, source, config, normalizeTextLabels })
   })
 }

@@ -173,3 +173,14 @@ func CountMarks(ctx context.Context, tx pgx.Tx, sessionID string) (int, error) {
 	err := tx.QueryRow(ctx, `SELECT count(*) FROM agent_events WHERE session_id = $1 AND kind = 'mark'`, sessionID).Scan(&n)
 	return n, err
 }
+
+// ClaimMarkRequest shares the append transaction, so failures leave no retry claim behind.
+// The existing idempotency sweep bounds claim retention; deterministic event IDs also prevent
+// an identical retry from appending a second event after a claim has been swept.
+func ClaimMarkRequest(ctx context.Context, tx pgx.Tx, scope, key, hash, sessionID string) (bool, error) {
+	var held string
+	err := tx.QueryRow(ctx, `INSERT INTO runner_idempotency (scope, key, request_hash, session_id)
+ VALUES ($1, $2, $3, $4) ON CONFLICT (scope, key) DO UPDATE SET key = EXCLUDED.key
+ RETURNING request_hash`, scope, key, hash, sessionID).Scan(&held)
+	return held == hash, err
+}

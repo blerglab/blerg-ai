@@ -191,6 +191,7 @@ func (a *API) refreshClusterModelCatalog(parent context.Context, jm *JobManager,
 		list.Source = models.SourceLive
 		list.Refreshing = false
 		list.Error = ""
+		list.Reconnect = false
 		list.DaemonID = ""
 		if list.FetchedAt == nil {
 			now := time.Now().UTC()
@@ -201,6 +202,9 @@ func (a *API) refreshClusterModelCatalog(parent context.Context, jm *JobManager,
 	entry.refreshing = false
 	if err != nil {
 		entry.list.Error = clusterModelErrorMessage(key.engine, err)
+		if provider, ok := clusterModelProviderFor(key.engine); ok && provider.reconnect != nil {
+			entry.list.Reconnect = provider.reconnect(err)
+		}
 		now := time.Now()
 		if c.now != nil {
 			now = c.now()
@@ -232,6 +236,7 @@ func decodeStoredClusterModelList(engine string, raw json.RawMessage, fetchedAt 
 	list.FetchedAt = &fetchedAt
 	list.Refreshing = false
 	list.Error = ""
+	list.Reconnect = false
 	list.DaemonID = ""
 	return list, true
 }

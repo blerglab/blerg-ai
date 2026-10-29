@@ -37,15 +37,15 @@ function RepoRow({ board, repo, desktops, onChanged }: { board: Board; repo: str
     <li className="repo-resolve-row">
       <p className="pop-foot warn"><span className="mono">{repo}</span> is a folder name on a desktop. The cluster clones owner/name: pick the desktop this folder lives on and look up its remote.</p>
       <div className="repo-resolve-controls">
-        <select aria-label={`Desktop for ${repo}`} value={daemon} disabled={busy} onChange={e => { setDaemon(e.target.value); setFound(null); }}>
+        <select className="settings-field" aria-label={`Desktop for ${repo}`} value={daemon} disabled={busy} onChange={e => { setDaemon(e.target.value); setFound(null); }}>
           <option value="">Pick the desktop this folder lives on…</option>
           {desktops.map(d => <option key={d.daemon_id} value={d.daemon_id}>{d.name}</option>)}
         </select>
-        <button className="btn small" type="button" disabled={busy || !daemon} onClick={() => void lookUp()}>Look up {repo}</button>
+        <button className="settings-action btn small" type="button" disabled={busy || !daemon} onClick={() => void lookUp()}>Look up {repo}</button>
       </div>
       {found?.full_name && <div className="repo-resolve-controls" role="status">
         <span className="mono">{repo} → {found.full_name}</span>
-        <button className="btn small" type="button" disabled={busy} onClick={() => void save(found.full_name!)}>Save {found.full_name}</button>
+        <button className="settings-action btn small" type="button" disabled={busy} onClick={() => void save(found.full_name!)}>Save {found.full_name}</button>
       </div>}
       {found?.problem && <p className="pop-foot" role="status">{found.problem}</p>}
       {error && <p className="pop-foot warn" role="alert">{error}</p>}

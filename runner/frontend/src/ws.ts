@@ -61,6 +61,7 @@ function connect(): void {
   let opened = false
 
   ws.onopen = () => {
+    if (socket !== ws) return
     opened = true
     clearRefreshAttempted()
     clearSignInStuck()
@@ -77,6 +78,7 @@ function connect(): void {
   }
 
   ws.onmessage = (event: MessageEvent) => {
+    if (socket !== ws) return
     let msg: ServerMessage
     try {
       msg = JSON.parse(event.data as string) as ServerMessage
@@ -90,7 +92,8 @@ function connect(): void {
   }
 
   ws.onclose = () => {
-    if (socket === ws) socket = null
+    if (socket !== ws) return
+    socket = null
     closeHandlers.forEach(h => {
       try {
         h()
@@ -210,6 +213,18 @@ if (typeof document !== 'undefined') {
 onSignInRecovered(() => {
   backoff = 2000
   connect()
+})
+
+window.addEventListener('blerg-identity-changed', () => {
+  clearReconnectTimer()
+  const previous = socket
+  socket = null
+  if (previous) {
+    previous.close()
+    closeHandlers.forEach(handler => { try { handler() } catch { /* stale UI subscriber */ } })
+    backoff = 2000
+    connect()
+  }
 })
 
 // Start connecting immediately on module load.

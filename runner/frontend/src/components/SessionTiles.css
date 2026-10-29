@@ -1,0 +1,14 @@
+.session-tools-slot { display: contents; }
+.session-tiles { display: flex; flex-direction: column; align-items: center; gap: 10px; overflow-y: auto; overflow-x: hidden; min-height: 0; flex: 1; width: 38px; padding: 4px 0; scrollbar-width: none; }
+.session-tile { position: relative; width: 32px; height: 32px; flex: 0 0 32px; border: 1px solid transparent; border-radius: 4px; color: #fff; font: 600 11px var(--sans, sans-serif); padding: 0; cursor: pointer; }
+.session-tile.active { outline: 2px solid var(--selected-border); outline-offset: 1px; }
+.session-tile:hover, .session-tile:focus-visible { outline: 2px solid var(--chalk); outline-offset: 1px; }
+.session-tile-state { position: absolute; right: -1px; bottom: -3px; display: grid; place-items: center; border-radius: 3px; min-width: 13px; height: 13px; background: var(--basalt); }
+.session-tile-children { position: absolute; top: -4px; right: -2px; border-radius: 3px; background: var(--basalt); color: var(--fog); font-size: 9px; padding: 0 2px; }
+.session-tile-unread { position: absolute; top: 2px; left: 2px; display: block; width: 5px; height: 5px; border-radius: 50%; background: var(--selected-border); }
+.session-rail-bell { margin-top: auto; flex: 0 0 auto; }
+
+.session-tile-preview-children { margin-left: 21px; padding-left: 8px; border-left: 1px solid var(--stone); }
+/* Execution type and state have separate corners; the project monogram keeps its center. */
+.session-tile > .runtime-icon { position: absolute; left: -2px; bottom: -3px; width: 13px; height: 13px; border-radius: 3px; background: var(--basalt); align-items: center; justify-content: center; }
+.session-tile > .runtime-icon svg { width: 12px; height: 12px; }

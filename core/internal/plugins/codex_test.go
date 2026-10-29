@@ -21,3 +21,19 @@ func TestCodexRegistryPreservesMarketplaceValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexNativeMarketplaceKeepsEngineAndOperatorPolicy(t *testing.T) {
+	allow, _ := pluginspec.ParseAllowlist("codex:openai-curated")
+	service := &Service{allow: allow}
+	e := Entry{Marketplace: "codex:openai-curated", Plugin: "selected"}
+	if err := service.Validate("codex", []Entry{e}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Validate("claude", []Entry{e}); err == nil {
+		t.Fatal("Claude accepted native Codex identity")
+	}
+	e.Marketplace = "codex:unapproved"
+	if err := service.Validate("codex", []Entry{e}); err == nil {
+		t.Fatal("native Codex bypassed allowlist")
+	}
+}

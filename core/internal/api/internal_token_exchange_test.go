@@ -92,7 +92,7 @@ func TestInternalTokenExchangeIssuesScopedShortLivedToken(t *testing.T) {
 	if p.Kind != "agent" || p.Project != "board-7" || p.OnBehalfOf != e.acctA || p.Lineage != e.acctA {
 		t.Errorf("claims kind/project/obo/lineage = %q/%q/%q/%q", p.Kind, p.Project, p.OnBehalfOf, p.Lineage)
 	}
-	if len(p.Caps) != 2 || !p.Has("card.read") || !p.Has("card.write") || p.Has("column.write") {
+	if len(p.Caps) != 3 || !p.Has("card.read") || !p.Has("card.write") || !p.Has("column.write") {
 		t.Errorf("caps = %v", p.Caps)
 	}
 	if d := time.Until(time.Unix(p.ExpiresAt, 0)); d < 9*time.Minute || d > 10*time.Minute+5*time.Second {
@@ -183,7 +183,7 @@ func TestInternalTokenExchangeProofRules(t *testing.T) {
 }
 
 // A proof token can never yield more than it holds: a read-only token gets a read-only exchange
-// token, a board token gets no column.write, and a cron token (session.start) delegates the target.
+// token, a board token gets what it holds, and a cron token (session.start) delegates the target.
 func TestInternalTokenExchangeCapsFollowTheProof(t *testing.T) {
 	e := newExchangeEnv(t)
 	ctx := context.Background()
@@ -201,9 +201,9 @@ func TestInternalTokenExchangeCapsFollowTheProof(t *testing.T) {
 		want  []string
 	}{
 		"read-only token": {map[string]any{"token_id": readOnly.ID}, []string{"card.read"}},
-		"board token":     {map[string]any{"token_id": boardTok.ID}, []string{"card.read", "card.write"}},
-		"cron token":      {map[string]any{"token_id": cronID}, []string{"card.read", "card.write"}},
-		"human session":   {map[string]any{"session_id": e.sidA}, []string{"card.read", "card.write"}},
+		"board token":     {map[string]any{"token_id": boardTok.ID}, []string{"card.read", "card.write", "column.write"}},
+		"cron token":      {map[string]any{"token_id": cronID}, []string{"card.read", "card.write", "column.write"}},
+		"human session":   {map[string]any{"session_id": e.sidA}, []string{"card.read", "card.write", "column.write"}},
 	} {
 		body := map[string]any{"account_id": e.acctA, "target": "board", "board_id": "b1"}
 		for k, v := range tc.proof {

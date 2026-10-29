@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { resetKeptAttachments } from '@blerglab/chat'
 import { getAccessToken } from '../authClient'
 import { connected } from '../ws'
 import { SIGN_IN_GRACE_MS, markSignInStuck, retrySignIn, useSignInState } from '../signIn'
@@ -20,6 +21,10 @@ export default function SignInBanner() {
     }, SIGN_IN_GRACE_MS)
     return () => clearTimeout(t)
   }, [])
+  // A sign-in that has ended takes the files waiting on this device with it (#231 review, 7).
+  useEffect(() => {
+    if (state === 'ended') void resetKeptAttachments()
+  }, [state])
   if (state === 'ok') return null
   const ended = state === 'ended'
   return (

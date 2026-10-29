@@ -139,3 +139,82 @@ describe('Mermaid policy: review payloads', () => {
     expect(drawn).not.toMatch(/[\r\u00a0\u2028]/)
   })
 })
+
+// Corpus regressions: these are passive presentation values, not loading capabilities.
+describe('Mermaid corpus compatibility', () => {
+  it('allows only standard xml:space values among XML attributes', () => {
+    for (const value of ['preserve', 'default']) {
+      expect(sanitizeSvg(`<svg xmlns="http://www.w3.org/2000/svg"><text xml:space="${value}">A B</text></svg>`)).toContain(`xml:space="${value}"`)
+    }
+    for (const attribute of ['xml:space="unknown"', 'xml:base="/private"', 'xml:lang="en"']) {
+      expect(() => sanitizeSvg(`<svg xmlns="http://www.w3.org/2000/svg"><text ${attribute}>A</text></svg>`)).toThrow('Unsupported SVG attribute')
+    }
+  })
+  it('allows numeric quadrant radii and literal kanban assignment metadata', () => {
+    expect(() => validateMermaid('quadrantChart\n classDef urgent color:#ff0000,radius:8\n A:::urgent: [0.2, 0.8]')).not.toThrow()
+    expect(() => validateMermaid('kanban\n todo[To do]\n a[Draft]@{ assigned: "Writer", priority: "High" }')).not.toThrow()
+    for (const source of ['quadrantChart\n classDef urgent radius:url(/private)',
+      'kanban\n todo[To do]\n a[Draft]@{ assigned: "https://example.invalid" }',
+      'kanban\n todo[To do]\n a[Draft]@{ icon: "fa:user" }']) {
+      expect(() => validateMermaid(source)).toThrow()
+    }
+  })
+})
+
+describe('Mermaid statement separators', () => {
+  // flow.jison: CLASS SPACE idString SPACE idString. Both operands accept comma,
+  // Unicode, and punctuation tokens; neither is restricted to a CSS identifier.
+  const classAssignments = [
+    'é red', 'A red,blue', 'é,节点 red,blue', 'A 色',
+    'A/B red', 'A red.blue', 'A:B red:blue', 'A&B red*', '123 456,789', 'A#1 default,v-1',
+  ]
+  it.each(classAssignments)('accepts the flowchart class operands %s after CSS', assignment => {
+    const source = `flowchart LR\nA-->B\nclassDef red fill:red; class ${assignment}`
+    expect(validateMermaid(source)).toBe(source)
+  })
+  it.each(classAssignments)('checks every style after class %s', assignment => {
+    for (const header of ['flowchart LR', 'graph LR']) {
+      for (const separator of ['; ', '\n']) {
+        for (const statement of ['style B', 'classDef blue', 'linkStyle 0']) {
+          const source = `${header}\nA-->B\nclassDef red fill:red; class ${assignment}${separator}${statement} fill:gold,position:fixed`
+          expect(() => validateMermaid(source), source).toThrow('the style property "position" not allowed')
+        }
+        const source = `${header}\nA-->B\nclassDef red fill:red; class ${assignment}${separator}style B fill:var(--evil)`
+        expect(() => validateMermaid(source), source).toThrow('the fill value "var(--evil)" not allowed')
+      }
+    }
+  })
+  it('checks every style on a line, separately from class assignments', () => {
+    expect(() => validateMermaid('flowchart LR; A-->B; classDef blue fill:lightblue; class A blue; style B fill:gold; linkStyle 0 stroke:red')).not.toThrow()
+    expect(() => validateMermaid('flowchart LR; A-->B; classDef blue fill:lightblue; class A blue; style B position:absolute')).toThrow('position')
+    // Semicolons between declarations remain checked, as state styles require.
+    expect(() => validateMermaid('stateDiagram-v2\n classDef blue fill:red;position:absolute')).toThrow('position')
+  })
+  it.each(['stateDiagram', 'stateDiagram-v2'])(
+    'checks the entire CSS line in %s, including class-looking declarations', header => {
+      for (const keyword of ['classDef blue', 'style A']) {
+        for (const tail of [
+          'class:foo;position:fixed',
+          'class foo;fill:var(--evil)',
+          'class foo;stroke:u\\72l(/private)',
+          'class foo;fill:expression(1)',
+          'style A fill:red;position:fixed',
+          'classDef red fill:red;position:fixed',
+        ]) {
+          const source = `${header}\n[*] --> A\n${keyword} fill:red;${tail}\nclass A blue`
+          expect(() => validateMermaid(source), source).toThrow(/line 3: .*not allowed/)
+        }
+      }
+    },
+  )
+  it('checks styles after real class assignments on the same line and later lines', () => {
+    expect(() => validateMermaid('flowchart LR; A-->B; class A blue; style A fill:red; class B blue; style B position:fixed')).toThrow('position')
+    expect(() => validateMermaid('stateDiagram-v2\n[*] --> A\nclass A blue\nclassDef blue fill:red;stroke:var(--evil)')).toThrow('stroke value')
+    expect(() => validateMermaid('stateDiagram-v2\n[*] --> A\nclassDef blue fill:red;stroke:blue;stroke-width:2px\nclass A blue')).not.toThrow()
+    expect(() => validateMermaid('---\ntitle: State colors\n---\n%% comment\nSTATEdiagram-v2\nclassDef blue fill:red;class:foo;position:fixed')).toThrow('line 6:')
+  })
+  it('accepts newline-separated shape literals and refuses loading keys there', () => {
+    expect(() => validateMermaid('flowchart LR\n A@{\n shape: hex\n label: "Review image"\n }')).not.toThrow()
+    expect(() => validateMermaid('flowchart LR\n A@{\n shape: hex\n img: "/private"\n }')).toThrow('"img"')
+  })
+})

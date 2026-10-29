@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef } from 'react'
+import '../../../../packages/settings/settings.css'
+import { type ReactNode, useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useSessionStore } from '../hooks/useSessionStore'
 import { defaultSessionName } from '../lib/sessionName'
@@ -6,6 +7,8 @@ import { keepNotice, matchModel, placeWords, type ModelPick } from '../lib/model
 import { apiFetch } from '../apiFetch'
 import { coreOrigin } from '../authClient'
 import RunColumn from './RunColumn'
+import { workspaceRuntimeAvailable } from '../lib/workspaceCapabilities'
+import WorkspacePicker, { type WorkspaceSelection } from './WorkspacePicker'
 import McpPicker from './McpPicker'
 import LaunchPermissions from './LaunchPermissions'
 import { NO_LAUNCH_PERMISSIONS, effectiveLaunchPermissions, type LaunchPermissionsValue } from '../lib/launchPermissions'
@@ -45,7 +48,7 @@ const sectionLabel: React.CSSProperties = {
   fontWeight: 700,
   letterSpacing: '0.1em',
   textTransform: 'uppercase',
-  marginBottom: 8,
+  marginBottom: 6,
   display: 'block',
 }
 
@@ -70,6 +73,7 @@ const createPlanStyle: React.CSSProperties = {
   border: '1px solid var(--scree-2)',
   borderRadius: 6,
   padding: '8px 12px',
+  overflowWrap: 'anywhere',
   marginTop: 8,
   color: 'var(--fog-dim)',
   fontSize: 13,
@@ -84,7 +88,8 @@ const itemSelected: React.CSSProperties = {
 // Remembers the last-used Engine/Model across launches so people aren't
 // re-picking every time — per-browser (localStorage), not synced across
 // machines. Guarded: localStorage can throw in privacy-restricted contexts.
-const LAST_BOARD_KEY = 'blerg.launch.board'
+// What an older version remembered as the launch board; deleted when the sheet opens.
+const LEGACY_BOARD_KEY = 'blerg.launch.board'
 const LAST_ENGINE_KEY = 'blerg.launch.engine'
 const LAST_MODEL_KEY = 'blerg.launch.model'
 // The last effort the person explicitly picked. Only an explicit pick is
@@ -107,6 +112,14 @@ function loadStored(key: string, valid: (v: unknown) => v is string): string | n
     return valid(v) ? v : null
   } catch {
     return null
+  }
+}
+
+function forgetStored(key: string) {
+  try {
+    localStorage.removeItem(key)
+  } catch {
+    // ignore
   }
 }
 
@@ -176,6 +189,10 @@ function partState(p: LaunchCacheData[PartName]): PartState {
   return !p ? 'waiting' : isFresh(p) ? 'fresh' : 'cached'
 }
 
+function RepositoryActions({modern,hidden,children}:{modern:boolean;hidden:boolean;children:ReactNode}) {
+ return modern ? <div hidden={hidden}>{children}</div> : <>{children}</>
+}
+
 export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const navigate = useNavigate()
   const addPendingSession = useSessionStore(s => s.addPendingSession)
@@ -209,6 +226,9 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const [daemons, setDaemons] = useState<DaemonApiInfo[]>(() => boot.cache.daemons?.value ?? [])
   const [search, setSearch] = useState('')
   const [selectedRepo, setSelectedRepo] = useState<RepoInfo | null>(null)
+  const [workspacePick, setWorkspacePick] = useState<{scope: string; selection: WorkspaceSelection | null; names: string[]}>({scope: '', selection: null, names: []})
+  const [desktopScope, setDesktopScope] = useState(0)
+
   // "No repository" is the default pick: a session tied to no repository.
   // On the cluster that is an empty, throwaway workspace; on a daemon it is a
   // new scratch folder under the repos root, named for the person
@@ -216,6 +236,8 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const [noRepoMode, setNoRepoMode] = useState(true)
   const [scratchSuffix, setScratchSuffix] = useState(() => newScratchSuffix())
   const [scratchRenaming, setScratchRenaming] = useState(false)
+  const [repoActions, setRepoActions] = useState(false)
+  const [pickerReset, setPickerReset] = useState(0)
   const [newFolderMode, setNewFolderMode] = useState(false)
   // Visibility of a new repository created on the cluster (private by default).
   const [visibility, setVisibility] = useState<'private' | 'public'>('private')
@@ -227,13 +249,25 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const [freeTextMode, setFreeTextMode] = useState(false)
   const [freeTextProvider, setFreeTextProvider] = useState('github')
   const [selectedDaemon, setSelectedDaemon] = useState<DaemonApiInfo | null>(() => boot.defaults?.daemon ?? null)
+  useEffect(() => {
+    const invalidate = () => {
+      setDesktopScope(n => n + 1); setNoRepoMode(false); setSelectedRepo(null); setSelectedDaemon(null); setDaemons([]); setRepos([])
+      void fetchDaemons().then(list => { setDaemons(list); if (list.length === 1) setSelectedDaemon(list[0]) }).catch(() => setDaemons([]))
+      void fetchRepos().then(part => setRepos(part.repos)).catch(() => setRepos([]))
+    }
+    window.addEventListener('blerg-desktop-scope-changed', invalidate)
+    window.addEventListener('blerg-desktop-inventory-changed', invalidate)
+    return () => { window.removeEventListener('blerg-desktop-scope-changed', invalidate); window.removeEventListener('blerg-desktop-inventory-changed', invalidate) }
+  }, [])
   const [initialPrompt, setInitialPrompt] = useState('')
   // MCP servers and tools chosen for this session (McpPicker). Empty: none, and no `mcp` is sent.
   const boards = useSessionBoards(open)
-  const [boardId, setBoardId] = useState(() => loadStored(LAST_BOARD_KEY, (v): v is string => typeof v === 'string' && v.length <= 200) ?? '')
+  // Never remembered: a launch board gives the session Full access to it, so every launch starts
+  // with none (#302); board access can be given in the session's Permissions later.
+  const [boardId, setBoardId] = useState('')
+  useEffect(() => { forgetStored(LEGACY_BOARD_KEY) }, [])
   function pickBoard(id: string) {
     setBoardId(id)
-    saveDefault(LAST_BOARD_KEY, id)
   }
   const [mcp, setMcp] = useState<McpSelectionEntry[]>([])
   // Permissions given before the session starts (LaunchPermissions); only what still applies is sent.
@@ -277,6 +311,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   // credentials; an unscoped daemon catalog is never used for cluster. On a
   // daemon runtime it waits until a daemon is selected rather than ask
   // without one.
+  const workspaceScope = `${desktopScope}:${runtime}:${selectedDaemon?.id ?? ''}:${selectedDaemon?.ownership_revision ?? ''}:${selectedDaemon?.connection_generation ?? ''}`
   const onCluster = runtime === 'cluster'
   const listDaemonId = onCluster ? undefined : selectedDaemon?.id
   // Asked at once — of the cached daemon, when the sheet opened from cache —
@@ -585,8 +620,18 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
 
   const folderName = search.trim()
   // The repository the session will run in, by name, for its default name.
-  const repoForName = noRepoMode ? '' : selectedRepo ? (selectedRepo.name || selectedRepo.full_name) : newFolderMode || freeTextMode ? folderName : ''
-  const runningTitles = useSessionStore(s => s.sessions).filter(s => !s.archived_at && !s.ended_at && !['ended', 'error', 'stopped'].includes(s.status)).map(s => s.title ?? '')
+  const repoForName = noRepoMode ? '' : selectedRepo ? (selectedRepo.name || selectedRepo.full_name) : newFolderMode || freeTextMode ? folderName : workspacePick.scope === workspaceScope ? workspacePick.names[0] ?? '' : ''
+  const sessions = useSessionStore(s => s.sessions)
+  // Reuse the scoped session list; do not retain desktop paths in another cache.
+  const recentRepos = [...sessions]
+    .filter(s => runtime === 'cluster' ? s.runtime === 'cluster' : s.daemon_id === selectedDaemon?.id)
+    .sort((a, b) => b.started_at.localeCompare(a.started_at))
+    .flatMap(s => {
+      if (!s.repo) return []
+      const prefix = `${selectedDaemon?.repos_root}/`
+      return [runtime !== 'cluster' && s.project_path.startsWith(prefix) ? s.project_path.slice(prefix.length) : s.repo]
+    })
+  const runningTitles = sessions.filter(s => !s.archived_at && !s.ended_at && !['ended', 'error', 'stopped'].includes(s.status)).map(s => s.title ?? '')
   const defaultName = defaultSessionName(repoForName, runningTitles)
   const name = typedName ?? defaultName
   // What the Repository box says, read as a repository: owner/name (on the
@@ -594,7 +639,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const typedRef: RepoRef | null = parseRepoInput(folderName, freeTextProvider)
   const onDaemonRuntime = runtime !== 'cluster'
 
-  const filteredRepos = repos.filter(r =>
+  const filteredRepos = repos.filter(r => runtime !== 'cluster' || !r.is_local).filter(r =>
     search === '' ||
     r.name.toLowerCase().includes(search.toLowerCase()) ||
     r.full_name.toLowerCase().includes(search.toLowerCase()) ||
@@ -631,7 +676,12 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const newRepoTokenMissing =
     !!newRepoRef && myCreds !== null && !(myCreds.git_providers ?? []).includes(newRepoRef.provider)
 
+  const workspaceRuntimeReady = workspaceRuntimeAvailable(runtime === 'cluster' ? clusterStatus?.workspace_capabilities : selectedDaemon?.workspace_capabilities, runtime)
+  const useWorkspacePicker = workspaceRuntimeReady && Boolean(runtime === 'cluster' || selectedDaemon?.discovery_version === 1)
+  const workspaceSelection = workspacePick.scope === workspaceScope ? workspacePick.selection : null
+
   const hasRepoChoice =
+    workspaceSelection !== null ||
     (noRepoMode && !scratchNameInvalid) ||
     selectedRepo !== null ||
     (newFolderMode && folderName !== '' && (runtime !== 'cluster' || newRepoRef !== null)) ||
@@ -736,7 +786,9 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
     : null
   const blockedReason = boardProblem ?? runtimeBlockedReason ?? hostClaudeBlockedReason ?? cloneByNameUnsupported ?? clonePlanProblem ?? scratchNameProblem ?? daemonUnconfirmedReason
 
+
   const canSubmit = engineKnown && hasRepoChoice &&
+    (!workspaceSelection || (workspaceRuntimeReady && (runtime === 'cluster' || daemons.some(d => d.id === selectedDaemon?.id && d.connection_generation === selectedDaemon?.connection_generation)))) &&
     (!needsDaemon || selectedDaemon !== null) && !submitting &&
     (runtime !== 'daemon' || agentAck) && !clusterEngineBlocked && blockedReason === null &&
     !clusterRepoUnresolved && !freeTextModelInvalid
@@ -804,6 +856,10 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
     // one keeps the historical bare name (the daemon qualifies it with its
     // org); any other provider's goes as owner/name with its provider, so
     // the daemon clones it from that host — never a same-named GitHub repo.
+    if (workspaceSelection) {
+      await postSession({ selection: workspaceSelection, daemon_id: selectedDaemon?.id })
+      return
+    }
     if (noRepoMode) {
       await postSession({
         daemon_id: selectedDaemon?.id ?? '',
@@ -926,19 +982,73 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
     }
   }
 
+  // The empty workspace's location belongs with its repository choice.
+  const emptyWorkspacePlan = <>
+    {/* What No repository will do, said before Launch — per
+        runtime, since only the cluster is truly folder-less. */}
+    {noRepoMode && !needsDaemon && (
+      <div data-testid="no-repo-plan" style={createPlanStyle}>
+        Uses an empty workspace that is deleted when the pod ends.
+      </div>
+    )}
+    {noRepoMode && needsDaemon && selectedDaemon && (
+      <div data-testid="no-repo-plan" style={createPlanStyle}>
+        <div>
+          Keeps your files in {selectedDaemon.repos_root}/{scratchFolder}.
+          <details className="launch-help"><summary>About this folder</summary><p>This scratch folder stays after the session and is hidden from the repository list.</p></details>
+        </div>
+        {scratchRenaming ? (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 6 }}>
+            <span>{SCRATCH_PREFIX}</span>
+            <input className="settings-field"
+              data-testid="scratch-name-input"
+              aria-label="Scratch folder name"
+              value={scratchSuffix}
+              onChange={e => setScratchSuffix(e.target.value)}
+              autoCorrect="off"
+              autoCapitalize="none"
+              autoComplete="off"
+              spellCheck={false}
+              style={{
+                flex: 1,
+                minWidth: 0,
+                background: 'var(--scree)',
+                border: `1px solid ${scratchNameInvalid ? 'var(--danger)' : 'var(--stone)'}`,
+                borderRadius: 6,
+                color: 'var(--chalk)',
+                padding: '4px 8px',
+                fontFamily: 'inherit',
+                fontSize: 13,
+              }}
+            />
+          </label>
+        ) : (
+          <button className="settings-action"
+            type="button"
+            data-testid="scratch-rename"
+            onClick={() => setScratchRenaming(true)}
+            style={{ marginTop: 4, background: 'none', border: 'none', padding: 0, color: 'inherit', textDecoration: 'underline', cursor: 'pointer', fontFamily: 'inherit', fontSize: 'inherit' }}
+          >
+            Rename
+          </button>
+        )}
+      </div>
+    )}
+  </>
+
   return (
     <div
       className="launch-overlay"
       style={{ display: open ? 'flex' : 'none' }}
       {...backdrop}
     >
-      <div className="launch-panel">
+      <div className="launch-panel" role="dialog" aria-modal="true" aria-label="New Session">
         {/* Header */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
           <span style={{ color: 'var(--blaze)', fontWeight: 700, fontSize: '1rem', letterSpacing: '0.08em', textTransform: 'uppercase' }}>New Session</span>
-          <button
+          <button className="settings-action"
             onClick={onClose}
-            style={{ background: 'none', border: 'none', color: 'var(--fog)', fontSize: '1.4rem', cursor: 'pointer', fontFamily: 'inherit' }}
+            style={{ background: 'none', border: 'none', padding: 0, color: 'var(--fog)', fontSize: '1.4rem', cursor: 'pointer', fontFamily: 'inherit' }}
           >
             ✕
           </button>
@@ -963,7 +1073,23 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
             {/* Section 1: Repository */}
             <div className="launch-repo-section">
               <span style={sectionLabel}>Repository</span>
-              <input
+              {!workspaceRuntimeReady && (runtime === 'cluster' || selectedDaemon?.discovery_version === 1) && <p role="status" className="workspace-note">Workspace sessions and owner shells are not enabled for this runtime.</p>}
+              {useWorkspacePicker && <WorkspacePicker key={`${workspaceScope}:${pickerReset}`} daemon={selectedDaemon} runtime={runtime} repos={repos}
+                recentRepos={recentRepos} hideTree={repoActions || newFolderMode || freeTextMode}
+                actions={<div className="launch-repo-actions">
+                  <button type="button" className="settings-action btn small" aria-pressed={repoActions || newFolderMode || freeTextMode} onClick={() => {
+                    setRepoActions(value => !value); setWorkspacePick({ scope: workspaceScope, selection: null, names: [] }); setPickerReset(value => value + 1)
+                    setNoRepoMode(false); setSelectedRepo(null); setNewFolderMode(false); setFreeTextMode(false)
+                    requestAnimationFrame(() => repoInputRef.current?.focus())
+                  }} title="Create a folder or repository, or clone from a URL">New repository</button>
+                  <button type="button" className="settings-action btn small" aria-pressed={noRepoMode} onClick={() => {
+                    selectNoRepo(); setRepoActions(false); setWorkspacePick({scope: workspaceScope, selection: null, names: []}); setPickerReset(value => value + 1)
+                  }}>Empty workspace</button>
+                </div>}
+                onChange={(selection, names) => { setWorkspacePick({scope: workspaceScope, selection, names}); setNoRepoMode(false); setSelectedRepo(null); setNewFolderMode(false); setFreeTextMode(false); setRepoActions(false) }} />}
+              {useWorkspacePicker && emptyWorkspacePlan}
+              <RepositoryActions modern={useWorkspacePicker} hidden={!repoActions && !newFolderMode && !freeTextMode}>
+              <input className="settings-field"
                 ref={repoInputRef}
                 value={search}
                 onChange={e => setSearch(e.target.value)}
@@ -989,7 +1115,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                   style={{ color: 'var(--amber)', fontSize: 13, marginBottom: 8 }}
                 >
                   {CLUSTER_REPO_UNRESOLVED}
-                  <button
+                  <button className="settings-action"
                     type="button"
                     onClick={() => repoInputRef.current?.focus()}
                     style={{ marginLeft: 6, background: 'none', border: 'none', padding: 0, color: 'inherit', textDecoration: 'underline', cursor: 'pointer', fontFamily: 'inherit', fontSize: 'inherit' }}
@@ -1029,7 +1155,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                     Couldn't load your GitHub/GitLab repositories, so some may be missing below. Check your token
                     in {settingsLink} — it may be expired or revoked. You can still type owner/name or paste a URL.
                   </span>
-                  <button
+                  <button className="settings-action"
                     type="button"
                     aria-label="Dismiss"
                     data-testid="repos-stale-dismiss"
@@ -1047,7 +1173,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
               <div className="launch-repo-list" data-testid="repo-list">
                 {/* Always first and always there, whatever is typed above:
                     the default pick, a session tied to no repository. */}
-                <div
+                {!useWorkspacePicker && <div
                   data-testid="no-repo-option"
                   role="option"
                   aria-selected={noRepoMode}
@@ -1058,7 +1184,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                   <div style={{ fontSize: '0.75rem', marginTop: 2, color: 'var(--fog)' }}>
                     {runtime === 'cluster' ? 'an empty, throwaway workspace' : 'a new scratch folder, nothing cloned'}
                   </div>
-                </div>
+                </div>}
                 {/* A repository typed as owner/name or pasted as a URL is
                     launchable even when nobody listed it or has it checked
                     out: the cluster pod clones it, and so does a daemon. */}
@@ -1085,7 +1211,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                     ) : (
                       <div role="radiogroup" aria-label="Git provider" style={{ display: 'flex', gap: 6, marginTop: 6 }}>
                         {Object.keys(PROVIDER_LABELS).map(p => (
-                          <button
+                          <button className="settings-action"
                             key={p}
                             type="button"
                             role="radio"
@@ -1136,7 +1262,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                     <>
                       <div role="radiogroup" aria-label="Git host for the new repository" style={{ display: 'flex', gap: 6, marginTop: 6 }}>
                         {Object.keys(PROVIDER_LABELS).map(p => (
-                          <button
+                          <button className="settings-action"
                             key={p}
                             type="button"
                             role="radio"
@@ -1160,7 +1286,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                       </div>
                       <div role="radiogroup" aria-label="Visibility" style={{ display: 'flex', gap: 6, marginTop: 6 }}>
                         {(['private', 'public'] as const).map(v => (
-                          <button
+                          <button className="settings-action"
                             key={v}
                             type="button"
                             role="radio"
@@ -1200,7 +1326,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                     style={{ ...itemBase, cursor: 'default', height: 38, opacity: 0.45 - i * 0.12 }}
                   />
                 ))}
-                {filteredRepos.map(repo => (
+                {(useWorkspacePicker ? [] : filteredRepos).map(repo => (
                   <div
                     key={repoKey(repo)}
                     style={selectedRepo && repoKey(selectedRepo) === repoKey(repo) ? itemSelected : itemBase}
@@ -1256,15 +1382,16 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                 )}
               </div>
               </div>
+              </RepositoryActions>
             </div>
           </div>
 
           {/* Column: session config */}
           <div className="launch-col-config" data-testid="launch-col-config" data-phone-order="3">
             {/* Section 4: Session name */}
-            <div style={{ marginBottom: 20 }}>
+            <div style={{ marginBottom: 14 }}>
               <span style={sectionLabel}>Session Name</span>
-              <input
+              <input className="settings-field"
                 value={name}
                 onChange={e => setTypedName(e.target.value)}
                 placeholder={defaultName}
@@ -1287,9 +1414,9 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
             </div>
 
             {/* Section 5: Initial prompt */}
-            <div style={{ marginBottom: 20 }}>
+            <div style={{ marginBottom: 14 }}>
               <span style={sectionLabel}>Initial Prompt</span>
-              <textarea
+              <textarea className="settings-field"
                 value={initialPrompt}
                 onChange={e => setInitialPrompt(e.target.value)}
                 placeholder="What should the agent work on?"
@@ -1315,11 +1442,11 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
             {/* Interaction: whether anyone will be reading the chat. A
                 terminal session has no chat, so the choice is not offered. */}
             {kind === 'agent' && (
-              <label
+              <label className="settings-field"
                 data-testid="launch-unattended"
-                style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: '0.8rem', color: 'var(--chalk)', marginBottom: 20, cursor: 'pointer' }}
+                style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: '0.8rem', color: 'var(--chalk)', marginBottom: 14, cursor: 'pointer' }}
               >
-                <input
+                <input className="settings-toggle-control"
                   type="checkbox"
                   data-testid="unattended-toggle"
                   checked={unattended}
@@ -1328,55 +1455,60 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                 <span>
                   Unattended
                   <span style={{ display: 'block', color: 'var(--fog)', fontSize: 12, marginTop: 2 }}>
-                    {UNATTENDED_HELP}
+                    Decide and finish without waiting for you.
                   </span>
                 </span>
               </label>
             )}
+            {kind === 'agent' && <details className="launch-help"><summary>About unattended sessions</summary><p>{UNATTENDED_HELP}</p></details>}
 
             {(boards.state !== 'ready' || boards.configured) && (
-              <div style={{ marginBottom: 20 }}>
+              <div style={{ marginBottom: 14 }}>
                 {boards.state === 'ready' && boards.configured ? (
                   <>
                     <label htmlFor="launch-board" style={sectionLabel}>Board</label>
-                    <select id="launch-board" value={boardId} onChange={e => pickBoard(e.target.value)}
-                      style={{ width: '100%', background: 'var(--scree)', border: '1px solid var(--stone)', borderRadius: 6, color: 'var(--chalk)', padding: '8px 10px', fontFamily: 'inherit' }}
+                    <select className="settings-field select" title="Adds tools for the selected board and makes the session private to you." id="launch-board" value={boardId} onChange={e => pickBoard(e.target.value)}
+                      style={{ width: '100%' }}
                     >
                       <option value="">No board</option>
                       {boardId && !boards.boards.some(b => b.id === boardId) && <option value={boardId}>Previously selected board (unavailable)</option>}
                       {boards.boards.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
                     </select>
                     <div style={{ color: 'var(--fog)', fontSize: 12, marginTop: 6 }}>
-                      Optional. Give this session tools to work directly on this board. Sessions with a board are private to you.
+                      Give this private session access to a board.
                     </div>
                   </>
                 ) : boards.state === 'failed' ? (
                   <div role="status" style={{ color: 'var(--fog)', fontSize: 13 }}>
                     Couldn't load boards. You can launch without one.{' '}
-                    <button type="button" onClick={boards.retry}>Retry boards</button>
+                    <button type="button" className="settings-action btn small" onClick={boards.retry}>Retry boards</button>
                   </div>
                 ) : <div role="status" style={{ color: 'var(--fog)', fontSize: 13 }}>Checking available boards…</div>}
               </div>
             )}
             {boardId && (boards.state !== 'ready' || !boards.configured) && (
-              <button type="button" onClick={() => pickBoard('')}>Clear board</button>
+              <button className="settings-action" type="button" onClick={() => pickBoard('')}>Clear board</button>
             )}
 
             {/* MCP servers: all unchecked, every tool off, until the person chooses */}
-            <div style={{ marginBottom: 20 }} data-testid="launch-mcp">
+            <div style={{ marginBottom: 14 }} data-testid="launch-mcp">
               <span style={sectionLabel}>MCP Servers</span>
               {mcpAvailable ? (
                 <>
-                  <McpPicker value={mcp} onChange={setMcp} connections={launchMcpConnections} />
+                  <details className="launch-tools"><summary>Choose connections{mcp.length > 0 ? ` (${mcp.length} selected)` : ' (optional)'}</summary>
+                    <p className="launch-help">Only the tools you enable are available through these connections.</p>
+                    <McpPicker value={mcp} onChange={setMcp} connections={launchMcpConnections} />
+                  </details>
                   {mcp.length > 0 && (
                     <div data-testid="launch-mcp-private" style={{ color: 'var(--fog)', fontSize: 12, marginTop: 6 }}>
-                      A session with MCP servers is private to you. It keeps its shell, settings and plugins; only the tools above are bounded.
+                      A session with MCP servers is private to you.
                     </div>
                   )}
                 </>
               ) : (
                 <div data-testid="launch-mcp-unavailable" style={{ color: 'var(--fog)', fontSize: 13 }}>
-                  MCP servers are available for Claude and Codex agent sessions in a cluster pod or an updated local sandbox, not on this machine unsandboxed. Choose an agent session in a supported sandbox to select connections.
+                  Choose a supported sandbox to add MCP tools.
+                  <details className="launch-help"><summary>MCP availability</summary><p>MCP servers are available for Claude and Codex agent sessions in a cluster pod or an updated local sandbox, not on this machine unsandboxed.</p></details>
                 </div>
               )}
             </div>
@@ -1403,6 +1535,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
             modelsLoading={engineModels.loading}
             modelsFallback={engineModels.fallback}
             modelsError={catalogTarget.runtime === 'cluster' ? engineModels.error : undefined}
+            modelsReconnect={catalogTarget.runtime === 'cluster' && engineModels.reconnect}
             modelsRefreshing={catalogTarget.runtime === 'cluster' && engineModels.refreshing}
             onModelsRetry={engineModels.retry}
             model={selectedModel?.id ?? ''}
@@ -1426,6 +1559,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
             engineDiscoveryState={launchOptions.state}
             engineDiscoveryError={launchOptions.error}
             onEngineDiscoveryRetry={launchOptions.retry}
+            unavailableEngines={launchOptions.unavailable}
             clusterEngineBlocked={clusterEngineBlocked}
             clusterGitMissing={clusterGitMissing}
             settingsLink={settingsLink}
@@ -1507,56 +1641,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                     + Will create {selectedDaemon.repos_root}/{folderName}
                   </div>
                 )}
-                {/* What No repository will do, said before Launch — per
-                    runtime, since only the cluster is truly folder-less. */}
-                {noRepoMode && !needsDaemon && (
-                  <div data-testid="no-repo-plan" style={createPlanStyle}>
-                    Runs in an empty, throwaway workspace — nothing is kept after the session's pod ends.
-                  </div>
-                )}
-                {noRepoMode && needsDaemon && selectedDaemon && (
-                  <div data-testid="no-repo-plan" style={createPlanStyle}>
-                    <div>
-                      + Will create a scratch folder named {scratchFolder} in {selectedDaemon.repos_root} (kept
-                      after the session; never listed as a repository)
-                    </div>
-                    {scratchRenaming ? (
-                      <label style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 6 }}>
-                        <span>{SCRATCH_PREFIX}</span>
-                        <input
-                          data-testid="scratch-name-input"
-                          aria-label="Scratch folder name"
-                          value={scratchSuffix}
-                          onChange={e => setScratchSuffix(e.target.value)}
-                          autoCorrect="off"
-                          autoCapitalize="none"
-                          autoComplete="off"
-                          spellCheck={false}
-                          style={{
-                            flex: 1,
-                            minWidth: 0,
-                            background: 'var(--scree)',
-                            border: `1px solid ${scratchNameInvalid ? 'var(--danger)' : 'var(--stone)'}`,
-                            borderRadius: 6,
-                            color: 'var(--chalk)',
-                            padding: '4px 8px',
-                            fontFamily: 'inherit',
-                            fontSize: 13,
-                          }}
-                        />
-                      </label>
-                    ) : (
-                      <button
-                        type="button"
-                        data-testid="scratch-rename"
-                        onClick={() => setScratchRenaming(true)}
-                        style={{ marginTop: 4, background: 'none', border: 'none', padding: 0, color: 'inherit', textDecoration: 'underline', cursor: 'pointer', fontFamily: 'inherit', fontSize: 'inherit' }}
-                      >
-                        Rename
-                      </button>
-                    )}
-                  </div>
-                )}
+                {!useWorkspacePicker && emptyWorkspacePlan}
               </>
             }
           />
@@ -1579,7 +1664,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
           )}
 
           {/* Submit */}
-          <button
+          <button className="settings-action"
             onClick={handleSubmit}
             disabled={!canSubmit}
             style={{
@@ -1596,7 +1681,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
               letterSpacing: '0.05em',
             }}
           >
-            {noRepoMode ? 'Launch Session' : newFolderMode ? 'Create & Launch →' : isCheckedOut || selectedRepo?.is_local || cloneFolder?.present ? 'Launch Session' : 'Clone & Launch →'}
+            {noRepoMode || workspaceSelection ? 'Launch Session' : newFolderMode ? 'Create & Launch →' : isCheckedOut || selectedRepo?.is_local || cloneFolder?.present ? 'Launch Session' : 'Clone & Launch →'}
           </button>
           </div>
 

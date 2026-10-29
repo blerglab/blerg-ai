@@ -5,6 +5,7 @@
 // attached to (marked Outdated when a later version changed them). A thread's code jumps to it in
 // Files. Read from what is stored: the diff's versions, the person's review uploads, the review
 // requests (model/reviewConversation.ts).
+import { ReferenceText } from '../RefLinks'
 import { useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { useChat } from '../context'
 import { useReviewRequests } from '../reviewRequestContext'
@@ -260,7 +261,7 @@ export default function ReviewConversation({
             {info.commits.map(c => (
               <li key={c.sha}>
                 <CommitChips commits={[{ sha: c.sha }]} onOpen={sha => openVersion(a, sha)} />
-                <span className="review-conv-commit-subject">{c.subject || '(no message)'}</span>
+                <span className="review-conv-commit-subject"><ReferenceText text={c.subject || '(no message)'} /></span>
               </li>
             ))}
           </ul>

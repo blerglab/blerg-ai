@@ -22,6 +22,7 @@ import (
 type sessionPluginArguments struct {
 	pluginspec.Entry
 	Engine       string `json:"engine"`
+	Action       string `json:"action,omitempty"`
 	Reason       string `json:"reason"`
 	SessionApply bool   `json:"session_apply"`
 }
@@ -64,13 +65,13 @@ func (a *API) sessionPluginOwner(w http.ResponseWriter, r *http.Request) (*db.Se
 }
 func (a *API) sessionPluginEligibility(ctx context.Context, row *db.SessionRow) (bool, string) {
 	if row == nil || row.DiscardRequestedAt != nil || row.ArchivedAt != nil || terminalSessionStatus(row.Status) || row.Kind != "agent" {
-		return false, "This session cannot reload plugins; always-on changes apply to new sessions."
+		return false, "This session loads plugins when a session starts — added for your next session."
 	}
 	if !pluginspec.SupportsEngine(sessionPluginEngine(row)) {
-		return false, "This engine loads plugin changes in new sessions."
+		return false, "This engine loads plugins when a session starts — added for your next session."
 	}
 	if row.Runtime != nil && *row.Runtime != "" && *row.Runtime != "daemon" {
-		return false, "This runtime loads plugin changes in new sessions."
+		return false, "This runtime loads plugins when a session starts — added for your next session."
 	}
 	var restricted bool
 	if err := a.dbPool.QueryRow(ctx, `SELECT restrict_tools FROM sessions WHERE id=$1`, row.ID).Scan(&restricted); err != nil {
@@ -81,25 +82,31 @@ func (a *API) sessionPluginEligibility(ctx context.Context, row *db.SessionRow) 
 	}
 	dc := a.hub.FindDaemonForSession(row.ID)
 	if dc == nil || dc.ID != row.DaemonID || !dc.CanSessionPluginsFor(sessionPluginEngine(row)) {
-		return false, "The live daemon does not support plugin reload; always-on changes apply to new sessions."
+		return false, "This engine loads plugins when a session starts — added for your next session."
 	}
 	return true, ""
 }
-func (a *API) sessionPluginAllowed(e pluginspec.Entry) bool {
-	return pluginspec.ValidateClaude(e) == nil && a.pluginAllow.Allows(e.Marketplace)
+func (a *API) sessionPluginAllowed(engine string, e pluginspec.Entry) bool {
+	return pluginspec.Validate(engine, e) == nil && a.currentPluginAllow().Allows(e.Marketplace)
+}
+func (a *API) sessionPluginChangeAllowed(engine string, e pluginspec.Entry, action string) bool {
+	if action == "remove" {
+		return pluginspec.Validate(engine, e) == nil
+	}
+	return a.sessionPluginAllowed(engine, e)
 }
 func (a *API) pluginPolicy(c sessionPluginCatalog) sessionPluginCatalog {
 	if !c.Any {
 		out := make([]string, 0, len(c.Allowed))
 		for _, m := range c.Allowed {
-			if a.pluginAllow.Allows(m) {
+			if a.currentPluginAllow().Allows(m) {
 				out = append(out, m)
 			}
 		}
 		c.Allowed = out
 		return c
 	}
-	sources, anySource := a.pluginAllow.List()
+	sources, anySource := a.currentPluginAllow().List()
 	c.Allowed = sources
 	c.Any = anySource
 	return c
@@ -149,7 +156,11 @@ func (a *API) HandleSessionPlugins(w http.ResponseWriter, r *http.Request) {
 }
 func (a *API) insertSessionPlugin(ctx context.Context, row *db.SessionRow, args sessionPluginArguments) (*db.Proposal, error) {
 	raw, _ := json.Marshal(args)
-	return db.InsertProposalLimited(ctx, a.dbPool, db.Proposal{AccountID: *row.SpawningAccountID, SessionID: row.ID, ConnectionID: db.SessionPluginConnectionID, ConnectionName: "session-plugin", Tool: "request_plugin", ToolHash: "session-plugin-v1", URLSnapshot: "session-plugins:" + row.DaemonID, Arguments: raw, AgentSummary: "Request plugin " + args.Plugin + " for this session."}, db.ProposalLimits{Account: 50, Session: 10, Cron: 20})
+	summary := "Request plugin " + args.Plugin + " for this session."
+	if args.Action == "remove" {
+		summary = "Remove plugin " + args.Plugin + " from this session."
+	}
+	return db.InsertProposalLimited(ctx, a.dbPool, db.Proposal{AccountID: *row.SpawningAccountID, SessionID: row.ID, ConnectionID: db.SessionPluginConnectionID, ConnectionName: "session-plugin", Tool: "request_plugin", ToolHash: "session-plugin-v1", URLSnapshot: "session-plugins:" + row.DaemonID, Arguments: raw, AgentSummary: summary}, db.ProposalLimits{Account: 50, Session: 10, Cron: 20})
 }
 func (a *API) HandleSessionPluginRequest(w http.ResponseWriter, r *http.Request) {
 	sid, raw, ok := a.agentSessionWrite(w, r, "plugin requests", 16<<10)
@@ -168,21 +179,22 @@ func (a *API) HandleSessionPluginRequest(w http.ResponseWriter, r *http.Request)
 	}
 	name, market, has := strings.Cut(req.Name, "@")
 	if !has {
-		sources, anySource := a.pluginAllow.List()
+		sources, anySource := a.currentPluginAllow().List()
 		if anySource || len(sources) != 1 {
-			writeError(w, 400, "Use plugin@owner/repo to choose an allowed marketplace.")
+			writeError(w, 400, "Use plugin@owner/repo or plugin@codex:<marketplace> to choose an allowed marketplace.")
 			return
 		}
 		market = sources[0]
 	}
-	e := pluginspec.Entry{Marketplace: market, Plugin: name}
-	if !a.sessionPluginAllowed(e) {
-		writeError(w, 403, "This plugin or marketplace is not allowed.")
-		return
-	}
 	row, err := db.GetSession(r.Context(), a.dbPool, sid)
 	if err != nil || row == nil || row.SpawningAccountID == nil || *row.SpawningAccountID == "" || row.Kind != "agent" || !pluginspec.SupportsEngine(sessionPluginEngine(row)) {
 		writeError(w, 409, "This session cannot request plugins.")
+		return
+	}
+
+	e := pluginspec.Entry{Marketplace: market, Plugin: name}
+	if !a.sessionPluginAllowed(sessionPluginEngine(row), e) {
+		writeError(w, 403, "This plugin or marketplace is not allowed.")
 		return
 	}
 	core, err := a.pluginCore()
@@ -218,12 +230,13 @@ func (a *API) HandleAddSessionPlugin(w http.ResponseWriter, r *http.Request) {
 		Marketplace string `json:"marketplace"`
 		Plugin      string `json:"plugin"`
 		Scope       string `json:"scope"`
+		Action      string `json:"action"`
 	}
 	if !decodeSessionPlugin(w, r, &req) {
 		return
 	}
 	e := pluginspec.Entry{Marketplace: req.Marketplace, Plugin: req.Plugin}
-	if !a.sessionPluginAllowed(e) || (req.Scope != "session" && req.Scope != "always") {
+	if !a.sessionPluginChangeAllowed(sessionPluginEngine(row), e, req.Action) || (req.Scope != "session" && req.Scope != "always") || (req.Action != "" && req.Action != "remove") || (req.Action == "remove" && (req.Scope != "session" || sessionPluginEngine(row) != "codex")) {
 		writeError(w, 403, "Choose an allowed plugin and scope.")
 		return
 	}
@@ -244,11 +257,11 @@ func (a *API) HandleAddSessionPlugin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 503, errSessionPluginCore.Error())
 		return
 	}
-	if !catalogPermits(catalog, e) {
+	if req.Action != "remove" && !catalogPermits(catalog, e) {
 		writeError(w, 403, "This marketplace is not allowed by Core.")
 		return
 	}
-	prop, err := a.insertSessionPlugin(r.Context(), row, sessionPluginArguments{Entry: e, Engine: sessionPluginEngine(row), Reason: "Added by the session owner.", SessionApply: apply})
+	prop, err := a.insertSessionPlugin(r.Context(), row, sessionPluginArguments{Entry: e, Engine: sessionPluginEngine(row), Reason: "Changed by the session owner.", Action: req.Action, SessionApply: apply})
 	if err != nil {
 		writeError(w, 409, "The plugin change could not be queued.")
 		return
@@ -272,7 +285,7 @@ func (h *proposalsHandler) approveSessionPlugin(w http.ResponseWriter, r *http.R
 		return
 	}
 	var args sessionPluginArguments
-	if json.Unmarshal(p.Arguments, &args) != nil || !h.api.sessionPluginAllowed(args.Entry) {
+	if json.Unmarshal(p.Arguments, &args) != nil || !h.api.sessionPluginChangeAllowed(args.Engine, args.Entry, args.Action) || (args.Action != "" && args.Action != "remove") || (args.Action == "remove" && (req.Scope != "session" || args.Engine != "codex")) {
 		writeError(w, 403, "This plugin or marketplace is no longer allowed.")
 		return
 	}
@@ -303,7 +316,7 @@ func (h *proposalsHandler) approveSessionPlugin(w http.ResponseWriter, r *http.R
 		writeError(w, 503, errSessionPluginCore.Error())
 		return
 	}
-	if !catalogPermits(catalog, args.Entry) {
+	if args.Action != "remove" && !catalogPermits(catalog, args.Entry) {
 		writeError(w, 403, "This marketplace is no longer allowed.")
 		return
 	}
@@ -322,7 +335,7 @@ func (h *proposalsHandler) approveSessionPlugin(w http.ResponseWriter, r *http.R
 	}
 	if state == db.ProposalDone && !apply {
 		resultState = "new_sessions"
-		message = "Saved as always on; this runtime loads the plugin in new sessions."
+		message = "This plugin loads when a session starts — added for your next session."
 	}
 	result, _ := json.Marshal(map[string]string{"state": resultState, "message": message, "scope": req.Scope})
 	recCtx, stop := context.WithTimeout(context.WithoutCancel(r.Context()), proposalWriteBudget)
@@ -358,6 +371,12 @@ func (h *Hub) dispatchSessionPlugin(ctx context.Context, pool *pgxpool.Pool, p *
 	if dc == nil || dc.ID != row.DaemonID || p.URLSnapshot != "session-plugins:"+dc.ID || !dc.CanSessionPluginsFor(args.Engine) {
 		return
 	}
-	raw, _ := json.Marshal(protocol.ApplySessionPlugins{Type: "apply_session_plugins", RequestID: p.ID, SessionID: p.SessionID, Plugins: []pluginspec.Entry{args.Entry}})
+	command := protocol.ApplySessionPlugins{Type: "apply_session_plugins", RequestID: p.ID, SessionID: p.SessionID}
+	if args.Action == "remove" {
+		command.Remove = []pluginspec.Entry{args.Entry}
+	} else {
+		command.Plugins = []pluginspec.Entry{args.Entry}
+	}
+	raw, _ := json.Marshal(command)
 	h.trySendToDaemon(dc, raw)
 }

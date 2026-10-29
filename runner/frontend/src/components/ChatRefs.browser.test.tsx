@@ -38,8 +38,8 @@ function serve() {
     const m = url.match(/^\/api\/board-cards\/b1\/(\d+)/)
     if (m) {
       cardReads.push(m[1])
-      return m[1] === '147'
-        ? json({ card: { id: 'c147', board_id: 'b1', number: 147, title: 'Doc box and folder images', column_id: 'k', column_name: 'Review', columns: [{ id: 'k', name: 'Review' }] }, url: '/boards/b1/cards/147' })
+      return ['147', '155', '156', '157'].includes(m[1])
+        ? json({ card: { id: `c${m[1]}`, board_id: 'b1', number: Number(m[1]), title: m[1] === '147' ? 'Doc box and folder images' : `Range card ${m[1]}`, column_id: 'k', column_name: 'Review', columns: [{ id: 'k', name: 'Review' }] }, url: '/boards/b1/cards/147' })
         : json({ error: 'not found' }, 404)
     }
     if (url.startsWith('/api/tool-changes')) return json({ tool_changes: [] })
@@ -75,10 +75,17 @@ async function moveTo(x: number, y: number) {
   await mouse.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: (f?.left ?? 0) + x * k, y: (f?.top ?? 0) + y * k })
 }
 async function hover(el: Element) {
-  const r = el.getBoundingClientRect()
-  const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2)
-  await moveTo(x, y - 1)
-  await moveTo(x, y)
+  // Reference resolution and dialog teardown can reflow the transcript after
+  // the chip appears. Aim again until real input registers, without advancing
+  // the manual clock before that registration.
+  await expect.poll(() => el.closest('.hc-anchor, [data-hc-anchor]')).not.toBeNull()
+  await expect.poll(async () => {
+    const r = el.getBoundingClientRect()
+    const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2)
+    await moveTo(x, y - 1)
+    await moveTo(x, y)
+    return clock.pending() > 0 || card() !== null
+  }).toBe(true)
   clock.advance(HOVERCARD.openDelayMs)
   await expect.poll(card).not.toBeNull()
 }
@@ -143,6 +150,64 @@ for (const [width, height] of [[390, 800], [3840, 2000]] as const) {
       expect([...cardReads].sort()).toEqual(['1', '147'])
       expect([...commitReads].sort()).toEqual(['08025f2c', 'cafe1234'])
       expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
+    })
+
+    it('expands ranges in both roles with a separate hovercard and dialog for every card', async () => {
+      renderPage()
+      const store = useTranscriptStore.getState()
+      for (const [seq, kind, payload] of [
+        [903, 'user_message', { text: 'Person range: (#155–157), next.', source: 'chat' }],
+        [904, 'assistant_text', { text: 'Agent range: #155-#157.\n\n`#155–157`\n\n```\n#155–157\n```', done: true }],
+      ] as const) store.ingest({ session_id: 'sess-a', client_event_id: `range${seq}`, seq, ts: new Date().toISOString(), kind, payload } as AgentEvent)
+      const person = await findMd(/Person range/)
+      const agent = await findMd(/Agent range/)
+      for (const md of [person, agent]) {
+        await waitFor(() => expect(within(md).getAllByTestId('md-ref').map(r => r.textContent)).toEqual(['#155', '#156', '#157']))
+      }
+      expect(person.textContent).toBe('Person range: (#155, #156, #157), next.')
+      expect(agent.querySelector('pre')!.textContent).toContain('#155–157')
+      expect(agent.querySelector('code')!.textContent).toBe('#155–157')
+      for (const ref of within(agent).getAllByTestId('md-ref')) {
+        ref.scrollIntoView({ block: 'center' })
+        await hover(ref)
+        await expect.poll(() => card()?.textContent).toContain(`Range card ${ref.textContent!.slice(1)}`)
+        await moveTo(1, 1)
+        ref.click()
+        const dialog = await screen.findByRole('dialog')
+        await waitFor(() => expect(dialog.textContent).toContain(`Range card ${ref.textContent!.slice(1)}`))
+        within(dialog).getByRole('button', { name: /close/i }).click()
+        await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+      }
+      expect(cardReads.filter(n => ['155', '156', '157'].includes(n)).sort()).toEqual(['155', '156', '157'])
+      expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
+    })
+
+    it('resolves a board created mid-session and opens explicit references inside Blerg', async () => {
+      const original = apiFetch.getMockImplementation()!
+      apiFetch.mockImplementation((url: string) => {
+        if (url.startsWith('/api/board-cards/new-board/7')) return json({ card: { id: 'new-card', board_id: 'new-board', number: 7, reference: 'NEW-7', title: 'New board work', column_name: 'Ready', columns: [] }, url: '/boards/new-board/cards/7' })
+        return original(url)
+      })
+      renderPage()
+      await findMd(/landed in/)
+      const store = useTranscriptStore.getState()
+      const add = (seq: number, kind: string, payload: unknown) => store.ingest({ session_id: 'sess-a', client_event_id: `created${seq}`, seq, ts: new Date().toISOString(), kind, payload } as AgentEvent)
+      add(903, 'proposal_decided', { proposal_id: 'new-board', kind: 'board_create', state: 'done', board: { board_id: 'new-board', board_name: 'New board', access: 'full' } })
+      add(904, 'assistant_text', { text: 'Created cards: #7 and board:new-board#7.', done: true })
+      const md = await findMd(/Created cards:/)
+      await waitFor(() => expect(within(md).getAllByTestId('md-ref')).toHaveLength(2))
+      const refs = within(md).getAllByTestId('md-ref')
+      expect(refs.map(r => r.textContent)).toEqual(['NEW-7', 'NEW-7'])
+      const explicit = refs[1]
+      explicit.scrollIntoView({ block: 'center' })
+      await hover(explicit)
+      await expect.poll(() => card()?.textContent).toContain('New board work')
+      await moveTo(1, 1)
+      explicit.click()
+      const dialog = await screen.findByRole('dialog')
+      expect(dialog.textContent).toContain('New board work')
+      expect(md.querySelector('a')).toBeNull()
+      within(dialog).getByRole('button', { name: /close/i }).click()
     })
 
     it('#147 has the card\'s hovercard; the sha opens the commit viewer', async () => {

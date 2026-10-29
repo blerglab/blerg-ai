@@ -66,6 +66,7 @@ export function normalizeCapabilities(raw: unknown): CapabilitiesPayload | null 
     version: str(o.version),
     cwd: str(o.cwd),
     permission_mode: str(o.permission_mode),
+    sandbox_mode: str(o.sandbox_mode),
     note: str(o.note),
     groups,
   }
@@ -158,30 +159,58 @@ export function withLiveMcp(payload: CapabilitiesPayload, live: McpLive | null |
 
 // ─── The Capabilities header card ────────────────────────────────────────────
 
-/** A permission mode in words, and whether it lets the agent act without asking (drawn amber). The
- *  known values of each engine are mapped; anything else shows as reported, neutral. */
-const PERMISSION_MODES: Record<string, { label: string; risky?: boolean }> = {
-  // Claude Code
-  default: { label: 'Default' },
-  acceptEdits: { label: 'Accept edits' },
-  plan: { label: 'Plan' },
-  auto: { label: 'Auto' },
-  dontAsk: { label: 'Don’t ask' },
-  bypassPermissions: { label: 'Bypass permissions', risky: true },
-  // Codex approval policies and sandboxes
-  never: { label: 'Never asks', risky: true },
-  'on-request': { label: 'Asks on request' },
-  'on-failure': { label: 'Asks on failure' },
-  untrusted: { label: 'Asks for untrusted' },
-  restricted: { label: 'Restricted' },
-  'read-only': { label: 'Read only' },
-  'workspace-write': { label: 'Workspace write' },
-  'danger-full-access': { label: 'Full access', risky: true },
+export interface PermissionMeaning {
+  label: string
+  risky: boolean
+  description: string
 }
 
-export function permissionLabel(mode: string): { label: string; risky: boolean } {
-  const known = Object.prototype.hasOwnProperty.call(PERMISSION_MODES, mode) ? PERMISSION_MODES[mode] : undefined
-  return known ? { label: known.label, risky: known.risky === true } : { label: mode, risky: false }
+// The chip states the effect; native names and sandbox scope stay in its
+// accessible description. Missing scope on an older report remains unknown.
+export function permissionLabel(mode: string, engine = '', sandbox = ''): PermissionMeaning {
+  const scopes: Record<string, string> = { 'danger-full-access': 'full access', 'workspace-write': 'workspace only', 'read-only': 'read only' }
+  const scope = Object.hasOwn(scopes, sandbox) ? scopes[sandbox] : sandbox ? `scope ${sandbox}` : 'scope not reported'
+  const codex: Record<string, [string, string, boolean]> = {
+    never: ['No prompts', 'No prompts', true],
+    'on-request': ['Asks first', 'Asks first when the engine requests approval', false],
+    'on-failure': ['Failure prompts', 'Asks on failure', false],
+    untrusted: ['Asks first', 'Asks first for untrusted commands', false],
+    restricted: ['Read only', 'Read only native sandbox; workspace writes and granted tools use the Blerg gateway', false],
+  }
+  if ((engine === 'codex' || !engine) && Object.hasOwn(codex, mode)) {
+    const [label, effect, risky] = codex[mode]
+    const approval = mode === 'restricted' ? 'never' : mode
+    return { label, risky: risky || sandbox === 'danger-full-access', description: `${effect} · ${scope}. Codex: approval ${approval}${sandbox ? `, sandbox ${sandbox}` : ''}. Runtime confinement still applies.` }
+  }
+  if (engine === 'hermes' && mode === 'bypassPermissions') {
+    return { label: 'No prompts', risky: true, description: 'No prompts for commands; protected actions may still ask. Hermes: HERMES_YOLO_MODE=1. Runtime confinement still applies.' }
+  }
+  const modes: Record<string, [string, string, boolean]> = {
+    default: ['Asks first', 'Asks first for actions that need permission', false],
+    acceptEdits: ['Allows edits', 'Asks for commands; edits allowed', false],
+    plan: ['Read only', 'Read only planning', false],
+    auto: ['Auto approval', 'Automatic permission review', false],
+    dontAsk: ['No prompts', 'No prompts; only previously allowed actions may run', true],
+    bypassPermissions: ['No prompts', 'No prompts · full access', true],
+    'read-only': ['Read only', 'Read only access', false],
+    'workspace-write': ['Workspace only', 'Writes limited to the workspace', false],
+    'danger-full-access': ['Full access', 'Full access; approval policy not reported', true],
+  }
+  if (Object.hasOwn(modes, mode)) {
+    const [label, effect, risky] = modes[mode]
+    const native = engine === 'codex' ? `Codex: sandbox ${mode}` : `${engine && engine !== 'claude' ? engine : 'Claude Code'}: ${mode}`
+    return { label, risky, description: `${effect}. ${native}. Runtime confinement still applies.` }
+  }
+  return { label: mode, risky: false, description: `Permission mode: ${mode}${engine ? ` (${engine})` : ''}; access scope not reported.` }
+}
+
+/** Launch configuration is known for agents and an explicit terminal bypass;
+ *  otherwise the terminal's own settings decide its approval and sandbox modes. */
+export function launchPermission(engine: string, kind: string, skipPermissions = false): PermissionMeaning {
+  if (kind !== 'agent' && !skipPermissions) return { label: 'Engine default', risky: false, description: 'Uses the engine’s configured approval and sandbox settings; access scope not reported.' }
+  if (engine === 'codex') return permissionLabel('never', engine, 'danger-full-access')
+  if (!engine || engine === 'claude' || engine === 'hermes') return permissionLabel('bypassPermissions', engine || 'claude')
+  return { label: 'No prompts', risky: true, description: 'No permission prompts; access scope follows the engine and runtime configuration.' }
 }
 
 const CLAUDE_FAMILY = /^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(\[1m\])?$/

@@ -16,18 +16,21 @@ import (
 	"time"
 
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
+	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 )
 
 // This is a local protocol test, with a loopback-only fake model provider. It never starts a
 // external model turn, reads a person's login, or reaches a remote marketplace.
 func TestNativeCodexPluginSnapshotLoadsAndResumesSameThread(t *testing.T) {
 	t.Run("host", func(t *testing.T) { runNativeCodexPluginSnapshot(t, false) })
+	t.Run("host-live-remove", func(t *testing.T) { runNativeCodexPluginSnapshot(t, false, false, true) })
 	t.Run("sandbox", func(t *testing.T) { runNativeCodexPluginSnapshot(t, true) })
 	t.Run("interactivegrant", func(t *testing.T) { runNativeCodexPluginSnapshot(t, false, true) })
 	t.Run("sandboxgrant", func(t *testing.T) { runNativeCodexPluginSnapshot(t, true, true) })
 }
 func runNativeCodexPluginSnapshot(t *testing.T, sandbox bool, interactive ...bool) {
 	granted := len(interactive) > 0 && interactive[0]
+	liveRemove := len(interactive) > 1 && interactive[1]
 	bin, err := exec.LookPath("codex")
 	if err != nil {
 		t.Skip("Codex CLI not installed")
@@ -198,6 +201,17 @@ func runNativeCodexPluginSnapshot(t *testing.T, sandbox bool, interactive ...boo
 		t.Fatal("native thread identity not recorded")
 	}
 	rpc("turn/start", map[string]any{"threadId": response.Thread.ID, "input": []map[string]any{{"type": "text", "text": "Reply with the fixture response."}}})
+	// Native rollout creation is asynchronous after turn/start. Wait for saved
+	// metadata before thread/read, which rejects a temporarily empty rollout.
+	waitUntil(t, "native rollout metadata", func() bool {
+		paths, _ := filepath.Glob(filepath.Join(source, "sessions", "*", "*", "*", "*.jsonl"))
+		for _, path := range paths {
+			if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+				return true
+			}
+		}
+		return false
+	})
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		state := rpc("thread/read", map[string]any{"threadId": response.Thread.ID, "includeTurns": true})
@@ -219,15 +233,22 @@ func runNativeCodexPluginSnapshot(t *testing.T, sandbox bool, interactive ...boo
 	}
 	stop()
 	stopSandbox()
-	// A real daemon Kill removes private SQLite/index state along with the plugin snapshot.
-	// Rebuild the snapshot, retaining only normal native rollouts, before resuming.
-	if err := os.RemoveAll(home); err != nil {
+	entries := []pluginspec.Entry{{Marketplace: "example-org/plugins", Plugin: "selected"}}
+	paths := map[string]string{"selected@fixture-market": selected}
+	if liveRemove {
+		// A live update creates a fresh home while preserving the normal rollout
+		// directory; the old process is already fully stopped.
+		snapshot = filepath.Join(base, "updated-session")
+		entries = nil
+		paths = nil
+	} else if err := os.RemoveAll(home); err != nil {
 		t.Fatal(err)
 	}
-	rebuilt, settings, err := snapshotCodexPluginHome(snapshot, source, workshop, []pluginspec.Entry{{Marketplace: "example-org/plugins", Plugin: "selected"}}, map[string]string{"selected@fixture-market": selected})
-	if err != nil || rebuilt != home {
+	rebuilt, settings, err := snapshotCodexPluginHome(snapshot, source, workshop, entries, paths)
+	if err != nil {
 		t.Fatalf("snapshot rebuild failed: %v", err)
 	}
+	driver.CodexHome = rebuilt
 	driver.RuntimeConfig = settings
 	if granted {
 		if err := sanitizeCodexInteractiveHome(context.Background(), rebuilt, source, sanitizeWork); err != nil {
@@ -237,6 +258,12 @@ func runNativeCodexPluginSnapshot(t *testing.T, sandbox bool, interactive ...boo
 	startSandbox()
 	rpc, stop = nativeCodexPluginProbe(t, bin, driver)
 	defer stop()
+	if liveRemove {
+		skills := rpc("skills/list", map[string]any{"cwds": []string{runtimeCwd}, "forceReload": true})
+		if strings.Contains(string(skills), `"pluginId":"selected@fixture-market"`) {
+			t.Fatal("removed plugin survived process restart")
+		}
+	}
 	resumed := rpc("thread/resume", map[string]any{"threadId": response.Thread.ID, "persistExtendedHistory": true})
 	var again struct {
 		Thread struct {
@@ -249,6 +276,84 @@ func runNativeCodexPluginSnapshot(t *testing.T, sandbox bool, interactive ...boo
 	recalled := rpc("thread/read", map[string]any{"threadId": response.Thread.ID, "includeTurns": true})
 	if !strings.Contains(string(recalled), "Fixture reply.") || !strings.Contains(string(recalled), "Reply with the fixture response.") {
 		t.Fatal("rebuilt plugin home lost the previous conversation")
+	}
+	if liveRemove {
+		// Exercise the actual driver's idle verification and planned restart using
+		// this installed CLI and loopback model, as well as native snapshot recovery.
+		stop()
+		em := &collectEmitter{}
+		d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: base, Model: "gpt-6.1-sol", Emitter: em, Env: []string{"PATH=" + os.Getenv("PATH"), "HOME=" + base}})
+		d.CodexHome = rebuilt
+		d.RuntimeConfig = settings
+		d.threadID = response.Thread.ID
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		stopDriver := startTestCodexDriver(ctx, t, d)
+		defer stopDriver()
+		applied := make(chan struct{})
+		if !d.queuePluginUpdate(func(context.Context) {
+			d.CodexHome = home
+			d.RuntimeConfig = codexPluginConfig(home, []string{"selected@fixture-market"})
+			close(applied)
+		}) {
+			t.Fatal("native live add refused")
+		}
+		select {
+		case <-applied:
+		case <-time.After(10 * time.Second):
+			d.mu.Lock()
+			a := d.app
+			active := d.activeTurn
+			pending := len(d.pendingPlugins)
+			bg := len(d.bgTasks)
+			children := len(d.children)
+			d.mu.Unlock()
+			if a != nil {
+				raw, err := a.call("thread/read", map[string]any{"threadId": response.Thread.ID, "includeTurns": true})
+				var v struct {
+					Thread struct {
+						ID     string
+						Status any
+						Turns  []json.RawMessage
+					}
+				}
+				_ = json.Unmarshal(raw, &v)
+				a.mu.Lock()
+				for _, ev := range a.backlog {
+					t.Logf("pending method: %s", ev.Method)
+				}
+				t.Logf("native state: active=%v pending=%d bg=%d children=%d thread=%s status=%v turns=%d err=%v backlog=%d dynamic=%d questions=%d childTurns=%d pendingChildren=%d", active, pending, bg, children, v.Thread.ID, v.Thread.Status, len(v.Thread.Turns), err, len(a.backlog), len(a.dynamicCalls), len(a.pendingQuestions), len(a.childTurns), len(a.pendingChildren))
+				a.mu.Unlock()
+			}
+			em.mu.Lock()
+			for _, e := range em.events {
+				if e.Kind == "error" {
+					t.Logf("driver error: %+v", e.Payload)
+				}
+			}
+			em.mu.Unlock()
+			t.Fatal("native idle gate did not apply plugin")
+		}
+		waitUntil(t, "replacement thread ready", func() bool {
+			d.mu.Lock()
+			defer d.mu.Unlock()
+			return d.mcpGeneration >= 2 && d.app != nil && d.app.mcpThreadReady
+		})
+		d.mu.Lock()
+		a := d.app
+		d.mu.Unlock()
+		skills, err := a.call("skills/list", map[string]any{"cwds": []string{base}, "forceReload": true})
+		if err != nil || !strings.Contains(string(skills), `"pluginId":"selected@fixture-market"`) {
+			t.Fatal("native restarted driver did not load added plugin")
+		}
+		d.EnqueueInput(agent.Input{Text: "Continue the fixture conversation.", ClientID: "live-next"})
+		waitUntil(t, "native next turn", func() bool { return countKind(em, "turn_done") == 1 })
+		d.mu.Lock()
+		same := d.threadID == response.Thread.ID
+		d.mu.Unlock()
+		if !same {
+			t.Fatal("live driver changed native thread")
+		}
 	}
 	got, _ := os.ReadFile(filepath.Join(source, "config.toml"))
 	if string(got) != config {

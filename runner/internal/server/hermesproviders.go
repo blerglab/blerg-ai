@@ -250,7 +250,10 @@ func (j *JobManager) personalHermesCredential(ctx context.Context, account strin
 // (agentconfig.go) carries .hermes/config.yaml. ok is false when the bundle
 // exists but cannot be read. No bundle: (false, true).
 func agentBundleHasHermesConfig() (has, ok bool) {
-	f, err := os.Open(agentConfigPath())
+	if sharedAgentConfigPath() == "" {
+		return false, true
+	}
+	f, err := os.Open(sharedAgentConfigPath())
 	if errors.Is(err, os.ErrNotExist) {
 		return false, true
 	}
@@ -264,7 +267,7 @@ func agentBundleHasHermesConfig() (has, ok bool) {
 	}
 	// The bundle is replaced by rename on every upload: its path, size and mtime name a version,
 	// so a scan is reused until it changes.
-	stamp := bundleStamp{path: agentConfigPath(), size: st.Size(), mod: st.ModTime()}
+	stamp := bundleStamp{path: sharedAgentConfigPath(), size: st.Size(), mod: st.ModTime()}
 	bundleScan.mu.Lock()
 	if bundleScan.stamp == stamp {
 		has, ok = bundleScan.has, bundleScan.ok

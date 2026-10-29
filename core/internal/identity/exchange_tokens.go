@@ -34,10 +34,12 @@ const ExchangeRevocationMargin = time.Hour
 var ErrNoExchangeCaps = errors.New("identity: proof token holds no capability for this target")
 
 // exchangeTargetCaps are the capabilities an exchanged token of a target carries (before
-// intersection with the owner's role and the proof). The board target does NOT get column.write:
-// the built-in board connection has no tool that creates or moves columns.
+// intersection with the owner's role and the proof). The board target includes column.write:
+// a session at the Full board level manages the board's columns (add, rename, move, set their
+// properties, remove); the runner allows the column tools only at Full, and exchanges a
+// card.read-only token for every read.
 var exchangeTargetCaps = map[string][]string{
-	"board": {"card.read", "card.write"},
+	"board": {"card.read", "card.write", "column.write"},
 }
 
 // ErrUnknownExchangeTarget is returned by CreateExchangeToken for a target outside ExchangeTargets.

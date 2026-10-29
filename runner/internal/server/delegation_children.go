@@ -208,7 +208,7 @@ func (a *API) handleChildModel(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "session not found")
 			return
 		}
-		resolved, problem := a.resolveChildModel(r.Context(), derefOrEmpty(row.Engine), request.Model, a.childHostOfChild(row), p)
+		resolved, problem := a.resolveChildModel(r.Context(), derefOrEmpty(row.Engine), request.Model, a.childHostOfChild(r.Context(), row), p)
 		if problem != nil {
 			writeAPIError(w, problem)
 			return
@@ -364,7 +364,7 @@ func (a *API) handleChildUpload(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleChildFiles(w http.ResponseWriter, r *http.Request) {
 	_, p, child, ok := a.delegateChild(w, r)
 	if ok && a.sessionFilesFor(w, r, p, child) {
-		(&artifactsHandler{api: a}).listSession(w, r, child)
+		(&artifactsHandler{api: a}).listSession(w, r, child, fileActor{account: p.spawningAccountID(), via: "contract"})
 	}
 }
 func (a *API) handleChildDownload(w http.ResponseWriter, r *http.Request) {

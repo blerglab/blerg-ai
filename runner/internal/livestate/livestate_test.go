@@ -233,6 +233,10 @@ func TestARunningForegroundSubagent(t *testing.T) {
 		!got.StartedAt.Equal(s.events[1].Ts) || !got.ActiveAt.Equal(s.events[3].Ts) {
 		t.Errorf("subagent = %+v", got)
 	}
+	// The parts behind the total, for the Running now chip's tooltip.
+	if got.Usage == nil || *got.Usage != (Usage{Input: 100, Output: 20, CacheRead: 1000}) {
+		t.Errorf("subagent usage = %+v", got.Usage)
+	}
 }
 
 func TestASubagentEndsWithItsFinalDone(t *testing.T) {
@@ -340,7 +344,7 @@ func TestTokensFollowTheInsightsRule(t *testing.T) {
 	opt := s.opts("running")
 	opt.ShowTokens = false
 	st := Build(s.events, opt)
-	if !st.TokensHidden || st.Subagents[0].Tokens != nil {
+	if !st.TokensHidden || st.Subagents[0].Tokens != nil || st.Subagents[0].Usage != nil {
 		t.Errorf("hidden tokens: %+v %+v", st.TokensHidden, st.Subagents[0])
 	}
 }
@@ -439,4 +443,15 @@ func TestAResumedSubagentRunsUntilItsOwnEnd(t *testing.T) {
 	s.resumed("toolu_send2", "toolu_bg", "Watch", true)
 	eq(t, "a background original's run", subs(Build(s.events, s.opts("idle"))), []string{"toolu_send2:background"})
 	eq(t, "in a stopped session", subs(Build(s.events, s.opts("stopped"))), nil)
+}
+
+func TestUsageNoticeLeavesWorkAndAsksOpen(t *testing.T) {
+	s := newScript()
+	s.sub("foreground", "Review")
+	s.nativeAsk("", "Which branch?")
+	s.msg("usage_limit", "95% used")
+	st := Build(s.events, s.opts("running"))
+	if len(st.Subagents) != 1 || len(st.Asks) != 1 {
+		t.Fatalf("usage notice changed live work: %+v", st)
+	}
 }

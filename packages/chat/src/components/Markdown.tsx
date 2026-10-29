@@ -33,7 +33,7 @@
 // is, a body that is not a JSON object gets the raw block and a note, and a
 // fence that has not closed yet (still streaming) is a plain code block —
 // its JSON is never parsed, complete as it may look.
-import { createContext, isValidElement, memo, useContext, useEffect, useState, type ReactNode } from 'react'
+import { createContext, isValidElement, memo, useContext, useEffect, useState, type ReactElement, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -175,6 +175,7 @@ function MarkdownLinkInner({ href, children }: { href?: string; children?: React
     if (ref && chat?.openWorkspaceFile) {
       const open = chat.openWorkspaceFile
       const folder = !!docPath // the folder's file, not a published one of the same name
+      // button-guard-ignore: an inline file link in the text, styled by .md .md-wsfile (chat.css) inside the Markdown container.
       return <span className="md-wsfile md-wslink" data-workspace-path={ref.path} {...wsProps(() => open(ref.path, ref.line, folder ? { folder: true } : undefined))}>{children}</span>
     }
     return <span className="md-link-inert" title={relative && !doc?.readWorkspace ? 'Not available: this file has no folder to open it from' : undefined}>{children}</span>
@@ -205,6 +206,7 @@ function InlineCode({ className, children, node }: { className?: string; childre
   const ref = workspace && chat?.openWorkspaceFile && !className && oneLine && text !== null ? workspaceFromCode(text) : null
   if (ref && chat?.openWorkspaceFile) {
     const open = chat.openWorkspaceFile
+    // button-guard-ignore: an inline file path in the text, styled by .md .md-wsfile (chat.css) inside the Markdown container.
     return <code className="md-wsfile" data-workspace-path={ref.path} {...wsProps(() => open(ref.path, ref.line))}>{children}</code>
   }
   return <code className={className}>{children}</code>
@@ -343,6 +345,7 @@ const components: Components = {
 // Links are vetted in the `a` component above; the transform only has to
 // keep react-markdown from rewriting them first.
 const keepUrl = (url: string) => url
+const REMARK_PLUGINS = [remarkGfm]
 
 // Headings get their ids and images their order everywhere; raw HTML is sanitized into allowlisted
 // elements only where the host opted in (`html`). Elsewhere react-markdown shows it as literal text.
@@ -376,18 +379,73 @@ export interface MarkdownProps {
    *  else (chat, approvals, tickets, threads) HTML stays literal text, so nothing can be hidden from
    *  the person reading it. */
   html?: boolean
+  /** One compact line of chat text (a relayed Blerg notice): only the inline subset (code, bold,
+   *  italic, strikethrough, links, references). Headings, lists, quotes, tables and code blocks
+   *  fall back to their plain text, images to a link, raw HTML stays literal. */
+  inline?: boolean
 }
 
-function MarkdownImpl({ text, className, cards, workspaceLinks, document: doc, html = false }: MarkdownProps) {
+// The inline subset: everything else is unwrapped to its text. `span` carries the reference marks.
+const INLINE_ELEMENTS = ['p', 'span', 'strong', 'em', 'del', 'code', 'a', 'img', 'br']
+const inlineComponents: Components = {
+  ...components,
+  p: ({ children }) => <span className="md-inline-p">{children} </span>,
+}
+
+// A text renders the same every time it is drawn: react-markdown's sync Markdown is a pure function
+// (parse, the rehype steps above, then elements; no hooks), and the components read their context
+// when React renders them, not here. So a session drawn again (a switch back, #306) reuses each
+// message's result instead of parsing it again. Bounded by total text kept, oldest first; a huge
+// text is never kept; in memory only, and forgotten on a sign-in change or sign-out.
+const CACHE_MAX_CHARS = 4_000_000
+const CACHE_MAX_ENTRY = 200_000
+const rendered = new Map<string, ReactElement>()
+let renderedChars = 0
+let misses = 0
+function forgetRendered() { rendered.clear(); renderedChars = 0 }
+if (typeof window !== 'undefined') {
+  window.addEventListener('blerg-identity-changed', forgetRendered)
+  window.addEventListener('blerg-signed-out', forgetRendered)
+}
+function renderMarkdown(text: string, variant: string, options: Parameters<typeof ReactMarkdown>[0]): ReactElement {
+  if (text.length > CACHE_MAX_ENTRY) { misses++; return ReactMarkdown(options) }
+  const key = `${variant}\u0000${text}`
+  const hit = rendered.get(key)
+  if (hit) {
+    rendered.delete(key)
+    rendered.set(key, hit)
+    return hit
+  }
+  misses++
+  const element = ReactMarkdown(options)
+  rendered.set(key, element)
+  renderedChars += key.length
+  for (const oldest of rendered.keys()) {
+    if (renderedChars <= CACHE_MAX_CHARS) break
+    rendered.delete(oldest)
+    renderedChars -= oldest.length
+  }
+  return element
+}
+/** Forget every kept result. An app that embeds the chat calls it when the signed-in account changes
+ *  (the runner's own events above do it for the runner; the board calls it from its token). */
+export function forgetMarkdown(): void { forgetRendered() }
+/** Test seam: how often a text had to be parsed, and the cache's size. */
+export const markdownCacheForTest = { misses: () => misses, chars: () => renderedChars, clear: () => { forgetRendered(); misses = 0 } }
+
+function MarkdownImpl({ text, className, cards, workspaceLinks, document: doc, html = false, inline = false }: MarkdownProps) {
   const [allImages, setAllImages] = useState(false)
   // Chat text in a chat that lends references (never a document, never raw HTML).
   const refs = !!useRefContext() && !doc && !html
   return (
-    <div className={`md${className ? ` ${className}` : ''}`}>
+    <div className={`md${inline ? ' md-inline' : ''}${className ? ` ${className}` : ''}`}>
       <Fence.Provider value={{ cards, source: text, workspace: workspaceLinks, doc, allImages, showAllImages: () => setAllImages(true), refs }}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={html ? htmlPlugins : refs ? refPlugins : textPlugins} components={components} urlTransform={keepUrl}>
-          {text}
-        </ReactMarkdown>
+        {renderMarkdown(text, `${html ? 'html' : refs ? 'refs' : 'text'}${inline ? '-inline' : ''}`, {
+          remarkPlugins: REMARK_PLUGINS, rehypePlugins: html ? htmlPlugins : refs ? refPlugins : textPlugins,
+          components: inline ? inlineComponents : components, urlTransform: keepUrl,
+          ...(inline ? { allowedElements: INLINE_ELEMENTS, unwrapDisallowed: true } : {}),
+          children: text,
+        })}
       </Fence.Provider>
     </div>
   )

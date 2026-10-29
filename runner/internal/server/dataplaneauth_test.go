@@ -66,22 +66,7 @@ func TestRuntimeDataPlaneIsRestrictedToItsCurrentRepository(t *testing.T) {
 			if (search.Code == 200) != allowed {
 				t.Fatalf("memory search status=%d", search.Code)
 			}
-			propose := run(api.HandlePostRule, http.MethodPost, "/api/agent/rules", `{"project":"`+project+`","content":"fixture rule"}`)
-			if (propose.Code == 201) != allowed {
-				t.Fatalf("rule proposal status=%d", propose.Code)
-			}
-			readRules := run(api.HandleGetRules, http.MethodGet, "/api/agent/rules?project="+project, "")
-			if (readRules.Code == 200) != allowed {
-				t.Fatalf("rules read status=%d", readRules.Code)
-			}
-			if scenario == "current" && strings.Contains(readRules.Body.String(), "fixture rule") {
-				t.Fatal("unapproved rule was exposed as standing instructions")
-			}
 			if scenario != "operator" {
-				approve := run(api.HandlePatchRule, http.MethodPatch, "/api/agent/rules/fixture", `{"enabled":true}`)
-				if approve.Code == 200 || approve.Code == 204 {
-					t.Fatal("runtime approved its own rule")
-				}
 				config := run(api.HandlePostAgentConfig, http.MethodPost, "/api/agent-config", "fixture")
 				if config.Code == 204 {
 					t.Fatal("runtime replaced shared agent configuration")

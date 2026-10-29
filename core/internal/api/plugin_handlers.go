@@ -45,7 +45,7 @@ func (d Deps) handleListPlugins(w http.ResponseWriter, r *http.Request) {
 		writePluginError(w, err)
 		return
 	}
-	d.writePluginList(w, engine, list)
+	d.writePluginList(w, r, engine, list)
 }
 
 // handlePutPlugins replaces the caller's whole list for an engine (add, remove and reorder are
@@ -95,11 +95,16 @@ func (d Deps) handlePutPlugins(w http.ResponseWriter, r *http.Request) {
 		writePluginError(w, err)
 		return
 	}
-	d.writePluginList(w, engine, list)
+	d.writePluginList(w, r, engine, list)
 }
 
-func (d Deps) writePluginList(w http.ResponseWriter, engine string, list []plugins.Entry) {
-	allowed, anyMkt := d.Plugins.Allowlist().List()
+func (d Deps) writePluginList(w http.ResponseWriter, r *http.Request, engine string, list []plugins.Entry) {
+	policy, err := d.Plugins.Policy(r.Context())
+	if err != nil {
+		http.Error(w, "plugin policy unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	allowed, anyMkt := policy.Allowlist().List()
 	if allowed == nil {
 		allowed = []string{}
 	}

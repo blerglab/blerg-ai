@@ -15,9 +15,12 @@ import (
 )
 
 type Board struct {
-	RunRuntime       string `json:"run_runtime"`
-	RunDaemonID      string `json:"run_daemon_id"`
-	RunTargetAccount string `json:"-"`
+	Key              string   `json:"key"`
+	SuggestedKey     string   `json:"suggested_key"`
+	KeyAliases       []string `json:"key_aliases"`
+	RunRuntime       string   `json:"run_runtime"`
+	RunDaemonID      string   `json:"run_daemon_id"`
+	RunTargetAccount string   `json:"-"`
 	// RunHostAckAt is when the automation owner acknowledged a host ("This machine") target:
 	// it runs unattended and unsandboxed as that desktop's person. Set only for a host target.
 	RunHostAckBy            string          `json:"-"`
@@ -107,7 +110,7 @@ func TerminalColumnSQL(alias string) string {
 	return `coalesce(` + alias + `.is_terminal OR lower(` + alias + `.name) LIKE '%done%', false)`
 }
 
-const boardCols = `effort, reviewer_effort, discuss_effort, chat_effort, id, name, description, default_runner, deploy_url, git_base, model, reviewer_model,
+const boardCols = `board_key, ARRAY(SELECT key FROM board_keys WHERE board_id=boards.id ORDER BY key), effort, reviewer_effort, discuss_effort, chat_effort, id, name, description, default_runner, deploy_url, git_base, model, reviewer_model,
 	discuss_model, chat_model, field_schema, require_repo,
 	gate_enabled, gate_on_unavailable, gate_on_dispute, driven_by, concurrency, ci_policy,
 	automation_engine, automation_token <> '', automation_token_expires_at, automation_account_id,
@@ -117,7 +120,7 @@ const boardCols = `effort, reviewer_effort, discuss_effort, chat_effort, id, nam
 
 func scanBoard(row pgx.Row) (Board, error) {
 	var b Board
-	err := row.Scan(&b.Effort, &b.ReviewerEffort, &b.DiscussEffort, &b.ChatEffort, &b.ID, &b.Name, &b.Description, &b.DefaultRunner, &b.DeployURL, &b.GitBase, &b.Model, &b.ReviewerModel,
+	err := row.Scan(&b.Key, &b.KeyAliases, &b.Effort, &b.ReviewerEffort, &b.DiscussEffort, &b.ChatEffort, &b.ID, &b.Name, &b.Description, &b.DefaultRunner, &b.DeployURL, &b.GitBase, &b.Model, &b.ReviewerModel,
 		&b.DiscussModel, &b.ChatModel, &b.FieldSchema,
 		&b.RequireRepo, &b.GateEnabled, &b.GateOnUnavailable, &b.GateOnDispute, &b.DrivenBy, &b.Concurrency,
 		&b.CIPolicy, &b.AutomationEngine, &b.AutomationTokenSet, &b.AutomationTokenExpiresAt, &b.AutomationAccountID,
@@ -130,6 +133,7 @@ func scanBoard(row pgx.Row) (Board, error) {
 }
 
 type BoardParams struct {
+	Key *string `json:"key"`
 	// Execution placement is accepted only through the owner-checked HTTP setting.
 	RunRuntime       *string `json:"-"`
 	RunDaemonID      *string `json:"-"`
@@ -487,6 +491,34 @@ func insertBoardTx(ctx context.Context, tx pgx.Tx, p BoardParams, schema json.Ra
 		return Board{}, fmt.Errorf("insert board: %w", err)
 	}
 
+	if p.Key != nil {
+		if err := claimBoardKey(ctx, tx, b.ID, *p.Key); err != nil {
+			return Board{}, err
+		}
+		b.Key = *p.Key
+	} else {
+		// Older clients can still create boards; choose an available suggestion atomically.
+		base := SuggestBoardKey(p.Name)
+		for i := 0; ; i++ {
+			if i >= 1000 {
+				return Board{}, fmt.Errorf("no available board key; choose a key explicitly")
+			}
+			key := boardKeyWithSuffix(base, i)
+			tag, err := tx.Exec(ctx, `INSERT INTO board_keys(key,board_id) VALUES($1,$2) ON CONFLICT(key) DO NOTHING`, key, b.ID)
+			if err != nil {
+				return Board{}, err
+			}
+			if tag.RowsAffected() == 1 {
+				if err := claimBoardKey(ctx, tx, b.ID, key); err != nil {
+					return Board{}, err
+				}
+				b.Key = key
+				break
+			}
+		}
+	}
+	b.KeyAliases = []string{b.Key}
+
 	for i, repo := range p.Repos {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO board_repos (board_id, repo, position) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
@@ -533,7 +565,14 @@ func GetBoard(ctx context.Context, pool *pgxpool.Pool, id string) (Board, error)
 		}
 		b.Repos = append(b.Repos, r)
 	}
-	return b, rows.Err()
+	if err := rows.Err(); err != nil {
+		return b, err
+	}
+	b.SuggestedKey = b.Key
+	if b.Key == "" {
+		b.SuggestedKey, err = AvailableBoardKey(ctx, pool, b.Name)
+	}
+	return b, err
 }
 
 func ListBoards(ctx context.Context, pool *pgxpool.Pool) ([]Board, error) {
@@ -550,7 +589,20 @@ func ListBoards(ctx context.Context, pool *pgxpool.Pool) ([]Board, error) {
 		}
 		out = append(out, b)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	for i := range out {
+		out[i].SuggestedKey = out[i].Key
+		if out[i].Key == "" {
+			out[i].SuggestedKey, err = AvailableBoardKey(ctx, pool, out[i].Name)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // UpdateBoard patches board settings. Nil pointers leave fields unchanged.
@@ -602,6 +654,11 @@ func UpdateBoardWithAutomation(ctx context.Context, pool *pgxpool.Pool, id strin
 
 	if err := lockBoard(ctx, tx, id); err != nil {
 		return Board{}, nil, err
+	}
+	if p.Key != nil {
+		if err := claimBoardKey(ctx, tx, id, *p.Key); err != nil {
+			return Board{}, nil, err
+		}
 	}
 	var replaced *MintedAutomation
 	if auto != nil {
@@ -842,8 +899,14 @@ func ListColumns(ctx context.Context, pool *pgxpool.Pool, boardID string) ([]Col
 	return out, rows.Err()
 }
 
-// CreateColumn appends a column at the end (or after afterID).
-func CreateColumn(ctx context.Context, pool *pgxpool.Pool, boardID, name string, isTerminal bool) (Column, error) {
+// CreateColumn appends a column at the end. An audit, when given, is recorded in the same
+// transaction: the column exists only if its audit row does.
+func CreateColumn(ctx context.Context, pool *pgxpool.Pool, boardID, name string, isTerminal bool, audit ...ColumnAudit) (Column, error) {
+	return CreateColumnAt(ctx, pool, boardID, name, isTerminal, "", audit...)
+}
+
+// CreateColumnAt is CreateColumn placed before beforeID ("" = the end), in one transaction.
+func CreateColumnAt(ctx context.Context, pool *pgxpool.Pool, boardID, name string, isTerminal bool, beforeID string, audit ...ColumnAudit) (Column, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return Column{}, err
@@ -873,17 +936,42 @@ func CreateColumn(ctx context.Context, pool *pgxpool.Pool, boardID, name string,
 	if err != nil {
 		return Column{}, err
 	}
+	if err := recordColumnAudit(ctx, tx, c.BoardID, c.ID, "created", audit, map[string]any{"name": c.Name, "is_terminal": c.IsTerminal}); err != nil {
+		return Column{}, err
+	}
+	if beforeID != "" {
+		var on string
+		if err := tx.QueryRow(ctx, `SELECT id FROM board_columns WHERE id = $1 AND board_id = $2`, beforeID, boardID).Scan(&on); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return Column{}, fmt.Errorf("before_id must be a column of this board")
+			}
+			return Column{}, err
+		}
+		if c, err = moveColumnTx(ctx, tx, c.ID, &beforeID); err != nil {
+			return Column{}, err
+		}
+		if err := recordColumnAudit(ctx, tx, c.BoardID, c.ID, "moved", audit, map[string]any{"name": c.Name, "before_id": beforeID}); err != nil {
+			return Column{}, err
+		}
+	}
 	return c, tx.Commit(ctx)
 }
 
 // DeleteColumn refuses when live cards remain (archive or move them first).
 // The FK RESTRICT is the backstop; this returns the typed error.
-func DeleteColumn(ctx context.Context, pool *pgxpool.Pool, columnID string) error {
+func DeleteColumn(ctx context.Context, pool *pgxpool.Pool, columnID string, audit ...ColumnAudit) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after a successful commit is a no-op; the commit error is what is returned
+	var boardID, name string
+	if err := tx.QueryRow(ctx, `SELECT board_id, name FROM board_columns WHERE id = $1`, columnID).Scan(&boardID, &name); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
 	var n int
 	if err := tx.QueryRow(ctx,
 		`SELECT count(*) FROM cards WHERE column_id = $1`, columnID).Scan(&n); err != nil {
@@ -899,19 +987,16 @@ func DeleteColumn(ctx context.Context, pool *pgxpool.Pool, columnID string) erro
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
+	if err := recordColumnAudit(ctx, tx, boardID, columnID, "deleted", audit, map[string]any{"name": name}); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
 // RenameColumn updates a column's name.
-func RenameColumn(ctx context.Context, pool *pgxpool.Pool, columnID, name string) error {
-	tag, err := pool.Exec(ctx, `UPDATE board_columns SET name = $2 WHERE id = $1`, columnID, name)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+func RenameColumn(ctx context.Context, pool *pgxpool.Pool, columnID, name string, audit ...ColumnAudit) error {
+	_, err := UpdateColumn(ctx, pool, columnID, &name, nil, audit...)
+	return err
 }
 
 // GetColumn fetches a single column by id.
@@ -929,13 +1014,27 @@ func GetColumn(ctx context.Context, pool *pgxpool.Pool, columnID string) (Column
 // MoveColumn repositions a column among its board's siblings, placing it
 // immediately before beforeColumnID, or at the end if beforeColumnID is
 // nil/empty. Takes the board lock (rank allocation), same scheme as MoveCard.
-func MoveColumn(ctx context.Context, pool *pgxpool.Pool, columnID string, beforeColumnID *string) (Column, error) {
+func MoveColumn(ctx context.Context, pool *pgxpool.Pool, columnID string, beforeColumnID *string, audit ...ColumnAudit) (Column, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return Column{}, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after a successful commit is a no-op; the commit error is what is returned
+	c, err := moveColumnTx(ctx, tx, columnID, beforeColumnID)
+	if err != nil {
+		return Column{}, err
+	}
+	data := map[string]any{"name": c.Name}
+	if beforeColumnID != nil {
+		data["before_id"] = *beforeColumnID
+	}
+	if err := recordColumnAudit(ctx, tx, c.BoardID, c.ID, "moved", audit, data); err != nil {
+		return Column{}, err
+	}
+	return c, tx.Commit(ctx)
+}
 
+func moveColumnTx(ctx context.Context, tx pgx.Tx, columnID string, beforeColumnID *string) (Column, error) {
 	var boardID string
 	if err := tx.QueryRow(ctx,
 		`SELECT board_id FROM board_columns WHERE id = $1`, columnID).Scan(&boardID); err != nil {
@@ -995,7 +1094,7 @@ func MoveColumn(ctx context.Context, pool *pgxpool.Pool, columnID string, before
 	if err != nil {
 		return Column{}, err
 	}
-	return c, tx.Commit(ctx)
+	return c, nil
 }
 
 func deref(s *string) string {

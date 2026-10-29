@@ -446,3 +446,50 @@ func TestRawSendsTheDeclaredContentLength(t *testing.T) {
 		}
 	}
 }
+
+// A start the runner refuses (422) reports the runner's own reason as a StartRefusedError, not the
+// HTTP exchange, and never carries the start credential.
+func TestBlergRunnerStartRefusalIsTyped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"error":"repo must be given as org/name for cluster sessions (or set BLERG_RUNNER_GITHUB_ORG)"}`))
+	}))
+	defer srv.Close()
+	_, err := NewBlergRunner(srv.URL, "key", "").Start(context.Background(), StartRequest{Repo: "app", Token: "secret-start-token"})
+	var refused *StartRefusedError
+	if !errors.As(err, &refused) || !strings.HasPrefix(refused.Message, ClusterBareRepoRefusal) {
+		t.Fatalf("err = %v, want a StartRefusedError with the runner's reason", err)
+	}
+	if strings.Contains(err.Error(), "HTTP") || strings.Contains(err.Error(), "secret-start-token") {
+		t.Fatalf("err = %q", err)
+	}
+}
+
+// Every runner refusal of a start (409 workspace selection, 503 capacity, …) is a typed
+// StartRefusedError carrying the runner's words and its status, never the HTTP exchange.
+func TestBlergRunnerStartRefusalsOfAnyStatusAreTyped(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		body   string
+		want   string
+	}{
+		{http.StatusConflict, `{"error":"Select an existing repository using fresh source references."}`, "Select an existing repository"},
+		{http.StatusServiceUnavailable, `{"error":"session cap reached"}`, "session cap reached"},
+		{http.StatusBadGateway, `<html>bad gateway</html>`, "HTTP 502"},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(tc.status)
+			_, _ = w.Write([]byte(tc.body))
+		}))
+		_, err := NewBlergRunner(srv.URL, "key", "").Start(context.Background(), StartRequest{Repo: "app", Token: "secret-start-token"})
+		srv.Close()
+		var refused *StartRefusedError
+		if !errors.As(err, &refused) || refused.Status != tc.status || !strings.Contains(refused.Message, tc.want) {
+			t.Fatalf("%d: err = %v", tc.status, err)
+		}
+		if strings.Contains(err.Error(), "blerg-runner POST") || strings.Contains(err.Error(), "secret-start-token") {
+			t.Fatalf("%d: raw exchange in %q", tc.status, err)
+		}
+	}
+}

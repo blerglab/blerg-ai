@@ -145,7 +145,7 @@ func TestSessionPluginsAdditiveConcurrentAndDurableReplay(t *testing.T) {
 }
 
 func TestSessionPluginsFailsClosedBeforeInstalling(t *testing.T) {
-	for _, mode := range []string{"restricted", "docker", "cluster", "codex", "unlisted", "invalid", "duplicate", "too-many", "no-workshop", "missing"} {
+	for _, mode := range []string{"restricted", "docker", "cluster", "mismatched-driver", "unlisted", "invalid", "duplicate", "too-many", "no-workshop", "missing"} {
 		t.Run(mode, func(t *testing.T) {
 			w, f := newTestWorkshop(t)
 			sender := &agentTestSender{}
@@ -161,8 +161,9 @@ func TestSessionPluginsFailsClosedBeforeInstalling(t *testing.T) {
 				sess.sandboxed = true
 			case "cluster":
 				h.cfg.Plugins = nil
-			case "codex":
-				sess.engine = "codex"
+			case "mismatched-driver":
+				sess.loop = newCodexDriver(AgentDriverOpts{Emitter: &collectEmitter{}})
+				sess.loop.(*codexDriver).RestrictedRuntime = &codexRestrictedRuntime{Restricted: true}
 			case "unlisted":
 				entries[0].Marketplace = "untrusted/repo"
 			case "invalid":

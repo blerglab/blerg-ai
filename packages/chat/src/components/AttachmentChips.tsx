@@ -1,5 +1,7 @@
 // The pieces of the chat's file attachments: the chips under the composer (upload state, remove),
 // and a message's text with its attachment note drawn as file chips.
+import type {ReactNode} from 'react'
+import { FileIcon } from './FileIcon'
 import { useState } from 'react'
 import { useChat } from './context'
 import { CAP_SHOW, countLines, firstLines, messageNeedsCap } from '../model/lineCap'
@@ -25,23 +27,48 @@ function uploadText(i: AttachmentItem): string {
   return `Uploading ${pct}% · ${formatSize(i.loaded ?? 0)} of ${formatSize(i.size)}`
 }
 
-export function ComposerChips({ items, onRemove }: { items: AttachmentItem[]; onRemove: (key: string) => void }) {
+function waitText(i: AttachmentItem): string {
+  return i.wait === 'offline' ? 'Waiting to reach the server' : 'Waiting for space'
+}
+
+/** Another tab's file: it uploads (and is sent) from there. */
+function foreignText(i: AttachmentItem): string {
+  return i.status === 'done' ? 'Attached in another tab' : i.status === 'error' ? 'Not attached' : 'Waiting in another tab'
+}
+
+/** The spoken summary of the waiting files: announced once when it changes, not per chip. */
+function waitingAnnouncement(waiting: AttachmentItem[]): string {
+  if (!waiting.length) return ''
+  const n = waiting.length
+  const files = n === 1 ? `${waiting[0]!.name} is` : `${n} files are`
+  if (waiting.every(i => i.wait === 'offline')) return `${files} waiting to reach the server. They upload by themselves when it answers.`
+  return `${files} waiting for space in this session. They upload by themselves when there is room.`
+}
+
+/** The chips under the message box. Waiting files share one set of actions (`waitingActions`),
+ *  shown once below the chips, and one live announcement. */
+export function ComposerChips({ items, onRemove, waitingActions }: { items: AttachmentItem[]; onRemove: (key: string) => void; waitingActions?: ReactNode }) {
+  const waiting = items.filter(i => i.status === 'waiting' && !i.foreign)
+  const announcement = waitingAnnouncement(waiting)
+  // The live region comes with the first chip (it is uploading then), so the later change to
+  // waiting is announced.
   if (items.length === 0) return null
   return (
+    <>
     <ul className="attach-chips composer-attachments" aria-label="Attached files">
       {items.map(i => (
-        <li key={i.key} className={`attach-chip composer-attachment ${i.status}${i.preview ? ' has-preview' : ''}`} data-testid="attach-chip">
+        <li key={i.key} className={`attach-chip composer-attachment ${i.status}${i.foreign ? ' is-foreign' : ''}${i.preview ? ' has-preview' : ''}`} data-testid="attach-chip">
           <div className={`attach-chip-preview${i.preview ? '' : ' is-file'}`}>
-            {!i.preview ? <span className="attach-chip-filetype" aria-hidden="true">{i.name.includes('.') ? i.name.split('.').pop()?.slice(0, 8).toUpperCase() : 'FILE'}</span>
+            {!i.preview ? <FileIcon name={i.name} className="attach-chip-filetype" />
               : i.preview.kind === 'text' ? <span className="attach-chip-excerpt">{i.preview.text}</span>
                 : <img src={i.preview.src} alt={`${i.preview.kind === 'pdf' ? 'First page of' : 'Preview of'} ${i.name}`} />}
           </div>
-          <span className="attach-chip-icon" aria-hidden="true">📎</span>
+          <FileIcon name={i.name} className="attach-chip-icon" />
           <span className="attach-chip-name" title={i.name}>{i.name}</span>
           <span className="attach-chip-meta">
-            {i.status === 'uploading' ? uploadText(i) : i.status === 'error' ? 'Not attached' : formatSize(i.size)}
+            {i.foreign ? foreignText(i) : i.status === 'uploading' ? uploadText(i) : i.status === 'waiting' ? waitText(i) : i.status === 'error' ? <span title={i.error}>{i.error ? `Not attached: ${i.error}` : 'Not attached'}</span> : formatSize(i.size)}
           </span>
-          {i.status === 'uploading' && (
+          {i.status === 'uploading' && !i.foreign && (
             <span
               className="attach-chip-progress"
               role="progressbar"
@@ -53,18 +80,21 @@ export function ComposerChips({ items, onRemove }: { items: AttachmentItem[]; on
               <span className="attach-chip-progress-bar" style={{ width: `${uploadPercent(i)}%` }} />
             </span>
           )}
-          <button
+          {!i.foreign && <button
             type="button"
             className="attach-chip-remove"
             aria-label={`Remove ${i.name}`}
             onClick={() => onRemove(i.key)}
           >
             ✕
-          </button>
+          </button>}
           {i.status === 'error' && i.error && <span className="attach-chip-error" role="alert">{i.error}<ErrorId id={i.errorId} /></span>}
         </li>
       ))}
     </ul>
+    {waiting.length > 0 && waitingActions && <div className="attach-space-panel" data-testid="attach-space-panel">{waitingActions}</div>}
+    <span className="chat-sr-only" role="status" aria-live="polite" data-testid="attach-waiting-status">{announcement}</span>
+    </>
   )
 }
 
@@ -116,7 +146,7 @@ export function MessageText({ text, cards, at }: { text: string; cards?: CardReg
       <ul className="attach-chips in-message" data-testid="message-attachments" aria-label="Attached files">
         {files.map((f, n) => (
           <li key={n} className="attach-chip done">
-            <span className="attach-chip-icon" aria-hidden="true">📎</span>
+            <FileIcon name={f.name} className="attach-chip-icon" />
             <span className="attach-chip-name" title={f.name}>{f.name}</span>
             <span className="attach-chip-meta">{f.size}</span>
           </li>

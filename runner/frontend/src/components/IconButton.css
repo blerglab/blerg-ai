@@ -48,6 +48,9 @@
   font-variant-numeric: tabular-nums;
 }
 .icon-btn-count.attention { background: var(--amber); color: var(--basalt); }
+/* The panel toggle's counts carry a mark: the subagent robot face for work inside, ↳ for child sessions. */
+.icon-btn-count:has(.icon-btn-count-glyph) { display: inline-flex; align-items: center; gap: 2px; }
+.icon-btn-count-glyph { flex: none; }
 
 /* A row of them: the session header's controls. */
 .icon-btn-group { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }

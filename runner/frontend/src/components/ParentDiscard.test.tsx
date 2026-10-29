@@ -4,15 +4,17 @@ import {ParentDiscardAction, ChildDiscardAction} from './ChildDiscard'
 const apiFetch = vi.hoisted(() => vi.fn())
 vi.mock('../apiFetch', () => ({apiFetch}))
 vi.mock('../ws', () => import('../test/wsMock'))
-beforeEach(() => {apiFetch.mockReset()})
+const forgetSessionAttachments = vi.hoisted(() => vi.fn(async () => {}))
+vi.mock('@blerglab/chat', async (original) => ({...(await original<typeof import('@blerglab/chat')>()), forgetSessionAttachments}))
+beforeEach(() => {apiFetch.mockReset(); forgetSessionAttachments.mockClear()})
 
 it('requires explicit confirmation and cancellation sends no request', () => {
   render(<ParentDiscardAction sessionId="parent /" title="Parent"/>)
   fireEvent.click(screen.getByRole('button', {name:'Discard Parent'}))
-  expect(screen.getByRole('dialog', {name:'Discard session and all children?'})).toBeInTheDocument()
+  expect(screen.getByRole('alertdialog', {name:'Discard session and all children?'})).toBeInTheDocument()
   expect(screen.getByText(/including children marked Keep running and work in progress/)).toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', {name:'Cancel'}))
-  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(screen.queryByRole('alertdialog')).toBeNull()
   expect(apiFetch).not.toHaveBeenCalled()
 })
 
@@ -22,11 +24,14 @@ it('leaves partial failure visible and retries the same idempotent route', async
   render(<ParentDiscardAction sessionId="parent /" title="Parent" onDiscarded={done}/>)
   fireEvent.click(screen.getByRole('button', {name:'Discard Parent'}))
   fireEvent.click(screen.getByRole('button', {name:'Discard session and children'}))
-  expect(await screen.findByRole('alert')).toHaveTextContent('Retry to complete any remaining steps')
+  await waitFor(() => expect(screen.getByRole('alertdialog')).toHaveTextContent('Retry to complete any remaining steps'))
   expect(done).not.toHaveBeenCalled()
-  expect(screen.getByRole('dialog')).toBeInTheDocument()
-  fireEvent.click(screen.getByRole('button', {name:'Discard session and children'}))
+  expect(screen.getByRole('alertdialog')).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', {name:'Retry'}))
   await waitFor(() => expect(done).toHaveBeenCalledTimes(1))
+  // Only the confirmed discard forgets the session's waiting files on this device (#231 review, 7).
+  expect(forgetSessionAttachments).toHaveBeenCalledTimes(1)
+  expect(forgetSessionAttachments).toHaveBeenCalledWith('parent /')
   expect(apiFetch).toHaveBeenCalledTimes(2)
   for (const call of apiFetch.mock.calls) expect(call).toEqual(['/api/sessions/parent%20%2F/discard', {method:'POST'}])
 })
@@ -43,7 +48,7 @@ it('does not navigate away from another session when an old request completes', 
   await act(async () => {finish({ok:true,json:async()=>({status:'discarded',session_id:'first',archived_at:'2026-10-20T12:00:00Z'})})})
   expect(done).not.toHaveBeenCalled()
   expect(screen.getByRole('button', {name:'Discard Second'})).toBeEnabled()
-  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(screen.queryByRole('alertdialog')).toBeNull()
 })
 
 
@@ -53,9 +58,10 @@ it.each([{}, {status:'discarded',session_id:'other',archived_at:'2026-10-20T12:0
   render(<ParentDiscardAction sessionId="parent" title="Parent" onDiscarded={done}/>)
   fireEvent.click(screen.getByRole('button',{name:'Discard Parent'}))
   fireEvent.click(screen.getByRole('button',{name:'Discard session and children'}))
-  expect(await screen.findByRole('alert')).toHaveTextContent('Could not finish discarding')
+  // The confirmation dialog already exists; wait for the asynchronous error state.
+  await waitFor(() => expect(screen.getByRole('alertdialog')).toHaveTextContent('Could not finish discarding'))
   expect(done).not.toHaveBeenCalled()
-  expect(screen.getByRole('dialog')).toBeInTheDocument()
+  expect(screen.getByRole('alertdialog')).toBeInTheDocument()
 })
 
 
@@ -64,8 +70,8 @@ it('directs a child-discard conflict back to the pending parent operation', asyn
   render(<ChildDiscardAction parentId="parent" childId="child" title="Worker"/>)
   fireEvent.click(screen.getByRole('button',{name:'Discard Worker'}))
   fireEvent.click(screen.getByRole('button',{name:'Discard child session'}))
-  expect(await screen.findByRole('alert')).toHaveTextContent('Retry discarding its parent to finish')
-  expect(screen.getByRole('dialog',{name:'Discard child session?'})).toBeInTheDocument()
+  await waitFor(() => expect(screen.getByRole('alertdialog')).toHaveTextContent('Retry discarding its parent to finish'))
+  expect(screen.getByRole('alertdialog',{name:"Discard didn't finish"})).toBeInTheDocument()
 })
 
 it('says a session is running before it is discarded, from the sidebar menu and the panel row', () => {

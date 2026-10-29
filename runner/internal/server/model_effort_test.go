@@ -17,13 +17,13 @@ import (
 func postSession(t *testing.T, body map[string]any) (int, *protocol.SpawnSession) {
 	t.Helper()
 	hub := NewHub()
-	dc := &DaemonConn{ID: "d1", Name: "laptop", send: make(chan []byte, 8)}
+	dc := &DaemonConn{ID: "00000000-0000-4000-8000-0000000000f1", Name: "laptop", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	hub.Register(dc)
-	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
+	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 	tok := enableBrowserAuth(t, api)("session.start")
 	if _, ok := body["daemon_id"]; !ok {
-		body["daemon_id"] = "d1"
+		body["daemon_id"] = "00000000-0000-4000-8000-0000000000f1"
 	}
 	if _, ok := body["repo"]; !ok {
 		body["repo"] = "my-app"
@@ -149,18 +149,18 @@ func TestPostSessionsChecksEffortAgainstTheModelsOwnLevels(t *testing.T) {
 // through the real routes and the server's real registry — not a mock source.
 func TestCodexThroughTheRealRoutes(t *testing.T) {
 	hub := NewHub()
-	dc := &DaemonConn{ID: "d1", Name: "laptop", send: make(chan []byte, 8)}
+	dc := &DaemonConn{ID: "00000000-0000-4000-8000-0000000000f1", Name: "laptop", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc.SetCheckedOutRepos([]string{"app"})
 	hub.Register(dc)
-	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
+	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 	api.SetRunnerKey("runner-key")
 	api.SetModelSources(NewModelSources(nil, hub))
 	mux := http.NewServeMux()
 	RegisterRunnerContractRoutes(mux, api)
 	do := func(method, path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
-		req.Header.Set("Authorization", "Bearer runner-key")
+		req.Header.Set("Authorization", "Bearer "+enableBrowserAuth(t, api)("session.start"))
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
 		return rec
@@ -211,7 +211,7 @@ func TestRunnerStartValidatesModelAndEffort(t *testing.T) {
 		{"--model", "high"},
 		{"claude-sonnet-5", "Max"},
 	} {
-		_, apiErr := api.StartSession(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind},
+		_, apiErr := api.StartSession(context.Background(), workspaceFixturePrincipal(),
 			runnerStartRequest{Repo: "app", Model: tc.model, Effort: tc.effort}, "")
 		if apiErr == nil || apiErr.Status != http.StatusUnprocessableEntity {
 			t.Errorf("model %q effort %q: got %v, want 422", tc.model, tc.effort, apiErr)
@@ -222,13 +222,13 @@ func TestRunnerStartValidatesModelAndEffort(t *testing.T) {
 // With a valid model/effort, a daemon-routed start carries both to the daemon.
 func TestRunnerStartCarriesEffortToDaemon(t *testing.T) {
 	hub := NewHub()
-	dc := &DaemonConn{ID: "d1", Name: "laptop", send: make(chan []byte, 8)}
+	dc := &DaemonConn{ID: "00000000-0000-4000-8000-0000000000f1", Name: "laptop", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc.SetCheckedOutRepos([]string{"app"})
 	hub.Register(dc)
-	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
+	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 	api.SetRunnerKey("runner-key")
-	_, apiErr := api.StartSession(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind},
+	_, apiErr := api.StartSession(context.Background(), workspaceFixturePrincipal(),
 		runnerStartRequest{Repo: "app", Model: "claude-sonnet-5", Effort: "low", Runtime: "daemon"}, "")
 	if apiErr != nil {
 		t.Fatalf("start: %v", apiErr)

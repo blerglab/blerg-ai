@@ -1,12 +1,13 @@
+import { FileIcon } from '../FileIcon'
 import { modelDisplayName } from '../../model/modelDisplay'
 // One card per kind of event: how each thing the transcript holds is drawn. renderEvent is the
 // switch; the compact timeline and the legacy (one card per call) view both go through it.
-import { memo, useState, type ReactNode } from 'react'
+import { memo, useRef, useState, type ReactNode } from 'react'
 import type { CardRegistry } from '../../cards/registry'
 import { isRetryNotice } from '../../model/notices'
 import { markRowText, topicDividerText } from '../../model/topicMarker'
 import { isReviewStateEvent } from '../../model/reviewRounds'
-import { automationAuthor, isFromParentSession, userMessageShape } from '../../model/userMessages'
+import { automationAuthor, isFromParentSession, PAUSED_ROW_TEXT, userMessageShape } from '../../model/userMessages'
 import { parseTs, turnDuration } from '../../model/timeLabel'
 import type {
   AgentEvent,
@@ -35,6 +36,7 @@ import DelegationCard from './DelegationCard'
 import ProposalCard from './ProposalCard'
 import ReviewRequestCard from './ReviewRequestCard'
 import { useAsks } from '../askContext'
+import { useRestartRows } from '../restartContext'
 import { MessageText } from '../AttachmentChips'
 import CopyMessage from '../CopyMessage'
 import Markdown from '../Markdown'
@@ -79,6 +81,45 @@ export interface RenderOptions {
   /** Which subagent cards the person opened or closed, by call id: kept by the transcript so a card
    *  drawn again (scrolled out of the window and back) keeps it. */
   subagentFolds?: Map<string, boolean>
+}
+
+// A restart row that paused the session: "Paused after a restart" with Resume, which sends the
+// session the message the daemon sends one it continues by itself; "Resumed" once someone did. The
+// details keep why and what was cut off. Drawn without a chat around it, there is no button.
+function PausedRestartRow({ ev, detail }: { ev: AgentEvent; detail?: string }) {
+  const rows = useRestartRows()
+  const [pending, setPending] = useState(false)
+  const busy = useRef(false)
+  const state = rows?.states.get(ev.client_event_id) ?? 'paused'
+  const resume = state === 'paused' ? rows?.resume : undefined
+  async function onResume() {
+    if (!resume || busy.current) return
+    busy.current = true
+    setPending(true)
+    try { await resume(ev.client_event_id) } finally {
+      busy.current = false
+      setPending(false)
+    }
+  }
+  const text = state === 'resumed' ? 'Resumed' : PAUSED_ROW_TEXT
+  return (
+    <div className="agent-card system-note restart-row" data-testid="restart-notice" data-restart-state={state}>
+      <span className="system-label">↻</span>
+      {detail ? (
+        <details className="system-text restart-disclosure">
+          <summary>{text}</summary>
+          <div className="restart-details" data-testid="restart-details">{detail}</div>
+        </details>
+      ) : <span className="system-text">{text}</span>}
+      {resume && (
+        <button type="button" className="artifact-btn restart-resume" data-testid="restart-resume" disabled={pending} aria-busy={pending || undefined} onClick={onResume}
+          title="Continue the session where the restart cut it off">
+          Resume
+        </button>
+      )}
+      <TimeLabel ts={ev.ts} className="card-time-end" />
+    </div>
+  )
 }
 
 // The prompt a session was started with: metadata more than conversation, so one dim line that
@@ -263,11 +304,20 @@ export function renderEvent(
       // system cards (model/userMessages.ts).
       const shape = userMessageShape(p)
       if (shape.as === 'hidden') return null
+      if (shape.as === 'notice' && shape.restart === 'paused') return <PausedRestartRow key={key} ev={ev} detail={shape.detail} />
       if (shape.as === 'notice') {
         return (
-          <div key={key} className="agent-card system-note" data-testid="system-note">
+          <div key={key} className="agent-card system-note" data-testid={shape.label === '↻' ? 'restart-notice' : 'system-note'}>
             <span className="system-label">{shape.label ?? 'system'}</span>
-            <span className="system-text">{shape.text}</span>
+            {shape.detail ? (
+              <details className="system-text restart-disclosure">
+                <summary>{shape.text}</summary>
+                <div className="restart-details" data-testid="restart-details">{shape.detail}</div>
+              </details>
+            ) : shape.label === 'Blerg' ? (
+              // Blerg's own relay can quote a child session's output: untrusted chat text, inline subset only.
+              <span className="system-text"><Markdown inline text={shape.text} /></span>
+            ) : <span className="system-text">{shape.text}</span>}
             <TimeLabel ts={ev.ts} className="card-time-end" />
           </div>
         )
@@ -342,7 +392,7 @@ export function renderEvent(
       const p = ev.payload as Partial<SessionUploadPayload> | null
       const name = typeof p?.name === 'string' ? p.name : 'a file'
       const parent = typeof p?.from_title === 'string' && p.from_title ? p.from_title : 'another session'
-      return <div key={key} className="agent-card marker" data-testid="session-upload" data-event-id={key}>📎 {name} · from {parent}{typeof p?.size === 'number' && Number.isFinite(p.size) && p.size >= 0 ? ` · ${p.size.toLocaleString()} bytes` : ''}<TimeLabel ts={ev.ts} className="card-time-end" /></div>
+      return <div key={key} className="agent-card marker" data-testid="session-upload" data-event-id={key}><FileIcon name={name} /> {name} · from {parent}{typeof p?.size === 'number' && Number.isFinite(p.size) && p.size >= 0 ? ` · ${p.size.toLocaleString()} bytes` : ''}<TimeLabel ts={ev.ts} className="card-time-end" /></div>
     }
     case 'delegation_request':
       return <DelegationCard key={key} ev={ev} />
@@ -401,6 +451,7 @@ export function renderEvent(
       )
     }
     case 'error': {
+      if ((ev.payload as ErrorPayload)?.code === 'session_recovery') return null
       const p = ev.payload as ErrorPayload
       if (p?.client_id) {
         // A message the session dropped: its queued bubble is gone, so this row says what happened.

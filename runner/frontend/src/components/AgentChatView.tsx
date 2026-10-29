@@ -1,11 +1,12 @@
-import { isFromParentSession, modelDisplayNames, type ChatRefs, type FiledCard, type Ticket } from '@blerglab/chat'
+import SessionSettings from './SessionSettings'
+import { isFromParentSession, type ChatRefs, type FiledCard, type Ticket } from '@blerglab/chat'
 // Chat/timeline view for agent-kind sessions: the runner's page over @blerglab/chat's ChatView.
 // The package draws the transcript, composer, files and viewer; this file adds what is the
 // runner's own — the model and effort pickers, the Rules panel, the ready card's repo line — and
 // wires the package to the runner's websocket and token. The chat's settings (Show thinking,
 // Compact tool calls), its Files and the Skills & plugins are in the session panel (SessionRail).
 import { useNavigate } from 'react-router-dom'
-import { memo, useEffect, useMemo, useState } from 'react'
+import { memo, useMemo, useState, type ReactNode } from 'react'
 import {
   ChatView,
   CommitViewerHost,
@@ -27,14 +28,10 @@ import { boardCardsReader } from '../lib/cardRefs'
 import { useLoadSessionBoard } from '../lib/sessionBoard'
 import { PinnedTicketModal } from './BoardCardView'
 import ProposalEditSheet from './ProposalEditSheet'
-import { apiFetch } from '../apiFetch'
-import { effectiveEffort, modelCatalogTarget, useEngineModels } from '../lib/engineModels'
 import { ENGINE_LABELS, RUNTIME_LABELS } from '../lib/runtimes'
 import { repoDetail } from '../lib/noRepo'
 import type { SessionInfo } from '../types'
 import { useSessionStore } from '../hooks/useSessionStore'
-import './AgentChatView.css'
-import ModelCatalogNotice from './ModelCatalogNotice'
 import {SessionPluginChatRequests} from './SessionPlugins'
 
 // The ?artifact=<id> of the address: the link `blerg-runner publish` prints.
@@ -51,54 +48,8 @@ function clearArtifactParam() {
   window.history.replaceState(window.history.state, '', u.pathname + u.search + u.hash)
 }
 
-interface AgentRule {
-  id: string
-  project: string
-  content: string
-  enabled: boolean
-}
-
-// RulesPanel: the human approval surface for agent-proposed standing rules.
-function RulesPanel({ project }: { project: string }) {
-  const [rules, setRules] = useState<AgentRule[]>([])
-  const load = () => {
-    void apiFetch(`/api/agent/rules?project=${encodeURIComponent(project)}`)
-      .then(r => r.json())
-      .then((data: AgentRule[]) => setRules(Array.isArray(data) ? data : []))
-      .catch(() => {})
-  }
-  useEffect(load, [project])
-  async function setEnabled(id: string, enabled: boolean) {
-    await apiFetch(`/api/agent/rules/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled }),
-    }).catch(() => {})
-    load()
-  }
-  async function remove(id: string) {
-    await apiFetch(`/api/agent/rules/${id}`, { method: 'DELETE' }).catch(() => {})
-    load()
-  }
-  return (
-    <div className="rules-panel" data-testid="rules-panel">
-      {rules.length === 0 && <div className="rules-empty">No rules for {project}. The agent can propose rules with rule_propose; they take effect once you approve them here.</div>}
-      {rules.map(r => (
-        <div key={r.id} className={`rule-row ${r.enabled ? 'enabled' : 'pending'}`}>
-          <span className="rule-status">{r.enabled ? '✓ active' : '⏳ pending'}</span>
-          <span className="rule-content">{r.content}</span>
-          <button onClick={() => void setEnabled(r.id, !r.enabled)}>
-            {r.enabled ? 'Disable' : 'Approve'}
-          </button>
-          <button className="rule-delete" onClick={() => void remove(r.id)}>✕</button>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-
 interface Props {
+  transcript?: (content: ReactNode) => ReactNode
   session: SessionInfo
   /** Whether the model's thinking is drawn (the panel's Show thinking). */
   thinking: boolean
@@ -124,7 +75,7 @@ interface Props {
 // Memoised: the page around it re-renders as the side panel's state moves, the chat need not.
 export default memo(AgentChatView)
 
-function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canReleasePrompt, reasoningTokens, canAnswerApprovals, onOpenChecklistItem, checklistItems, onManageChildApproval }: Props) {
+function AgentChatView({ transcript, session, thinking, compact, openArtifact, mcpHold, canReleasePrompt, reasoningTokens, canAnswerApprovals, onOpenChecklistItem, checklistItems, onManageChildApproval }: Props) {
   const boardBase = useBoardOrigin()
   const sessionId = session.id
   const navigate = useNavigate()
@@ -150,16 +101,16 @@ function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canR
   const [refTicket, setRefTicket] = useState<Ticket | null>(null)
   const refs = useMemo<ChatRefs>(() => ({
     cards: refBoard ? boardCardsReader(refBoard, sessionId) : undefined,
+    boardCards: (boardId, numbers) => boardCardsReader({ id: boardId }, sessionId)(numbers),
     openCard: t => setRefTicket({ source: 'blerg-board', key: t.key, title: t.title ?? '', ...(t.boardId ? { board_id: t.boardId } : {}), ...(t.status ? { status: t.status } : {}) } as Ticket),
     // A pin row in the chat opens the same live dialog as the panel (#96): the Board card read live,
     // in the two-column layout; another tracker's ticket as pinned.
     openTicket: t => setRefTicket(t),
-    commits: canReleasePrompt === true,
+    commits: canReleasePrompt,
   }), [refBoard, sessionId, canReleasePrompt])
   const [proposalRevision, setProposalRevision] = useState(0)
   // The server's per-file limit (initial_state): the chat refuses a larger attachment before sending it.
   const maxFileBytes = useSessionStore(s => s.maxFileBytes)
-  const [showRules, setShowRules] = useState(false)
   const [linked, setLinked] = useState<string | null>(artifactParam)
   const [linkedCommit, setLinkedCommit] = useState<string | null>(null)
   // A request from the History tab, taken once: the chat consumes the link when its viewer opens it.
@@ -169,73 +120,12 @@ function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canR
     setLinked(openArtifact.id)
     setLinkedCommit(openArtifact.commit ?? null)
   }
-  // The in-session switcher offers the same list the launch sheet does for
-  // this session's engine, and the efforts of the model it is on now. A model
-  // the list doesn't know (an alias, an older id) gets every level any model
-  // of the engine offers; one that takes no effort (Haiku) gets no effort
-  // control at all, and neither does an engine with no model list. A list a
-  // daemon reports (Codex, Hermes) is asked of the session's own daemon.
-  const catalogTarget = modelCatalogTarget(session.runtime, session.daemon_id)
-  const engineModels = useEngineModels(session.engine ?? '', catalogTarget.daemonId, { runtime: catalogTarget.runtime })
-  const modelNames = useMemo(() => modelDisplayNames(session.model && !engineModels.models.some(m => m.id === session.model) ? [...engineModels.models, { id: session.model }] : engineModels.models), [engineModels.models, session.model])
-  const currentModel = engineModels.models.find(m => m.id === session.model)
-  const sessionEfforts: readonly string[] = currentModel
-    ? currentModel.efforts
-    : Array.from(new Set(engineModels.models.flatMap(m => m.efforts)))
-
   const meta: SessionMeta = session
   const engine = ENGINE_LABELS[session.engine || 'claude'] ?? session.engine
   const runtime = RUNTIME_LABELS[session.runtime || 'daemon'] ?? session.runtime
   const slots = useMemo(() => ({
-    header: session.archived_at ? <span role="status">Archived session · read only</span> : (
-      <>
-        <ModelCatalogNotice state={engineModels} />
-        <select
-          aria-label="Model"
-          value={session.model ?? ''}
-          title={session.model}
-          onChange={e => {
-            const model = e.target.value
-            const effort = effectiveEffort(engineModels.models.find(m => m.id === model), session.effort ?? null)
-            ws.send({ type: 'set_session_model', session_id: sessionId, model, ...(effort ? { effort } : {}) })
-          }}
-        >
-          {!session.model && <option value="">model…</option>}
-          {/* A session launched on an id or alias the list doesn't have
-              (an older id, "sonnet") still shows what it is running. */}
-          {session.model && !currentModel && <option value={session.model} title={session.model}>{modelNames.get(session.model)}</option>}
-          {engineModels.models.map(m => (
-            <option key={m.id} value={m.id} title={[m.id, m.description].filter(Boolean).join(' — ')}>{modelNames.get(m.id)}</option>
-          ))}
-        </select>
-        {sessionEfforts.length > 0 && (
-          <select
-            aria-label="Effort"
-            value={session.effort ?? ''}
-            onChange={e => ws.send({ type: 'set_session_model', session_id: sessionId, effort: e.target.value })}
-          >
-            {!session.effort && <option value="">effort…</option>}
-            {session.effort && !sessionEfforts.includes(session.effort) && (
-              <option value={session.effort}>{session.effort}</option>
-            )}
-            {sessionEfforts.map(m => (
-              <option key={m} value={m}>{m}</option>
-            ))}
-          </select>
-        )}
-        <button
-          className="agent-rules-toggle"
-          data-testid="rules-toggle"
-          aria-label="Rules"
-          title="Rules"
-          onClick={() => setShowRules(s => !s)}
-        >
-          <span className="tb-icon" aria-hidden="true">⚖</span>
-          <span className="tb-label">Rules</span>
-        </button>
-        {showRules && <RulesPanel project={session.repo} />}
-      </>
-    ),
+    transcript,
+    header: session.archived_at ? <span role="status">Archived session · read only</span> : undefined,
     aboveComposer: session.archived_at ? undefined : <>
       {mcpHold && <McpHoldLine hold={mcpHold} onSendNow={canReleasePrompt ? () => { ws.send({ type: 'release_held_prompt', session_id: sessionId }) } : undefined} />}
       <SessionPluginChatRequests sessionId={sessionId} active={canReleasePrompt === true}/>
@@ -245,12 +135,13 @@ function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canR
         <div><dt>Repo</dt><dd data-testid="ready-repo">{repoDetail(session.repo)}</dd></div>
       </ReadyCard>
     ),
-  }), [session.archived_at, session.model, session.effort, session.repo, sessionId, currentModel, engineModels, modelNames, sessionEfforts, showRules, engine, runtime, mcpHold, canReleasePrompt])
+  }), [transcript, session.archived_at, session.repo, sessionId, engine, runtime, mcpHold, canReleasePrompt])
 
   // A Blerg Board card's hovercard in the chat (a pinned ticket) reads the card as the board has it.
   const hover = useMemo(() => ({ card: (t: CardTarget) => cardPreview(t, sessionId), repo: () => session.repo, account: signedInAccount }), [sessionId, session.repo])
   return (
     <HovercardProvider value={hover}>
+    <SessionSettings session={session} commandsOnly />
     <CommitViewerHost files={transport.files} repo={() => session.repo}>
     <ChatView
       session={sessionId}
@@ -266,6 +157,7 @@ function AgentChatView({ session, thinking, compact, openArtifact, mcpHold, canR
       thinking={thinking ? 'shown' : 'hidden'}
       compact={compact}
       filesButton={false}
+      composerAutoFocus={false}
       canAnswerApprovals={canAnswerApprovals === undefined ? canReleasePrompt === true : canAnswerApprovals}
       canOpenWorkspaceFiles={!session.archived_at && canReleasePrompt === true}
       reasoningTokens={reasoningTokens === true}

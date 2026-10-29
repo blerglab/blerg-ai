@@ -42,7 +42,7 @@ func checkRepositoryRead(ctx context.Context, client *http.Client, cloneURL, tok
 	transport := *client
 	transport.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	for redirects := 0; redirects < 5; redirects++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil) // #nosec G704 -- Production uses the netguard client below; parsed HTTP(S) URLs and redirects stay on the original origin.
 		if err != nil {
 			return errRepositoryAddress
 		}
@@ -53,7 +53,7 @@ func checkRepositoryRead(ctx context.Context, client *http.Client, cloneURL, tok
 		if token != "" && endpoint.Scheme == "https" {
 			req.SetBasicAuth(gitprovider.Default.TokenUserForHost(endpoint.Hostname()), token)
 		}
-		response, err := transport.Do(req)
+		response, err := transport.Do(req) // #nosec G704 -- Production uses the netguard client below; parsed HTTP(S) URLs and redirects stay on the original origin.
 		if err != nil {
 			if errors.Is(err, netguard.ErrURLNotPermitted) || errors.Is(err, netguard.ErrBlockedAddress) {
 				return errRepositoryAddress
@@ -136,10 +136,13 @@ func (j *JobManager) operatorGitToken(ctx context.Context) (string, error) {
 }
 
 func (j *JobManager) precheckRepository(spec SessionJobSpec, cloneURL string, sessionData map[string][]byte, personalKeys map[string]bool, operatorOK bool) error {
+	return j.precheckRepositoryContext(context.Background(), spec, cloneURL, sessionData, personalKeys, operatorOK)
+}
+func (j *JobManager) precheckRepositoryContext(parent context.Context, spec SessionJobSpec, cloneURL string, sessionData map[string][]byte, personalKeys map[string]bool, operatorOK bool) error {
 	if spec.NoRepo || spec.NewRepo {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 	token := string(sessionData[gitTokenKey])
 	if caller, ok := spec.ExtraEnv[gitTokenKey]; ok {

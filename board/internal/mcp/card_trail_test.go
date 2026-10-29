@@ -69,3 +69,96 @@ func contentText(res map[string]any) string {
 	text, _ := items[0]["text"].(string)
 	return text
 }
+
+func TestKeyReferencesResolveAliasesAndEnforceScope(t *testing.T) {
+	w := newDiffWorld(t)
+	ctx := t.Context()
+	for side, key := range map[string]string{"A": "BLG", "B": "AD"} {
+		if _, err := db.UpdateBoard(ctx, w.pool, w.ids[side]["board_id"], db.BoardParams{Key: &key}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	renamed := "NEW"
+	if _, err := db.UpdateBoard(ctx, w.pool, w.ids["A"]["board_id"], db.BoardParams{Key: &renamed}); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"BLG", "NEW"} {
+		args, _ := json.Marshal(map[string]any{"reference": key + "-1", "with_trail": true})
+		res, err := w.srv.dispatch(ctx, w.scoped, "blerg_card_get", args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var card struct {
+			Reference string `json:"reference"`
+		}
+		if err := json.Unmarshal([]byte(contentText(res)), &card); err != nil || card.Reference != "NEW-1" {
+			t.Fatalf("key %s = %v: %v", key, card, err)
+		}
+	}
+	if _, err := w.srv.dispatch(ctx, w.scoped, "blerg_card_get", json.RawMessage(`{"reference":"AD-1"}`)); err == nil {
+		t.Fatal("key bypassed board scope")
+	}
+	if _, err := w.srv.dispatch(ctx, w.scoped, "blerg_card_get", json.RawMessage(`{"reference":"NEW-1","number":2}`)); err == nil {
+		t.Fatal("accepted conflicting references")
+	}
+}
+
+func TestCardSearchPagingKeepsLegacyArrayAndScope(t *testing.T) {
+	w := newDiffWorld(t)
+	board := w.ids["A"]["board_id"]
+	args, _ := json.Marshal(map[string]any{"board_id": board, "limit": 1, "page": true})
+	res, err := w.srv.dispatch(t.Context(), w.scoped, "blerg_card_search", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var page db.SearchPage
+	if err := json.Unmarshal([]byte(contentText(res)), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Cards) != 1 {
+		t.Fatalf("page = %+v", page)
+	}
+	if page.Cards[0].BoardID != board {
+		t.Fatal("search escaped board scope")
+	}
+	// Add enough to require a cursor, then traverse the same MCP path again.
+	title := "Another card"
+	if _, err := db.CreateCard(t.Context(), w.pool, board, db.CardParams{Title: &title}, db.EventMeta{}); err != nil {
+		t.Fatal(err)
+	}
+	res, err = w.srv.dispatch(t.Context(), w.scoped, "blerg_card_search", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(contentText(res)), &page); err != nil {
+		t.Fatal(err)
+	}
+	if page.NextCursor == "" {
+		t.Fatal("missing next_cursor")
+	}
+	first := page.Cards[0].ID
+	args, _ = json.Marshal(map[string]any{"board_id": board, "limit": 1, "cursor": page.NextCursor})
+	res, err = w.srv.dispatch(t.Context(), w.scoped, "blerg_card_search", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(contentText(res)), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Cards) != 1 || page.Cards[0].ID == first || page.NextCursor != "" {
+		t.Fatalf("last page = %+v", page)
+	}
+	args, _ = json.Marshal(map[string]any{"board_id": board})
+	res, err = w.srv.dispatch(t.Context(), w.scoped, "blerg_card_search", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy []db.Card
+	if err := json.Unmarshal([]byte(contentText(res)), &legacy); err != nil {
+		t.Fatal("legacy search changed shape", err)
+	}
+	args, _ = json.Marshal(map[string]any{"board_id": w.ids["B"]["board_id"], "page": true})
+	if _, err = w.srv.dispatch(t.Context(), w.scoped, "blerg_card_search", args); err == nil {
+		t.Fatal("paged search bypassed scope")
+	}
+}

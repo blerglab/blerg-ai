@@ -19,7 +19,6 @@ import (
 	"github.com/blerglab/blerg-ai/contracts/netguard"
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	"github.com/blerglab/blerg-ai/contracts/secrets"
-	"github.com/blerglab/blerg-ai/contracts/updatenotice"
 	"github.com/blerglab/blerg-ai/core/internal/api"
 	"github.com/blerglab/blerg-ai/core/internal/authprovider"
 	"github.com/blerglab/blerg-ai/core/internal/credentials"
@@ -31,6 +30,7 @@ import (
 	"github.com/blerglab/blerg-ai/core/internal/mcpconn"
 	"github.com/blerglab/blerg-ai/core/internal/plugins"
 	"github.com/blerglab/blerg-ai/core/internal/projects"
+	"github.com/blerglab/blerg-ai/core/internal/shellpolicy"
 )
 
 // validateSecrets refuses to boot on placeholder or too-short shared secrets (R4) — a copied
@@ -344,14 +344,30 @@ func parseOriginAudiences() map[string]string {
 	return out
 }
 
-// pluginAllowlist reads BLERG_CORE_PLUGIN_MARKETPLACES: the comma-separated GitHub owner/repo
-// marketplaces an account may register always-on plugins from ("*" = any valid source).
-// Defaults to the official Anthropic marketplace only; malformed entries are dropped, never
-// widened into something else.
+// pluginAllowlist reads the initial Core policy. Saved Settings decisions take
+// precedence; malformed entries are dropped. Native Codex sources are explicit
+// identities, and "*" permits all valid GitHub and native sources.
 func pluginAllowlist() pluginspec.Allowlist {
-	a, dropped := pluginspec.ParseAllowlist(os.Getenv("BLERG_CORE_PLUGIN_MARKETPLACES"))
+	raw := os.Getenv("BLERG_CORE_PLUGIN_MARKETPLACES")
+	// Upgrade the former shipped default once; saved Settings decisions always win.
+	legacyDefault := false
+	for _, source := range strings.Split(raw, ",") {
+		source = strings.TrimSpace(source)
+		if source == "" {
+			continue
+		}
+		if !strings.EqualFold(source, "anthropics/claude-plugins-official") {
+			legacyDefault = false
+			break
+		}
+		legacyDefault = true
+	}
+	if legacyDefault {
+		raw = pluginspec.DefaultMarketplaces
+	}
+	a, dropped := pluginspec.ParseAllowlist(raw)
 	for _, d := range dropped {
-		log.Printf("ignoring invalid BLERG_CORE_PLUGIN_MARKETPLACES entry %q (want GitHub owner/repo)", d)
+		log.Printf("ignoring invalid BLERG_CORE_PLUGIN_MARKETPLACES entry %q (want owner/repo or codex:<marketplace>)", d)
 	}
 	return a
 }
@@ -457,6 +473,7 @@ func buildDeps(ctx context.Context, st *db.PgStore) (api.Deps, *identity.Service
 	identitySvc.SetSessionTTL(ttl)
 	return api.Deps{
 		Identity:             identitySvc,
+		ShellPolicy:          shellpolicy.New(st.Pool()),
 		Projects:             projects.NewService(st),
 		Registry:             discovery.NewRegistry(st, componentTTL),
 		Credentials:          credentials.NewService(st, keyBackend),
@@ -465,6 +482,7 @@ func buildDeps(ctx context.Context, st *db.PgStore) (api.Deps, *identity.Service
 		Audience:             "blerg-core",
 		RegisterKey:          os.Getenv("BLERG_CORE_REGISTER_KEY"),
 		InternalKey:          os.Getenv("BLERG_CORE_INTERNAL_KEY"),
+		RunnerURL:            strings.TrimRight(strings.TrimSpace(os.Getenv("BLERG_CORE_RUNNER_URL")), "/"),
 		BoardMintKey:         os.Getenv("BLERG_CORE_BOARD_MINT_KEY"),
 		BoardMintDisabled:    strings.EqualFold(strings.TrimSpace(os.Getenv("BLERG_CORE_BOARD_MINT_DISABLED")), "true") || strings.TrimSpace(os.Getenv("BLERG_CORE_BOARD_MINT_DISABLED")) == "1",
 		BoardMintLimiter:     api.NewBoardMintLimiter(api.BoardMintLimit, api.BoardMintWindow),
@@ -542,8 +560,8 @@ func serve(ctx context.Context) error {
 		return fmt.Errorf("build deps: %w", err)
 	}
 
-	// Look for a newer public release in the background (BLERG_UPDATE_CHECK=0 turns it off).
-	updates := updatenotice.NewChecker(landing.Release(), landing.Version())
+	// Saved administrator settings override the environment seed; database failures deny checks.
+	updates := identitySvc.ReleaseChecker(landing.Release(), landing.Version())
 	deps.LatestRelease = updates.Latest
 	updates.Start(ctx)
 

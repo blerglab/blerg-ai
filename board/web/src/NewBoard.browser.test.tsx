@@ -14,6 +14,7 @@ const choices = Array.from({ length: 14 }, (_, i) => ({
 vi.mock('./api', async original => ({
   ...await original<typeof import('./api')>(),
   api: vi.fn(async (path: string) => {
+    if (path.startsWith('/api/board-key-suggestion?')) return { key: 'LN' }
     if (path === '/api/me') return { is_admin: true, is_human: true, kind: 'human' }
     if (path === '/api/repo-choices') return { available: true, repos: choices }
     if (path === '/api/boards') return []

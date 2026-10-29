@@ -70,3 +70,43 @@ describe('LaunchSheet footer layout', () => {
     expect(button.width).toBeGreaterThan(footer.width - 60)
   })
 })
+
+it.each([390,3840])('uses the approved single repository surface in the full sheet at %ipx',async width=>{
+  const {clearLaunchCache}=await import('../lib/launchCache');clearLaunchCache()
+  vi.stubGlobal('fetch',vi.fn((url:string,init?:RequestInit)=>{
+    if(url==='/api/daemons')return json([{id:'d1',name:'Desktop',mode:'local',repos_root:'/repos',status:'connected',sandbox_available:true,available_engines:['claude'],discovery_version:1,ownership_revision:1,connection_generation:'current',workspace_capabilities:{manifest_version:2,linux_host:true,sandbox:true}}])
+    if(url.startsWith('/api/workspace/discovery?'))return json({ok:true,page:{root_identity:'root',root:{path:'.',name:'Repositories',kind:'directory',source_identity:'root'},entries:[{path:'apps',name:'apps',kind:'directory',source_identity:'apps'}],truncated:false}})
+    if(url==='/api/workspace/preview'){
+      const body=JSON.parse(String(init?.body));const members=[{path:'apps/atlas',source_identity:'atlas'},{path:'apps/beacon',source_identity:'beacon'}]
+      return json({ok:true,selection:{...body.selection,members},members:[{name:'atlas'},{name:'beacon'}]})
+    }
+    return okFetch(url)
+  }))
+  await page.viewport(width,900)
+  render(<MemoryRouter><LaunchSheet open onClose={()=>{}}/></MemoryRouter>)
+  fireEvent.click(await screen.findByTestId('runtime-daemon'))
+  fireEvent.click(await screen.findByRole('checkbox',{name:/apps.*Folder/}))
+  await screen.findByText('2 / 20')
+  expect(screen.getAllByText('Empty workspace')).toHaveLength(1)
+  expect(screen.queryByTestId('no-repo-option')).toBeNull()
+  const picker=screen.getByRole('region',{name:'Workspace repositories'})
+  expect(getComputedStyle(picker).borderTopWidth).toBe('0px')
+  expect(getComputedStyle(picker).paddingLeft).toBe('0px')
+  expect(picker.querySelector('.workspace-chips')!.compareDocumentPosition(picker.querySelector('.workspace-tree')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expect(screen.getByPlaceholderText('Search repos, or owner/name or a URL...').closest('[hidden]')).not.toBeNull()
+  expect(picker.getBoundingClientRect().right).toBeLessThanOrEqual(width)
+})
+
+it.each([390,3840])('keeps unsupported host workspace selection unavailable at %ipx',async width=>{
+  const {clearLaunchCache}=await import('../lib/launchCache');clearLaunchCache()
+  vi.stubGlobal('fetch',vi.fn((url:string)=>{
+    if(url==='/api/daemons')return json([{id:'d1',name:'Desktop',mode:'local',repos_root:'/repos',status:'connected',sandbox_available:true,available_engines:['claude'],discovery_version:1,workspace_capabilities:{manifest_version:2,sandbox:true,macos_host:false}}])
+    return okFetch(url)
+  }))
+  await page.viewport(width,900)
+  render(<MemoryRouter><LaunchSheet open onClose={()=>{}}/></MemoryRouter>)
+  fireEvent.click(await screen.findByTestId('runtime-daemon'))
+  await screen.findByText('Workspace sessions and owner shells are not enabled for this runtime.')
+  expect(screen.queryByRole('region',{name:'Workspace repositories'})).toBeNull()
+  expect(screen.getByTestId('launch-col-repo').getBoundingClientRect().right).toBeLessThanOrEqual(width)
+})

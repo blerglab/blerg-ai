@@ -21,6 +21,7 @@ import (
 	"time"
 
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
+	"github.com/blerglab/blerg-ai/runner/internal/discovery"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/blerglab/blerg-ai/runner/internal/scratch"
@@ -33,6 +34,7 @@ type Sender interface {
 
 // ManagerConfig holds configuration for the session manager.
 type ManagerConfig struct {
+	Workspaces *LocalWorkspaceService
 	// ReposRoot is the initial repos root. ReposRootSetting, when set, is the
 	// live one (changeable from the app, persisted); without it the Manager
 	// wraps ReposRoot in a setting that cannot be saved, so a change is
@@ -112,12 +114,20 @@ func (c ManagerConfig) sandboxOptions() SandboxOptions {
 
 // Manager tracks active PTY sessions and handles server-driven lifecycle messages.
 type Manager struct {
-	mu          sync.Mutex
-	sessions    map[string]*Session
-	trackers    map[string]*StateTracker
-	metaParsers map[string]*MetaParser
-	client      Sender
-	config      ManagerConfig
+	legacySandboxReader func(context.Context, string, workspaceFileBinding) *remoteWorkspaceExplorer
+	legacyMu            sync.Mutex
+	legacyWorkspaces    map[string]*legacySessionWorkspace
+
+	lifecycleActive map[string]bool // bounded, coalesced per-session teardown workers
+	explorer        WorkspaceExplorerRouter
+	discovery       *discovery.Service
+	discoveryOps    discoveryOperations
+	mu              sync.Mutex
+	sessions        map[string]*Session
+	trackers        map[string]*StateTracker
+	metaParsers     map[string]*MetaParser
+	client          Sender
+	config          ManagerConfig
 
 	// agents hosts agent-kind sessions (the LLM harness). Nil when the
 	// daemon has no API key configured.
@@ -232,6 +242,7 @@ const (
 
 // NewManager creates a Manager and registers its message handlers on client.
 func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
+	client.OwnerShellRuntime()
 	cfg = cfg.withReposRootSetting()
 	m := &Manager{
 		sessions:             make(map[string]*Session),
@@ -267,16 +278,19 @@ func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 	m.agents = NewAgentHost(client, AgentHostConfig{
 		// A desktop Claude agent session runs on the user's `claude` login
 		// when it is installed, like a terminal session does.
-		PreferClaudeCLI: true,
-		SpawnKilled:     m.spawnKilled,
-		ReposRoot:       cfg.ReposRoot,
-		ReposRootFn:     cfg.ReposRootSetting.Get,
-		ServerHTTP:      cfg.ServerHTTP,
-		DaemonToken:     cfg.DaemonToken,
-		APIKey:          apiKey,
-		BudgetUSD:       budget,
-		Pricing:         DefaultPricing(),
-		Sandbox:         cfg.sandboxOptions(),
+		PreferClaudeCLI:      true,
+		PlanNudges:           client.CanPlanNudges,
+		SpawnKilled:          m.spawnKilled,
+		ReposRoot:            cfg.ReposRoot,
+		ReposRootFn:          cfg.ReposRootSetting.Get,
+		ServerHTTP:           cfg.ServerHTTP,
+		DaemonToken:          cfg.DaemonToken,
+		APIKey:               apiKey,
+		BudgetUSD:            budget,
+		Pricing:              DefaultPricing(),
+		Sandbox:              cfg.sandboxOptions(),
+		Workspaces:           cfg.Workspaces,
+		PrepareHostWorkspace: m.prepareHostWorkspace,
 		// Always-on plugins land in the daemon's own state dir, never in
 		// the person's ~/.claude (pluginworkshop.go).
 		Plugins: NewPluginWorkshop(DaemonStateDir()),
@@ -293,6 +307,16 @@ func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 		log.Printf("manager: agent sessions enabled (Claude needs the claude CLI on PATH — no ANTHROPIC_API_KEY for the native loop; %s run their CLIs)", strings.Join(engineOrder, "/"))
 	}
 	logEngineConfig()
+	client.SetWorkspaceDisconnect(func() {
+		m.explorer.CancelAll()
+		if m.agents != nil {
+			m.agents.explorer.CancelAll()
+		}
+	})
+	m.discovery = discovery.NewOwned(m.reposRoot, client.config.DesktopID)
+	client.discoveryVersion = 1
+	client.OnMessage("attach_session_workspace", m.handleAttachSessionWorkspace)
+	client.OnMessage("discover_workspace", m.handleDiscoverWorkspace)
 	client.OnMessage("spawn_session", m.enqueueSpawn)
 	client.OnMessage("send_input", m.handleSendInput)
 	client.OnMessage("kill_session", m.handleKillSession)
@@ -301,8 +325,12 @@ func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 	client.OnMessage("resize_session", m.handleResizeSession)
 	client.OnMessage("request_scrollback", m.handleRequestScrollback)
 	client.OnMessage("read_workspace_file", m.handleReadWorkspaceFile)
+	client.OnMessage("cancel_workspace_file", m.handleReadWorkspaceFile)
+	client.OnMessage("workspace_explorer", m.handleWorkspaceExplorer)
+	client.OnMessage("cancel_workspace_explorer", m.handleWorkspaceExplorer)
 	client.OnMessage("read_session_origin", m.handleReadSessionOrigin)
 	client.OnMessage("read_commit", m.handleReadCommit)
+	client.OnMessage("plugin_marketplace_policy", m.handlePluginMarketplacePolicy)
 	client.OnMessage("read_plugin_catalog", m.handleReadPluginCatalog)
 	client.OnMessage("mcp_sign_in", m.handleMCPSignIn)
 	client.OnMessage("apply_session_plugins", func(raw []byte) {
@@ -315,6 +343,7 @@ func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 	client.OnMessage("inject_note_reply", m.handleInjectNoteReply)
 	client.OnMessage("agent_event_ack", m.handleAgentEventAck)
 	client.OnMessage("agent_user_message", m.handleAgentUserMessage)
+	client.OnMessage("plan_input_result", m.agents.DeliverPlanInput)
 	client.OnMessage("set_session_model", m.handleSetSessionModel)
 	client.OnMessage("refresh_session_tools", m.handleRefreshSessionTools)
 	client.OnMessage("interrupt_session", m.handleInterruptSession)
@@ -364,7 +393,7 @@ func (m *Manager) handleAgentUserMessage(raw []byte) {
 	if msg.Source == "limit_resume" && msg.ExpectedTurnID == "" {
 		return
 	}
-	m.agents.UserInput(msg.SessionID, agent.Input{Text: msg.Text, Source: msg.Source, ClientID: msg.ClientID, ExpectedTurnID: msg.ExpectedTurnID})
+	m.agents.UserInput(msg.SessionID, agent.Input{Text: msg.Text, PlanNudge: msg.PlanNudge, Source: msg.Source, ClientID: msg.ClientID, ExpectedTurnID: msg.ExpectedTurnID})
 }
 
 func (m *Manager) handleSetSessionModel(raw []byte) {
@@ -541,6 +570,7 @@ func (m *Manager) ActiveSessionIDs() []string {
 	if m.agents != nil {
 		ids = append(ids, m.agents.ActiveIDs()...)
 	}
+	ids = mergeSessionIDs(ids, m.config.Workspaces.PendingIDs())
 	// A custom command (tests) is not tmux-backed, so skip the tmux probe.
 	if len(m.config.Command) > 0 {
 		return ids
@@ -591,7 +621,7 @@ func sanitizedEnviron(extra ...string) []string {
 	out := make([]string, 0, len(base)+len(extra))
 	for _, e := range base {
 		key, _, _ := strings.Cut(e, "=")
-		if sessionOriginEnvKeys[key] {
+		if sessionOriginEnvKeys[key] || key == attachmentsDirEnv {
 			continue
 		}
 		// The master token, and a pod's gateway grant (MCPGatewayEnvVar; the pod
@@ -601,6 +631,10 @@ func sanitizedEnviron(extra ...string) []string {
 		if !strings.HasPrefix(e, "BLERG_RUNNER_DAEMON_TOKEN=") && !strings.HasPrefix(e, MCPGatewayEnvVar+"=") &&
 			!strings.HasPrefix(e, "BLERG_RUNNER_PREVIEW_URL=") &&
 			!strings.HasPrefix(e, "BLERG_RUNNER_BOARD_ID=") &&
+			// A daemon started from inside a session must not hand that session's identity,
+			// token or attachments folder to the sessions it starts.
+			!strings.HasPrefix(e, "BLERG_RUNNER_SESSION_ID=") && !strings.HasPrefix(e, "BLERG_RUNNER_SESSION_TOKEN=") &&
+			!strings.HasPrefix(e, attachmentsDirEnv+"=") &&
 			!strings.HasPrefix(e, "BLERG_RUNNER_BOARD_TOKEN=") &&
 			!strings.HasPrefix(e, "BLERG_RUNNER_BOARD_GATEWAY_URL=") &&
 			!strings.HasPrefix(e, RestrictToolsEnvVar+"=") && !strings.HasPrefix(e, InteractionEnvVar+"=") {
@@ -704,13 +738,14 @@ func (m *Manager) sessionEnv(sessionID string, assist bool, boardID, boardToken,
 // spend it with — the blerg-runner CLI was inert in the sessions the board
 // drives.
 type sessionEnvOpts struct {
-	SessionID    string
-	ServerHTTP   string
-	Assist       bool
-	BoardID      string
-	BoardToken   string
-	SessionToken string
-	Extra        map[string]string
+	AttachmentsStateDir string
+	SessionID           string
+	ServerHTTP          string
+	Assist              bool
+	BoardID             string
+	BoardToken          string
+	SessionToken        string
+	Extra               map[string]string
 }
 
 func buildSessionEnv(o sessionEnvOpts) []string {
@@ -722,6 +757,9 @@ func buildSessionEnv(o sessionEnvOpts) []string {
 	}
 
 	env = append(env, "BLERG_RUNNER_SESSION_ID="+o.SessionID)
+	if path := sessionAttachmentsPath(attachmentsStateDir(o.AttachmentsStateDir), o.SessionID); path != "" {
+		env = append(env, attachmentsDirEnv+"="+path)
+	}
 	if o.ServerHTTP != "" {
 		env = append(env, "BLERG_RUNNER_SERVER_HTTP="+o.ServerHTTP)
 	}
@@ -962,6 +1000,25 @@ func removeCreatedWorkspace(root string, c createdDirs) {
 // prepareWorkspaceTracked is prepareWorkspace plus what it created, returned on
 // failure too, so the caller can clean up when the spawn fails later.
 func (m *Manager) prepareWorkspaceTracked(msg protocol.SpawnSession) (string, createdDirs, error) {
+	if !msg.Sandbox && msg.Workspace != nil {
+		pins, err := m.PinWorkspaceSelection(m.spawnContext(msg.SessionID), *msg.Workspace)
+		if err != nil {
+			return "", createdDirs{}, err
+		}
+		defer pins.Close()
+		path := pins.AnchorPath
+		if hostSelectionIsVirtual(pins) {
+			path = pins.Sources[0].CanonicalPath
+		}
+		return path, createdDirs{}, nil
+	}
+	if msg.Sandbox && msg.Workspace != nil {
+		w, err := m.config.Workspaces.Prepare(m.spawnContext(msg.SessionID), msg)
+		if err != nil {
+			return "", createdDirs{}, err
+		}
+		return w.state.Root, createdDirs{}, nil
+	}
 	ctx := m.spawnContext(msg.SessionID)
 	// Defence in depth: this is the process that actually chdirs into the
 	// repo, so it does not trust the server's own validation.
@@ -1292,6 +1349,21 @@ func (m *Manager) handleSpawnSession(raw []byte) {
 		return
 	}
 
+	var terminalExplorer WorkspaceExplorer
+	if msg.Workspace != nil && !msg.Sandbox {
+		projectPath, terminalExplorer, err = m.prepareHostWorkspace(m.spawnContext(msg.SessionID), msg)
+		if err != nil {
+			m.sendError(msg.SessionID, err.Error())
+			return
+		}
+		defer func() {
+			if terminalExplorer != nil {
+				if c, ok := terminalExplorer.(interface{ Close() error }); ok {
+					_ = c.Close()
+				}
+			}
+		}()
+	}
 	// Build environment.
 	env := m.sessionEnv(msg.SessionID, msg.Assist, msg.BoardID, msg.BoardToken, msg.SessionToken, msg.ExtraEnv)
 	env = append(env, selectedBoardCLIEnv(msg.BoardID, msg.MCPGateway)...)
@@ -1405,6 +1477,7 @@ func (m *Manager) handleSpawnSession(raw []byte) {
 		return
 	}
 
+	sess.sandboxed = msg.Sandbox
 	cleanupCreated = false // the session started: its folder is real now
 	tracker := NewStateTracker(msg.SessionID, m.client)
 	m.watchSandboxTurns(msg.SessionID, projectPath, tracker)
@@ -1414,6 +1487,12 @@ func (m *Manager) handleSpawnSession(raw []byte) {
 	m.trackers[msg.SessionID] = tracker
 	m.metaParsers[msg.SessionID] = metaParser
 	m.mu.Unlock()
+	if terminalExplorer != nil {
+		m.BindWorkspaceExplorer(msg.SessionID, terminalExplorer)
+		terminalExplorer = nil
+	} else {
+		m.bindTerminalExplorer(msg.SessionID)
+	}
 
 	// Notify server the session started.
 	_ = m.client.Send(protocol.SessionStarted{
@@ -1472,6 +1551,7 @@ func (m *Manager) streamSession(id string, sess *Session) {
 		}
 		// OutputCh is closed only after the process exits, so exit code is set.
 		// Removing the session here also signals the state poller to stop.
+		m.explorer.Unbind(id)
 		m.mu.Lock()
 		delete(m.sessions, id)
 		delete(m.trackers, id)
@@ -1494,6 +1574,7 @@ func (m *Manager) streamSession(id string, sess *Session) {
 		// Best-effort: safe to call when no record exists (e.g. test path).
 		m.deleteRecord(id)
 		removeSessionTokenFile(DaemonStateDir(), id)
+		removeSessionAttachments(DaemonStateDir(), id)
 		_ = m.client.Send(protocol.SessionEnded{
 			Type:      "session_ended",
 			SessionID: id,
@@ -1554,6 +1635,7 @@ func (m *Manager) AdoptAgentSessions(done func()) int {
 	if n > 0 {
 		go func() {
 			m.agents.RunAdoption()
+			m.attachLegacyWorkspaces()
 			if done != nil {
 				done()
 			}
@@ -1565,6 +1647,7 @@ func (m *Manager) AdoptAgentSessions(done func()) int {
 // FreezeAgentRecords stops every recovery-record write. The daemon calls it first thing when
 // told to stop (AgentHost.Freeze).
 func (m *Manager) FreezeAgentRecords() {
+	m.explorer.Close()
 	if m.agents != nil {
 		m.agents.Freeze()
 	}
@@ -1578,6 +1661,7 @@ func (m *Manager) FreezeAgentRecords() {
 // tmux session and resumes Claude via --resume. No-op when a custom Command is
 // configured (tests, not tmux-backed).
 func (m *Manager) ReattachSessions() {
+	defer m.attachLegacyWorkspaces()
 	// A tmux server that outlived an older daemon (or was started from the
 	// user's shell) may hold the master token or a stale session token in
 	// its global env, which every later pane would inherit. Unset them
@@ -1593,19 +1677,8 @@ func (m *Manager) ReattachSessions() {
 		// reported, and a cut-off turn waiting to be continued may be (agentadopt.go).
 		m.agents.NoteConnected()
 	}
-	// Ship the user's agent config to the server so runner pods (which have
-	// no ~/.claude) can download it. Best-effort, off the reattach path.
-	if m.config.ServerHTTP != "" && m.config.DaemonToken != "" && len(m.config.Command) == 0 {
-		go func() {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return
-			}
-			if err := UploadConfigBundle(context.Background(), m.config.ServerHTTP, m.config.DaemonToken, home); err != nil {
-				log.Printf("manager: agent-config upload: %v", err)
-			}
-		}()
-	}
+	// Desktop home configuration is never uploaded into an install-wide cache.
+	// Shared pod configuration is supplied explicitly by the operator.
 	if len(m.config.Command) > 0 {
 		return
 	}
@@ -1625,6 +1698,22 @@ func (m *Manager) ReattachSessions() {
 // reattach what still runs, recover what a hard restart left behind, then sweep the sandbox
 // containers and homes nobody uses.
 func (m *Manager) reattachPass(recs []SessionRecord, hostTmux []string) {
+	if err := m.recoverWorkspaces(context.Background()); err != nil {
+		log.Printf("workspace recovery refused: %v", err)
+	}
+	if m.config.Workspaces != nil {
+		legacy := recs[:0]
+		for _, record := range recs {
+			path, err := workspaceRecord(record.SessionID)
+			if err == nil {
+				if _, err := os.Lstat(path); err == nil {
+					continue
+				}
+			}
+			legacy = append(legacy, record)
+		}
+		recs = legacy
+	}
 	recorded := map[string]bool{}
 	for _, rec := range recs {
 		recorded[rec.SessionID] = true
@@ -1801,6 +1890,7 @@ func (m *Manager) reattachSession(id string) {
 		if rec, e := readSessionRecord(root, id); e == nil && rec.ProjectPath != "" {
 			if info, statErr := os.Stat(rec.ProjectPath); statErr == nil && info.IsDir() {
 				sess.workspace, sess.workspaceInfo = rec.ProjectPath, info
+				sess.sandboxed = rec.Sandbox
 			}
 		}
 	})
@@ -1813,6 +1903,7 @@ func (m *Manager) reattachSession(id string) {
 	m.trackers[id] = tracker
 	m.metaParsers[id] = metaParser
 	m.mu.Unlock()
+	m.bindTerminalExplorer(id)
 
 	log.Printf("manager: reattached to persistent session %s", id)
 	m.streamSession(id, sess)
@@ -2087,11 +2178,46 @@ func (m *Manager) handleKillSession(raw []byte) {
 		m.pendingSpawns[msg.SessionID] = true
 		ctl.cancel()
 	}
+	if m.lifecycleActive == nil {
+		m.lifecycleActive = map[string]bool{}
+	}
+	if m.lifecycleActive[msg.SessionID] || len(m.lifecycleActive) >= 64 {
+		m.mu.Unlock()
+		return // durable server stop intent is retried on reconnect/queue saturation
+	}
+	m.lifecycleActive[msg.SessionID] = true
 	m.mu.Unlock()
+	go func() {
+		defer func() { m.mu.Lock(); delete(m.lifecycleActive, msg.SessionID); m.mu.Unlock() }()
+		m.killSession(msg.SessionID)
+	}()
+}
+
+// One active worker per session, at most 64 overall. Never run lifecycle RPCs
+// on the socket pump that must receive their authenticated replies.
+func (m *Manager) killSession(id string) {
+	msg := protocol.KillSession{SessionID: id}
+	m.explorer.Unbind(id)
 
 	if m.agents != nil && m.agents.Has(msg.SessionID) {
 		m.agents.Kill(msg.SessionID)
 		return
+	}
+	// A stopped preparation has no AgentHost entry yet. Its service mutex joins
+	// cloning; the signed intent then takes the exact cleanup-only recovery path.
+	if service := m.config.Workspaces; service != nil {
+		service.mu.Lock()
+		prepared := service.sessions[id]
+		service.mu.Unlock()
+		if prepared != nil {
+			if err := prepared.RequestStop(protocol.SessionEnded{Type: "session_ended", SessionID: id}); err != nil {
+				log.Printf("workspace preparation stop retained: %v", err)
+				return
+			}
+		}
+		if err := m.recoverWorkspaces(context.Background()); err != nil {
+			log.Printf("workspace cleanup retained: %v", err)
+		}
 	}
 	// An agent session this daemon is not hosting may still have a recovery record (it was
 	// stopped while the daemon was down, and the server is saying so now): without this the
@@ -2117,10 +2243,12 @@ func (m *Manager) handleKillSession(raw []byte) {
 	sess, ok := m.sessions[msg.SessionID]
 	m.mu.Unlock()
 	if !ok {
+		removeSessionAttachments(DaemonStateDir(), id)
 		log.Printf("manager: kill_session for unknown session %s (record and tmux cleared)", msg.SessionID)
 		return
 	}
 	sess.Kill()
+	removeSessionAttachments(DaemonStateDir(), id)
 }
 
 func (m *Manager) handleResizeSession(raw []byte) {
@@ -2210,4 +2338,10 @@ func (m *Manager) scheduleRefresh(id string) {
 			fn(id)
 		}
 	})
+}
+
+// Kept separate from legacy install-wide discovery: workspace reconnect acts on
+// authenticated session records and must not sweep unrelated sandbox instances.
+func (m *Manager) recoverWorkspaces(ctx context.Context) error {
+	return m.config.Workspaces.RecoverAll(ctx, func(message protocol.SessionEnded) error { return m.client.Send(message) })
 }

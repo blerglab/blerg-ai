@@ -44,7 +44,7 @@ describe('foldLive', () => {
     const launch = ev('subagent_done', { child_id: 'k2', background: true }, 13)
     const task = ev('background_task_started', { task_id: 'a5', call_id: 'k2', kind: 'agent' }, 14)
     v = foldLive(reply(), [start, update, launch, task], T0)
-    expect(v.subagents[0]).toMatchObject({ model: 'claude-haiku', tokens: 12, background: true })
+    expect(v.subagents[0]).toMatchObject({ model: 'claude-haiku', tokens: 12, background: true, usage: { input: 5, output: 7, cache_read: 0, cache_write: 0 } })
     // Its background task is the same work: counted once, as the subagent.
     expect(v.tasks).toEqual([])
     expect(v.subagents).toHaveLength(1)
@@ -55,6 +55,7 @@ describe('foldLive', () => {
   it('a message that is not the system\'s ends a foreground subagent, not a background one', () => {
     const r = reply({ subagents: [sub('k1'), sub('k2', { background: true })] })
     expect(foldLive(r, [ev('user_message', { source: 'system', text: 'x' }, 11)], T0).subagents.map(s => s.key)).toEqual(['k1', 'k2'])
+    expect(foldLive(r, [ev('user_message', { source: 'usage_limit', text: '95%' }, 11)], T0).subagents.map(s => s.key)).toEqual(['k1', 'k2'])
     expect(foldLive(r, [ev('user_message', { source: 'chat', text: 'also the docs' }, 11)], T0).subagents.map(s => s.key)).toEqual(['k2'])
   })
 
@@ -71,6 +72,12 @@ describe('foldLive', () => {
     expect(v.subagents.map(s => [s.key, s.background, s.resumed])).toEqual([['S1', false, true], ['S2', true, true]])
     v = foldLive(r, [...after, ev('subagent_done', { child_id: 'S1', summary: 'fixed', resumed: true }, 14)], T0)
     expect(v.subagents.map(s => s.key)).toEqual(['S2'])
+  })
+
+  it('keeps a subagent\'s usage parts from the reply, for its chip\'s breakdown', () => {
+    const v = foldLive(reply({ subagents: [sub('k1', { tokens: 10, usage: { input: 1, output: 2, cache_read: 7, cache_write: 0 } })] }), [], T0)
+    expect(v.subagents[0].usage).toEqual({ input: 1, output: 2, cache_read: 7, cache_write: 0 })
+    expect(foldLive(reply({ tokens_hidden: true, subagents: [sub('k1', { tokens: null, usage: { input: 1, output: 2, cache_read: 7, cache_write: 0 } })] }), [], T0).subagents[0].usage).toBeUndefined()
   })
 
   it('hides tokens when the reply does', () => {
@@ -100,6 +107,7 @@ describe('foldLive', () => {
     // A person's message closes only an ask with no message id; a system line closes none.
     v = foldLive(r, [ev('ask', { body: 'Old style?' }, 11), ev('user_message', { source: 'system', text: 'x' }, 12)], T0)
     expect(v.asks).toHaveLength(2)
+    expect(foldLive(r, [ev('ask', { body: 'Old style?' }, 11), ev('user_message', { source: 'usage_limit', text: '95%' }, 12)], T0).asks).toHaveLength(2)
     v = foldLive(r, [ev('ask', { body: 'Old style?' }, 11), ev('user_message', { source: 'chat', text: 'yes' }, 12)], T0)
     expect(v.asks.map(a => a.messageId)).toEqual(['m1'])
   })

@@ -22,6 +22,7 @@ type hermesQueuedMsg struct {
 }
 
 type hermesDriver struct {
+	startCommand        func(*exec.Cmd) error
 	routeFingerprint    string
 	routeBound          bool
 	restoredFingerprint string
@@ -263,7 +264,7 @@ func (d *hermesDriver) runGateway(ctx context.Context) {
 	d.mu.Lock()
 	d.cmd = cmd
 	d.mu.Unlock()
-	if err = cmd.Start(); err != nil {
+	if err = startEngineCommand(cmd, d.startCommand); err != nil {
 		d.emit("error", agent.ErrorPayload{Message: "Hermes native gateway could not start", Retryable: true})
 		return
 	}
@@ -659,3 +660,5 @@ func (d *hermesDriver) addAdoptionWork(line string) {
 	}
 	d.adoptionNote += line
 }
+
+func (d *hermesDriver) useCommandBoundary(f func(*exec.Cmd) error) { d.startCommand = f }

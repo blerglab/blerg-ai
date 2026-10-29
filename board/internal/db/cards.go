@@ -20,6 +20,7 @@ type Link struct {
 }
 
 type Card struct {
+	Reference   string          `json:"reference,omitempty"`
 	Sensitive   bool            `json:"sensitive"`
 	Origin      json.RawMessage `json:"origin,omitempty"`
 	Effort      string          `json:"effort"`
@@ -59,7 +60,7 @@ type Card struct {
 	Blockers []Blocker `json:"blockers"`
 }
 
-const cardCols = `id, board_id, number, column_id, type, title, body, priority, size, model, effort,
+const cardCols = `COALESCE((SELECT NULLIF(board_key, '') || '-' || cards.number::text FROM boards WHERE boards.id=cards.board_id), ''), id, board_id, number, column_id, type, title, body, priority, size, model, effort,
 	fields, dedup_key, external_id, rank, auto_merge, run_attempts, merged_sha,
 	to_char(merged_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 	to_char(stuck_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
@@ -69,7 +70,7 @@ const cardCols = `id, board_id, number, column_id, type, title, body, priority, 
 
 func scanCard(row pgx.Row) (Card, error) {
 	var c Card
-	err := row.Scan(&c.ID, &c.BoardID, &c.Number, &c.ColumnID, &c.Type, &c.Title, &c.Body,
+	err := row.Scan(&c.Reference, &c.ID, &c.BoardID, &c.Number, &c.ColumnID, &c.Type, &c.Title, &c.Body,
 		&c.Priority, &c.Size, &c.Model, &c.Effort, &c.Fields, &c.DedupKey, &c.ExternalID, &c.Rank,
 		&c.AutoMerge, &c.RunAttempts, &c.MergedSHA, &c.MergedAt, &c.StuckAt, &c.StaleAt,
 		&c.ArchivedAt, &c.Version, &c.GateFlag, &c.CreatedAt, &c.UpdatedAt, &c.Sensitive, &c.Origin)
@@ -1141,7 +1142,7 @@ func ListCards(ctx context.Context, pool *pgxpool.Pool, boardID string, archived
 
 // cardColsC is cardCols with every column qualified by the alias "c" — kept
 // explicit rather than derived because to_char(...) expressions contain commas.
-const cardColsC = `c.id, c.board_id, c.number, c.column_id, c.type, c.title, c.body, c.priority, c.size, c.model, c.effort,
+const cardColsC = `COALESCE((SELECT NULLIF(board_key, '') || '-' || c.number::text FROM boards WHERE boards.id=c.board_id), ''), c.id, c.board_id, c.number, c.column_id, c.type, c.title, c.body, c.priority, c.size, c.model, c.effort,
 	c.fields, c.dedup_key, c.external_id, c.rank, c.auto_merge, c.run_attempts, c.merged_sha,
 	to_char(c.merged_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 	to_char(c.stuck_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),

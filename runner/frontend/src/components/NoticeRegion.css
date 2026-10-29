@@ -1,0 +1,6 @@
+.notice-region { position: fixed; z-index: 1100; top: 64px; right: 12px; width: min(340px, calc(100vw - 24px)); max-height: 0; overflow: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 8px; scrollbar-width: thin; }
+.notice-slot { display: contents; }
+.notice-region > *, .notice-slot > * { flex-shrink: 0; box-sizing: border-box; overflow-wrap: anywhere; }
+.notice-region button { min-height: 28px; }
+.message-toast { background: var(--chat-surface-2, var(--scree)); color: var(--chat-fg, var(--chalk)); border: 1px solid var(--chat-border, var(--stone)); border-radius: 10px; padding: 12px 14px; box-shadow: 0 10px 24px rgb(0 0 0 / .35); font-family: inherit; pointer-events: auto; }
+.message-toast .confirm-popover-text { margin-bottom: 0; }

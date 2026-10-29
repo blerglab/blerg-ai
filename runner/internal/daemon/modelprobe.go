@@ -191,14 +191,13 @@ func (p *ModelProber) ProbeAll(ctx context.Context) {
 		}
 		pending[engine] = true
 		go func() {
-			defer func() {
-				p.mu.Lock()
-				delete(p.inflight, engine)
-				p.mu.Unlock()
-			}()
 			pctx, cancel := context.WithTimeout(ctx, p.deadline)
 			defer cancel()
 			ms, err := probe(pctx)
+			// A published completion must permit an immediate fresh probe.
+			p.mu.Lock()
+			delete(p.inflight, engine)
+			p.mu.Unlock()
 			results <- result{engine, ms, err}
 		}()
 	}

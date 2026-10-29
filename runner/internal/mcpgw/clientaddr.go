@@ -114,3 +114,9 @@ func (b *lookupBudget) take() bool {
 	b.tokens--
 	return true
 }
+
+// PublicClientIP is publicClientIP for other public routes that throttle a client (desktop
+// enrollment codes): the peer, or the forwarded client when the peer is a trusted proxy.
+func PublicClientIP(r *http.Request, trusted []netip.Prefix) string {
+	return publicClientIP(r, trusted)
+}

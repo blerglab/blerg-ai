@@ -3,8 +3,11 @@
 import '@testing-library/jest-dom/vitest'
 import { afterEach } from 'vitest'
 import { cleanup, configure } from '@testing-library/react'
+import { clearViewCache } from '../model/viewCache'
 
 afterEach(() => {
+  // A session's kept Files list and file contents never carry into another test (#281).
+  clearViewCache()
   cleanup()
 })
 

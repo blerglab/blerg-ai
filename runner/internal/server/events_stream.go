@@ -18,6 +18,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -132,7 +133,7 @@ func (a *API) HandleRunnerEventStream(w http.ResponseWriter, r *http.Request) {
 	// Resolve the session BEFORE any streaming header goes out: a 404 must be
 	// an ordinary error response, not an event stream that happens to say
 	// nothing. This doubles as the first terminal check.
-	res, err := a.buildSessionResult(ctx, sessionID)
+	res, err := a.buildSessionResult(ctx, sessionID, desktopViewer(ctx, principal.spawningAccountID()))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -173,10 +174,16 @@ func (a *API) HandleRunnerEventStream(w http.ResponseWriter, r *http.Request) {
 			return 0, true
 		}
 		for _, ev := range rows {
-			if _, err := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n",
-				ev.Seq, sseEventName(ev.Kind), sseData(ev.Payload)); err != nil {
-				return 0, false // client gone mid-write
+			if err := a.sessionReadFence(ctx, sessionID, func(fenced context.Context) error {
+				_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Second))
+				defer func() { _ = http.NewResponseController(w).SetWriteDeadline(time.Time{}) }()
+				_, err := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", ev.Seq, sseEventName(ev.Kind), sseData(string(a.hub.desktopEventPayload(fenced, desktopViewer(fenced, principal.spawningAccountID()), sessionID, ev.Kind, ev.Payload)))) //nolint:gosec // SSE JSON is escaped by sseData; event names are sanitized; content type is text/event-stream.
+				flusher.Flush()
+				return err
+			}); err != nil {
+				return 0, false
 			}
+
 			cursor = ev.Seq
 		}
 		if len(rows) > 0 {
@@ -202,7 +209,7 @@ func (a *API) HandleRunnerEventStream(w http.ResponseWriter, r *http.Request) {
 		default:
 			// Caught up. Re-read the session so a state change since the last
 			// poll is seen, and close the stream once the work is over.
-			if res, err = a.buildSessionResult(ctx, sessionID); err == nil && res.Terminal {
+			if res, err = a.buildSessionResult(ctx, sessionID, desktopViewer(ctx, principal.spawningAccountID())); err == nil && res.Terminal {
 				// One last drain: an event may have landed between the query
 				// above and this one, and `end` must be the last thing a
 				// consumer sees, never a way to lose the final events.
@@ -211,13 +218,21 @@ func (a *API) HandleRunnerEventStream(w http.ResponseWriter, r *http.Request) {
 				} else if n > 0 {
 					continue
 				}
-				body, err := json.Marshal(res)
-				if err != nil {
-					log.Printf("runner event stream %s: result encode: %v", sessionID, err)
-					return
-				}
-				_, _ = fmt.Fprintf(w, "event: end\ndata: %s\n\n", body)
-				flusher.Flush()
+				_ = a.sessionReadFence(ctx, sessionID, func(fenced context.Context) error {
+					fresh, err := a.buildSessionResult(fenced, sessionID, desktopViewer(fenced, principal.spawningAccountID()))
+					if err != nil {
+						return err
+					}
+					body, err := json.Marshal(fresh)
+					if err != nil {
+						return err
+					}
+					_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Second))
+					defer func() { _ = http.NewResponseController(w).SetWriteDeadline(time.Time{}) }()
+					_, err = fmt.Fprintf(w, "event: end\ndata: %s\n\n", body)
+					flusher.Flush()
+					return err
+				})
 				return
 			}
 			if time.Since(lastWrite) >= keepalive {

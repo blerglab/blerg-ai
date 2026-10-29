@@ -152,6 +152,9 @@ func TestRuleValidation(t *testing.T) {
 	if err := db.UpsertDaemon(ctx, fx.pool, desk, "desk", "local", "/repos"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := fx.pool.Exec(ctx, `UPDATE daemons SET desktop_owner_id=$2 WHERE id=$1`, desk, "owner-1"); err != nil {
+		t.Fatal(err)
+	}
 	if code, out := fx.addRule(owner, map[string]any{"engine": "codex", "runtime": "docker", "daemon_id": desk}); code != http.StatusCreated || out["daemon_name"] != "desk" {
 		t.Errorf("offline daemon: %d %v", code, out)
 	}
@@ -233,7 +236,7 @@ func TestRulesListShowsLimits(t *testing.T) {
 		t.Fatalf("list: %d %v", code, out)
 	}
 	limits, _ := out["limits"].(map[string]any)
-	want := map[string]float64{"per_parent_running": 3, "per_parent_starts": 20, "per_account_running": 6, "per_account_starts_per_hour": 60}
+	want := map[string]float64{"per_parent_running": 3, "per_parent_starts_per_hour": 120, "per_account_running": 6, "per_account_starts_per_hour": 60}
 	if len(limits) != len(want) {
 		t.Fatalf("limits %v", limits)
 	}

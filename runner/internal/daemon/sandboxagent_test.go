@@ -86,6 +86,9 @@ if [[ "$*" == *"/home/agent/.hermes/hermes-agent"* ]] && [ -n "$HERMES_PYTHON_SR
  done
  exec "${args[@]}"
 fi
+if [[ "$*" == *"/usr/local/bin/blerg-workspace-explorer"* ]] && [ -n "$FAKE_EXPLORER_ROOT" ]; then
+ exec /usr/bin/env -i PATH=/usr/bin:/bin BLERG_EXPLORER_TEST_PROCESS=1 BLERG_EXPLORER_TEST_ROOT="$FAKE_EXPLORER_ROOT" "$FAKE_EXPLORER_TEST_BINARY" -test.run=^TestWorkspaceExplorerChildProcess$
+fi
 exec "$@"
 `
 	path := filepath.Join(dir, "docker")

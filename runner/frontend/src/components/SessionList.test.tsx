@@ -4,6 +4,7 @@ import { Suspense, use } from 'react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import SessionList from './SessionList'
 import { useSessionStore } from '../hooks/useSessionStore'
+import { emit } from '../test/wsMock'
 import { useMessageStore } from '../hooks/useMessageStore'
 import { makeDaemon, makeSession } from '../test/fixtures'
 import { setSettingsOpen, settingsIsOpen } from '../lib/settingsDialog'
@@ -83,6 +84,7 @@ describe('SessionList', () => {
     expect(link).toHaveAttribute('target', '_blank')
     expect(link).toHaveAttribute('rel', 'noopener noreferrer')
     expect(link).toHaveAttribute('title', 'A newer Blerg release is available')
+    expect(screen.getByRole('link', { name: 'How to upgrade' })).toHaveAttribute('href', expect.stringContaining('/upgrade'))
     useSessionStore.setState({ latestVersion: '', latestUrl: '' })
   })
 
@@ -695,6 +697,26 @@ describe('SessionList — cluster pill count', () => {
     await waitFor(() => expect(screen.getByTestId('focus-pill-cluster')).toHaveTextContent('Cluster 1/4'))
   })
 
+  it.each(['stopped', 'error'] as const)('updates the Cluster pill when a nested child becomes %s', async status => {
+    localStorage.clear()
+    const fetch = vi.fn(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ configured: true, max_sessions: 4, active_sessions: 2 }),
+    }))
+    vi.stubGlobal('fetch', fetch)
+    seed([], [
+      makeSession({ id: 'parent', runtime: 'cluster', status: 'running' }),
+      makeSession({ id: 'child', parent_session_id: 'parent', runtime: 'cluster', status: 'running' }),
+    ])
+    renderList()
+    await waitFor(() => expect(screen.getByTestId('focus-pill-cluster')).toHaveTextContent('Cluster 2/4'))
+    const reads = fetch.mock.calls.length
+    // State broadcasts preserve ended_at and the other fields used by the structure selector.
+    act(() => emit({ type: 'session_state_changed', session_id: 'child', status, unread: false }))
+    expect(screen.getByTestId('focus-pill-cluster')).toHaveTextContent('Cluster 1/4')
+    await waitFor(() => expect(fetch.mock.calls.length).toBeGreaterThan(reads))
+  })
+
   it('follows a cap saved on the Cluster page without a reload', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({
       ok: true,
@@ -767,6 +789,36 @@ describe('Automated sessions', () => {
 
 describe('started-session sidebar nesting', () => {
   beforeEach(() => localStorage.clear())
+  it.each(['archived', 'discarded', 'unknown'])('lets a child of an %s parent ask the person', parentState => {
+    const parent = makeSession({ id: 'gone', title: 'Gone parent', status: parentState === 'discarded' ? 'stopped' : 'ended', archived_at: '2026-10-19T12:00:00Z' })
+    const child = makeSession({ id: 'orphan', title: 'Orphan question', parent_session_id: 'gone', status: 'waiting' })
+    seed([makeDaemon()], [...(parentState === 'unknown' ? [] : [parent]), child])
+    renderList()
+    expect(screen.getByTestId('status-dot')).toHaveTextContent('?')
+    expect(screen.getByTestId('status-dot')).toHaveAccessibleName('waiting')
+    expect(screen.getByTestId('waiting-banner')).toHaveTextContent('1 session waiting for input')
+    act(() => useSessionStore.setState({ sessions: [...(parentState === 'unknown' ? [] : [parent]), { ...child, status: 'idle', paused_reason: 'restart' }] }))
+    expect(screen.getByTestId('status-dot')).toHaveTextContent('?')
+    expect(screen.getByTestId('status-dot')).toHaveAccessibleName('paused by a restart')
+  })
+
+  it.each([0, 2])('uses a neutral glyph for a child waiting on its parent with %i tasks, then asks when the parent is archived', background_tasks => {
+    const parent = makeSession({ id: 'parent', title: 'Parent', status: 'idle' })
+    seed([makeDaemon()], [parent, makeSession({ id: 'child', title: 'Child question', parent_session_id: 'parent', status: 'waiting', unread: true, background_tasks })])
+    renderList()
+    const childCard = screen.getByText('Child question').closest('[data-session-branch="child"]')! as HTMLElement
+    const glyph = within(childCard).getByTestId('status-dot')
+    expect(glyph).toHaveAccessibleName('Waiting for its parent session')
+    expect(glyph).toHaveAttribute('data-status', 'waiting-parent')
+    expect(glyph).toHaveStyle({ color: 'var(--fog-dim)' })
+    expect(glyph).not.toHaveTextContent(/[?]|Zz/)
+    expect(childCard.querySelector('.blerg-runner-waiting-flash')).toBeNull()
+    expect(screen.queryByTestId('waiting-banner')).toBeNull()
+    act(() => useSessionStore.setState(s => ({ sessions: s.sessions.map(session => session.id === 'parent' ? { ...session, archived_at: '2026-10-19T12:00:00Z' } : session) })))
+    expect(screen.getByTestId('status-dot')).toHaveTextContent('?')
+    expect(screen.getByTestId('waiting-banner')).toHaveTextContent('1 session waiting for input')
+  })
+
   it('lists a child only under its parent, and a chevron control outside the card hides and shows it', () => {
     localStorage.removeItem('blerg-runner.sidebar.childrenClosed')
     seed([makeDaemon()], [makeSession({ id: 'parent', title: 'Parent' }), makeSession({ id: 'child', title: 'Child review', status: 'idle', parent_session_id: 'parent', started_by: { kind: 'session', name: 'Parent' } })])
@@ -784,7 +836,7 @@ describe('started-session sidebar nesting', () => {
     const chip = screen.getByTestId('hidden-children')
     expect(chip.tagName).toBe('SPAN')
     expect(chip).toHaveTextContent('↳ 1')
-    expect(chip).toHaveAttribute('data-state', 'idle')
+    expect(chip).toHaveAttribute('aria-label', '1 started session')
     fireEvent.click(toggle)
     expect(screen.queryByText('Child review')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Show 1 started session' }))
@@ -804,7 +856,7 @@ describe('started-session sidebar nesting', () => {
     expect(screen.getByTestId('opened')).toBeInTheDocument()
   })
 
-  it('a collapsed parent still surfaces a grandchild that needs the person', () => {
+  it('a collapsed parent hides a grandchild question and leaves its parent responsible', () => {
     localStorage.setItem('blerg-runner.sidebar.childrenClosed', JSON.stringify(['parent']))
     seed([makeDaemon()], [
       makeSession({ id: 'parent', title: 'Parent' }),
@@ -813,11 +865,13 @@ describe('started-session sidebar nesting', () => {
     ])
     renderList()
     expect(screen.queryByText('Idle middle')).not.toBeInTheDocument()
-    expect(screen.getByTestId('kept-child')).toHaveTextContent('Asking grandchild')
-    expect(screen.getByTestId('hidden-children')).toHaveAttribute('aria-label', '1 needs you, hidden (1 started session)')
+    expect(screen.queryByText('Asking grandchild')).toBeNull()
+    expect(screen.queryByTestId('kept-child')).toBeNull()
+    expect(screen.getByTestId('hidden-children')).toHaveAttribute('aria-label', '1 started session hidden')
+    expect(screen.queryByTestId('waiting-banner')).toBeNull()
   })
 
-  it('collapsed, then reloaded: the parent says what is hidden, and a child that needs the person stays visible', () => {
+  it('collapsed, then reloaded: all children stay hidden while the parent glyph reflects their work', () => {
     localStorage.removeItem('blerg-runner.sidebar.childrenClosed')
     seed([makeDaemon()], [
       makeSession({ id: 'parent', title: 'Parent' }),
@@ -832,15 +886,12 @@ describe('started-session sidebar nesting', () => {
     renderList()
     expect(screen.getByRole('button', { name: 'Show 3 started sessions' })).toHaveAttribute('aria-expanded', 'false')
     const glyph = screen.getByTestId('hidden-children')
-    expect(glyph).toHaveAttribute('aria-label', '1 needs you, 1 running, hidden (3 started sessions)')
-    expect(glyph).toHaveAttribute('data-state', 'waiting')
-    expect(glyph).toHaveTextContent('↳? 3')
-    // The idle one is hidden; the one that needs the person and the running one stay, one line each.
-    expect(screen.queryByText('Idle worker')).not.toBeInTheDocument()
-    const kept = screen.getAllByTestId('kept-child')
-    expect(kept.map(k => k.textContent)).toEqual(['?Asking worker', 'Busy worker'])
-    expect(within(kept[0]).getByRole('img', { name: 'needs you' })).toBeInTheDocument()
-    expect(within(kept[1]).getByRole('img', { name: 'running' })).toBeInTheDocument()
+    expect(glyph).toHaveAttribute('aria-label', '3 started sessions hidden')
+    expect(glyph).toHaveTextContent('↳ 3')
+    expect(screen.getByTestId('status-dot')).toHaveAttribute('title', 'running')
+    for (const title of ['Idle worker', 'Asking worker', 'Busy worker']) expect(screen.queryByText(title)).toBeNull()
+    expect(screen.queryByTestId('kept-child')).toBeNull()
+    expect(screen.queryByTestId('waiting-banner')).toBeNull()
     expect(screen.queryByTestId('nested-sessions')).toBeNull()
   })
   it('keeps the "from {parent}" chip on a child shown on its own', () => {
@@ -913,6 +964,67 @@ it('discarding a running session from its sidebar card asks first, and says it i
   renderList()
   fireEvent.click(screen.getByRole('button', { name: 'Actions for Busy parent' }))
   fireEvent.click(screen.getByRole('menuitem', { name: 'Discard session and children' }))
-  expect(screen.getByRole('dialog', { name: 'Discard session and all children?' })).toBeInTheDocument()
+  expect(screen.getByRole('alertdialog', { name: 'Discard session and all children?' })).toBeInTheDocument()
   expect(screen.getByTestId('discard-running')).toHaveTextContent('It is running now.')
+})
+
+it('uses the same main sessions in the expanded sidebar and collapsed tiles, preserving place and search', async () => {
+ seed([makeDaemon({id:'desktop'})],[
+  makeSession({id:'active',title:'Desktop work',runtime:'daemon',daemon_id:'desktop',status:'idle'}),
+  makeSession({id:'pod',title:'Cluster work',runtime:'cluster',status:'running'}),
+  makeSession({id:'automated',title:'Nightly work',cron_id:'cron',status:'running'}),
+  makeSession({id:'ended',title:'Previous work',status:'stopped'}),
+  makeSession({id:'child',title:'Nested work',parent_session_id:'active',status:'running'}),
+ ])
+ render(<MemoryRouter initialEntries={['/sessions/active']}><SessionList variant="sidebar"/></MemoryRouter>)
+ const expanded=await screen.findByTestId('session-list')
+ expect(within(expanded).getByText('Desktop work')).toBeVisible()
+ expect(within(expanded).getByText('Cluster work')).toBeVisible()
+ expect(within(expanded).queryByText('Nightly work')).toBeNull()
+ expect(within(expanded).queryByText('Previous work')).toBeNull()
+ fireEvent.click(screen.getByRole('button',{name:'Collapse session list'}))
+ const tiles=screen.getByRole('group',{name:'Sessions'})
+ expect(within(tiles).getAllByRole('button').map(b=>b.dataset.sessionId).sort()).toEqual(['active','pod'])
+ fireEvent.click(screen.getByRole('button',{name:'Toggle session list'}))
+ fireEvent.change(screen.getByTestId('search-input'),{target:{value:'Desktop'}})
+ fireEvent.click(screen.getByRole('button',{name:'Collapse session list'}))
+ expect(within(screen.getByRole('group',{name:'Sessions'})).getAllByRole('button').map(b=>b.dataset.sessionId)).toEqual(['active'])
+})
+
+// The structure subscription must still follow children that become roots, and the collapsed
+// branch must read current state instead of the structure snapshot's older card content.
+it('moves a child of an archived parent to History when it stops', () => {
+ localStorage.clear()
+ seed([makeDaemon()], [
+  makeSession({ id: 'archived-parent', title: 'Archived parent', archived_at: '2026-10-26T00:00:00Z' }),
+  makeSession({ id: 'orphan', title: 'Independent child', parent_session_id: 'archived-parent', status: 'running' }),
+ ])
+ renderList()
+ expect(screen.getByText('Independent child')).toBeInTheDocument()
+ act(() => useSessionStore.getState().updateSessionStatus('orphan', 'stopped'))
+ expect(screen.queryByText('Independent child')).toBeNull()
+ fireEvent.click(screen.getByRole('button', { name: /History/ }))
+ expect(screen.getByText('Independent child')).toBeInTheDocument()
+})
+it('keeps every collapsed child hidden across live work and attention changes', () => {
+ localStorage.clear()
+ localStorage.setItem('blerg-runner.sidebar.childrenClosed', JSON.stringify(['parent']))
+ seed([makeDaemon()], [
+  makeSession({ id: 'parent', title: 'Parent', status: 'idle' }),
+  makeSession({ id: 'child', title: 'Child', parent_session_id: 'parent', status: 'idle' }),
+ ])
+ renderList()
+ expect(screen.queryByTestId('kept-child')).toBeNull()
+ act(() => useSessionStore.getState().updateSessionStatus('child', 'waiting'))
+ expect(screen.queryByTestId('kept-child')).toBeNull()
+ expect(screen.queryByText('Child')).toBeNull()
+ expect(screen.getByTestId('hidden-children')).toHaveAttribute('aria-label', '1 started session hidden')
+ expect(screen.getByTestId('status-dot')).toHaveAttribute('title', 'idle')
+ expect(screen.queryByTestId('waiting-banner')).toBeNull()
+ act(() => useSessionStore.getState().updateSessionStatus('child', 'running'))
+ expect(screen.queryByText('Child')).toBeNull()
+ expect(screen.getByTestId('status-dot')).toHaveAttribute('title', 'running')
+ act(() => useSessionStore.getState().updateSessionStatus('child', 'idle'))
+ expect(screen.queryByTestId('kept-child')).toBeNull()
+ expect(screen.queryByTestId('waiting-banner')).toBeNull()
 })

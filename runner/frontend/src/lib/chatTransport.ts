@@ -8,12 +8,41 @@ import { bounceToRefresh } from '../signIn'
 import { tokenExpired, tokenSubject } from '../claims'
 import { checkAccount } from './liveBoardCard'
 import { notifyReviewRequestsChanged } from '../hooks/useMyReviewRequests'
+import { rememberDesktopCacheScope } from './desktopCacheScope'
 
 let shared: Transport | null = null
+let disposeShared: (() => void) | null = null
+
+/** Drop buffered replay pages and pending older-page reads before a new scope subscribes. */
+export function invalidateChatTransport() {
+  const dispose = disposeShared
+  shared = null
+  disposeShared = null
+  dispose?.()
+}
 export function blergTransport(): Transport {
   if (shared) return shared
+  const subscriptions = new Set<() => void>()
+  const listeners = new Set<() => void>()
+  const closes = new Set<() => void>()
+  let alive = true
+  const track = (off: () => void) => {
+    const remove = () => { if (listeners.delete(remove)) off() }
+    listeners.add(remove)
+    return remove
+  }
   shared = createBlergTransport({
-    socket: ws,
+    socket: {
+      send: message => alive && ws.send(message),
+      connected: ws.connected,
+      onMessage: (type, handler) => track(ws.onMessage(type as Parameters<typeof ws.onMessage>[0], message => { if (alive) handler(message as never) })),
+      onOpen: handler => track(ws.onOpen(() => { if (alive) handler() })),
+      onClose: handler => {
+        closes.add(handler)
+        const off = ws.onClose(handler)
+        return track(() => { closes.delete(handler); off() })
+      },
+    },
     getToken: async () => {
       const tok = getAccessToken()
       if (!tok || tokenExpired(tok)) await ensureFreshToken()
@@ -27,6 +56,27 @@ export function blergTransport(): Transport {
     // Who is signed in: a question someone else dismissed says so (not "dismissed by you").
     viewerId: () => tokenSubject(getAccessToken()),
   })
+  const subscribe = shared.subscribe.bind(shared)
+  shared.subscribe = (...args) => {
+    rememberDesktopCacheScope(args[0])
+    const off = subscribe(...args)
+    const remove = () => { if (subscriptions.delete(remove)) off() }
+    subscriptions.add(remove)
+    return remove
+  }
+  const loadOlder = shared.loadOlder?.bind(shared)
+  if (loadOlder) shared.loadOlder = (...args) => {
+    rememberDesktopCacheScope(args[0])
+    return loadOlder(...args)
+  }
+  disposeShared = () => {
+    // Unsubscribe first, so closing pending older reads cannot flush an old
+    // subscription's buffered capability events back into the transcript.
+    for (const off of subscriptions) off()
+    alive = false
+    for (const close of closes) close()
+    for (const off of listeners) off()
+  }
   // A review decided in the viewer leaves the bell at once, not at its next minute's read.
   const decide = shared.decideReview?.bind(shared)
   if (decide) {

@@ -1,0 +1,20 @@
+/* A one-line notice above a session whose desktop is not enrolled to its person (#193). */
+.desktop-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin: 6px 12px 0;
+  padding: 6px 10px;
+  border: 1px solid var(--stone);
+  border-left: 3px solid var(--amber);
+  border-radius: 6px;
+  background: var(--basalt);
+  color: var(--fog);
+  font-size: var(--text-sm, 13px);
+  line-height: 1.4;
+  min-width: 0;
+}
+.desktop-notice-text { min-width: 0; overflow-wrap: anywhere; }
+.desktop-notice-link { color: var(--blaze); font-weight: 600; white-space: nowrap; text-decoration: none; }
+.desktop-notice-link:hover, .desktop-notice-link:focus-visible { text-decoration: underline; }

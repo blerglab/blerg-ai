@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -167,7 +168,7 @@ func TestSandboxedClaudeEndsWhenItsContainerStops(t *testing.T) {
 	fastSandboxWatch(t, 50*time.Millisecond)
 	id := "s-claude-dies-" + ccUUID()[:8]
 	host.Spawn(protocol.SpawnSession{Type: "spawn_session", SessionID: id, Repo: "proj", Kind: "agent", Sandbox: true, InitialPrompt: "hello"})
-	t.Cleanup(func() { host.Kill(id) })
+	cleanupSandboxHost(t, host)
 	sender.waitForKind(t, "turn_done")
 	time.Sleep(200 * time.Millisecond) // several looks at a live container: nothing happens
 	if len(sender.sessionEnds()) > 0 {
@@ -190,7 +191,7 @@ func TestSandboxedHermesStopsWhenItsContainerStopped(t *testing.T) {
 	t.Setenv("FAKE_DOCKER_EXEC_FAIL", "1") // every exec fails the way a stopped container's does
 	id := "s-hermes-dies-" + ccUUID()[:8]
 	host.Spawn(protocol.SpawnSession{Type: "spawn_session", SessionID: id, Repo: "proj", Kind: "agent", Engine: "hermes", Sandbox: true, InitialPrompt: "hello"})
-	t.Cleanup(func() { host.Kill(id) })
+	cleanupSandboxHost(t, host)
 	assertEndedForSandbox(t, host, sender, id, exit)
 	if n := strings.Count(dockerCalls(t, logPath), hermesGatewayPIDFile+`; exec "$@" sh`); n != 1 {
 		t.Fatalf("the gateway was started %d times in a stopped container, want 1:\n%s", n, dockerCalls(t, logPath))
@@ -209,7 +210,7 @@ func TestSandboxedCodexStopsWhenItsContainerStopped(t *testing.T) {
 	t.Setenv("FAKE_DOCKER_EXEC_FAIL", "1")
 	id := "s-codex-dies-" + ccUUID()[:8]
 	host.Spawn(protocol.SpawnSession{Type: "spawn_session", SessionID: id, Repo: "proj", Kind: "agent", Engine: "codex", Sandbox: true, InitialPrompt: "hello"})
-	t.Cleanup(func() { host.Kill(id) })
+	cleanupSandboxHost(t, host)
 	assertEndedForSandbox(t, host, sender, id, exit)
 	time.Sleep(1500 * time.Millisecond) // past the driver's first retry backoff
 	if n := strings.Count(dockerCalls(t, logPath), "app-server"); n != 1 {
@@ -224,15 +225,36 @@ func TestSandboxStopIsNotAContainerDeath(t *testing.T) {
 	host, sender, _, home := sandboxHost(t, engineDir, AgentHostConfig{})
 	writeClaudeLogin(t, home)
 	t.Setenv("FAKE_CLAUDE_LOG", filepath.Join(engineDir, "claude-calls.log"))
-	var dead atomic.Bool
-	stubSandboxExit(t, &dead, agent.SandboxExit{Gone: true})
+	entered, release := make(chan struct{}), make(chan struct{})
+	var enteredOnce, releaseOnce sync.Once
+	orig := sandboxContainerExit
+	sandboxContainerExit = func(string) (agent.SandboxExit, bool) {
+		enteredOnce.Do(func() { close(entered) })
+		<-release
+		return agent.SandboxExit{Gone: true}, true
+	}
+	t.Cleanup(func() { sandboxContainerExit = orig })
 	fastSandboxWatch(t, 20*time.Millisecond)
+	cleanupSandboxHost(t, host)
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
 	id := "s-claude-stopped-" + ccUUID()[:8]
 	host.Spawn(protocol.SpawnSession{Type: "spawn_session", SessionID: id, Repo: "proj", Kind: "agent", Sandbox: true, InitialPrompt: "hello"})
 	sender.waitForKind(t, "turn_done")
-	dead.Store(true) // what the watch would see once the stop has removed the container
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("watch never probed the container")
+	}
+	// Stop while the probe is in flight; it returns "gone" only after cancellation.
 	host.Kill(id)
-	time.Sleep(200 * time.Millisecond)
+	releaseOnce.Do(func() { close(release) })
+	done := make(chan struct{})
+	go func() { host.sandboxWatches.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("watch never stopped")
+	}
 	ends := sender.sessionEnds()
 	if len(ends) != 1 || ends[0].ExitCode != 0 || ends[0].Message != "" {
 		t.Fatalf("session_ended = %+v, want one stop with exit 0", ends)
@@ -384,4 +406,28 @@ func TestCodexDriverDoesNotRetryInAStoppedContainer(t *testing.T) {
 	if n := strings.Count(dockerCalls(t, logPath), "app-server"); n != 1 {
 		t.Fatalf("a later message started the app-server again (%d)", n)
 	}
+}
+
+// A session_ended notification precedes the watch goroutine's return. Join the watch before
+// restoring any process-global probe, timer, environment or PID-file stub.
+func cleanupSandboxHost(t *testing.T, host *AgentHost) {
+	t.Helper()
+	t.Cleanup(func() {
+		host.mu.Lock()
+		var ids []string
+		for id := range host.sessions {
+			ids = append(ids, id)
+		}
+		host.mu.Unlock()
+		for _, id := range ids {
+			host.Kill(id)
+		}
+		done := make(chan struct{})
+		go func() { host.sandboxWatches.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(20 * time.Second):
+			t.Fatal("sandbox watcher did not stop")
+		}
+	})
 }

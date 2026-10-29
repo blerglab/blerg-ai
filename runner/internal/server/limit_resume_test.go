@@ -372,3 +372,178 @@ func TestLimitResumeIngestWaitSkipsWithoutTimeLeft(t *testing.T) {
 		t.Fatalf("400 ms left: %v", got)
 	}
 }
+
+// Move the persisted deadline instead of sleeping; no new usage read is needed.
+func TestLimitResumeAtRecordedReset(t *testing.T) {
+	for _, engine := range []string{"claude", "codex"} {
+		for _, optIn := range []string{"before-limit", "after-limit"} {
+			for _, action := range []string{"idle", "reconnect", "manual", "ended"} {
+				t.Run(engine+"/"+optIn+"/"+action, func(t *testing.T) {
+					f := newIngestFixture(t)
+					ctx := f.ctx
+					check := func(err error) {
+						t.Helper()
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					_, err := f.pool.Exec(ctx, `UPDATE sessions SET kind='agent',engine=$2,spawning_account_id='user-1' WHERE id=$1`, f.sessionID, engine)
+					check(err)
+					f.hub.SetSessionOwner(f.sessionID, f.dc.ID)
+					api := NewAPI(f.hub, f.pool, "", nil, "")
+					token := enableBrowserAuth(t, api)(coreAuthBrowserCap)
+					enable := func() {
+						req := httptest.NewRequest(http.MethodPut, "/api/sessions/"+f.sessionID+"/limit-resume", strings.NewReader(`{"enabled":true}`))
+						req.SetPathValue("id", f.sessionID)
+						req.Header.Set("Authorization", "Bearer "+token)
+						rec := httptest.NewRecorder()
+						api.HandleLimitResume(rec, req)
+						if rec.Code != http.StatusOK {
+							t.Fatalf("enable: %d %s", rec.Code, rec.Body.String())
+						}
+					}
+					if optIn == "before-limit" {
+						enable()
+					}
+					at := time.Now().Add(-time.Second)
+					f.ingest("turn", "user_message", `{"turn_id":"interrupted","source":"chat"}`, at.Format(time.RFC3339Nano))
+					reset := time.Now().Add(time.Hour).Truncate(time.Microsecond)
+					raw, err := json.Marshal(limitRefusal{Provider: engine, TurnID: "interrupted", ResetAt: &reset})
+					check(err)
+					f.ingest("limit", "usage_limit", string(raw), at.Format(time.RFC3339Nano))
+					if optIn == "after-limit" {
+						enable()
+					}
+					state, err := db.GetLimitResume(ctx, f.pool, f.sessionID)
+					check(err)
+					if state.State != "pending" || state.ResetAt == nil || !state.ResetAt.Equal(reset) {
+						t.Fatalf("not armed: %+v", state)
+					}
+					f.acks()
+					api.checkLimitResumes(ctx)
+					select {
+					case msg := <-f.dc.send:
+						t.Fatalf("resumed before reset: %s", msg)
+					default:
+					}
+					if action == "reconnect" {
+						_, err = f.pool.Exec(ctx, `UPDATE sessions SET status='error',daemon_lost_at=now() WHERE id=$1`, f.sessionID)
+						check(err)
+					}
+					handleUsageLimits(f.hub, f.dc, protocol.UsageLimits{Provider: engine, Windows: []protocol.UsageWindow{{ID: "5h", UsedPercent: 100, ResetsAt: time.Now().Add(-time.Second)}}})
+					_, err = f.pool.Exec(ctx, `UPDATE session_limit_resume SET reset_at=now()-interval '3 minutes' WHERE session_id=$1`, f.sessionID)
+					check(err)
+					switch action {
+					case "manual":
+						check(withCancelledPendingLimitResume(ctx, f.pool, f.sessionID, func() error { return nil }))
+						f.ingest("new-turn", "user_message", `{"turn_id":"manual-turn","source":"chat"}`, time.Now().Format(time.RFC3339Nano))
+						f.acks()
+					case "ended":
+						_, err = f.pool.Exec(ctx, `UPDATE sessions SET status='ended',ended_at=now() WHERE id=$1`, f.sessionID)
+						check(err)
+					case "reconnect":
+						api.checkLimitResumes(ctx)
+						state, err = db.GetLimitResume(ctx, f.pool, f.sessionID)
+						check(err)
+						if state.State != "pending" || state.Attempts != 0 {
+							t.Fatalf("lost retry: %+v", state)
+						}
+						f.dc = &DaemonConn{ID: f.dc.ID, send: make(chan []byte, 64)}
+						f.hub.Register(f.dc)
+						f.hub.SetSessionOwner(f.sessionID, f.dc.ID)
+						api = NewAPI(f.hub, f.pool, "", nil, "")
+						_, err = f.pool.Exec(ctx, `UPDATE sessions SET status='idle',daemon_lost_at=NULL WHERE id=$1`, f.sessionID)
+						check(err)
+						f.ingest("limit", "usage_limit", string(raw), at.Format(time.RFC3339Nano))
+						f.acks()
+					}
+					api.checkLimitResumes(ctx)
+					want := action == "idle" || action == "reconnect"
+					select {
+					case raw := <-f.dc.send:
+						var msg protocol.AgentUserMessage
+						check(json.Unmarshal(raw, &msg))
+						if !want || msg.Source != limitResumeSource || msg.ExpectedTurnID != "interrupted" {
+							t.Fatalf("unexpected continuation: %s", raw)
+						}
+					default:
+						if want {
+							t.Fatal("no continuation on first tick after recorded reset without a fresh usage report")
+						}
+					}
+					api.checkLimitResumes(ctx)
+					select {
+					case msg := <-f.dc.send:
+						t.Fatalf("duplicate continuation: %s", msg)
+					default:
+					}
+					f.ingest("limit", "usage_limit", string(raw), at.Format(time.RFC3339Nano))
+					f.acks()
+					state, err = db.GetLimitResume(ctx, f.pool, f.sessionID)
+					check(err)
+					if want && (state.State != "dispatched" || state.Attempts != 1) {
+						t.Fatalf("replay changed dispatched retry: %+v", state)
+					}
+				})
+			}
+		}
+	}
+}
+
+// A busy reset must not make later sessions or another engine wait behind an
+// install-wide one-per-tick queue, which can exceed the reset-to-minute bound.
+func TestLimitResumeDueBatchAcrossEngines(t *testing.T) {
+	f := newIngestFixture(t)
+	ctx := f.ctx
+	check := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids := []string{}
+	reset := time.Now().Add(-3 * time.Minute)
+	for _, engine := range []string{"claude", "codex", "claude", "codex", "claude", "codex"} {
+		id := newUUID()
+		ids = append(ids, id)
+		check(db.InsertSession(ctx, f.pool, id, f.dc.ID, "idle", "/w/project", "project", "Agent", ""))
+		_, err := f.pool.Exec(ctx, `UPDATE sessions SET kind='agent',engine=$2 WHERE id=$1`, id, engine)
+		check(err)
+		check(db.SetLimitResume(ctx, f.pool, id, true, newUUID()))
+		check(db.TrackLimitResumeTurn(ctx, f.pool, id, "interrupted", "chat", reset.Add(-time.Minute), 1))
+		check(db.RecordLimitRefusal(ctx, f.pool, id, engine, "interrupted", &reset, 2, reset.Add(-time.Minute)))
+		f.hub.SetSessionOwner(id, f.dc.ID)
+	}
+	api := NewAPI(f.hub, f.pool, "", nil, "")
+	api.checkLimitResumes(ctx)
+	seen := map[string]bool{}
+	for {
+		select {
+		case raw := <-f.dc.send:
+			var msg protocol.AgentUserMessage
+			check(json.Unmarshal(raw, &msg))
+			if msg.Source != limitResumeSource || seen[msg.SessionID] {
+				t.Fatalf("unexpected or duplicate dispatch: %s", raw)
+			}
+			seen[msg.SessionID] = true
+		default:
+			if len(seen) != len(ids) {
+				t.Fatalf("only %d of %d due continuations dispatched; install-wide staggering delays reset resumes", len(seen), len(ids))
+			}
+			for _, id := range ids {
+				state, err := db.GetLimitResume(ctx, f.pool, id)
+				check(err)
+				if state.State != "dispatched" || state.Attempts != 1 {
+					t.Fatalf("invalid batch attempt: %+v", state)
+				}
+			}
+			api.checkLimitResumes(ctx)
+			select {
+			case raw := <-f.dc.send:
+				t.Fatalf("duplicate batch continuation: %s", raw)
+			default:
+			}
+			return
+		}
+	}
+}

@@ -31,7 +31,7 @@ func (f *fixtureFiling) SnapshotURL() string { return "https://board.example.tes
 func (f *fixtureFiling) Prepare(_ context.Context, _ mcpgw.Proof, _ string, d boardfiling.Draft) (boardfiling.Draft, error) {
 	return d, nil
 }
-func (f *fixtureFiling) Search(context.Context, mcpgw.Proof, string, string) (json.RawMessage, error) {
+func (f *fixtureFiling) Search(context.Context, mcpgw.Proof, string, string, string) (json.RawMessage, error) {
 	return json.RawMessage(`{"cards":[],"truncated":false}`), nil
 }
 func (f *fixtureFiling) Create(_ context.Context, p mcpgw.Proof, _ string, b string, d boardfiling.Draft) (json.RawMessage, error) {

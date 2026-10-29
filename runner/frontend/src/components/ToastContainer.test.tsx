@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import ToastContainer from './ToastContainer'
 import { useToastStore } from '../hooks/useToastStore'
@@ -30,6 +30,16 @@ describe('ToastContainer', () => {
     expect(container.firstChild).toBeNull()
   })
 
+  it('lets a person dismiss every variant without navigating or running its action', () => {
+    const action = vi.fn()
+    useToastStore.setState({ toasts: [{ id: 1, title: 'Notice', body: 'Details', url: '/sessions/other', action: { label: 'Undo', onClick: action } }] })
+    renderContainer()
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss notification' }))
+    expect(useToastStore.getState().toasts).toEqual([])
+    expect(action).not.toHaveBeenCalled()
+    expect(screen.queryByRole('region', { name: 'Notifications' })).toBeNull()
+  })
+
   it('session toast has data-testid="toast-session"', () => {
     useToastStore.setState({
       toasts: [{ id: 1, title: 'Session waiting', body: 'foo', variant: 'session' }],
@@ -54,7 +64,7 @@ describe('ToastContainer', () => {
     expect(screen.getByTestId('toast-session')).toBeInTheDocument()
   })
 
-  it('session and message toasts have different left border colors', () => {
+  it('session and message toasts use one surface', () => {
     useToastStore.setState({
       toasts: [
         { id: 1, title: 'Session', body: 'A', variant: 'session' },
@@ -64,10 +74,11 @@ describe('ToastContainer', () => {
     renderContainer()
     const sessionEl = screen.getByTestId('toast-session')
     const messageEl = screen.getByTestId('toast-message')
-    expect(sessionEl.style.borderLeft).not.toBe(messageEl.style.borderLeft)
+    expect(sessionEl.className).toBe('message-toast')
+    expect(messageEl.className).toBe(sessionEl.className)
   })
 
-  it('message toast title uses teal color, session toast uses cream color', () => {
+  it('message and session titles use the popover typography', () => {
     useToastStore.setState({
       toasts: [
         { id: 1, title: 'Session', body: 'A', variant: 'session' },
@@ -80,6 +91,7 @@ describe('ToastContainer', () => {
     expect(sessionTitle).toBeTruthy()
     expect(messageTitle).toBeTruthy()
     // Colors differ between variants
-    expect(sessionTitle.style.color).not.toBe(messageTitle.style.color)
+    expect(sessionTitle.className).toBe('confirm-popover-title')
+    expect(messageTitle.className).toBe(sessionTitle.className)
   })
 })

@@ -52,7 +52,7 @@ export default function AskReply({ answer, messageId, label = 'Your answer', cla
           }
         }}
       />
-      <button type="submit" className="ask-reply-send" disabled={sending || !draft.trim()}>Answer</button>
+      <button type="submit" className="artifact-btn ask-reply-send" disabled={sending || !draft.trim()}>Answer</button>
       {failed && <span className="ask-reply-error" role="status">Not connected — your answer was not sent.</span>}
     </form>
   )

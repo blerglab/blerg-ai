@@ -73,8 +73,8 @@ values and, with `runtime` omitted, the same defaults: cluster where one is conf
 **Local sandbox** when the connected daemon chosen for the repo reports `sandbox_available`, else
 **This machine** — the daemon host, unsandboxed. So everything the Board launches on a desktop
 with the sandbox image built runs in the sandbox. An explicit value is honored verbatim:
-`runtime: "daemon"` is the opt-out onto the host (the board sends it for every start when
-`BLERG_BOARD_RUNNER_RUNTIME=daemon`), and `runtime: "docker"` against a daemon without the image is
+`runtime: "daemon"` is the opt-out onto the host (the board sends it only for a board whose owner
+chose and acknowledged the host in Where it runs), and `runtime: "docker"` against a daemon without the image is
 refused by the daemon rather than demoted onto the host.
 
 A board-started session in the sandbox has its `BLERG_BOARD_*` variables, the `blerg-runner`
@@ -145,7 +145,7 @@ Paths are relative to the runner's `base_url`.
 | `GET` | `/api/models/{engine}` | the models (and each one's effort levels) a session on that engine can use | see [Model lists](#model-lists); also readable with a browser session |
 | `POST` | `/api/runner/start` | start a session | `202 {session_id}`; honors `Idempotency-Key` |
 | `GET` | `/api/runner/sessions/{id}` | status | `{lifecycle, runtime, resumable, auto_stop, interaction, error_reason, end_reason, ended_by, limits}`; `limits` is `{max_file_bytes, max_session_upload_bytes, max_session_artifact_bytes}`, what the session's files may weigh (absent before 0.2.1) |
-| `POST` | `/api/runner/sessions/{id}/message` | send a turn | `{text, source?, client_id?}` → `202`; resumes a disconnected cluster session. The sources Blerg writes itself (`proposal`, `review`, `system`, `ask_answer`, `note_reply`, `limit_resume`, `child_turn`) are refused with `422`, and so is `session`, which the runner sets itself for a parent session's messages to its child |
+| `POST` | `/api/runner/sessions/{id}/message` | send a turn | `{text, source?, client_id?}` → `202`; resumes a disconnected cluster session. The sources Blerg writes itself (`proposal`, `review`, `system`, `ask_answer`, `note_reply`, `limit_resume`, `child_turn`, `question_answer`, `plan_drift`) are refused with `422`, and so is `session`, which the runner sets itself for a parent session's messages to its child |
 | `POST` | `/api/runner/sessions/{id}/model` | select next-turn model/effort | `{model?, effort?}` → `202`; existing session engine remains authoritative |
 | `POST` | `/api/runner/sessions/{id}/interrupt` | cancel the in-flight turn | `202`; `409` when there is no live runtime |
 | `POST` | `/api/runner/sessions/{id}/stop` | end the session | `200 {"status":"stopped"}`; idempotent. Finished work **must** call this or cluster session slots leak |
@@ -156,7 +156,7 @@ Paths are relative to the runner's `base_url`.
 | `GET` | `/api/runner/sessions/{id}/artifacts` | the session's files | `{artifacts: [...]}`, newest first; see [Session files](#session-files) |
 | `GET` | `/api/runner/sessions/{id}/artifacts/{aid}/raw` | one file's bytes for a viewer | server-chosen type, `nosniff`, `CSP: sandbox` |
 | `GET` | `/api/runner/sessions/{id}/artifacts/{aid}/download` | one file's bytes as an attachment | `Content-Disposition` with its name |
-| `DELETE` | `/api/runner/sessions/{id}/artifacts/{aid}` | delete one file | `204`; any origin |
+| `DELETE` | `/api/runner/sessions/{id}/artifacts/{aid}` | delete one file | `204`; any origin; owner/admin only |
 | `POST` | `/api/runner/sessions/{id}/uploads` | attach a person's file | raw body + `X-Artifact-Name` → `201`; the app vouches for the person |
 | `GET` | `/packages/` | the UI packages this runner serves | public; see [UI package](#ui-package) |
 | `GET` | `/packages/{file}` | a package tarball | public, immutable |
@@ -207,13 +207,30 @@ Validation, and the status each failure answers with:
   Job, a daemon's send buffer is full, or an idempotency record raced. All of these are retryable.
 - `500` — the session could not be recorded; it was not started.
 
-**`Idempotency-Key`.** Send one whenever a retry is possible. The key is 1–128 characters, scoped
+**`Idempotency-Key`.** Send one whenever a retry is possible. The key is 1–128 ASCII characters from `[A-Za-z0-9_.:-]`, scoped
 to the calling credential (two callers using `retry-1` neither collide nor see each other's
 sessions) and retained for 24 h. Same key, same body → the original `202` is replayed with
 `Idempotent-Replayed: true` and no second session. Same key, different body → `409 idempotency key
 reused with a different request`. A header that is present but empty, sent twice, or over 128
-characters is a `400` rather than a silently dropped guarantee. A start that fails releases its
+characters, or containing any other character is a `400` rather than a silently dropped guarantee. A start that fails releases its
 key, so a retry is a fresh start rather than a replay of a session that never existed.
+
+All runner endpoints accepting `Idempotency-Key` use this charset and length, including
+session children (where the header is required), History marks, and board proposals.
+The MCP `start_session` argument `idempotency_key` uses the same rule. The 1-character
+minimum preserves existing session and MCP callers. Whitespace, including leading and trailing
+whitespace, is not allowed. Use unique keys such as UUIDs, including for board proposals.
+
+Scopes encode every part, including the operation namespace, with its byte length and a
+`v2|` prefix. Parts containing colons cannot alias another scope, and the new prefix prevents
+matching an ambiguous legacy row. Cron recovery alone reads its unambiguous legacy scope
+for one release so an interrupted start is adopted across the upgrade. No schema migration
+is needed: `runner_idempotency` is a retry cache, with 24-hour start claims and an opportunistic prune on keyed starts.
+A retry across the upgrade can miss its old claim and repeat the operation; finish pending
+retries before upgrading when duplication matters. Mark claims use the same sweep rather
+than expiring on lookup, so old marks may remain physically stored longer on a quiet runner.
+Board proposal and delegation request keys are stored in separate, structured columns;
+their retention and replay behavior are unchanged.
 
 ### Discovering launch choices and controlling a conversation
 
@@ -435,7 +452,7 @@ subagents — is reported as a transcript event of kind `capabilities`. It persi
 any other event, appears in `…/events`, the SSE stream and MCP `get_events`, and is what the
 session panel's **Capabilities** tab shows (a terminal session's Skills & plugins dialog says it has
 none). Only the latest one describes the session. Payload:
-`{engine, engine_name?, model?, version?, cwd?, permission_mode?, note?, groups: [{id, label,
+`{engine, engine_name?, model?, version?, cwd?, permission_mode?, sandbox_mode?, note?, groups: [{id, label,
 note?, total?, items: [{name, description?, detail?, status?, source?}]}]}`, with group `id` one of
 `skills`, `plugins`, `mcp`, `commands`, `tools`, `agents` (in that order). A group the engine does
 not report is absent; a reported group with nothing in it has `items: []`. Browsers get the latest
@@ -646,7 +663,23 @@ reported `tokens` and optional price estimates, and `ticket`: the child's curren
 its parent's live state). A `local` flag describes the
 owning daemon's endpoint classification; it does not invent a zero dollar cost.
 Current-turn `usage_updated` snapshots are nonbilling display telemetry and are
-replaced at completion. See [Live child telemetry](../docs/telemetry.md#live-child-telemetry).
+replaced at completion. For the session's owner or an administrator only (as Insights), the
+reply's `usage` and each child's `usage` give the Running now token chip: `{total, input, output,
+cache_read, cache_write, subagents, turns, turn?: {tokens, input, output, cache_read, cache_write,
+in_flight}, cost_usd?}`, from the recorded turn usage plus the running turn's report; `turn` is the
+running turn's report when it is newer than the last finished turn, otherwise that turn. Each
+`subagents[]` entry carries `usage` `{input, output, cache_read, cache_write}` beside its `tokens`
+under the same rule. `usage.context` is the context meter's reading (#191), from the newest
+`turn_done` that reports one (`context` `{tokens?, window?, compact_at?, compacted?, compacted_from?}`
+on the event, written by the daemon): `{tokens?, window?, compact_at?, compacted?, compacted_from?, at}`,
+where `tokens` is the main agent's prompt at its latest model call (Claude: input + cache read +
+cache write; Codex: its reported token count; the native loop: its own reading), `window` the
+model's window as the engine reports it, `compact_at` the engine's own compaction size when it says
+one (only the native loop does), and `compacted` that the engine compacted in that turn. A
+`compaction` event recorded after that turn drops `tokens` and sets `compacted` (a turn that compacted
+and then failed or was interrupted reports no new count). The window is always the reading's model's.
+A part the engine did not report is absent; nothing is estimated.
+See [Live child telemetry](../docs/telemetry.md#live-child-telemetry).
 
 **Background tasks.** When a Claude Code agent leaves something running (a `Bash` call with
 `run_in_background`, a `Monitor`, a background subagent), the runner records
@@ -802,11 +835,30 @@ the bytes, the server-classified content type, the hardening headers (`nosniff`,
 
 | Request | Answers |
 |---|---|
-| `GET …/artifacts` | `{artifacts: [{id, name, size, content_type, view, origin, version, latest_version, created_at}]}`, newest first. `origin` is `agent` or `user`; a file published again under the same name is the next `version` of it |
+| `GET …/artifacts` | `{artifacts: [{id, name, size, content_type, view, origin, version, latest_version, created_at, can_delete}]}`, newest first. `origin` is `agent` or `user`; a file published again under the same name is the next `version` of it |
 | `GET …/artifacts/{aid}/raw` | the bytes for an in-app viewer: images and PDFs with their type, everything else as `application/octet-stream` |
 | `GET …/artifacts/{aid}/download` | the bytes as an attachment, named after the file (an older version as `<stem>-v<N><ext>`) |
-| `DELETE …/artifacts/{aid}` | `204`. Whoever may see the session may delete its files, whichever origin they came from |
-| `POST …/uploads` | the body is the file, `X-Artifact-Name` (percent-encoded) or `?name=` its name; stored with `origin: user` and attributed to the account the credential acts for. `201` with the stored file (`previous` is the version it follows). 100 MiB per file, 100 attachments and 500 MiB per session, 20 versions per name (the sizes are configurable, see below, and the status above reports them); `409` on an ended session or a reached cap, `413` for a file over the limit (the message names both sizes; send `Content-Length` and it is refused before the body is read) |
+| `DELETE …/artifacts/{aid}` | `204`. The session owner or an administrator may delete any file, and a person the attachments they attached; visibility is checked first. `403` with a sentence otherwise |
+| `POST …/storage` | an administrator raises the session's attachment total by 500 MiB, up to the install maximum; `200` `{limits, can_increase}`, `403` for anyone else, `409` (`code: "storage_at_maximum"`) at the maximum. Each raise is recorded (`session_storage_audit`) |
+| `POST …/uploads` | the body is the file, `X-Artifact-Name` (percent-encoded) or `?name=` its name; stored with `origin: user` and attributed to the account the credential acts for. `201` with the stored file (`previous` is the version it follows). 100 MiB per file and 500 MiB of attachments per session (no lifetime file-count cap), 20 versions per name (the sizes are configurable, see below, and the status above reports them); `409` on an ended session or a reached cap, `413` for a file over the limit (the message names both sizes; send `Content-Length` and it is refused before the body is read) |
+
+The artifact list also returns `limits` (with this session's own `max_session_upload_bytes` and
+the install's `max_session_upload_cap_bytes`), `can_delete` (the owner or an administrator) and
+`can_increase` (an administrator below the maximum). A broker credential (the runner key the
+board's chat uses, or a service token) acts for the person it names in `X-Blerg-Acting-Account`.
+The runner checks that person with core on every request (`POST /internal/accounts/standing`:
+the account exists and is active, and its real role decides administrator status;
+`X-Blerg-Acting-Admin` is ignored) and requires that they can see the session. Deletes, storage
+raises and upload attribution are then decided for them; with no valid name, or with core
+unreachable, it deletes and raises nothing. Every deletion is recorded in
+`session_file_deletions` (session, file, person, whether they were an administrator, and the path:
+`browser`, `contract` or `broker:<kind>`). The per-session default and maximum are
+Core administrator settings (`GET`/`PUT /api/settings/session-storage`), read by the runner from
+`POST /internal/session-storage` at most every 30 seconds; `BLERG_RUNNER_MAX_SESSION_UPLOADS_MB`
+applies until one is saved. A total-size refusal is a `409` with
+`code: "file_space_required"`; version-count refusals remain ordinary `409` errors. The browser
+saves waiting attachment bytes locally, checks space before sending large bodies, and retries
+after deletion, refocus, or a five-second space check. See [freeing file space](../docs/artifacts.md#uploading-files-to-a-session).
 
 An `artifact` event in the transcript announces each file the agent publishes, with the same
 fields as a list entry minus `latest_version` and `created_at`.
@@ -891,8 +943,18 @@ authenticated calls refuse redirects rather than forward credentials.
 Reusing an identical pending request can return `200` with that same request. Expiring an already
 allowed request returns `409` with its existing outcome rather than canceling the child.
 
-Limits are three running children and twenty starts per parent, six running children and sixty
-starts per account per hour. A real parent end stops non-kept children and invalidates old grants,
+By default a parent may run three children at once and start 120 per rolling hour; there is no
+lifetime start cap. An administrator changes both install-wide in core Settings → Child session
+limits (parallel 1–50, starts/hour 1–10000); saved settings win and apply on the next start request.
+`BLERG_RUNNER_MAX_PARALLEL_CHILDREN` (default `3`) and
+`BLERG_RUNNER_MAX_CHILD_STARTS_PER_HOUR` (default `120`) seed the defaults at startup. Set them on
+core for its Settings defaults and on a standalone runner for its fallback defaults. Invalid values
+log a startup warning and use the built-in default. Runner reads core with its internal key;
+unavailable/older core retains the last valid settings, or environment defaults before a successful
+read. Account limits remain six running children and sixty starts per rolling hour across all
+parents, so these can be reached before a higher per-parent limit. Approval requests reserve rate
+budget too; allowed requests with a child count once. Refusals name the limit and say to stop a
+child or give the next available time in UTC (with `Retry-After` for the rolling window). A real parent end stops non-kept children and invalidates old grants,
 including across daemon restart; a pause only expires the requests pending at that pause. New child
 starts require the daemon's recovery-ready handshake. Host sessions share their home and can read
 other host sessions' token files; use a sandbox for isolation. The injected CLI guide is delivered
@@ -967,7 +1029,7 @@ REST decodes a request body and MCP decodes a tool-call argument object, so the 
 `start_session`'s schema marks `prompt` required although the REST contract requires only `repo`;
 an MCP client that validates locally will refuse a promptless start that REST would accept. Its
 `idempotency_key` may be omitted, but not sent empty: an empty string is a `400 idempotency key
-must be 1-128 characters`, the same rejection an empty `Idempotency-Key` header gets, rather than
+must be a single value of 1-128 characters using only A-Z, a-z, 0-9, '_', '.', ':' or '-'`, the same rejection an empty `Idempotency-Key` header gets, rather than
 a silently dropped retry guarantee.
 
 ### MCP connections and crons (human-only routes)
@@ -1261,6 +1323,41 @@ Claude refuses a call for its limit and says when it resets, the row also reads 
 credits or the token. A daemon that predates this sends nothing and no meter is drawn; a server that predates it logs
 the report as an unknown message and ignores it. Updating the desktop daemon needs its reinstall.
 
+The server also omits expired windows from budget responses and agent-facing usage data,
+including when a daemon replays a stale report after reconnecting. An expired window is unknown
+until the provider reports a new reading; it does not mean the new window is already exhausted.
+The plaintext `blerg-runner budget` output shows each window's own reset with its local date,
+clock time and timezone. A weekly reset several days away is never shown as a clock time alone;
+`--json` preserves the server's full UTC timestamps.
+
+For supported engines, the session owner can enable **Resume when limit resets** before the
+refusal or afterward. Claude's session, weekly, model-specific and usage-credit refusals and
+Codex's usage-limit refusals record the interrupted turn and known reset in the runner database.
+Minute-only CLI times round forward to the end of the displayed minute. An ambiguous local
+clock time during a backward clock change uses its later occurrence. The server waits a
+60-second grace after the reset, plus a stable random delay of 0–30 seconds per session to spread
+shared-account continuations, and checks every five seconds. Known resets do not depend on a
+later usage report. If enabled after that deadline, continuation is due immediately.
+
+When the refusal has no readable reset, the server uses the same engine/window's account meter
+on the session's daemon. Opus, Sonnet and Fable weekly limits each use their own meter window;
+a missing model window never falls back to the general weekly limit. If no reset is known, the
+server requests meter refreshes once a minute at first, every five minutes after an hour,
+every 15 minutes after six hours, and hourly after a day. Unknown waits stop after seven days
+from the original refusal and require manual continuation. Poll timing survives server restarts.
+A fresh reading below 99% on Claude (below 100% on Codex) can prove availability; rounded Claude
+99% readings and missing or expired readings cannot. A recently refused automatic continuation
+prefers a matching meter window only when it is at 100%. Otherwise it keeps a future reset from
+the refusal text. A reset that already produced a refusal returns to meter polling, with the
+same grace before any new attempt. Bare clocks just after midnight can name yesterday's reset.
+
+A disconnected workstation keeps the continuation pending until its daemon returns. Manual
+continuation cancels the pending attempt, and an ended session cannot resume. Delivery is at most
+once per interrupted turn, with at most three attempts over eight days; an ambiguous send
+requires manual continuation. If the provider's usage meter cannot be read and no reset is known,
+manual continuation remains available. Upgrade the desktop daemon for refusal parsing and
+on-demand meter refreshes. The runner applies migration 092 to retain the refused window and time, and 093 for poll backoff.
+
 ### What "runs as you" means
 
 A session started with an **agent token** runs as the token's owner, not as the operator. The
@@ -1279,8 +1376,8 @@ brings back to `wip/<session_id>`), a sandbox home with the engine's current sig
 configuration read-only, and nothing else of the machine, with no git credentials (it can commit but not push) and, of the stack's services, a route to the
 board and runner only (via `blerg-sandbox`); on **This machine** it runs on the host with full filesystem
 access, which the launch sheet asks the launcher to acknowledge and a v1 start gets with
-`runtime: "daemon"` (or `BLERG_BOARD_RUNNER_RUNTIME=daemon` on the board) or on a daemon without
-the image. Either way the session can use the engine's current sign-in until it expires; it cannot renew it. Sessions started with the **static runner key** have no owning account
+`runtime: "daemon"` (from a board, only where its owner chose the host in Where it runs) or on a
+daemon without the image. Either way the session can use the engine's current sign-in until it expires; it cannot renew it. Sessions started with the **static runner key** have no owning account
 at all and use the shared operator credentials.
 
 Attribution always comes from the verified credential, never from the request body.
@@ -1600,16 +1697,19 @@ administrators included, it answers `404 Session not found.`, as an unknown sess
 transcript access does not grant filesystem access. Agent tokens, service credentials and the static runner key
 cannot use this route.
 
-The current session daemon reads the relative path from that session's workspace. Host sessions
-use their working folder; container sessions use its host bind mount; cluster sessions use their
-pod workspace. The daemon never executes a container command to read a file. Absolute paths,
-parent traversal, backslashes, secret-looking names, symlink escapes, nonregular files and hard
-links are refused. The launch folder's identity is captured before the session starts and checked
-against the pinned directory handle, preventing a replaced folder from changing the read scope.
+The current session daemon resolves references against that session's launch working directory,
+not its artifact storage or output directory. Repository-relative references such as `README.md`
+and absolute references inside that working directory are supported. A sandbox's `/workspace/`
+references map to its own clone; a cluster pod's absolute references retain the project subdirectory.
+Host sessions use their working folder; container sessions use its host bind mount; cluster sessions
+use their pod workspace. The daemon never executes a container command to read a file. Absolute paths
+outside the launch working directory, parent traversal, backslashes, secret-looking names, symlink
+escapes, nonregular files and hard links are refused. The launch folder's identity is captured
+before the session starts and checked against the pinned directory handle, preventing a replaced folder from changing the read scope.
 Paths are checked again against the opened file to prevent replacement races.
 
-A `200` JSON response contains `path`, `size`, `view`, `content_type`, `truncated: false`,
-`content_b64` and RFC3339 `mtime`. The viewer classification matches published artifacts.
+A `200` JSON response contains the normalized workspace-relative `path`, `size`, `view`,
+`content_type`, `truncated: false`, `content_b64` and RFC3339 `mtime`. The viewer classification matches published artifacts.
 Responses are private and not cached; file contents never become transcript events.
 Refusals contain a safe `error` sentence and `error_id`: `403` for an unsafe path or filename,
 `404` for a missing file, `409` for a missing/stale/busy daemon or a timeout, and `413` for a file
@@ -1640,9 +1740,9 @@ requires reading Go source to discover.
 | Var | Required? | Default | What it does |
 |---|---|---|---|
 | `BLERG_RUNNER_DATABASE_URL` | yes | — | Postgres DSN |
-| `BLERG_RUNNER_DAEMON_TOKEN` | yes | — | shared token the daemon presents on `/ws/daemon` |
+| `BLERG_RUNNER_DAEMON_TOKEN` | yes | — | install-wide service secret; desktop use requires the explicit deprecated legacy window |
 | `BLERG_RUNNER_LISTEN_PORT` | no | `8080` | app-level HTTP listen port. Deliberately not `BLERG_RUNNER_PORT` — Kubernetes auto-injects that name (`BLERG_RUNNER_PORT=tcp://<clusterIP>:8080`) into every pod for a `blerg-runner` Service already in the namespace, which would silently clobber a same-named custom var |
-| `BLERG_RUNNER_DATA_DIR` | no | `data` (relative to the working directory) | directory for runner's on-disk state: published mockups and screenshots, uploaded agent-config bundles, and the files agents publish with `blerg-runner publish` (`artifacts/<session>/…`; see [`docs/artifacts.md`](../docs/artifacts.md)). It needs a persistent volume to keep them across restarts, writable by the runner's user (id 65532 in the image); at startup the runner checks this and logs one `STORAGE NOT WRITABLE` line if it is not |
+| `BLERG_RUNNER_DATA_DIR` | no | `data` (relative to the working directory) | directory for runner's on-disk state: published mockups and screenshots, historical agent-config bundles (automatic desktop sharing is retired), and the files agents publish with `blerg-runner publish` (`artifacts/<session>/…`; see [`docs/artifacts.md`](../docs/artifacts.md)). It needs a persistent volume to keep them across restarts, writable by the runner's user (id 65532 in the image); at startup the runner checks this and logs one `STORAGE NOT WRITABLE` line if it is not |
 | `BLERG_RUNNER_MAX_FILE_MB` | no | `100` | the largest file, in MiB, a person may attach or an agent publish. An invalid value keeps the default and logs one line; a value above either session total below is lowered to that total (also logged), so the limit the runner advertises is one a file can actually meet. Behind an ingress or proxy, its body-size limit must be larger (the Kubernetes ingress allows `128m`) |
 | `BLERG_RUNNER_MAX_SESSION_UPLOADS_MB` | no | `500` | the total, in MiB, of the files people attach to one session |
 | `BLERG_RUNNER_MAX_SESSION_ARTIFACTS_MB` | no | `1024` | the total, in MiB, of the files one session's agent publishes |
@@ -1653,11 +1753,13 @@ requires reading Go source to discover.
 | `BLERG_RUNNER_SELF_URL` | no | — | the runner's own URL, advertised at registration. Also the base of the proposal links an agent is given when its write call is queued (`<this>/proposals?id=<id>`); without it the agent is given only the proposal id |
 | `VOYAGE_API_KEY` | no | — | enables semantic (embedding) search for the agent memory / knowledge store. **Privacy: when set, the name and content of each memory an agent saves (`POST /api/agent/memories`) and the query text of each knowledge search (`POST /api/agent/knowledge-search`) is sent to Voyage AI's API (`https://api.voyageai.com/v1/embeddings`), and the returned vector is stored beside the memory in your database. Unset by default; when unset, nothing is sent to Voyage and search uses plain keyword matching.** A failed Voyage call also falls back to keyword matching, and a memory is still saved without its vector |
 | `VOYAGE_MODEL` | no | `voyage-3-lite` | the Voyage embedding model to request; only read when `VOYAGE_API_KEY` is set |
+| `BLERG_RUNNER_MAX_PARALLEL_CHILDREN` | no | `3` | environment-seeded fallback for children at once per parent (1–50); core's saved admin setting wins at the next start request |
+| `BLERG_RUNNER_MAX_CHILD_STARTS_PER_HOUR` | no | `120` | environment-seeded fallback for starts per rolling hour per parent (1–10000); no lifetime cap; core's saved admin setting wins |
 | `BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE` | no | `false` | `true` = allow session completion webhooks to be delivered to private, loopback or link-local addresses. Off by default: a `callback_url` is chosen by whoever starts a session, so without this the runner refuses to become a proxy into its own network (checked at connect time, on the address actually resolved, per attempt). It also gates the contract's plain-`http://localhost` callback exception: without it, a loopback `callback_url` is refused at start with a `422`. Set it `true` when receivers legitimately live beside the runner — the desktop compose stack does |
 | `BLERG_CORE_PUBLIC_URL` | no | — | core's browser-facing origin; when set, `/healthz` allows that origin (the landing page's status tiles) cross-origin |
 | `BLERG_RUNNER_ALLOWED_ORIGINS` | no | — | comma-separated `scheme://host` origins allowed to open `/ws/browser` cross-origin. Same-origin requests and requests with no `Origin` header are always allowed, so this is only needed when the frontend is served from a different origin than runner's API |
 | `BLERG_RUNNER_MODEL_CATALOG_URL` | no | `https://downloads.claude.ai/model-catalog/v1/catalog.json` | where the Claude model list (`GET /api/models/claude`, the launch sheet's Model/Effort picker) comes from: the public Claude Code model catalog, fetched at startup and every 6 h (https only — plain http is accepted only for a loopback host — same-host redirects only, 5 s timeout, 1 MB cap; the last good copy is kept). Set it **empty** to disable fetching — air-gapped installs — and serve the list compiled into this build instead |
-| `BLERG_RUNNER_PLUGIN_MARKETPLACES` | no | `anthropics/claude-plugins-official` | comma-separated GitHub `owner/repo` marketplaces **always-on plugins** may come from (`*` = any valid `owner/repo`). When a cluster session starts for an account, the server reads that account's list from core (`POST /internal/plugins/list`, see `core/docs/CONFIG.md`), drops entries whose marketplace is not allowed here, and hands the rest to the pod as `BLERG_RUNNER_PLUGINS` (non-secret JSON) together with this allow-list, which the pod checks again before running `claude plugin marketplace add` / `claude plugin install <plugin>@<marketplace> --scope user` (no shell, 90 s per command, 4 min overall, one after another). If core cannot be reached the session still starts without plugins and its start panel says so. Claude and Codex agent sessions. Codex installs through its native `plugin marketplace add` / `plugin add` commands in a credential-free installer home, then loads copied plugin caches and frozen catalogs from a private session `CODEX_HOME`; its existing login/config/rollouts are linked, never copied. A Local sandbox or This machine session gets the same list through `SpawnSession.plugins`, sent only to a daemon whose hello advertised that engine in `plugin_engines` (legacy `plugins` permits Claude only); the daemon re-checks its own `BLERG_RUNNER_PLUGIN_MARKETPLACES`, installs into its plugin workshop under its state dir with `CLAUDE_CONFIG_DIR` (never the person's `~/.claude`) and starts Claude with one `--plugin-dir=` per plugin (`install/desktop/DAEMON.md`). Restricted sessions never load any. Keep equal to core's `BLERG_CORE_PLUGIN_MARKETPLACES` |
+| `BLERG_RUNNER_PLUGIN_MARKETPLACES` | no | `anthropics/claude-plugins-official,codex:openai-curated,codex:openai-curated-remote` | Initial fallback for servers and desktop daemons, used only until a Core policy has been saved locally. Cluster pods require a fresh Core policy through their runtime-authenticated server bootstrap on every start; without it they deny plugin installs and ignore socket policy frames, retrying bootstrap every two seconds. Core's **Settings → Plugin marketplaces** policy replaces it; servers refresh every two seconds and deliver it to desktops and cluster runners over their authenticated socket. Every holder persists its policy ID and revision, resets revision tracking when Core's ID changes, and rejects equal or older revisions within one ID. It retains the last accepted policy through outages, lease expiry and restarts. Cluster startup and approved live installs use the same current policy. Sources are GitHub `owner/repo` or Codex-native `codex:<marketplace>` (`*` permits any valid source; `,` explicitly permits none). Restricted sessions load no plugins. Disallowed entries are skipped for new sessions and refused for new installs, with existing lists and snapshots retained. See [Core precedence, audit and upgrade rules](../core/docs/CONFIG.md#plugin-marketplace-policy). |
 
 | `BLERG_RUNNER_METRICS_TOKEN` | no | — (endpoint off) | the bearer token a Prometheus scraper presents to `GET /metrics`. Unset: the endpoint answers `404`. Set: a missing or wrong token is `401`. Metrics are aggregates only; no session, account or title appears in them. See [`docs/telemetry.md`](../docs/telemetry.md) |
 | `BLERG_RUNNER_MCP_GW_ADDR` | no | — (gateway off) | listen address of the **MCP gateway**, a second listener and `http.Server` separate from the main port (for example `:8090`). Unset disables the gateway, and with it every session with MCP connections and every cron that uses one. It also needs the database and core (`BLERG_CORE_URL` plus `BLERG_RUNNER_CORE_INTERNAL_KEY`). Never route this listener through a public ingress. Sessions on workstation daemons instead reach the gateway on the main port under `/mcp-gw/` (see `BLERG_RUNNER_MCP_GW_PUBLIC`); see [`docs/mcp-connections.md`](../docs/mcp-connections.md) |
@@ -1691,7 +1793,8 @@ dropped after 30 min. See ["When nobody is watching"](#what-runs-as-you-means) a
 | Var | Required? | Default | What it does |
 |---|---|---|---|
 | `BLERG_RUNNER_SERVER_URL` | yes | — | the server's WS URL to dial |
-| `BLERG_RUNNER_DAEMON_TOKEN` | yes | — | must match the server's value above |
+| `BLERG_RUNNER_DAEMON_TOKEN` | no | — | fallback credential only when no private desktop credential file exists; use a person-issued token with `BLERG_RUNNER_DESKTOP_ID`. Shared tokens require the explicit 0.5 legacy window |
+| `BLERG_RUNNER_DESKTOP_ID` | no | — | stable ID bound to a person-issued environment token; the private credential file overrides both |
 | `BLERG_RUNNER_REPOS_ROOT` | yes | — | where session checkouts live — the **first-run default**. The folder can be changed from the app (the launch sheet's Run column: "Repos folder → Change"); the daemon saves that choice to `<state dir>/settings.json`, and from then on the saved value wins over this variable on every start. Delete the file (or its `repos_root` key) to go back to the variable |
 | `BLERG_RUNNER_DAEMON_STATE_DIR` | no | `~/.blerg-runner-daemon` | where the daemon keeps its own state (`settings.json`, and `connection.json`, see [Checking a daemon token](#checking-a-daemon-token); mode 0600 in a 0700 directory). Deliberately outside the repos root. If it can't be determined or written, changing the repos folder from the app is refused rather than applied until the next restart silently undoes it |
 | `BLERG_RUNNER_DAEMON_NAME` | no | hostname | how this daemon identifies itself |
@@ -1725,13 +1828,26 @@ It writes `connecting` before its first dial, so a file another process left is 
 token, ever. `install/desktop/daemon/install.sh status` prints it.
 
 `GET /api/daemon/whoami` with `Authorization: Bearer <daemon token>` checks a token without
-connecting a daemon: `200 {"ok":true,"mode":"daemon"}` for `BLERG_RUNNER_DAEMON_TOKEN`,
+connecting a daemon: `200 {"ok":true,"mode":"desktop",...}` for a person-issued credential,
+`200 {"ok":true,"mode":"daemon"}` for the explicitly enabled legacy shared credential,
 `200 {"ok":true,"mode":"runtime"}` for a session pod's current runtime token, `401` for anything
 else (`503` if a runtime token could not be checked). It has no rate limit, like the websocket
 hello: the tokens are long random strings. A server older than 0.2.1 has no such route and answers
 its web page (`200 text/html`) or a `404`, so a caller must treat only a `200` with a JSON body
 `{"ok":true}` as accepted. The desktop installer asks it before it replaces a running daemon
 (`install/desktop/DAEMON.md`, "Is the daemon connected?").
+
+#### Checking a desktop's engines again
+
+`POST /api/daemons/{id}/engine-check` with `{"redetect_path": false}` asks that desktop (the
+signed-in owner's own) to re-detect its engines now instead of at its next heartbeat; with
+`true` it first reads its owner's login-shell PATH, merges it into its own and saves it
+("Re-detect PATH"). The server sends `engine_check` and waits up to 30 s for
+`engine_check_result`, applies it, and answers `200` with `engine_statuses` (each engine's
+`status`, `reason`, `fix` and `action`, the same as `GET /api/daemons` carries), `available_engines`,
+and `path_added` / `path_error`. `404`: no such desktop of yours is connected; `504`: it did not
+answer (a daemon older than this message). Launch options' `unavailable` list carries the same
+reason and fix per engine. See [Adding an engine after install](../install/desktop/DAEMON.md#adding-an-engine-after-install).
 
 #### Changing the repos folder while the daemon runs
 
@@ -1774,13 +1890,13 @@ DAEMON.md's "Cluster pod auth" for how each engine's credentials reach a pod.
 | `BLERG_RUNNER_INTERNAL_URL` | `http://blerg-runner-server.default.svc.cluster.local:8080` | in-cluster URL pods dial back to |
 | `BLERG_RUNNER_AGENT_GIT_BASE` | `https://github.com/<BLERG_RUNNER_GITHUB_ORG>`, or `https://github.com` when no org is set | git clone URL base for GitHub pods — a bare repo name is appended as `<base>/<repo>.git`; so is an `org/name` when this is set explicitly, while with only the org default an `org/name` clones from `https://github.com/org/name.git`. This base or an org decides a bare folder name; without either, only the remote reported by the desktop the start names resolves it; otherwise name the repo as `org/name` (422). Repositories on another git provider (a launch with `"provider":"gitlab"`) always clone from that provider's own host, never from this base |
 | `BLERG_RUNNER_AGENT_SECRET` | `blerg-runner-agent` | k8s Secret holding `ANTHROPIC_API_KEY`/`BLERG_RUNNER_DAEMON_TOKEN`/`BLERG_RUNNER_GIT_TOKEN` |
-| `BLERG_RUNNER_OAUTH_SECRET_NAME` | same as `BLERG_RUNNER_AGENT_SECRET` | separate Secret for operator-synced creds (`CLAUDE_CODE_OAUTH_TOKEN`, `CODEX_AUTH_JSON`, `HERMES_ENV_CONTENTS`, `BLERG_RUNNER_GIT_TOKEN`) when rotation flows from elsewhere (e.g. Infisical) |
+| `BLERG_RUNNER_OAUTH_SECRET_NAME` | same as `BLERG_RUNNER_AGENT_SECRET` | Codex OAuth snapshots are access-only; use a dedicated managed connection for renewal. Separate Secret for operator-synced creds (`CLAUDE_CODE_OAUTH_TOKEN`, `CODEX_AUTH_JSON`, `HERMES_ENV_CONTENTS`, `BLERG_RUNNER_GIT_TOKEN`) when rotation flows from elsewhere (e.g. Infisical) |
 | `BLERG_RUNNER_HERMES_PROVIDERS` | unset | the cluster's shared Hermes provider fragment (a Hermes `config.yaml` document; install/k8s sets it from Secret `blerg-hermes-providers`). Merged into every Hermes session pod's `~/.hermes/config.yaml`, lists the providers' models in the cluster catalog, and makes Hermes available on the cluster without a `.env`. See [Shared Hermes providers](../install/k8s/CLUSTER-RUNTIME.md#shared-hermes-providers) |
 | `BLERG_RUNNER_MAX_SESSIONS` | `4` | concurrent cluster session cap. An administrator can change it (1 to 64) on the runner's Cluster page (`PUT /api/cluster/settings` with `max_sessions`, `0` or `null` returns to this value; needs the `account.manage` capability); a saved value beats the environment and applies to the next session start, no restart. `GET /api/cluster/status` reports the effective `max_sessions` and this value as `max_sessions_default` |
 | `BLERG_RUNNER_POD_TTL_SECONDS` | `604800` (7d) | `activeDeadlineSeconds` — the hard cap on a pod's lifetime, busy or idle |
 | `BLERG_RUNNER_POD_IDLE_TIMEOUT_SECONDS` | `86400` (24h) | the pod ends itself after this long with no message sent and no turn finished (`0` = never). The session keeps its history and can be resumed. An administrator can change this and the lifetime cap on the runner's Cluster page (`PUT /api/cluster/settings`, needs the `account.manage` capability); a saved value beats the environment and applies to pods started afterwards |
 | `BLERG_RUNNER_POD_CPU_REQUEST` / `BLERG_RUNNER_POD_MEM_REQUEST` | `500m` / `1Gi` | pod resource requests |
-| `BLERG_RUNNER_POD_CPU_LIMIT` / `BLERG_RUNNER_POD_MEM_LIMIT` | `1` / `4Gi` | pod resource limits |
+| `BLERG_RUNNER_POD_CPU_LIMIT` / `BLERG_RUNNER_POD_MEM_LIMIT` | `1` / `8Gi` | pod resource limits (build/test workloads may need more memory) |
 | `BLERG_RUNNER_POD_TERMINATION_GRACE_SECONDS` | `120` | grace period before a killed pod is force-stopped |
 | `BLERG_RUNNER_POD_TTL_AFTER_FINISHED_SECONDS` | `3600` | how long a finished Job sticks around before k8s garbage-collects it |
 
@@ -1847,7 +1963,7 @@ The daemon runs on the host (it drives your local `claude`); start it with:
 
 ```
 export BLERG_RUNNER_SERVER_URL=ws://localhost:8083/ws/daemon
-export BLERG_RUNNER_DAEMON_TOKEN=<same value the server has>
+# Enroll first; the daemon loads ~/.blerg-runner-daemon/desktop-credential.json.
 export CLAUDE_CODE_OAUTH_TOKEN=<from `claude setup-token`>
 go run ./cmd/daemon
 ```
@@ -1872,3 +1988,71 @@ for retry, with its admission fence retained across server restarts. Repeat the 
 the worker reconnects. Success is idempotent and returns `status`, `session_id` and `archived_at`.
 Discard keeps conversations, artifacts, direct links, History and Insights. It does not change
 standing desktop rules, and ordinary Stop/`DELETE /api/sessions/{id}` still respects Keep running.
+
+### Person-owned desktops (0.5)
+
+Desktop daemons enroll with a credential issued by core for the installing person,
+stable desktop ID and ownership revision. Re-run the installer after upgrading;
+`BLERG_RUNNER_INSTALLING_ACCOUNT_ID` selects the installing account, otherwise the first
+enabled admin is used. A fresh install must create its account before enrolling.
+Core's Settings → Account → Your desktops lists each person's desktops (enrolled, needs
+enrolling, offline, last seen) with Rename, Remove and Enroll; a live human administrator
+also sees everyone's, can remove them and assign an unknown desktop; reassignment fences
+old connections and credentials. Core reaches the runner's `/internal/desktops` routes
+with the internal key and the person's account. **Add a desktop** issues a one-time code
+for `daemon/install.sh install --enroll <code>`, which the runner redeems through core on
+`POST /api/desktops/enroll` (rate-limited; a new desktop identity, never an existing one).
+Shared desktop credentials on upgrade-era desktops keep working automatically through 0.5;
+new desktops require personal enrollment. A session on such a desktop links to Your
+desktops; enroll before 0.6. The legacy environment variable is an explicit
+connection override. See [desktop ownership](../docs/desktop-ownership.md)
+for issuer APIs, private credential storage, migration and the P1–P6 authority interface.
+
+
+Workspace selection and desktop confidentiality in 0.5 are described in
+[workspace selection](../docs/workspace-selection.md). Automatic desktop config
+uploads are retired. `BLERG_RUNNER_SHARED_AGENT_CONFIG_BUNDLE` optionally names
+an absolute path to an operator-managed, intentionally shared archive; leave it
+unset to serve none. Historical uploaded archives are ignored and should be
+removed from the runner data volume during upgrade. This does not re-enable
+personal desktop configuration sharing.
+
+Permission chips share concise effect labels across engines. Their tooltips and accessible
+descriptions retain native terms and reported sandbox scope. Codex reports approval and
+sandbox separately; an older report without scope is displayed as unreported, never inferred
+to be full access. Runtime confinement is separate from the engine's native sandbox mode.
+
+### Usage-limit notices
+
+Runner **Settings → Usage-limit notices** lets an administrator set three increasing whole
+percentages (1–100), saved install-wide, without a restart. The defaults are 80%, 90% and 95%.
+`GET` and `PUT /api/settings/usage-notices` use the same `account.manage` authorization as other
+runner administrator settings; the body is `{"thresholds":[80,90,95]}`. Desktop-only installs
+support these settings too. Sidebar meter colors retain their fixed 80/90/95 levels.
+
+A daemon usage report sends an authenticated `usage_limit` relay to working top-level agent
+sessions on that desktop using the reported engine. Working means a running turn or running
+managed child sessions. Idle sessions with no running children, child sessions (including kept
+children whose parent has gone), native subagents, terminal sessions and ended sessions receive
+none. A turn starting above unreported thresholds gets one current-state notice, covering the
+lower levels. Each threshold is remembered per session, desktop, engine and window instance, across
+runner restarts (migration 094). A report jumping past several thresholds sends one notice at
+the highest level and mentions the others. Instances re-arm when usage falls below the lowest
+configured threshold (including while idle or with an unknown reset), or the reset moves forward
+by more than one hour for a 5-hour window or 12 hours for a weekly window. Smaller shifts keep
+the original reset anchor. Unused and ended-session state is pruned after 35 days; warned live sessions retain their state. Expired and synthetic
+`capped` windows do not generate notices; a refusal uses the limit-resume path.
+
+Only daemons advertising the `usage_notices` hello capability receive notices. Older daemons
+continue reporting meters without receiving these relays; update the desktop daemon to enable
+the authenticated notice source and its session guidance.
+
+Notices include the engine, window, used percentage, UTC reset time (or unknown), other available
+engines’ headroom from the same desktop, and the session’s running children on that engine.
+At 80% prefer other engines for new children and reviews; at 90% start nothing new on that
+engine and let running work finish; at 95% finish the current step and save state. Customized
+thresholds keep those three actions in order. These are agent guidance, with no Needs you item,
+toast or push to the person. The sidebar uses amber from 80%, red from 90%, and a gentle two-second
+pulse on the fill and percentage from 95%. With reduced motion, the warning is solid bold red
+with a labeled `!` marker. Tiers follow the rounded percentage shown by the label; the capped
+chip also pulses and respects reduced motion. Meter tooltips include known reset times.

@@ -12,14 +12,17 @@ package server
 //     mark (at) has an event id derived from what it says, so an import sent twice records it once.
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/agent"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/idempotency"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/blerglab/blerg-ai/runner/internal/topics"
 )
@@ -74,6 +77,21 @@ func (a *API) HandlePostMarks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	sess, err := db.GetSession(ctx, a.dbPool, sid)
+	if err != nil {
+		writeDatabaseFailure(w, "check the session", "marks GetSession", err)
+		return
+	}
+	if sess == nil || (owner != "" && !ownsSession(owner, sess)) {
+		// Someone else's session reads as missing, as a private one does on every other route.
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if terminalSessionStatus(sess.Status) {
+		writeError(w, http.StatusConflict, "This session has ended; its history can be marked only while it runs.")
+		return
+	}
+
 	var req marksRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxMarksBody)).Decode(&req); err != nil {
 		var tooBig *http.MaxBytesError
@@ -99,6 +117,11 @@ func (a *API) HandlePostMarks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("at most %d marks at a time, got %d", topics.MaxImport, len(inputs)))
 		return
 	}
+	key, keyErr := requestIdempotencyKey(r, false)
+	if keyErr != nil {
+		writeAPIError(w, keyErr)
+		return
+	}
 	now := time.Now()
 	marks := make([]agent.MarkPayload, 0, len(inputs))
 	for i, in := range inputs {
@@ -113,20 +136,6 @@ func (a *API) HandlePostMarks(w http.ResponseWriter, r *http.Request) {
 		}
 		marks = append(marks, m)
 	}
-	sess, err := db.GetSession(ctx, a.dbPool, sid)
-	if err != nil {
-		writeDatabaseFailure(w, "check the session", "marks GetSession", err)
-		return
-	}
-	if sess == nil || (owner != "" && !ownsSession(owner, sess)) {
-		// Someone else's session reads as missing, as a private one does on every other route.
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	if terminalSessionStatus(sess.Status) {
-		writeError(w, http.StatusConflict, "This session has ended; its history can be marked only while it runs.")
-		return
-	}
 
 	tx, err := a.dbPool.Begin(ctx)
 	if err != nil {
@@ -138,6 +147,23 @@ func (a *API) HandlePostMarks(w http.ResponseWriter, r *http.Request) {
 		writeDatabaseFailure(w, "record the marks", "marks lock "+sid, err)
 		return
 	}
+	// Claim the request and append its events in the same transaction. A lost reply can then
+	// be retried without claiming a request whose mark was rolled back.
+	scope := idempotency.Scope("marks", sid, poster, owner)
+	requestHash := ""
+	if key != "" {
+		raw, _ := json.Marshal(marks)
+		requestHash = fmt.Sprintf("%x", sha256.Sum256(raw))
+		same, err := db.ClaimMarkRequest(ctx, tx, scope, key, requestHash, sid)
+		if err != nil {
+			writeDatabaseFailure(w, "record the marks", "marks request", err)
+			return
+		}
+		if !same {
+			writeError(w, http.StatusConflict, idempotencyConflictMessage)
+			return
+		}
+	}
 	type fresh struct {
 		id  string
 		raw []byte
@@ -146,10 +172,13 @@ func (a *API) HandlePostMarks(w http.ResponseWriter, r *http.Request) {
 	}
 	var out []fresh
 	reply := marksReply{Marks: make([]agent.MarkPayload, 0, len(marks))}
-	for _, m := range marks {
+	for i, m := range marks {
 		eventID := topics.MarkEventID(sid, m)
+		if key != "" && m.At == "" {
+			eventID = markRequestEventID(scope, key, requestHash, i)
+		}
 		m.ID = topics.NewMarkID()
-		if m.At != "" {
+		if m.At != "" || key != "" {
 			m.ID = "mk_" + eventID[:8]
 		}
 		raw, err := json.Marshal(m)
@@ -193,4 +222,12 @@ func (a *API) HandlePostMarks(w http.ResponseWriter, r *http.Request) {
 		fanOutServerEvent(a.hub, sid, f.id, "mark", f.raw, f.seq, f.at)
 	}
 	writeJSON(w, http.StatusCreated, reply)
+}
+
+// An event identity belongs to the authorized caller, session, request and position in its batch.
+func markRequestEventID(scope, key, hash string, index int) string {
+	sum := sha256.Sum256([]byte(scope + "\x00" + key + "\x00" + hash + "\x00" + strconv.Itoa(index)))
+	sum[6] = (sum[6] & 0x0f) | 0x50
+	sum[8] = (sum[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", sum[:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16])
 }

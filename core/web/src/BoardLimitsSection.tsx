@@ -149,16 +149,10 @@ export default function BoardLimitsSection() {
   };
 
   return (
-    <section className="section" data-testid="board-limits">
+    <section className="settings-section section" data-testid="board-limits">
       <p className="eyebrow">Administration</p>
-      <h2 className="section-title">Board call limits</h2>
-      <p className="section-help">
-        How much board traffic a session's board calls may make, for every
-        account on this install. Core's live-token cap applies at the next
-        exchange; runners use the other limits within{" "}
-        {view ? `${view.runner_refresh_seconds} seconds` : "a minute"}, at each
-        session's next board call.
-      </p>
+      <h2 className="settings-heading section-title">Board call limits</h2>
+      <p className="settings-description">Limit how often sessions can use boards across this install.</p>
       {error && (
         <p className="field-error" role="alert">
           {error}
@@ -171,9 +165,9 @@ export default function BoardLimitsSection() {
             const id = `board-limit-${f.key}`;
             return (
               <div key={f.key}>
-                <label className="field" htmlFor={id}>
+                <label className="settings-field field" htmlFor={id}>
                   <span className="field-label">{f.label}</span>
-                  <input
+                  <input className="settings-field"
                     id={id}
                     type="number"
                     inputMode="numeric"
@@ -215,13 +209,13 @@ export default function BoardLimitsSection() {
           <div className="card-actions">
             <button
               type="button"
-              className="btn"
+              className="settings-action btn"
               onClick={reset}
               disabled={saving}
             >
               Use the defaults
             </button>
-            <button type="submit" className="btn btn-primary" disabled={saving}>
+            <button type="submit" className="settings-action btn btn-primary" disabled={saving}>
               {saving ? "Saving…" : "Save limits"}
             </button>
           </div>

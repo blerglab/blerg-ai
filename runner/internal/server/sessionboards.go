@@ -24,8 +24,10 @@ const (
 // SessionBoard describes a board from the standalone Board service. Runner's
 // legacy /api/boards tables are intentionally not a source for gateway grants.
 type SessionBoard struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	Key        string   `json:"key,omitempty"`
+	KeyAliases []string `json:"key_aliases,omitempty"`
 }
 
 type sessionBoardLister interface {

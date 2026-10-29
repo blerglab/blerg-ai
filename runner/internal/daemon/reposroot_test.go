@@ -399,6 +399,7 @@ wait:
 	if after.ProjectPath != filepath.Join(newRoot, "beta") {
 		t.Errorf("new session path %q, want under %q", after.ProjectPath, newRoot)
 	}
+	initChildRepo(t, filepath.Join(newRoot, "beta"))
 	// The repo listing reflects the new root.
 	if got := listReposOnDisk(mgr.reposRoot()); len(got) != 1 || got[0] != "beta" {
 		t.Errorf("repos under the new root: %v", got)
@@ -531,8 +532,8 @@ func mustSymlink(t *testing.T, target, link string) {
 func TestHeartbeatReportsLiveReposRoot(t *testing.T) {
 	first := t.TempDir()
 	second := t.TempDir()
-	mustMkdir(t, filepath.Join(first, "one"))
-	mustMkdir(t, filepath.Join(second, "two"))
+	initChildRepo(t, filepath.Join(first, "one"))
+	initChildRepo(t, filepath.Join(second, "two"))
 	setting := NewReposRootSetting(first, filepath.Join(t.TempDir(), daemonSettingsFile))
 
 	type msg struct {

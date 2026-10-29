@@ -25,11 +25,11 @@ const (
 const MaxEntries = 20
 
 // DefaultMarketplaces is the allow-list used when the operator sets none.
-const DefaultMarketplaces = "anthropics/claude-plugins-official"
+const DefaultMarketplaces = "anthropics/claude-plugins-official,codex:openai-curated,codex:openai-curated-remote"
 
 // Entry is one always-on plugin: a marketplace and a plugin in it. Marketplace is the source
-// handed to the engine's "marketplace add" (a GitHub owner/repo in v1), not the marketplace's
-// own display name, which the engine only learns after adding it.
+// handed to the engine's "marketplace add" (GitHub owner/repo), or
+// codex:<native marketplace> for a Codex-owned catalog.
 type Entry struct {
 	Marketplace string `json:"marketplace"`
 	Plugin      string `json:"plugin"`
@@ -37,6 +37,7 @@ type Entry struct {
 
 var (
 	pluginNameRE   = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+	codexSourceRE  = regexp.MustCompile(`^codex:[a-z0-9][a-z0-9._-]{0,99}$`)
 	githubSourceRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,39}/[A-Za-z0-9._-]{1,100}$`)
 )
 
@@ -66,8 +67,42 @@ func ValidMarketplaceSource(s string) bool {
 // SupportsEngine reports whether a native plugin installer is registered for this engine.
 func SupportsEngine(engine string) bool { return engine == EngineClaude || engine == EngineCodex }
 
-// ValidateCodex uses the same deliberately narrow marketplace/name grammar as Claude.
-func ValidateCodex(e Entry) error { return ValidateClaude(e) }
+// CodexMarketplaceName returns the native selector from a namespaced Codex source.
+// It cannot be a URL, path, option or GitHub source.
+func CodexMarketplaceName(source string) (string, bool) {
+	if !codexSourceRE.MatchString(source) {
+		return "", false
+	}
+	return strings.TrimPrefix(source, "codex:"), true
+}
+
+// ValidSource includes native Codex identities for policy and transport validation.
+// Engine-specific validation still refuses these identities for Claude.
+func ValidSource(source string) bool {
+	_, native := CodexMarketplaceName(source)
+	return native || ValidMarketplaceSource(source)
+}
+
+func Validate(engine string, e Entry) error {
+	switch engine {
+	case EngineCodex:
+		return ValidateCodex(e)
+	case EngineClaude:
+		return ValidateClaude(e)
+	default:
+		return errors.New("unsupported plugin engine")
+	}
+}
+
+func ValidateCodex(e Entry) error {
+	if _, native := CodexMarketplaceName(e.Marketplace); !native {
+		return ValidateClaude(e)
+	}
+	if !ValidPluginName(e.Plugin) {
+		return ErrInvalidName
+	}
+	return nil
+}
 
 // ValidateClaude checks an entry's shape for the claude engine.
 func ValidateClaude(e Entry) error {
@@ -86,7 +121,7 @@ type Allowlist struct {
 	srcs      map[string]bool
 }
 
-// ParseAllowlist reads a comma-separated list of owner/repo sources; "*" allows any valid
+// ParseAllowlist reads a comma-separated list of owner/repo or codex:name sources; "*" allows any valid
 // source. An empty string means DefaultMarketplaces. Entries that are not valid sources are
 // dropped (fail closed) and returned so the caller can log them.
 func ParseAllowlist(raw string) (Allowlist, []string) {
@@ -101,7 +136,7 @@ func ParseAllowlist(raw string) (Allowlist, []string) {
 		case p == "":
 		case p == "*":
 			a.anySource = true
-		case ValidMarketplaceSource(p):
+		case ValidSource(p):
 			a.srcs[strings.ToLower(p)] = true
 		default:
 			dropped = append(dropped, p)
@@ -111,9 +146,9 @@ func ParseAllowlist(raw string) (Allowlist, []string) {
 }
 
 // Allows reports whether source is permitted: it must be a valid source AND listed (GitHub
-// names are case-insensitive) or the list is "*".
+// names are case-insensitive; native names are lowercase) or the list is "*".
 func (a Allowlist) Allows(source string) bool {
-	if !ValidMarketplaceSource(source) {
+	if !ValidSource(source) {
 		return false
 	}
 	return a.anySource || a.srcs[strings.ToLower(source)]

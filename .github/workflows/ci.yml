@@ -105,6 +105,9 @@ jobs:
           git config --global init.defaultBranch main
       - run: go vet ./...
       - run: go test -timeout 30m ./...
+      - name: Daemon release race gate (three passes)
+        if: matrix.module == 'runner'
+        run: make -C .. test-daemon-race
 
   frontend:
     runs-on: ubuntu-latest
@@ -119,13 +122,13 @@ jobs:
             browser: false
           - dir: board/web
             install: .
-            browser: true
+            browser: chromium
           - dir: packages/chat
             install: .
             browser: false
           - dir: runner/frontend
             install: .
-            browser: true
+            browser: chromium firefox
     defaults:
       run:
         working-directory: ${{ matrix.dir }}
@@ -138,13 +141,30 @@ jobs:
           cache-dependency-path: ${{ matrix.install }}/package-lock.json
       - run: npm ci
         working-directory: ${{ matrix.install }}
-      # runner/frontend and board/web have a vitest "browser" project that needs a real Chromium.
-      - name: Install Chromium for browser tests
+      # Key browser binaries by OS, engine set and lockfile (Playwright revision).
+      # Keep board on Chromium; only runner needs the Firefox shortcut matrix.
+      - name: Cache Playwright browsers
         if: matrix.browser
-        run: npx playwright install --with-deps chromium
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ matrix.browser }}-${{ hashFiles('package-lock.json') }}
+      - name: Install browsers and system dependencies
+        if: matrix.browser
+        # Always install system libraries, including after a browser cache hit.
+        run: npx playwright install --with-deps ${{ matrix.browser }}
       - run: npm run lint
       - run: npx tsc --noEmit
       - run: npm test
+        if: matrix.dir != 'runner/frontend'
+      - name: Test runner units and browser interactions
+        if: matrix.dir == 'runner/frontend'
+        run: npm test -- --project unit --project browser
+      # Exit the other Vitest process so its browser workers and caches cannot contend with
+      # strict wall-clock samples. The performance project also disables file parallelism.
+      - name: Test runner performance after other workers exit
+        if: matrix.dir == 'runner/frontend'
+        run: npm run test:performance
       - run: npm run build
 
   scripts:
@@ -160,6 +180,11 @@ jobs:
           BLERG_SKIP_KUBECTL: "1"
       - run: bash install/desktop/hostcheck_test.sh
       - run: bash install/desktop/daemon_install_test.sh
+      - run: bash install/desktop/workspace_worker_image_test.sh
+      # ubuntu-latest includes Linux pwsh. The suite requires it and mocks all
+      # Windows APIs/WSL launches; missing PowerShell is a failure, not a skip.
+      - name: WSL startup regressions
+        run: bash install/desktop/wsl_startup_test.sh
       # The messaging CLI's tests: one is unittest, the other needs pytest.
       - name: Messaging CLI tests
         working-directory: runner/.claude/skills/session-messaging

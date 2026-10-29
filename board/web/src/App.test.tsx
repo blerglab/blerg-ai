@@ -10,8 +10,13 @@ import { markSignInStuck } from "./signIn";
 const responses: Record<string, unknown> = {};
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
-  return { ...actual, api: vi.fn((path: string) => Promise.resolve(responses[path] ?? [])) };
+  return { ...actual, api: vi.fn((path: string) => Promise.resolve(path.startsWith('/api/board-key-suggestion?') ? { key: ({ plain:'PLN', me:'ME', mine:'MN', team:'TM', launch:'LNH' } as Record<string,string>)[new URL(path, 'https://example.test').searchParams.get('name')!] ?? 'BD' } : responses[path] ?? [])) };
 });
+
+async function clickCreate() {
+  await waitFor(() => expect(screen.getByLabelText('Board key')).not.toHaveValue(''));
+  fireEvent.click(screen.getByText('Create board'));
+}
 
 const { renewSilently } = vi.hoisted(() => ({
   renewSilently: vi.fn(() => Promise.resolve("token" as const)),
@@ -64,6 +69,7 @@ describe("Shell nav", () => {
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", "noopener noreferrer");
     expect(link).toHaveAttribute("title", "A newer Blerg release is available");
+    expect(screen.getByRole("link", { name: "How to upgrade" })).toHaveAttribute("href", expect.stringContaining("/upgrade"));
   });
   it("shows no version when /api/version fails, rather than an ellipsis", async () => {
     responses["/api/me"] = { kind: "service", is_admin: false, is_human: true };
@@ -147,9 +153,9 @@ describe("New board template", () => {
     render(<MemoryRouter><MeProvider><Boards /></MeProvider></MemoryRouter>);
     fireEvent.click(await screen.findByText("New board"));
     fireEvent.change(screen.getByPlaceholderText("board name"), { target: { value: "plain" } });
-    fireEvent.click(screen.getByText("Create board"));
+    await clickCreate();
     await waitFor(() => expect(postedBody()).toBeDefined());
-    expect(postedBody()).toEqual({ name: "plain", require_repo: false });
+    expect(postedBody()).toEqual({ name: "plain", key: "PLN", require_repo: false });
   });
 
   it("sends the chosen template", async () => {
@@ -157,9 +163,9 @@ describe("New board template", () => {
     fireEvent.click(await screen.findByText("New board"));
     fireEvent.change(screen.getByPlaceholderText("board name"), { target: { value: "me" } });
     fireEvent.change(screen.getByLabelText("Template"), { target: { value: "focus-board" } });
-    fireEvent.click(screen.getByText("Create board"));
+    await clickCreate();
     await waitFor(() => expect(postedBody()).toBeDefined());
-    expect(postedBody()).toEqual({ name: "me", require_repo: false, template: "focus-board" });
+    expect(postedBody()).toEqual({ name: "me", key: "ME", require_repo: false, template: "focus-board" });
   });
 
   it("shows the server's error in the form and keeps what was typed when creating fails", async () => {
@@ -173,7 +179,7 @@ describe("New board template", () => {
       fireEvent.click(await screen.findByText("New board"));
       fireEvent.change(screen.getByPlaceholderText("board name"), { target: { value: "me" } });
       fireEvent.change(screen.getByLabelText("Template"), { target: { value: "focus-board" } });
-      fireEvent.click(screen.getByText("Create board"));
+      await clickCreate();
       const alert = await screen.findByRole("alert");
       expect(alert).toHaveTextContent("template cannot be combined with columns or field_schema");
       // the form stays open with its input, and is usable again
@@ -196,10 +202,10 @@ describe("New board template", () => {
       render(<MemoryRouter><MeProvider><Boards /></MeProvider></MemoryRouter>);
       fireEvent.click(await screen.findByText("New board"));
       fireEvent.change(screen.getByPlaceholderText("board name"), { target: { value: "me" } });
-      fireEvent.click(screen.getByText("Create board"));
+      await clickCreate();
       await screen.findByRole("alert");
       fail = false;
-      fireEvent.click(screen.getByText("Create board"));
+      await clickCreate();
       await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
       expect(screen.queryByPlaceholderText("board name")).toBeNull(); // form closed on success
     } finally {
@@ -214,9 +220,9 @@ describe("New board template", () => {
     const box = await screen.findByLabelText("Run this board's cards as me") as HTMLInputElement;
     expect(box.checked).toBe(true);
     fireEvent.change(screen.getByPlaceholderText("board name"), { target: { value: "mine" } });
-    fireEvent.click(screen.getByText("Create board"));
+    await clickCreate();
     await waitFor(() => expect(postedBody()).toBeDefined());
-    expect(postedBody()).toEqual({ name: "mine", require_repo: false, run_as_me: true });
+    expect(postedBody()).toEqual({ name: "mine", key: "MN", require_repo: false, run_as_me: true });
   });
 
   it("leaves the box unchecked when the operator turns the default off, and honors a change", async () => {
@@ -226,9 +232,9 @@ describe("New board template", () => {
     const box = await screen.findByLabelText("Run this board's cards as me") as HTMLInputElement;
     expect(box.checked).toBe(false);
     fireEvent.change(screen.getByPlaceholderText("board name"), { target: { value: "team" } });
-    fireEvent.click(screen.getByText("Create board"));
+    await clickCreate();
     await waitFor(() => expect(postedBody()).toBeDefined());
-    expect(postedBody()).toEqual({ name: "team", require_repo: false, run_as_me: false });
+    expect(postedBody()).toEqual({ name: "team", key: "TM", require_repo: false, run_as_me: false });
   });
 
   it("has no Run as me box when the install cannot mint", async () => {
@@ -250,7 +256,7 @@ describe("New board template", () => {
       render(<MemoryRouter><MeProvider><Boards /></MeProvider></MemoryRouter>);
       fireEvent.click(await screen.findByText("New board"));
       fireEvent.change(screen.getByPlaceholderText("board name"), { target: { value: "mine" } });
-      fireEvent.click(screen.getByText("Create board"));
+      await clickCreate();
       expect(await screen.findByRole("status")).toHaveTextContent(/created, but it can't start sessions yet: blerg-core did not accept your sign-in/);
     } finally {
       vi.mocked(api).mockImplementation(real);
@@ -291,9 +297,9 @@ describe("New board repositories", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add" }));
     expect(screen.getByLabelText("Chosen repositories").textContent).toMatch(/^example-org\/web primary/);
     fireEvent.change(screen.getByLabelText("Template"), { target: { value: "focus-board" } });
-    fireEvent.click(screen.getByText("Create board"));
+    await clickCreate();
     await waitFor(() => expect(postedBody()).toBeDefined());
-    expect(postedBody()).toEqual({ name: "launch", require_repo: false, template: "focus-board", repos: ["example-org/web", "example-org/app", "example-org/docs"] });
+    expect(postedBody()).toEqual({ name: "launch", key: "LNH", require_repo: false, template: "focus-board", repos: ["example-org/web", "example-org/app", "example-org/docs"] });
   });
 
   it("refuses a typed repository that is not owner/name or a folder", async () => {

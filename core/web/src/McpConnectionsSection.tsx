@@ -358,23 +358,10 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
   }, [highlightId, list]);
 
   return (
-    <section className="section">
+    <section className="settings-section section">
       <p className="eyebrow">Sessions</p>
-      <h2 className="section-title">MCP connections</h2>
-      <p className="section-help">
-        An MCP connection gives your agent sessions access to the tools of a remote MCP server.
-        Connections are off for every session until you select them when you start a session or a
-        cron, and a session only ever gets the tools you choose there. Choosing the tools is done in
-        the{" "}
-        {runnerUrl ? (
-          <a href={runnerUrl} rel="noreferrer">
-            runner app
-          </a>
-        ) : (
-          "runner app"
-        )}
-        , not here. The secret you enter is stored encrypted and is never shown again.
-      </p>
+      <h2 className="settings-heading section-title">MCP connections</h2>
+      <p className="settings-description">Connect external tools that you can choose for your sessions.</p>
 
       {loading && <p className="muted">Loading…</p>}
       {error && (
@@ -390,7 +377,7 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
           className={banner.kind === "error" ? "field-error" : "field-help"}
         >
           <span>{banner.text}</span>{" "}
-          <button type="button" className="btn btn-quiet" onClick={() => setBanner(null)}>
+          <button type="button" className="settings-action btn btn-quiet" onClick={() => setBanner(null)}>
             Dismiss
           </button>
         </div>
@@ -419,7 +406,7 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
                     style={highlightId === c.id ? { outline: "2px solid currentColor" } : undefined}
                   >
                     <div className="card-head">
-                      <h3 className="card-title mono">{c.name}</h3>
+                      <h3 className="settings-heading card-title mono">{c.name}</h3>
                       <span className={st.chip}>
                         <span className="dot" aria-hidden="true" />
                         <span className="label">{st.label}</span>
@@ -436,9 +423,9 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
                     )}
                     {c.auth_kind === "oauth" && c.status === "error" && <p className="field-error">{ERROR_TEXT}</p>}
 
-                    <label className="field" htmlFor={`mcp-policy-${c.id}`}>
+                    <label className="settings-field field" htmlFor={`mcp-policy-${c.id}`}>
                       <span className="field-label">Definition changes</span>
-                      <select
+                      <select className="settings-field"
                         id={`mcp-policy-${c.id}`}
                         aria-label={`Definition changes for ${c.name}`}
                         value={c.pin_policy === "auto_accept" ? "auto_accept" : "strict"}
@@ -469,7 +456,7 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
                         {c.auth_kind === "oauth" && (
                           <button
                             type="button"
-                            className={c.status === "needs_auth" ? "btn btn-primary" : "btn"}
+                            className={'settings-action ' + (c.status === "needs_auth" ? "btn btn-primary" : "btn")}
                             disabled={busy}
                             aria-label={`Reconnect ${c.name}`}
                             onClick={() => void reconnect(c)}
@@ -479,7 +466,7 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
                         )}
                         <button
                           type="button"
-                          className="btn"
+                          className="settings-action btn"
                           disabled={busy}
                           aria-label={`Rename ${c.name}`}
                           onClick={() => startEdit(c, "rename")}
@@ -489,7 +476,7 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
                         {c.auth_kind === "static" && (
                           <button
                             type="button"
-                            className="btn"
+                            className="settings-action btn"
                             disabled={busy}
                             aria-label={`Replace secret for ${c.name}`}
                             onClick={() => startEdit(c, "secret")}
@@ -499,7 +486,7 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
                         )}
                         <button
                           type="button"
-                          className="btn btn-quiet"
+                          className="settings-action btn btn-quiet"
                           disabled={busy}
                           aria-label={`Remove ${c.name}`}
                           onClick={() => startEdit(c, "remove")}
@@ -517,11 +504,11 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
                           void patch(c, { name: editValue.trim() });
                         }}
                       >
-                        <label className="field" htmlFor={`mcp-rename-${c.id}`}>
+                        <label className="settings-field field" htmlFor={`mcp-rename-${c.id}`}>
                           <span className="field-label">New name</span>
                           <input
                             id={`mcp-rename-${c.id}`}
-                            className="mono"
+                            className="settings-field mono"
                             value={editValue}
                             onChange={(e) => setEditValue(e.target.value)}
                             maxLength={32}
@@ -532,12 +519,12 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
                         <div className="card-actions">
                           <button
                             type="submit"
-                            className="btn btn-primary"
+                            className="settings-action btn btn-primary"
                             disabled={busy || editValue.trim() === "" || editValue.trim() === c.name}
                           >
                             {busy ? "Saving…" : "Save name"}
                           </button>
-                          <button type="button" className="btn btn-quiet" disabled={busy} onClick={stopEdit}>
+                          <button type="button" className="settings-action btn btn-quiet" disabled={busy} onClick={stopEdit}>
                             Cancel
                           </button>
                         </div>
@@ -552,22 +539,22 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
                           void patch(c, { secret: editValue });
                         }}
                       >
-                        <label className="field" htmlFor={`mcp-secret-${c.id}`}>
+                        <label className="settings-field field" htmlFor={`mcp-secret-${c.id}`}>
                           <span className="field-label">New secret</span>
                           <input
                             id={`mcp-secret-${c.id}`}
                             type="password"
-                            className="mono"
+                            className="settings-field mono"
                             value={editValue}
                             onChange={(e) => setEditValue(e.target.value)}
                             autoComplete="off"
                           />
                         </label>
                         <div className="card-actions">
-                          <button type="submit" className="btn btn-primary" disabled={busy || editValue === ""}>
+                          <button type="submit" className="settings-action btn btn-primary" disabled={busy || editValue === ""}>
                             {busy ? "Saving…" : "Save secret"}
                           </button>
-                          <button type="button" className="btn btn-quiet" disabled={busy} onClick={stopEdit}>
+                          <button type="button" className="settings-action btn btn-quiet" disabled={busy} onClick={stopEdit}>
                             Cancel
                           </button>
                         </div>
@@ -584,13 +571,13 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
                         <div className="card-actions">
                           <button
                             type="button"
-                            className="btn btn-primary"
+                            className="settings-action btn btn-primary"
                             disabled={busy}
                             onClick={() => void remove(c)}
                           >
                             {busy ? "Removing…" : "Confirm remove"}
                           </button>
-                          <button type="button" className="btn btn-quiet" disabled={busy} onClick={stopEdit}>
+                          <button type="button" className="settings-action btn btn-quiet" disabled={busy} onClick={stopEdit}>
                             Cancel
                           </button>
                         </div>
@@ -608,19 +595,19 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
             </p>
           ) : (
             <form className="card-form" onSubmit={add}>
-              <label className="field" htmlFor="mcp-kind">
+              <label className="settings-field field" htmlFor="mcp-kind">
                 <span className="field-label">Authentication</span>
-                <select id="mcp-kind" value={authKind} onChange={(e) => setAuthKind(e.target.value as AuthKind)}>
+                <select className="settings-field" id="mcp-kind" value={authKind} onChange={(e) => setAuthKind(e.target.value as AuthKind)}>
                   <option value="static">Token (static)</option>
                   <option value="oauth">Sign in (OAuth)</option>
                   <option value="none">No credential</option>
                 </select>
               </label>
-              <label className="field" htmlFor="mcp-name">
+              <label className="settings-field field" htmlFor="mcp-name">
                 <span className="field-label">Name</span>
                 <input
                   id="mcp-name"
-                  className="mono"
+                  className="settings-field mono"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="my-server"
@@ -632,11 +619,11 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
               <p className="field-help" id="mcp-name-hint">
                 {NAME_HINT}
               </p>
-              <label className="field" htmlFor="mcp-url">
+              <label className="settings-field field" htmlFor="mcp-url">
                 <span className="field-label">Server URL (https)</span>
                 <input
                   id="mcp-url"
-                  className="mono"
+                  className="settings-field mono"
                   type="url"
                   value={url}
                   onChange={(e) => setUrl(e.target.value)}
@@ -646,22 +633,22 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
               </label>
               {authKind === "static" && (
                 <>
-                  <label className="field" htmlFor="mcp-header">
+                  <label className="settings-field field" htmlFor="mcp-header">
                     <span className="field-label">Header name</span>
                     <input
                       id="mcp-header"
-                      className="mono"
+                      className="settings-field mono"
                       value={headerName}
                       onChange={(e) => setHeaderName(e.target.value)}
                       autoComplete="off"
                     />
                   </label>
-                  <label className="field" htmlFor="mcp-secret">
+                  <label className="settings-field field" htmlFor="mcp-secret">
                     <span className="field-label">Secret (header value)</span>
                     <input
                       id="mcp-secret"
                       type="password"
-                      className="mono"
+                      className="settings-field mono"
                       value={secret}
                       onChange={(e) => setSecret(e.target.value)}
                       autoComplete="off"
@@ -671,23 +658,23 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
               )}
               {authKind === "oauth" && (
                 <>
-                  <label className="field" htmlFor="mcp-client-id">
+                  <label className="settings-field field" htmlFor="mcp-client-id">
                     <span className="field-label">
                       Client ID (only if the server does not register clients automatically)
                     </span>
                     <input
                       id="mcp-client-id"
-                      className="mono"
+                      className="settings-field mono"
                       value={clientId}
                       onChange={(e) => setClientId(e.target.value)}
                       autoComplete="off"
                     />
                   </label>
-                  <label className="field" htmlFor="mcp-scopes">
+                  <label className="settings-field field" htmlFor="mcp-scopes">
                     <span className="field-label">Scopes (optional, separated by spaces)</span>
                     <input
                       id="mcp-scopes"
-                      className="mono"
+                      className="settings-field mono"
                       value={scopes}
                       onChange={(e) => setScopes(e.target.value)}
                       autoComplete="off"
@@ -706,7 +693,7 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
               <div className="card-actions">
                 <button
                   type="submit"
-                  className="btn btn-primary"
+                  className="settings-action btn btn-primary"
                   disabled={busy || name.trim() === "" || url.trim() === "" || (authKind === "static" && secret === "")}
                 >
                   {authKind === "oauth" ? (busy ? "Connecting…" : "Connect") : busy ? "Adding…" : "Add connection"}

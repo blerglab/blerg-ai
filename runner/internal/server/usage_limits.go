@@ -21,9 +21,9 @@ import (
 const usageResetHorizon = 31 * 24 * time.Hour
 
 // sanitizeUsageLimits checks a daemon's report: false for a provider this
-// server does not know. Unknown notes, unknown and repeated windows are dropped, percentages
-// clamped to 0–100, a reset in the far past or future forgotten, a fetched_at
-// in the future set to now.
+// server does not know. Unknown notes, unknown, repeated and expired windows are
+// dropped, percentages clamped to 0–100, a reset in the far future forgotten,
+// and a fetched_at in the future set to now.
 func sanitizeUsageLimits(u protocol.UsageLimits, now time.Time) (protocol.UsageLimits, bool) {
 	descriptor, registered := engines.Lookup(u.Provider)
 	if u.Provider == "" || !registered || len(descriptor.UsageWindows) == 0 {
@@ -39,6 +39,9 @@ func sanitizeUsageLimits(u protocol.UsageLimits, now time.Time) (protocol.UsageL
 			continue
 		}
 		seen[w.ID] = true
+		if !w.ResetsAt.IsZero() && !w.ResetsAt.After(now) {
+			continue // The old window is unknown until the provider reports its successor.
+		}
 		pct := w.UsedPercent
 		if math.IsNaN(pct) || pct < 0 {
 			pct = 0
@@ -81,14 +84,25 @@ func (dc *DaemonConn) SetUsageLimits(u protocol.UsageLimits) {
 	dc.usageLimits[u.Provider] = u
 }
 
-// UsageLimits is the daemon's latest report per provider, by provider name;
-// never nil.
+// UsageLimits is the daemon's latest report per provider, by provider name,
+// with expired windows omitted even when the next report has not arrived.
+// Never nil.
 func (dc *DaemonConn) UsageLimits() []protocol.UsageLimits {
+	return dc.usageLimitsAt(time.Now())
+}
+
+func (dc *DaemonConn) usageLimitsAt(now time.Time) []protocol.UsageLimits {
 	dc.liveMu.RLock()
 	defer dc.liveMu.RUnlock()
 	out := make([]protocol.UsageLimits, 0, len(dc.usageLimits))
 	for _, u := range dc.usageLimits {
-		u.Windows = append([]protocol.UsageWindow{}, u.Windows...)
+		windows := make([]protocol.UsageWindow, 0, len(u.Windows))
+		for _, w := range u.Windows {
+			if w.ResetsAt.IsZero() || w.ResetsAt.After(now) {
+				windows = append(windows, w)
+			}
+		}
+		u.Windows = windows
 		out = append(out, u)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Provider < out[j].Provider })
@@ -105,10 +119,14 @@ func handleUsageLimits(h *Hub, dc *DaemonConn, msg protocol.UsageLimits) {
 		return
 	}
 	dc.SetUsageLimits(clean)
-	h.BroadcastJSON(protocol.DaemonLimitsChanged{
-		Type:        "daemon_limits_changed",
-		DaemonID:    dc.ID,
-		UsageLimits: dc.UsageLimits(),
+	h.checkUsageNotices(dc, "")
+	h.broadcastOwnedDesktop(dc, func() any {
+		return protocol.DaemonLimitsChanged{
+			OwnershipRevision: dc.ownershipRevision(), ConnectionGeneration: dc.DesktopGeneration,
+			Type:        "daemon_limits_changed",
+			DaemonID:    dc.ID,
+			UsageLimits: dc.UsageLimits(),
+		}
 	})
 }
 

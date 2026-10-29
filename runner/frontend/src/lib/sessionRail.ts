@@ -2,7 +2,8 @@
 // kept per browser, the chat settings its Live tab holds, and the words it uses for how long
 // something has waited or run.
 import { useSyncExternalStore } from 'react'
-import { loadCompact, localStorageChatStorage, saveCompact } from '@blerglab/chat'
+import { loadCompact, localStorageChatStorage, saveCompact, type BackgroundTask } from '@blerglab/chat'
+import { childIsWorking, type LiveChildSession } from './liveState'
 
 export const RAIL_PREF_KEY = 'blerg-runner.sessionRail.open'
 
@@ -127,4 +128,32 @@ export function useThinking(): [boolean, (on: boolean) => void] {
 /** Compact tool calls, likewise. */
 export function useCompact(): [boolean, (on: boolean) => void] {
   return [useSyncExternalStore(subscribeChatSettings, readCompact), writeCompact]
+}
+
+/** What Running now lists (besides Main), counted once for the list and for the panel toggle's
+ *  two counts so they always agree: the work inside the session (its subagents, and its background
+ *  commands and tasks still running; a background subagent's own task is listed once, as the
+ *  subagent) and its started sessions at work. `tasks` keeps the finished ones the list still shows. */
+export function runningWork(o: {
+  subagents: readonly { key: string }[]
+  /** The server's running tasks; absent: the chat's own reading (bg.running). */
+  serverTasks?: readonly BackgroundTask[] | null
+  bg: { running: readonly BackgroundTask[]; recent: readonly BackgroundTask[] }
+  children: readonly LiveChildSession[]
+  archived: boolean
+}): { tasks: BackgroundTask[]; runningChildren: LiveChildSession[]; inside: number; children: number } {
+  const subKeys = new Set(o.subagents.map(s => s.key))
+  const ended = new Set(o.bg.recent.map(t => t.taskId))
+  const running = (o.serverTasks ?? o.bg.running).filter(t => !ended.has(t.taskId))
+  const tasks = [...running, ...o.bg.recent].filter(t => !(t.kind === 'agent' && subKeys.has(t.callId)))
+  const runningChildren = o.archived ? [] : o.children.filter(c => !c.archived_at && childIsWorking(c))
+  return { tasks, runningChildren, inside: o.subagents.length + tasks.filter(t => !t.done).length, children: runningChildren.length }
+}
+
+/** The panel toggle's words for its counts: "3 subagents and background tasks · 4 child sessions". */
+export function runningWorkLabel(inside: number, children: number): string {
+  return [
+    inside > 0 ? `${inside} ${inside === 1 ? 'subagent or background task' : 'subagents and background tasks'}` : '',
+    children > 0 ? `${children} child ${children === 1 ? 'session' : 'sessions'}` : '',
+  ].filter(Boolean).join(' · ')
 }

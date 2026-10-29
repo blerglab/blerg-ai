@@ -57,9 +57,10 @@ skip unless it is configured.
 | Target | Runs | Needs |
 |---|---|---|
 | `make test` | `go vet`, then `go test` on contracts, core, runner and board | nothing; database tests run only if the variables below are set |
-| `make test-web` | `tsc --noEmit`, tests and production build in each frontend | `npm ci` in each first; Chromium for `runner/frontend` |
+| `make test-daemon-race` | three uncached runner daemon race-detector passes (required before a release; also run in CI) | Go race-detector support; tmux for terminal cases |
+| `make test-web` | `tsc --noEmit`, tests and production build in each frontend | `npm ci` in each first; Chromium and Firefox for `runner/frontend` |
 | `make lint` | gofmt and golangci-lint on all four Go modules, then ESLint in each frontend (`make lint-go` and `make lint-web` run the halves) | golangci-lint; `npm ci` in each frontend |
-| `make check-scripts` | installer, messaging-CLI, scrub and link checks | `python3` with `pytest` (`pip install pytest`); the `docker compose` CLI makes the Compose check run instead of skip |
+| `make check-scripts` | installer, messaging-CLI, scrub and link checks | `pwsh` (Linux PowerShell, with Windows APIs mocked), `python3` with `pytest` (`pip install pytest`); the `docker compose` CLI makes the Compose check run instead of skip |
 | `make db-up` / `make db-down` | start / stop Postgres from `docker-compose.yml` | **Docker** |
 
 Lint failures block a merge. A `//nolint` or `eslint-disable` must name the rule and give
@@ -130,12 +131,20 @@ gives the locked versions.
 ```
 cd core/web        && npm ci && npm run lint && npx tsc --noEmit && npm test && npm run build
 cd board/web       && npm ci && npm run lint && npx tsc --noEmit && npm test && npm run build
-cd runner/frontend && npm ci && npx playwright install chromium && npm run lint && npx tsc --noEmit && npm test && npm run build
+cd runner/frontend && npm ci && npx playwright install chromium firefox && npm run lint && npx tsc --noEmit && npm test && npm run build
 ```
 
-`runner/frontend` also has browser tests that need a real Chromium; without one `npm test`
-fails with "Executable doesn't exist". `npx playwright install chromium` downloads it once
+`runner/frontend` also has browser tests that need real Chromium and Firefox; without both
+`npm test` fails with "Executable doesn't exist". `npx playwright install chromium firefox` downloads them once
 (add `--with-deps` on Linux to install the system libraries; that needs sudo).
+
+For the full runner browser suite, use `npm run test:browser`. The `browser` project runs
+layout and interaction tests first; after that Vitest process exits, `browser-performance`
+runs `*.performance.browser.test.{ts,tsx}` serially. CI likewise runs
+`npm test -- --project unit --project browser`, then `npm run test:performance`, so the
+other browser workers cannot contend with strict timing budgets. `npm test` includes
+all three ordered projects in one process. To run only performance files, use
+`npm run test:performance`.
 
 **Installer scripts, messaging CLI, scrub and links** (`make check-scripts` runs them all):
 
@@ -144,6 +153,7 @@ BLERG_SKIP_KUBECTL=1 ./install/desktop/compose_test.sh   # skips without `docker
 BLERG_SKIP_KUBECTL=1 ./install/k8s/deploy_test.sh        # skips the kubectl dry-run; no cluster needed
 bash ./install/desktop/hostcheck_test.sh                 # engine preflight; needs no docker
 bash ./install/desktop/daemon_install_test.sh            # the daemon token check and connection wait; stubs only
+bash ./install/desktop/wsl_startup_test.sh               # requires pwsh; Windows APIs and WSL launches are fakes
 (cd runner/.claude/skills/session-messaging && python3 -m unittest test_blerg_runner test_blerg_runner_review_request && python3 -m pytest -q blerg_runner_board_test.py)
 ./scripts/scrub.sh && ./scripts/scrub_test.sh            # no hostnames, addresses or personal paths
 ./scripts/check_links_test.sh && ./scripts/check_links.sh   # doc links and stale references
@@ -196,6 +206,20 @@ cd runner/frontend && npm ci && npm run dev
 - **Extend by registering, not by branching.** Engines, git providers and model
   sources each have a registry. A new one should be a new entry, not a new `if`.
 - **Match the code around you**: naming, comment density and idiom.
+- **No unstyled buttons.** Every `<button>`, `<input type="button|submit|reset">` and
+  `role="button"` element in `runner/frontend`, `core/web`, `board/web` and `packages/chat`
+  must provably get a real background and border: from a design-system class (`btn` with
+  `primary`, `danger` or `small`; `icon-btn`; `settings-action`; `artifact-btn` in the chat;
+  `link-btn` on the board), from a component class or a container rule whose whole selector
+  matches it at rest (no `@media`, `:hover` or attribute conditions; ancestors in the same
+  file, `>` only across a direct parent), or from an inline `style` with known values.
+  Props are read left to right, and a spread or value the guard cannot resolve fails closed.
+  The guard (`packages/settings/buttons.ts`) runs with each app's `npm test` (the
+  `button guard` block in `SettingsPrimitives.test.ts`, and
+  `packages/chat/src/ButtonGuard.test.ts`) and fails with the file, the line and the approved
+  classes. A reviewed exception is a comment alone on the line above the element, with a
+  reason: `// button-guard-ignore: <reason>`, or `{/* button-guard-ignore: <reason> */}` among
+  JSX children.
 - **Update the docs in the same change** when you change behavior, a flag or an
   environment variable.
 
@@ -209,7 +233,7 @@ cd runner/frontend && npm ci && npm run dev
 - Keep a pull request to one logical change. The pull request template asks what you
   tested and what you could not; answer both.
 - CI must pass. It runs the same checks as `make test`, `make lint`, `make test-web`
-  and `make check-scripts` above, with Postgres and Chromium available.
+  and `make check-scripts` above, with Postgres, Chromium and Firefox available.
 
 ## Versions and releases
 

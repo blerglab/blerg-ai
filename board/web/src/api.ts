@@ -61,6 +61,9 @@ export async function api<T = unknown>(
 // ── shapes ──────────────────────────────────────────────────────────────────
 
 export interface Board {
+  key?: string;
+  suggested_key?: string;
+  key_aliases?: string[];
   run_runtime?: string;
   run_daemon_id?: string;
   run_host_acknowledged_at?: string;
@@ -130,6 +133,7 @@ export interface CardLink { kind: string; url: string; label: string | null }
 export interface CardOriginInfo { session_url: string; repo: string; commit: string; engine: string; component_version?: string; component_commit?: string }
 
 export interface Card {
+  reference?: string;
   sensitive?: boolean;
   origin?: CardOriginInfo | null;
   id: string;

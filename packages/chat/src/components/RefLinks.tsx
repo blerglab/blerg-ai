@@ -3,10 +3,11 @@
 // holds nothing but a hash), and RefSpan draws each one as the text it is until the store confirms
 // it, then as a link in the same place: a hovercard on hover, a click opening the ticket or the
 // commit viewer. Model: model/refs.ts.
-import { createContext, useContext, useEffect, useSyncExternalStore, type ReactNode } from 'react'
+import './markdown.css'
+import { createContext, useContext, useEffect, useMemo, useSyncExternalStore, type ReactNode } from 'react'
 import { Hover } from './Hovercard'
 import { useCommitOpener } from './CommitViewer'
-import { isHash, splitRefs, type ChatRefs, type RefKey, type RefStore } from '../model/refs'
+import { isHash, splitRefs, refStoreFor, type ChatRefs, type RefKey, type RefStore } from '../model/refs'
 
 export interface RefContextValue {
   store: RefStore
@@ -25,6 +26,7 @@ export function useRefContext(): RefContextValue | null {
 type HNode = { type: string; tagName?: string; value?: string; properties?: Record<string, unknown>; children?: HNode[] }
 
 const ATTR = 'dataBlergRef'
+const RANGE = 'dataBlergRange'
 
 function textOf(n: HNode): string {
   if (n.type === 'text') return n.value ?? ''
@@ -55,8 +57,10 @@ function walk(node: HNode) {
     }
     if (c.type === 'text' && c.value) {
       const pieces = splitRefs(c.value)
-      if (pieces.length === 1 && !('key' in pieces[0])) { out.push(c); continue }
-      for (const p of pieces) out.push('key' in p ? mark(p.key, [{ type: 'text', value: p.text }]) : { type: 'text', value: p.text })
+      if (pieces.length === 1 && !('key' in pieces[0]) && !('cards' in pieces[0])) { out.push(c); continue }
+      for (const p of pieces) out.push('cards' in p
+        ? { type: 'element', tagName: 'span', properties: { [RANGE]: p.cards.join(',') }, children: [{ type: 'text', value: p.text }] }
+        : 'key' in p ? mark(p.key, [{ type: 'text', value: p.text }]) : { type: 'text', value: p.text })
       continue
     }
     out.push(c)
@@ -75,6 +79,9 @@ export function rehypeRefs() {
 export function RefSpanFor(props: { enabled: boolean } & Record<string, unknown>) {
   const { enabled, children, ...rest } = props
   delete rest.node
+  const range = rest['data-blerg-range']
+  delete rest['data-blerg-range']
+  if (enabled && typeof range === 'string') return <RangeSpan numbers={range.split(',').map(Number)}>{children as ReactNode}</RangeSpan>
   const key = rest['data-blerg-ref']
   if (enabled && typeof key === 'string' && (key.startsWith('card:') || key.startsWith('commit:'))) return <RefSpan refKey={key as RefKey}>{children as ReactNode}</RefSpan>
   delete rest['data-blerg-ref']
@@ -82,6 +89,18 @@ export function RefSpanFor(props: { enabled: boolean } & Record<string, unknown>
 }
 
 const none = () => () => {}
+
+function RangeSpan({ numbers, children }: { numbers: number[]; children?: ReactNode }) {
+  const ctx = useRefContext()
+  const store = ctx?.store
+  const keys = numbers.map(n => `card:${n}` as RefKey)
+  const signature = keys.join(',')
+  const states = useSyncExternalStore(store ? store.subscribe : none,
+    () => keys.map(k => store?.get(k).state ?? 'off').join(','), () => '')
+  useEffect(() => { for (const k of signature.split(',')) store?.want(k as RefKey) }, [store, signature])
+  if (!ctx?.refs?.openCard || states.split(',').some(s => s !== 'card')) return <span>{children}</span>
+  return <>{keys.map((key, i) => <span key={key}>{i > 0 && ', '}<RefSpan refKey={key}>#{numbers[i]}</RefSpan></span>)}</>
+}
 
 function RefSpan({ refKey, children }: { refKey: RefKey; children?: ReactNode }) {
   const ctx = useRefContext()
@@ -94,9 +113,10 @@ function RefSpan({ refKey, children }: { refKey: RefKey; children?: ReactNode })
     const target = state.target
     return (
       <Hover target={target}>
+        {/* button-guard-ignore: a reference link (in Markdown, diff headers and review commit lists), styled by button.md-ref (markdown.css). */}
         <button type="button" className="md-ref md-ref-card" data-ref={refKey} data-testid="md-ref"
           aria-label={`Open card ${target.key}${target.title ? `: ${target.title}` : ''}`}
-          onClick={e => { e.stopPropagation(); open(target) }}>{children}</button>
+          onClick={e => { e.stopPropagation(); open(target) }}>{target.key}</button>
       </Hover>
     )
   }
@@ -104,11 +124,28 @@ function RefSpan({ refKey, children }: { refKey: RefKey; children?: ReactNode })
     const sha = state.sha
     return (
       <Hover target={{ kind: 'commit', sessionId: ctx.sessionId, sha }}>
+        {/* button-guard-ignore: a reference link (in Markdown, diff headers and review commit lists), styled by button.md-ref (markdown.css). */}
         <button type="button" className="md-ref md-ref-commit" data-ref={refKey} data-testid="md-ref"
-          aria-label={`Open commit ${sha.slice(0, 7)}`} onClick={e => { e.stopPropagation(); opener(ctx.sessionId, sha) }}>{children}</button>
+          aria-label={`Open commit ${sha.slice(0, 7)}`} onClick={e => { e.stopPropagation(); opener(ctx.sessionId, sha, undefined, ctx) }}>{children}</button>
       </Hover>
     )
   }
   // Not (yet) confirmed: the text exactly as it is.
   return <span data-ref-candidate={refKey} data-ref-state={state?.state ?? 'off'}>{children}</span>
+}
+
+/** The same confirmed card references in host surfaces such as History and plans. */
+export function ReferenceText({ text }: { text: string }) {
+  return <>{splitRefs(text).map((p, i) => 'key' in p
+    ? <RefSpan key={i} refKey={p.key}>{p.text}</RefSpan>
+    : 'cards' in p ? <RangeSpan key={i} numbers={p.cards}>{p.text}</RangeSpan> : p.text)}</>
+}
+
+
+/** Lends a host surface the same session-scoped resolver and hovercard behavior as chat. */
+export function ReferenceScope({ sessionId, refs, children }: { sessionId: string; refs: ChatRefs; children: ReactNode }) {
+  const store = refStoreFor(sessionId)
+  useEffect(() => { store.setResolvers({ cards: refs.cards, boardCards: refs.boardCards, commit: null }) }, [store, refs.cards, refs.boardCards])
+  const value = useMemo(() => ({ store, sessionId, refs }), [store, sessionId, refs])
+  return <RefContext.Provider value={value}>{children}</RefContext.Provider>
 }

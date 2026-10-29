@@ -549,6 +549,7 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
     answersAsks: true,
 
     files: createFiles({
+      queueScope: opts.viewerId ? () => {const viewer = opts.viewerId!(); return viewer ? `${baseUrl}\0${viewer}` : ''} : undefined,
       base: (sessionId) => `${baseUrl}/api/sessions/${enc(sessionId)}`,
       fetch: fetchImpl,
       headers: bearer,

@@ -130,3 +130,62 @@ reconnecting; a cached model catalog never overrides those failures.
 After an upgrade, each person completes Settings → Managed connections → Codex once.
 That consent step creates the dedicated Cluster login; the upgrade does not convert
 or renew an existing snapshot import automatically.
+
+## Cluster Codex snapshot migration
+
+The runner server prepares imported `auth.json` files as access-only snapshots
+before creating any pod-bound Secret or environment reference. This includes
+personal imports, caller environment overrides, and the operator Secret. Pods
+reference a per-launch snapshot, never the original operator bundle. Model probes
+use the same snapshot preparation. Refresh-token fields are omitted and local
+refresh time is set to now; pods never rotate a desktop token family or write credentials back to a
+workstation. When materializing the private native `auth.json` file, the consumer
+adds an empty refresh-token schema slot required by Codex. That empty slot carries
+no refresh authority and is absent from delivered Secrets and environment values.
+For an existing snapshot session, use this migration:
+
+1. Preserve any work using the session's normal repository sync/recovery controls.
+2. For a person-owned launch, complete Settings → Managed connections → Codex.
+3. Start a **new person-owned cluster session**, with the required repositories and
+   work selected. The new launch enrolls its runtime credential with the managed
+   connection. Stop the old snapshot session after preserving its work.
+
+Retrying a turn, refreshing the model catalog, or restarting Codex inside the old
+pod cannot enroll it with the new connection. Settings does not modify an existing
+pod's credential source or runtime authorization. A connected catalog therefore
+is not proof that the old snapshot session has migrated.
+
+For an operator/runner-key launch, a person's Settings login does not apply: that
+principal has no spawning account. Configure an API-key `auth.json` in the
+operator credential Secret and launch a replacement session, or have a person
+connect Codex and start a new person-owned session. Updating the operator Secret
+only affects future launches; it cannot renew an existing pod's snapshot.
+Reimporting a desktop login is not a renewal strategy. API-key imports remain
+supported.
+
+Pods launched before this server-side delivery change must also be stopped and
+replaced after preserving work, even if their access has not yet expired. An
+upgrade cannot erase credentials from a running process's initial environment.
+No running pod is automatically rebound or restarted by this upgrade.
+
+Core renews a managed connection before issuing access when it is near expiry,
+serializes rotation across replicas, and persists each rotated refresh token in
+the encrypted vault. Pods use the native `chatgptAuthTokens` mode and request new
+access from Core after an authorization error. Model probes obtain fresh access
+from the same broker before starting; they receive no refresh authority.
+
+Catalog responses include `reconnect: true` only when a login or snapshot
+migration is needed. Network, provider and malformed broker responses remain
+catalog errors with Retry. The launch sheet and Session settings link directly
+to the managed connection controls.
+
+Codex structured errors retain `additionalDetails` and recognized connection
+classes/HTTP statuses, with credential values and URL authority/query data
+redacted before the transcript or log sees them. If an unexpected interruption
+or engine exit follows retries, the last connection cause becomes the final
+error. A requested interruption remains an interruption.
+
+A cluster session without a workspace manifest cannot gain one through the
+legacy desktop attachment protocol. Its explorer explains that a new cluster
+session with a repository selection is needed. Existing cluster workspace
+manifests keep their runtime-token and generation checks.

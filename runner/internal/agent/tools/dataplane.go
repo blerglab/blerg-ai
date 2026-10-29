@@ -16,9 +16,10 @@ import (
 // DataPlaneConfig points the memory/rules/knowledge tools at the blerg-runner
 // server. Embedding happens server-side — no embedding key here.
 type DataPlaneConfig struct {
-	Base    string
-	Token   string
-	Project string
+	Base        string
+	Token       string
+	TokenSource func() string
+	Project     string
 }
 
 func (c DataPlaneConfig) call(ctx context.Context, method, path string, body any) ([]byte, error) {
@@ -34,7 +35,11 @@ func (c DataPlaneConfig) call(ctx context.Context, method, path string, body any
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
+	token := c.Token
+	if c.TokenSource != nil {
+		token = c.TokenSource()
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
@@ -95,32 +100,6 @@ func MemoryDelete(cfg DataPlaneConfig) agent.Tool {
 				return "", err
 			}
 			return "memory deleted: " + args.Name, nil
-		},
-	}
-}
-
-// RulePropose returns the "rule_propose" tool: rules change agent behavior,
-// so they land disabled until the user approves them in the blerg-runner UI.
-func RulePropose(cfg DataPlaneConfig) agent.Tool {
-	return fnTool{
-		def: agent.ToolDef{
-			Name:        "rule_propose",
-			Description: "Propose a standing rule for this project (injected into every future session's instructions). Rules take effect only after the user approves them in the blerg-runner UI.",
-			InputSchema: schema(`{"type":"object","properties":{"content":{"type":"string"}},"required":["content"]}`),
-		},
-		mutating: true,
-		run: func(ctx context.Context, in json.RawMessage) (string, error) {
-			var args struct{ Content string }
-			if err := json.Unmarshal(in, &args); err != nil {
-				return "", err
-			}
-			raw, err := cfg.call(ctx, http.MethodPost, "/api/agent/rules", map[string]string{
-				"project": cfg.Project, "content": args.Content,
-			})
-			if err != nil {
-				return "", err
-			}
-			return "rule proposed (pending user approval): " + string(raw), nil
 		},
 	}
 }

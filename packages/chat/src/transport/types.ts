@@ -41,6 +41,8 @@ export interface FileLimits {
   max_file_bytes?: number
   max_session_upload_bytes?: number
   max_session_artifact_bytes?: number
+  /** In a session's file list: the most an administrator may raise its attachment total to. */
+  max_session_upload_cap_bytes?: number
 }
 
 /** The end of a replay page: how far it reached and what is left on either side. A tail page
@@ -111,7 +113,8 @@ export interface WorkspaceFile {
 
 /** A commit read from the session's own workspace (the runner's commit route): every field
  *  bounded by the server. */
-export interface CommitDetails {
+export interface WorkspaceGitRef { member_id: string; launch_generation: string; generation: number }
+export interface CommitDetails extends Partial<WorkspaceGitRef> {
   sha: string
   short: string
   subject: string
@@ -129,18 +132,35 @@ export interface CommitDetails {
 
 /** A commit's diff read on demand: its text, 'large' when it is over the server's cap, null when it
  *  cannot be read (the session's workspace or daemon is gone, the commit is unknown, no access). */
-export type CommitDiff = { text: string } | 'large' | null
+export type CommitDiff = { text: string; member?: WorkspaceGitRef } | 'large' | null
+
+export interface FileSpace {
+  artifacts: ArtifactInfo[]
+  limits: FileLimits
+  /** The owner or an administrator: may delete every file. Each file's `can_delete` also covers
+   *  the person's own attachments. */
+  can_delete: boolean
+  /** An administrator who can raise this session's attachment total (`increaseStorage`). */
+  can_increase?: boolean
+}
 
 export interface TransportFiles {
+  /** Stable account/server namespace for local queued bytes. Absent: memory only. Never a token. */
+  queueScope?(): string
   /** A commit by sha (7 to 64 hex digits), read from the session's workspace; null when it cannot be
    *  read, for whatever reason (there is nothing to tell the person). Absent on a transport
    *  without the route. */
-  commit?(sessionId: string, sha: string, signal?: AbortSignal): Promise<CommitDetails | null>
+  commit?(sessionId: string, sha: string, signal?: AbortSignal, member?: WorkspaceGitRef): Promise<CommitDetails | null>
   /** The commit's diff, generated on demand (see CommitDiff). Absent with `commit`. */
-  commitDiff?(sessionId: string, sha: string, signal?: AbortSignal): Promise<CommitDiff>
+  commitDiff?(sessionId: string, sha: string, signal?: AbortSignal, member?: WorkspaceGitRef): Promise<CommitDiff>
   /** Reads a file by its path in the session's folder (owner only; absent on a transport without
    *  the route). Throws WorkspaceFileError for a refusal; honours `signal`. */
   workspaceFile?(sessionId: string, path: string, signal?: AbortSignal): Promise<WorkspaceFile>
+  /** Fresh quota information and deletion permission; absent on older adapters. */
+  space?(sessionId: string): Promise<FileSpace>
+  /** An administrator raises this session's attachment total by one step (absent on older
+   *  adapters). Throws a FileRequestError with a readable message when refused. */
+  increaseStorage?(sessionId: string): Promise<void>
   list(sessionId: string): Promise<ArtifactInfo[]>
   /** The bytes through the authenticated route, never a bare URL. */
   raw(sessionId: string, id: string): Promise<Blob>

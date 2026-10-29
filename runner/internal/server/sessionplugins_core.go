@@ -57,12 +57,12 @@ func (c *httpSessionPluginCore) call(ctx context.Context, path string, body any)
 		return sessionPluginCatalog{}, errSessionPluginCore
 	}
 	for _, entry := range out.Plugins {
-		if pluginspec.ValidateClaude(entry) != nil {
+		if pluginspec.Validate(out.Engine, entry) != nil {
 			return sessionPluginCatalog{}, errSessionPluginCore
 		}
 	}
 	for _, market := range out.Allowed {
-		if !pluginspec.ValidMarketplaceSource(market) {
+		if !pluginspec.ValidSource(market) {
 			return sessionPluginCatalog{}, errSessionPluginCore
 		}
 	}

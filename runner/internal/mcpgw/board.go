@@ -39,6 +39,10 @@ import (
 // also the gateway path segment. core reserves the name, so no user connection can collide with it.
 const BuiltinBoard = "board"
 
+// BoardSessionHeader names the runner session a built-in board call comes from; the board keeps it
+// in its column audit. The runner sets it, never the agent (it holds no board credential).
+const BoardSessionHeader = "X-Blerg-Runner-Session"
+
 // BoardConnectionID is the connection_id every board grant carries: a fixed sentinel that is never a
 // core connection id, so the primary key (session, connection) stays unique per session.
 const BoardConnectionID = "00000000-0000-4000-8000-00000000b0a2"
@@ -46,8 +50,9 @@ const BoardConnectionID = "00000000-0000-4000-8000-00000000b0a2"
 // boardRenewBefore is how much life a cached exchange token must have left to be used again.
 const boardRenewBefore = 60 * time.Second
 
-// boardToolNames is the complete set of board tools a session may use (spec 10.2). Archiving,
-// creating or moving columns, and creating or updating boards are deliberately absent.
+// boardToolNames is the fixed set of board tools every board connection offers (spec 10.2).
+// Archiving and creating or updating boards are deliberately absent; column management is the
+// separate boardColumnToolNames.
 var boardToolNames = []string{
 	"blerg_board_get", "blerg_board_list", "blerg_board_schema",
 	"blerg_column_list",
@@ -55,16 +60,47 @@ var boardToolNames = []string{
 	"blerg_card_move", "blerg_card_comment", "blerg_card_link",
 }
 
-var boardToolSet = func() map[string]bool {
-	m := make(map[string]bool, len(boardToolNames))
-	for _, n := range boardToolNames {
-		m[n] = true
+// boardColumnToolNames manage a board's columns (0.5.0): add, rename or set properties, move, and
+// remove (only an empty column, or with a column to move its cards to). They need level full and
+// a person's sign-in behind the access (PersonBehind): a cron, or a session launched with an agent
+// token, never gets them, as before.
+var boardColumnToolNames = []string{
+	"blerg_column_create", "blerg_column_update", "blerg_column_move", "blerg_column_delete",
+}
+
+func toolSet(names ...[]string) map[string]bool {
+	m := map[string]bool{}
+	for _, list := range names {
+		for _, n := range list {
+			m[n] = true
+		}
 	}
 	return m
-}()
+}
 
-// BoardToolNames returns the fixed tool set (a copy).
-func BoardToolNames() []string { return append([]string(nil), boardToolNames...) }
+var (
+	boardColumnToolSet = toolSet(boardColumnToolNames)
+	allBoardToolSet    = toolSet(boardToolNames, boardColumnToolNames)
+)
+
+// BoardToolNames returns every board tool a session may call, column management included (a copy).
+func BoardToolNames() []string {
+	return append(append([]string(nil), boardToolNames...), boardColumnToolNames...)
+}
+
+// IsBoardColumnTool reports whether tool manages a board's columns.
+func IsBoardColumnTool(tool string) bool { return boardColumnToolSet[tool] }
+
+// PersonBehind reports whether the access a board call acts with is a person's sign-in (a login
+// session), rather than an agent token's (a cron, or a launch made with a token). Column
+// management needs one.
+func PersonBehind(p Proof) bool { return p.SessionID != "" && p.TokenID == "" }
+
+// builtinToolOffered reports whether the built-in board connection offers tool at all (before its
+// level and, for column management, the person behind the access, both read per call).
+func builtinToolOffered(tool string) bool {
+	return allBoardToolSet[tool]
+}
 
 // BoardTools is the tools map of a board grant: every tool in mode allow, with no pinned hash (the
 // definitions are the board's own).
@@ -153,7 +189,16 @@ func (st *grantState) boardCredential(ctx context.Context, gr *db.MCPGrant) (Cre
 	if err != nil || err2 != nil || want != have {
 		return Credential{}, errors.New("the connection's address changed since this session started")
 	}
-	tok, err := g.cfg.Board.Exchange(ctx, ProofFromGrant(gr.AccountID, gr.ProofKind, gr.ProofValue), gr.BuiltinRef, gr.SessionID)
+	// The sign-in the board acts with is the live permission's (a level the person set acts with the
+	// sign-in they set it from), else the launch's: listing and calls alike, so an expired launch
+	// token does not hide what the person's current grant allows.
+	proof := ProofFromGrant(gr.AccountID, gr.ProofKind, gr.ProofValue)
+	if gr.Builtin == BuiltinBoard {
+		if _, person := g.boardGrantAccess(ctx, gr); person != nil {
+			proof = *person
+		}
+	}
+	tok, err := g.cfg.Board.Exchange(ctx, proof, gr.BuiltinRef, gr.SessionID)
 	switch {
 	case errors.Is(err, ErrConnectionGone):
 		return Credential{}, err

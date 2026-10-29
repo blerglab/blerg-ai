@@ -23,7 +23,10 @@ func childRepoGit(t *testing.T, dir string, args ...string) string {
 
 func childRepoGitErr(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	// No automatic maintenance: newer Git starts a detached `git maintenance` after a commit,
+	// and its writes under .git race the explorer's metadata checks.
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=maintenance.auto", "GIT_CONFIG_VALUE_0=false", "GIT_CONFIG_KEY_1=gc.auto", "GIT_CONFIG_VALUE_1=0",
 		"GIT_AUTHOR_NAME=Example Developer", "GIT_AUTHOR_EMAIL=developer@example.com",
 		"GIT_COMMITTER_NAME=Example Developer", "GIT_COMMITTER_EMAIL=developer@example.com")
 	out, err := cmd.CombinedOutput()
@@ -46,6 +49,12 @@ func initChildRepo(t *testing.T, dir string) {
 
 func runCalls(calls string) string {
 	for _, line := range strings.Split(calls, "\n") {
+		if strings.HasPrefix(line, "--context ") {
+			parts := strings.SplitN(line, " ", 3)
+			if len(parts) == 3 {
+				line = parts[2]
+			}
+		}
 		if strings.HasPrefix(line, "run ") {
 			return line
 		}

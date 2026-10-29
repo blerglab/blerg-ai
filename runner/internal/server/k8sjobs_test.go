@@ -34,6 +34,7 @@ type fakeK8s struct {
 	// Secret name — how CreateSessionJob attaches the per-session Secret's
 	// ownerReferences to the created Job.
 	patchedSecrets map[string]map[string]any
+	patchedPods    []map[string]any
 	// jobUID is the metadata.uid the fake reports for every created Job.
 	jobUID string
 	active int
@@ -147,6 +148,11 @@ func (f *fakeK8s) handler() http.HandlerFunc {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		switch {
+		case r.Method == "PATCH" && strings.Contains(r.URL.Path, "/pods/"):
+			var patch map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&patch)
+			f.patchedPods = append(f.patchedPods, patch)
+			w.WriteHeader(http.StatusOK)
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pods"):
 			// The start watcher's pod list (startstages.go). A fake that was
 			// never given pods answers 403, as a cluster without the pods
@@ -400,6 +406,7 @@ func TestCreateSessionJobManifest(t *testing.T) {
 	for _, want := range []string{
 		`"name":"blerg-runner-agent-abc-123"`,
 		`"BLERG_RUNNER_SESSION_ID","value":"abc-123"`,
+		`"BLERG_RUNNER_ATTACHMENTS_DIR","value":"/home/agent/.blerg-runner-daemon/sessions/abc-123/attachments"`,
 		`"BLERG_RUNNER_GIT_URL","value":"https://github.com/org/proj.git"`,
 		`"restartPolicy":"Never"`,
 		`"terminationGracePeriodSeconds":120`,
@@ -446,7 +453,7 @@ func TestCreateSessionJobRecoveryMarker(t *testing.T) {
 }
 
 func TestCreateSessionJobEngine(t *testing.T) {
-	f := &fakeK8s{}
+	f := &fakeK8s{secrets: map[string]map[string]string{"blerg-runner-oauth": {"CODEX_AUTH_JSON": b64(`{"tokens":{"access_token":"fixture-access-private","refresh_token":"fixture-refresh-private"}}`)}}}
 	jm := newTestJobManager(t, f)
 	jm.OAuthSecretName = "blerg-runner-oauth"
 	if err := jm.CreateSessionJob(SessionJobSpec{SessionID: "s", Repo: "r", Engine: "codex"}); err != nil {
@@ -457,7 +464,7 @@ func TestCreateSessionJobEngine(t *testing.T) {
 	for _, want := range []string{
 		`"BLERG_RUNNER_ENGINE","value":"codex"`,
 		`"name":"CODEX_AUTH_JSON"`,
-		`"key":"CODEX_AUTH_JSON","name":"blerg-runner-oauth"`,
+		`"key":"CODEX_AUTH_JSON","name":"blerg-runner-session-s"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("manifest missing %s\n%s", want, body)
@@ -1346,7 +1353,7 @@ func TestCreateSessionJobSecretConflictPersistsFailsOnce(t *testing.T) {
 	const sentinel = "SENTINEL-409-body-detail"
 	f := &fakeK8s{
 		secretCreateStatus: http.StatusConflict,
-		secretCreateBody:   `{"message":"secrets already exists ` + sentinel + `","code":409}`,
+		secretCreateBody:   `{"reason":"AlreadyExists","message":"secrets already exists ` + sentinel + `","code":409}`,
 	}
 	jm := newTestJobManager(t, f)
 	f.setJobMissing(jm.jobName("s-res"))

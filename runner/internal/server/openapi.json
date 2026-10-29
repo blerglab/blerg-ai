@@ -167,7 +167,7 @@
         ],
         "operationId": "getSessionWorkspaceFile",
         "summary": "Open a live session workspace file (human owner or administrator only)",
-        "description": "Browser-only primitive: a signed-in human owning the session or carrying account.manage may read one relative file through the current daemon. Public transcript visibility grants no access. Agent, service and operator credentials are refused. Resolves symlinks inside the workspace, refuses secret-looking files and nonregular files. Text/code limit defaults to 2 MiB, image/PDF limit to 25 MiB; configured limits cannot exceed 25 MiB. Oversized files return 413 without partial content. Missing or old daemons return 409 after a daemon wait capped at 10 seconds, with up to one additional second to write the small refusal response. Nothing is stored in the transcript.",
+        "description": "Browser-only primitive: a signed-in human owning the session or carrying account.manage may read one file through the current daemon, relative to the launch working directory or absolute inside it (including a sandbox's /workspace mount). Public transcript visibility grants no access. Agent, service and operator credentials are refused. Resolves symlinks inside the workspace, refuses secret-looking files and nonregular files. Text/code limit defaults to 2 MiB, image/PDF limit to 25 MiB; configured limits cannot exceed 25 MiB. Oversized files return 413 without partial content. Missing or old daemons return 409 after a daemon wait capped at 10 seconds, with up to one additional second to write the small refusal response. Nothing is stored in the transcript.",
         "security": [
           {
             "humanSession": []
@@ -191,7 +191,7 @@
               "type": "string",
               "maxLength": 4096
             },
-            "description": "Relative workspace path; absolute paths, tilde, backslashes, NUL and parent traversal are refused."
+            "description": "Workspace-relative path or absolute path inside the launch working directory. The daemon maps sandbox /workspace paths to the session clone. Paths outside that directory, tilde, backslashes, NUL and parent traversal are refused."
           }
         ],
         "responses": {
@@ -246,7 +246,7 @@
             "description": "A human browser credential is required."
           },
           "403": {
-            "description": "Not a human owner/admin, unsafe path, or a restricted filename. JSON error and error_id; no filesystem details."
+            "description": "Access refused, unsafe path, or a restricted filename. JSON includes error, error_id and code: person_required (sign in as a person), session_ownership (ask the session owner to open or publish the file), desktop_ownership (enroll or ask an administrator to assign the desktop), or forbidden (path policy). Private sessions remain indistinguishable from unknown sessions (404). No filesystem details."
           },
           "404": {
             "description": "Session or file not found."
@@ -379,8 +379,8 @@
             "name": "Idempotency-Key",
             "in": "header",
             "required": false,
-            "description": "1-128 characters, scoped to the calling credential, retained 24 h.",
-            "schema": { "type": "string", "minLength": 1, "maxLength": 128 }
+            "description": "A single value of 1-128 ASCII characters from [A-Za-z0-9_.:-], scoped to the calling credential, retained 24 h. Empty, repeated, or malformed values return 400. Whitespace, including leading and trailing whitespace, is not allowed.",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:-]{1,128}$" }
           }
         ],
         "requestBody": {
@@ -455,7 +455,7 @@
                   "text": { "type": "string", "description": "The turn to deliver. Required and non-empty." },
                   "source": {
                     "type": "string",
-                    "description": "Who is speaking, for the transcript. Defaults to `runner`. The sources Blerg writes itself (`proposal`, `review`, `system`, `ask_answer`, `note_reply`, `limit_resume`, `child_turn`) are refused with 422, and so is `session`, which the runner sets itself for a parent session's messages to its child.",
+                    "description": "Who is speaking, for the transcript. Defaults to `runner`. The sources Blerg writes itself (`proposal`, `review`, `system`, `ask_answer`, `note_reply`, `limit_resume`, `child_turn`, `question_answer`, `plan_drift`, `usage_limit`) are refused with 422, and so is `session`, which the runner sets itself for a parent session's messages to its child.",
                     "default": "runner"
                   },
                   "client_id": {
@@ -641,7 +641,7 @@
         "operationId": "files_list",
         "tags": ["files"],
         "summary": "The session's files (published by the agent or attached by a person), newest first, with versions.",
-        "description": "The same list the runner's browser shows in its Files panel. A file published again under the same name and origin is the next `version` of it; `latest_version` is the highest version of that name.",
+        "description": "The same list the runner's browser shows in its Files panel. A file published again under the same name and origin is the next `version` of it; `latest_version` is the highest version of that name. A broker credential (the runner key or a service token) names the person it acts for in `X-Blerg-Acting-Account`; the runner checks that account with core on every request (exists, active, can see the session; administrator status from its real role, never from a header), and `can_delete` and `can_increase` are then that person's.",
         "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
         "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
         "responses": {
@@ -652,7 +652,7 @@
                 "schema": {
                   "type": "object",
                   "required": ["artifacts"],
-                  "properties": { "artifacts": { "type": "array", "items": { "$ref": "#/components/schemas/Artifact" } } }
+                  "properties": { "artifacts": { "type": "array", "items": { "$ref": "#/components/schemas/Artifact" } }, "limits": { "$ref": "#/components/schemas/FileLimits", "description": "The limits in force for this session: `max_session_upload_bytes` is this session's own attachment total, `max_session_upload_cap_bytes` the most an administrator may raise it to." }, "can_delete": { "type": "boolean", "description": "Whether the caller is the session owner or an administrator and may delete every file. Each file's own `can_delete` also covers a person's own attachments." }, "can_increase": { "type": "boolean", "description": "Whether the caller is an administrator who can raise this session's attachment total (`POST /api/runner/sessions/{id}/storage`)." } }
                 }
               }
             }
@@ -698,13 +698,14 @@
       "delete": {
         "operationId": "file_delete",
         "tags": ["files"],
-        "summary": "Delete one of the session's files, whichever origin it came from.",
-        "description": "A file is deleted by whoever may see the session. Idempotent in effect: a file that is already gone is a 404.",
+        "summary": "Delete one of the session's files: the owner or an administrator any file, a person their own attachment.",
+        "description": "A file may be deleted by the session owner or an administrator, and an attachment by the person who attached it, after the usual visibility check. A broker credential (the runner key or a service token) deletes for the person it names in `X-Blerg-Acting-Account`, checked with core on every request (administrator status from the account's real role), and for nobody when it names no valid person or core cannot be reached. Every deletion is audited with the person and the path. Idempotent in effect: a file that is already gone is a 404.",
         "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
         "parameters": [{ "$ref": "#/components/parameters/SessionId" }, { "$ref": "#/components/parameters/ArtifactId" }],
         "responses": {
           "204": { "description": "Deleted." },
           "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "The caller may not delete this file: not the owner, an administrator, or the person who attached it.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
           "404": { "$ref": "#/components/responses/NotFound" }
         }
       }
@@ -714,7 +715,7 @@
         "operationId": "upload",
         "tags": ["files"],
         "summary": "Attach a person's file to the session (raw body, X-Artifact-Name header), for the agent to fetch.",
-        "description": "The body is the file; the name comes from `X-Artifact-Name` (percent-encoded) or `?name=`, sanitized to a base name. The content type is classified by the server from the name and bytes — the request's `Content-Type` is never used. Stored with `origin: user`, attributed to the account the credential acts for (the app vouches for the person). Caps, as on the browser route: 100 MiB per file, 100 attachments and 500 MiB per session, 20 versions per name (the defaults; an operator changes the sizes with `BLERG_RUNNER_MAX_FILE_MB` and `BLERG_RUNNER_MAX_SESSION_UPLOADS_MB`, and `GET /api/runner/sessions/{id}` reports the ones in force as `limits`); an ended session takes no more. Send `Content-Length`: a declared size over the limit is refused before the body is read, while an undeclared one is read up to the limit first.",
+        "description": "The body is the file; the name comes from `X-Artifact-Name` (percent-encoded) or `?name=`, sanitized to a base name. The content type is classified by the server from the name and bytes — the request's `Content-Type` is never used. Stored with `origin: user`, attributed to the account the credential acts for, or to the person a broker credential names in `X-Blerg-Acting-Account`. Caps, as on the browser route: 100 MiB per file and 500 MiB of attachments per session unless an administrator raised this session's total (no lifetime file-count cap), 20 versions per name (the defaults; an operator changes the sizes with `BLERG_RUNNER_MAX_FILE_MB` and `BLERG_RUNNER_MAX_SESSION_UPLOADS_MB`, and `GET /api/runner/sessions/{id}` reports the ones in force as `limits`); an ended session takes no more. Send `Content-Length`: a declared size over the limit is refused before the body is read, while an undeclared one is read up to the limit first.",
         "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
         "parameters": [
           { "$ref": "#/components/parameters/SessionId" },
@@ -730,9 +731,29 @@
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "404": { "$ref": "#/components/responses/NotFound" },
-          "409": { "description": "The session has ended, or a cap is reached (files, bytes, or versions of this name).", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "409": { "description": "The session has ended, or a cap is reached (bytes, or versions of this name). A refusal over the session's attachment total carries `code: file_space_required`: the file fits once space is freed or the total is raised.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
           "413": { "description": "The file is larger than the per-file limit (`limits.max_file_bytes`); `error` names both sizes.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
           "500": { "description": "The runner could not store the file (its disk or its database); `error` says which and what to do, `error_id` is in the runner's log.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/api/runner/sessions/{id}/storage": {
+      "post": {
+        "operationId": "storage_increase",
+        "tags": ["files"],
+        "summary": "An administrator raises the session's attachment total by one step, up to the install maximum.",
+        "description": "Adds 500 MiB to this session's attachment total, never past the install maximum (both install values are administrator settings in core). Each raise is recorded with who made it. A broker credential raises for the person it names in `X-Blerg-Acting-Account` when core says that account is an active administrator.",
+        "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+        "responses": {
+          "200": {
+            "description": "Raised.",
+            "content": { "application/json": { "schema": { "type": "object", "required": ["limits", "can_increase"], "properties": { "limits": { "$ref": "#/components/schemas/FileLimits" }, "can_increase": { "type": "boolean" } } } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "The caller is not an administrator.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "The session is already at the install maximum (`code: storage_at_maximum`).", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
         }
       }
     },
@@ -873,7 +894,7 @@
           "discovery"
         ],
         "summary": "Discover engines and models available for a launch target",
-        "description": "Uses the verified launch principal and runtime. Account-bound tokens resolve their owner; operator keys see only operator credential availability/catalogs. Catalogs are cached and refresh asynchronously. Engines includes known available engines only; state unknown distinguishes incomplete discovery from known empty. Select one engine automatically without an engine picker; show a picker for multiple. Use targets to select a host; copy daemon_id/runtime from the selected engine option on start, since automatic discovery can resolve different hosts per engine. Availability is advisory and never authorizes inference.",
+        "description": "Uses the verified launch principal and runtime. Account-bound tokens resolve their owner; operator keys see only operator credential availability/catalogs. Catalogs are cached and refresh asynchronously. Engines includes known available engines only, and unavailable lists the rest with a reason and fix; state unknown distinguishes incomplete discovery from known empty. Select one engine automatically without an engine picker; show a picker for multiple. Use targets to select a host; copy daemon_id/runtime from the selected engine option on start, since automatic discovery can resolve different hosts per engine. Availability is advisory and never authorizes inference.",
         "security": [
           {
             "bearerAuth": []
@@ -1215,6 +1236,7 @@
         "required": ["models", "source"],
         "properties": {
           "models": { "type": "array", "items": { "$ref": "#/components/schemas/Model" } },
+          "reconnect": { "type": "boolean", "description": "A dedicated engine login or reauthentication is required. Link to Settings managed connections; ordinary provider failures do not set this flag." },
           "refreshing": { "type": "boolean", "description": "A background Cluster catalog refresh is in progress. Existing models remain usable." },
           "error": { "type": "string", "description": "A safe message for a failed background refresh; the last successful catalog remains available." },
           "source": { "type": "string", "enum": ["live", "builtin", "daemon", "none"], "description": "`live`: the engine's own list, last fetched successfully. `builtin`: the list compiled into this build. `daemon`: probed on a connected workstation daemon from the engine's own CLI or endpoint (Codex, Hermes). `none`: no source for this engine, or no daemon reported a list for it; `models` is empty." },
@@ -1250,8 +1272,9 @@
         "description": "What the runner takes in files, in bytes. A client checks a file against these before sending it. Absent from a runner older than 0.2.1, whose limit was 25 MiB per file.",
         "properties": {
           "max_file_bytes": { "type": "integer", "format": "int64", "description": "One file, a person's attachment or an agent's published file (default 100 MiB)." },
-          "max_session_upload_bytes": { "type": "integer", "format": "int64", "description": "A session's attachments together (default 500 MiB)." },
-          "max_session_artifact_bytes": { "type": "integer", "format": "int64", "description": "The files a session's agent published, together (default 1 GiB)." }
+          "max_session_upload_bytes": { "type": "integer", "format": "int64", "description": "A session's attachments together (default 500 MiB; in a session's file list, that session's own total)." },
+          "max_session_artifact_bytes": { "type": "integer", "format": "int64", "description": "The files a session's agent published, together (default 1 GiB)." },
+          "max_session_upload_cap_bytes": { "type": "integer", "format": "int64", "description": "In a session's file list: the most an administrator may raise this session's attachment total to." }
         }
       },
       "Principal": {
@@ -1387,7 +1410,8 @@
           "version": { "type": "integer", "description": "1 for the first file of this name and origin, then 2, 3, …" },
           "latest_version": { "type": "integer", "description": "The highest version of this name and origin." },
           "created_at": { "type": "string", "format": "date-time" },
-          "missing": { "type": "boolean", "description": "Present and true when the file is listed but its bytes are no longer stored: it can be deleted, not read (its raw and download routes answer 410)." }
+          "missing": { "type": "boolean", "description": "Present and true when the file is listed but its bytes are no longer stored: it can be deleted, not read (its raw and download routes answer 410)." },
+          "can_delete": { "type": "boolean", "description": "In a file list: whether the caller may delete this file." }
         }
       },
       "StoredArtifact": {
@@ -1426,6 +1450,7 @@
           "version": { "type": "string", "description": "The engine's own version, when it reports one." },
           "cwd": { "type": "string", "description": "Short display form of the working directory, never a full host path." },
           "permission_mode": { "type": "string" },
+          "sandbox_mode": { "type": "string", "description": "Native sandbox scope reported separately from approval policy; absent when unreported." },
           "note": { "type": "string", "description": "Where the report comes from, for display." },
           "groups": {
             "type": "array",
@@ -1458,7 +1483,7 @@
       },
       "Result": {
         "type": "object",
-        "required": ["session_id", "lifecycle", "terminal", "runtime", "repo", "branch", "artifacts"],
+        "required": ["session_id", "lifecycle", "terminal", "runtime", "repo", "branch", "artifacts", "workspace_results"],
         "properties": {
           "session_id": { "type": "string", "format": "uuid" },
           "lifecycle": { "$ref": "#/components/schemas/Lifecycle" },
@@ -1467,6 +1492,8 @@
           "repo": { "type": "string" },
           "git_url": { "type": "string" },
           "branch": { "type": "string", "description": "`wip/<session_id>`: pushed to the repository's remote by a cluster session; for any sandboxed session (a child or not), the branch fetched from its own clone into the repository on its desktop. Empty for a host session or a session with no repository." },
+          "workspace": { "type": "object", "description": "Authorized immutable launch manifest with member IDs, paths, provider/destination and launch_generation. Omitted when source metadata is not authorized." },
+          "workspace_results": { "type": "array", "description": "Persisted outcomes qualified by member_id and launch_generation. Folder scalar repo, git_url and branch remain empty. Recovery locations require the exact desktop recipient.", "items": { "type": "object", "required": ["member_id", "launch_generation", "base", "head", "branch"], "properties": { "member_id": { "type": "string" }, "launch_generation": { "type": "string" }, "base": { "type": "string" }, "head": { "type": "string" }, "branch": { "type": "string" }, "sync_error": { "type": "string" }, "push_error": { "type": "string" }, "pending": { "type": "boolean" }, "recovery_location": { "type": "string" } } } },
           "last_assistant_message": { "type": "string", "description": "The last text the agent wrote in its last turn (the one in progress, while one is). Empty when that turn wrote none or failed." },
           "error_reason": { "type": "string", "description": "Why the session failed; else, when its last turn failed, why that turn did." },
           "end_reason": { "$ref": "#/components/schemas/EndReason" },
@@ -1657,6 +1684,58 @@
           },
           "refreshing": {
             "type": "boolean"
+          },
+          "unavailable": {
+            "type": "array",
+            "description": "Every other known engine this target can't run now, with why and the exact fix. status is not_installed, not_logged_in, misconfigured or outdated (from the desktop), unsupported (this runtime or session kind never runs it) or not_connected (no Cluster credential). action is the one-click fix: check_again (POST /api/daemons/{id}/engine-check), redetect_path (the same with redetect_path true), settings, or absent.",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "name",
+                "status",
+                "reason"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "fix": {
+                  "type": "string"
+                },
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "check_again",
+                    "redetect_path",
+                    "settings"
+                  ]
+                },
+                "daemon_id": {
+                  "type": "string"
+                },
+                "found_at": {
+                  "type": "string",
+                  "description": "Where the CLI is, with the home folder written as ~."
+                },
+                "searched_path": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The daemon's PATH, bounded, when the CLI was not found."
+                }
+              }
+            }
           }
         }
       }

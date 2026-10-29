@@ -280,7 +280,7 @@ export function strokeWords(s: Pick<Stroke, 'kind' | 'by' | 'state' | 'source' |
   switch (s.kind) {
     case 'decision':
       if (s.by === 'person') return 'Your decision'
-      if (s.recorded_as === 'person') return 'Decision (agent): your ruling, as the agent recorded it'
+      if (s.recorded_as === 'person') return 'Your decision'
       return 'Decision (agent): its own; you can overrule it'
     case 'milestone':
       return 'Milestone'

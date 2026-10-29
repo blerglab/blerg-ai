@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import type { Board } from '../types'
 import * as boardApi from '../lib/boardApi'
@@ -116,7 +116,7 @@ describe('BoardsList', () => {
 
   // ─── Delete with confirmation ───────────────────────────────────────────────
 
-  it('calls window.confirm before deleting a board', async () => {
+  it('uses an anchored confirmation before deleting a board', async () => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
     renderBoardsList()
     await screen.findByText('Alpha Board')
@@ -125,18 +125,20 @@ describe('BoardsList', () => {
     const deleteButtons = screen.getAllByRole('button', { name: /delete|✕|×|trash|remove/i })
     fireEvent.click(deleteButtons[0])
 
-    expect(confirm).toHaveBeenCalled()
+    expect(confirm).not.toHaveBeenCalled()
+    expect(screen.getByRole('alertdialog', { name: 'Delete board?' })).toHaveTextContent('Alpha Board')
     expect(boardApi.deleteBoard).not.toHaveBeenCalled()
   })
 
   it('calls deleteBoard only after the user confirms deletion', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
     renderBoardsList()
     await screen.findByText('Alpha Board')
 
     const deleteButtons = screen.getAllByRole('button', { name: /delete|✕|×|trash|remove/i })
     fireEvent.click(deleteButtons[0])
 
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Delete board' }))
     await waitFor(() => expect(boardApi.deleteBoard).toHaveBeenCalledWith('b1'))
   })
 
@@ -148,11 +150,13 @@ describe('BoardsList', () => {
     const deleteButtons = screen.getAllByRole('button', { name: /delete|✕|×|trash|remove/i })
     fireEvent.click(deleteButtons[0])
 
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(boardApi.deleteBoard).not.toHaveBeenCalled()
   })
 
   it('refreshes the list after a board is deleted', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
 
     // After deletion, return only Beta Board
     vi.mocked(boardApi.listBoards)
@@ -165,8 +169,20 @@ describe('BoardsList', () => {
     const deleteButtons = screen.getAllByRole('button', { name: /delete|✕|×|trash|remove/i })
     fireEvent.click(deleteButtons[0])
 
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Delete board' }))
     await waitFor(() => expect(screen.queryByText('Alpha Board')).not.toBeInTheDocument())
     expect(screen.getByText('Beta Board')).toBeInTheDocument()
+  })
+
+  it('retries a failed deletion for the same board', async () => {
+    vi.mocked(boardApi.deleteBoard).mockRejectedValueOnce(new Error('Offline')).mockResolvedValueOnce(undefined)
+    renderBoardsList(); await screen.findByText('Alpha Board')
+    fireEvent.click(screen.getAllByRole('button', { name: 'Delete board' })[0])
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Delete board' }))
+    const error = await screen.findByRole('alertdialog', { name: 'Board could not be deleted' })
+    fireEvent.click(within(error).getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(boardApi.deleteBoard).toHaveBeenCalledTimes(2))
+    expect(boardApi.deleteBoard).toHaveBeenLastCalledWith('b1')
   })
 
   // ─── Create sheet ───────────────────────────────────────────────────────────

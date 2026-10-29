@@ -388,3 +388,28 @@ func TestInternalPluginAddRejectsProofExpiringDuringWrite(t *testing.T) {
 		t.Fatal("expired proof committed plugin")
 	}
 }
+
+func TestInternalCodexMarketplaceApprovedSettingPersists(t *testing.T) {
+	deps, srv, account, _ := newPluginsTestDeps(t, "codex:openai-curated")
+	sid := insertLiveHumanSession(t, deps.Store.Pool(), account)
+	e := pluginspec.Entry{Marketplace: "codex:openai-curated", Plugin: "selected"}
+	body := map[string]any{"account_id": account, "session_id": sid, "engine": "codex", "entry": e}
+	code, raw := internalPluginPost(t, srv, "/internal/plugins/add", testInternalKey, body)
+	if code != 200 {
+		t.Fatalf("native approved add %d %s", code, raw)
+	}
+	code, raw = internalPluginPost(t, srv, "/internal/plugins/list", testInternalKey, map[string]any{"account_id": account, "session_id": sid, "engine": "codex"})
+	var out struct{ Plugins []pluginspec.Entry }
+	if code != 200 || json.Unmarshal([]byte(raw), &out) != nil || len(out.Plugins) != 1 || out.Plugins[0] != e {
+		t.Fatalf("native next-session list %d %s", code, raw)
+	}
+	body["engine"] = "claude"
+	if code, _ := internalPluginPost(t, srv, "/internal/plugins/add", testInternalKey, body); code != 422 {
+		t.Fatalf("Claude accepted native source: %d", code)
+	}
+	body["engine"] = "codex"
+	body["entry"] = pluginspec.Entry{Marketplace: "codex:unapproved", Plugin: "selected"}
+	if code, _ := internalPluginPost(t, srv, "/internal/plugins/add", testInternalKey, body); code != 422 {
+		t.Fatalf("native source bypassed policy: %d", code)
+	}
+}

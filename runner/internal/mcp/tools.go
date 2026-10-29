@@ -3,6 +3,8 @@ package mcp
 // toolDefs is the runner's MCP tool catalog for agent contract v1 (spec §4). Descriptions are prescriptive about WHEN to
 // call: an agent picks a tool from its description, not from a manual.
 
+import "github.com/blerglab/blerg-ai/runner/internal/idempotency"
+
 var toolDefs = []map[string]any{
 	{
 		"name":        "discover_launch_options",
@@ -31,7 +33,7 @@ var toolDefs = []map[string]any{
 			"runtime":         strEnum(`where to run it: "cluster" (a cluster Job), "docker" (the local sandbox container on a connected daemon) or "daemon" (that daemon's bare host). Empty = cluster where one is configured, else docker when the daemon has the sandbox image, else daemon. The sandbox has no git credentials (its agent can commit but not push) — pass "daemon" for work that must push or needs the host`, "cluster", "docker", "daemon"),
 			"auto_stop":       boolean("one-shot: stop the session as soon as its first turn is done (default false, i.e. it stays up for more messages)"),
 			"interaction":     strEnum(`whether a person is reading the session's chat as it works: "unattended" (the default: the agent decides, notes its assumptions and ends with a summary that stands on its own) or "interactive" (a person is reading and answers in the chat, so the agent talks things through and asks before changing anything). Any other value is refused`, "interactive", "unattended"),
-			"idempotency_key": str("retry key, up to 128 characters: the same key and body replays the original start"),
+			"idempotency_key": map[string]any{"type": "string", "description": "retry key, 1-128 ASCII characters from [A-Za-z0-9_.:-], with no whitespace: the same key and body replays the original start", "minLength": idempotency.MinLength, "maxLength": idempotency.MaxLength, "pattern": idempotency.Pattern},
 			"callback_url":    str("https URL POSTed the result when the session reaches a terminal state (plain http only to localhost, and only on an install that allows private callback targets)"),
 			"callback_secret": str("HMAC key signing that callback; stored, never returned by any endpoint"),
 			"git_url":         str("clone URL override, for a repo outside this install's default git base"),
@@ -54,7 +56,7 @@ var toolDefs = []map[string]any{
 			"session_id": str("session id"),
 			"text":       str("what to say to the agent"),
 			"client_id":  str("retry-safe message id (at most 256 bytes); reuse the same id and text on retries to avoid a second turn. Persisted until the engine acknowledges consumption"),
-			"source":     str(`who is speaking: "human" or an automation's name (empty = "runner"); the sources Blerg writes itself (proposal, review, system, ask_answer, note_reply, limit_resume, child_turn, question_answer) are refused, and so is session (a parent's message to its child, set by the runner)`),
+			"source":     str(`who is speaking: "human" or an automation's name (empty = "runner"); the sources Blerg writes itself (proposal, review, system, ask_answer, note_reply, limit_resume, child_turn, question_answer, plan_drift, usage_limit) are refused, and so is session (a parent's message to its child, set by the runner)`),
 		}, req("session_id", "text")),
 	},
 	{

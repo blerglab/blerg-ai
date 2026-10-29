@@ -1,5 +1,6 @@
+import RuntimeIcon from './RuntimeIcon'
 import { modelDisplayName } from '@blerglab/chat'
-import { useContext } from 'react'
+import { memo, useContext } from 'react'
 import {ChildSessionActions, ParentSessionActions} from './ChildDiscard'
 import { useNavigate } from 'react-router-dom'
 import { OpenSessionContext } from '../lib/openSession'
@@ -7,11 +8,11 @@ import type { SessionInfo, DaemonInfo } from '../types'
 import { send } from '../ws'
 import { isNoRepo, repoLabel } from '../lib/noRepo'
 import { startedByLabel } from '../lib/startedBy'
-import { BACKGROUND_COLOR, PAUSED_WORDS, displayLabel, displayState, pausedByRestart } from '../lib/displayState'
+import { BACKGROUND_COLOR } from '../lib/displayState'
+import { useSessionStore } from '../hooks/useSessionStore'
+import { useSessionAggregate } from '../lib/sessionAggregate'
 
 export interface SessionCardProps {
-  /** The parent's started sessions while they are collapsed under it (null or absent: shown, or none). */
-  hiddenChildren?: { total: number; running: number; waiting: number } | null
   /** The card's started sessions: how many (the plain "↳ N" chip), whether they are shown, and the
    *  show/hide handler (the round chevron in the card's second line, over the nested indent line). */
   childrenControl?: { total: number; shown: boolean; toggle: () => void } | null
@@ -23,6 +24,7 @@ export interface SessionCardProps {
 }
 
 const STATUS_STYLES: Record<string, { bg: string; border: string; color: string; text: string }> = {
+  'waiting-parent': { bg: 'var(--scree-2)', border: 'var(--stone)', color: 'var(--fog-dim)', text: 'Waiting for its parent session' },
   waiting:  { bg: 'color-mix(in srgb, var(--amber) 16%, var(--scree-2))', border: 'color-mix(in srgb, var(--amber) 40%, var(--stone))', color: 'var(--amber)', text: 'waiting' },
   running:  { bg: 'color-mix(in srgb, var(--lichen) 16%, var(--scree-2))', border: 'color-mix(in srgb, var(--lichen) 40%, var(--stone))', color: 'var(--lichen)', text: 'running' },
   idle:     { bg: 'var(--scree-2)', border: 'var(--stone)', color: 'var(--fog-dim)', text: 'idle' },
@@ -50,7 +52,8 @@ function kindChipLabel(kind: string | undefined): string | null {
   if (kind === undefined) return null
   // An agent session is the default kind: a chip on every card would say nothing.
   if (kind === 'agent') return null
-  if (kind === 'tmux' || kind === '') return 'Terminal'
+  // Only an existing Terminal (tmux) session says so; they were removed in 0.5.0.
+  if (kind === 'tmux') return 'Terminal'
   return null
 }
 
@@ -109,7 +112,7 @@ function StatusIndicator(props: { status: string; color: string; text: string; c
 }
 
 function StatusGlyph({ status, color, text, count = 0 }: { status: string; color: string; text: string; count?: number }) {
-  const common = { 'data-testid': 'status-dot', title: text } as const
+  const common = { 'data-testid': 'status-dot', title: text, role: 'img', 'aria-label': text } as const
 
   if (status === 'background') {
     return (
@@ -133,6 +136,14 @@ function StatusGlyph({ status, color, text, count = 0 }: { status: string; color
         style={{ color, borderTopColor: color }}
       />
     )
+  }
+
+  if (status === 'waiting-parent') {
+    return <span {...common} data-status="waiting-parent" style={{ color, display: 'inline-flex' }}>
+      <svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5">
+        <path d="M12 13H8a3 3 0 0 1-3-3V3m-3 3 3-3 3 3" />
+      </svg>
+    </span>
   }
 
   if (status === 'waiting') {
@@ -202,25 +213,28 @@ function backgroundTitle(n: number): string {
 // A session at work: discarding it stops that work, and its confirmation says so.
 const WORKING = new Set(['starting', 'running', 'waiting'])
 
-/** What a collapsed parent says of its hidden started sessions, in words (the glyph's tooltip). */
-function hiddenChildrenWords(h: { total: number; running: number; waiting: number }): string {
-  const parts = [h.waiting ? `${h.waiting} ${h.waiting === 1 ? 'needs' : 'need'} you` : '', h.running ? `${h.running} running` : ''].filter(Boolean)
-  const all = `${h.total} started ${h.total === 1 ? 'session' : 'sessions'}`
-  return parts.length ? `${parts.join(', ')}, hidden (${all})` : `${all} hidden`
-}
+// List records track structure; read changing card content at this leaf only. The plain card
+// also serves standalone previews whose supplied record need not be in the session store.
+export const LiveSessionCard = memo(function LiveSessionCard(props: SessionCardProps) {
+  const session = useSessionStore(s => s.sessions.find(current => current.id === props.session.id)) ?? props.session
+  return <SessionCard {...props} session={session} />
+})
 
-export default function SessionCard({ session, active, hiddenChildren = null, childrenControl = null, nested = false }: SessionCardProps) {
+export default memo(SessionCard)
+
+function SessionCard({ session, daemon, active, childrenControl = null, nested = false }: SessionCardProps) {
   const navigate = useNavigate()
   const openSession = useContext(OpenSessionContext)
   const status = session.status
   // What the card shows: an idle session with background work running reads as "background".
-  const shown = displayState(session)
-  // A session a daemon restart left paused needs the person as a waiting one does: the same "?",
+  const aggregate = useSessionAggregate(session)
+  const shown = aggregate.state
+  // A root session a daemon restart left paused needs the person: the same "?",
   // its own words in the tooltip.
-  const paused = pausedByRestart(session)
+  const paused = aggregate.paused
   const glyph = paused ? 'waiting' : shown
   const statusStyle = STATUS_STYLES[glyph] ?? STATUS_STYLES.stopped
-  const isWaiting = status === 'waiting'
+  const isWaiting = glyph === 'waiting'
 
   // Flash and unread dot driven by server-persisted session.unread.
   const unread = !!session.unread
@@ -230,9 +244,10 @@ export default function SessionCard({ session, active, hiddenChildren = null, ch
   const bgTasks = LIVE_STATUSES.has(status) ? session.background_tasks ?? 0 : 0
   // In the background state the status glyph carries the count; the chip shows it otherwise.
   const bgChip = shown !== 'background' && bgTasks > 0
-  // The session's org/repo in small text, so the list needs no repo headings. Not for a no-repo
-  // session, and not for an untitled one: its name already is the repo.
-  const repoLine = session.title && !isNoRepo(session.repo) ? session.repo : ''
+  // Nested cards omit only the repo they share with their parent. An untitled card already
+  // names its repo, and a no-repo session has no repository to show.
+  const parentRepo = useSessionStore(s => nested ? s.sessions.find(parent => parent.id === session.parent_session_id)?.repo : undefined)
+  const repoLine = (!nested || session.repo !== parentRepo) && session.title && !isNoRepo(session.repo) ? session.repo : ''
   // A session with background tasks keeps its second line when the count moves into the status slot,
   // so the card does not change height as its turn ends.
   const hasChildren = (childrenControl?.total ?? 0) > 0
@@ -273,7 +288,7 @@ export default function SessionCard({ session, active, hiddenChildren = null, ch
           the whole line so it stays readable in the narrow sidebar. */}
       <div style={{ display: 'flex', alignItems: 'center', gap: ROW_GAP, minWidth: 0 }}>
       {/* Status indicator — spinner / "?" / "Zz" / "⏱ n" / dot depending on state */}
-      <StatusIndicator status={glyph} color={statusStyle.color} text={paused ? PAUSED_WORDS : displayLabel(shown, bgTasks)} count={bgTasks} />
+      <StatusIndicator status={glyph} color={statusStyle.color} text={aggregate.label} count={aggregate.tasks} />
 
       {/* Session name */}
       <span style={{
@@ -289,20 +304,13 @@ export default function SessionCard({ session, active, hiddenChildren = null, ch
         {session.title || repoLabel(session.repo)}
       </span>
 
-      {/* Its started sessions are collapsed: one glyph says what is behind them (amber "?" when one
-          needs you, a running dot when one runs), the count beside it; the words are the tooltip. */}
-      {/* Its started sessions: "↳ N", plain information. Collapsed, one glyph also says what is behind
-          them (amber "?" when one needs you, a running dot when one runs); the words are the tooltip. */}
-      {(hiddenChildren?.total ?? childrenControl?.total ?? 0) > 0 && (() => {
-        const h = hiddenChildren ?? { total: childrenControl!.total, running: 0, waiting: 0 }
-        const words = hiddenChildren ? hiddenChildrenWords(h) : `${h.total} started ${h.total === 1 ? 'session' : 'sessions'}`
-        return (
-          <span data-testid="hidden-children" role="img" aria-label={words} title={words}
-            data-state={h.waiting ? 'waiting' : h.running ? 'running' : 'idle'}
-            style={{ ...chipStyle, color: h.waiting ? 'var(--amber)' : h.running ? 'var(--lichen)' : 'var(--fog-dim)' }}>
-            ↳{h.waiting ? '?' : h.running ? '●' : ''} {h.total}
-          </span>
-        )
+      {/* Descendant work is in the main glyph; the child count never asks the person. */}
+      {childrenControl && childrenControl.total > 0 && (() => {
+        const { total, shown } = childrenControl
+        const words = `${total} started ${total === 1 ? 'session' : 'sessions'}${shown ? '' : ' hidden'}`
+        return <span data-testid="hidden-children" role="img" aria-label={words} title={words} style={{ ...chipStyle, color: 'var(--fog-dim)' }}>
+          ↳ {total}
+        </span>
       })()}
       {/* Unread dot — shown whenever session.unread is true, regardless of status */}
       {unread && (
@@ -344,10 +352,14 @@ export default function SessionCard({ session, active, hiddenChildren = null, ch
       </button>
       </div>
 
-      {/* Row 2, the last: the org/repo, failure reason and the small chips (where/how it runs,
-          model) on ONE line that never wraps, so a card is two lines at most; the repo and a
-          failure reason give way (ellipsis), the chips keep their size. */}
+      {/* Row 2: type first, then the top-level repo and model; optional task counts stay last.
+          Keep one line: repo and failure text give way while the icon and chips keep their size. */}
       {hasDetails && <div style={{ display: 'flex', flexWrap: 'nowrap', overflow: 'hidden', alignItems: 'center', gap: 4, minWidth: 0, minHeight: 15, paddingLeft: STATUS_SLOT + ROW_GAP }}>
+      {session.runtime && RUNTIME_CHIP[session.runtime] && (
+        <span data-testid="runtime-chip" style={chipStyle}>
+          <RuntimeIcon runtime={session.runtime} machine={daemon?.name ?? session.daemon_id} />
+        </span>
+      )}
       {repoLine && (
         <span
           data-testid="session-repo"
@@ -367,59 +379,6 @@ export default function SessionCard({ session, active, hiddenChildren = null, ch
           {repoLine}
         </span>
       )}
-      {/* Background tasks running — a long watch is otherwise invisible from the list */}
-      {bgChip && (
-        <span
-          data-testid="background-chip"
-          title={backgroundTitle(bgTasks)}
-          aria-label={backgroundTitle(bgTasks)}
-          style={{ ...chipStyle, ...backgroundText, borderColor: `color-mix(in srgb, ${BACKGROUND_COLOR} 40%, var(--scree))` }}
-        >
-          <TaskCount n={bgTasks} />
-        </span>
-      )}
-
-      {/* Spawn/run failure reason — second line, only on failed sessions */}
-      {status === 'error' && session.error_reason && (
-        <span
-          data-testid="error-reason"
-          title={session.error_reason}
-          style={{
-            color: 'var(--danger)',
-            fontSize: '0.72rem',
-                        overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {session.error_reason}
-        </span>
-      )}
-
-      {/* Where and how it runs — the two facts the launch sheet now makes
-          explicit, carried through to the list so a Host session is never a
-          silent one. */}
-      {session.cron_id && (
-        <span data-testid="cron-badge" title="Started by a cron" style={{ ...chipStyle, color: 'var(--amber)', borderColor: 'var(--amber)' }}>
-          cron
-        </span>
-      )}
-      {session.started_by && session.started_by.kind !== 'cron' && !session.cron_id && !(nested && session.started_by.kind === 'session') && (
-        <span data-testid="started-by-chip" title={`Started by ${startedByLabel(session)}`} style={{ ...chipStyle, color: 'var(--amber)', borderColor: 'var(--amber)' }}>
-          {startedByLabel(session)}
-        </span>
-      )}
-      {session.runtime && RUNTIME_CHIP[session.runtime] && (
-        <span data-testid="runtime-chip" style={chipStyle}>
-          {RUNTIME_CHIP[session.runtime]}
-        </span>
-      )}
-      {kindChipLabel(session.kind) && (
-        <span data-testid="kind-chip" style={chipStyle}>
-          {kindChipLabel(session.kind)}
-        </span>
-      )}
-
       {/* Compact model chip — effort is shown in SessionDetail, not here */}
       {session.model && (
         <span
@@ -440,6 +399,52 @@ export default function SessionCard({ session, active, hiddenChildren = null, ch
         </span>
       )}
 
+      {/* Spawn/run failure reason — second line, only on failed sessions */}
+      {status === 'error' && session.error_reason && (
+        <span
+          data-testid="error-reason"
+          title={session.error_reason}
+          style={{
+            color: 'var(--danger)',
+            fontSize: '0.72rem',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {session.error_reason}
+        </span>
+      )}
+
+      {/* Launch source and terminal metadata follow the stable type/repo/model prefix. */}
+      {session.cron_id && (
+        <span data-testid="cron-badge" title="Started by a cron" style={{ ...chipStyle, color: 'var(--amber)', borderColor: 'var(--amber)' }}>
+          cron
+        </span>
+      )}
+      {session.started_by && session.started_by.kind !== 'cron' && !session.cron_id && !(nested && session.started_by.kind === 'session') && (
+        <span data-testid="started-by-chip" title={`Started by ${startedByLabel(session)}`} style={{ ...chipStyle, color: 'var(--amber)', borderColor: 'var(--amber)' }}>
+          {startedByLabel(session)}
+        </span>
+      )}
+      {kindChipLabel(session.kind) && (
+        <span data-testid="kind-chip" style={chipStyle}>
+          {kindChipLabel(session.kind)}
+        </span>
+      )}
+
+
+      {/* Background tasks running — a long watch is otherwise invisible from the list */}
+      {bgChip && (
+        <span
+          data-testid="background-chip"
+          title={backgroundTitle(bgTasks)}
+          aria-label={backgroundTitle(bgTasks)}
+          style={{ ...chipStyle, ...backgroundText, borderColor: `color-mix(in srgb, ${BACKGROUND_COLOR} 40%, var(--scree))` }}
+        >
+          <TaskCount n={bgTasks} />
+        </span>
+      )}
       </div>}
       {hasChildren && (() => {
         const n = childrenControl!.total
@@ -458,4 +463,11 @@ export default function SessionCard({ session, active, hiddenChildren = null, ch
       })()}
     </div>
   )
+}
+
+export function SessionStatusGlyph({ session }: { session: SessionInfo }) {
+  const aggregate = useSessionAggregate(session)
+  const shown = aggregate.state
+  const style = STATUS_STYLES[shown] ?? STATUS_STYLES.stopped
+  return <StatusGlyph status={shown} color={style.color} text={aggregate.label} count={aggregate.tasks} />
 }

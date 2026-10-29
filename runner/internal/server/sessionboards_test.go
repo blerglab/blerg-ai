@@ -98,7 +98,7 @@ func TestLaunchBoardAttachesExistingGrantOnEveryLaunchPath(t *testing.T) {
 					if grant.BuiltinRef != "board-7" || grant.ProofValue != testSID || grant.AccountID != mcpAcct {
 						t.Fatal("board grant lost its verified scope or proof")
 					}
-					if len(grant.Tools) != len(mcpgw.BoardToolNames()) {
+					if len(grant.Tools) != len(mcpgw.BoardTools()) {
 						t.Fatal("board grant changed fixed tool set")
 					}
 				}

@@ -65,7 +65,7 @@ async function snapshot(width: number, tab: 'live' | 'plan' | 'capabilities' = '
       <Routes><Route path="/sessions/:id" element={<SessionDetail />} /></Routes>
     </MemoryRouter>,
   )
-  await waitFor(() => { if (!screen.getByTestId('rail-badge')) throw new Error('not yet') })
+  await waitFor(() => { if (!screen.getByTestId('rail-toggle').querySelector('.icon-btn-count')) throw new Error('not yet') })
   if (width < 1024) fireEvent.click(screen.getByTestId('rail-toggle'))
   if (tab === 'live') await waitFor(() => { if (!screen.getByTestId('rail-plan-summary')) throw new Error('not yet') }, { timeout: 4000 })
   if (tab === 'capabilities') await screen.findByText('issues', {}, { timeout: 4000 })

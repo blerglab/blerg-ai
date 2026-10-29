@@ -125,11 +125,12 @@ once it is; a `kill_session` for it means it is never hosted. For each record:
    recorded spec; if that fails the session continues without them and says so.
 4. **Resume.** The driver's Claude session id is preset to the recorded one when its transcript
    exists; otherwise the conversation starts fresh.
-5. **Tell the person.** One retryable `error` transcript event, which the chat renders and which
-   closes the tool call left spinning: "The session's host restarted. The conversation was
-   restored." plus, as applicable, "The step that was running was cut off." / "The earlier
-   conversation could not be restored: the agent starts fresh, with the files as they were." /
-   "Its plugins could not be reinstalled." / "1 background task and 2 subagents were stopped."
+5. **Tell the person.** A retryable `error` diagnostic with code `session_recovery`
+   closes interrupted tool calls. Chat hides that diagnostic and shows one compact
+   system row for the final outcome: ready, continued or paused with a short reason.
+   A verified requester sees `↻ Updated to <commit> · continued`. Full recovery
+   instructions stay in the driver's adoption note, delivered once with the next
+   agent input rather than repeated as chat bubbles.
    Then each background task and subagent the record lists as running (`open_tasks`,
    `open_subagents`, kept current by the driver as they start and end) is ended as its own end
    would have been: `background_task_done` with status `stopped` and summary "the daemon
@@ -177,21 +178,76 @@ once it is; a `kill_session` for it means it is never hosted. For each record:
    a call on the restart deny-list (`destructive` in `open_calls`, set when the call starts from
    the whole command; for an older record, its `detail` is matched): a force push, `rm -rf`, a
    migration, a deploy, the installer or a service restart, `DROP`/`TRUNCATE` (the list is in
-   DAEMON.md). Deterministic, not left to the model. And, for an `interactive` session only: it
+   DAEMON.md). Deterministic, not left to the model.
+
+   A planned successful daemon update is the one exception. The installer (and
+   `make restart-daemon`) contacts the running daemon over its owner-only state
+   directory's `update.sock` at installer start, then again before restart with
+   the target executable and its embedded commit. The second notification must
+   descend from the same installer or make process and match the original live
+   call; a later tool call in the same session cannot inherit the exception.
+   The daemon attributes the caller to a live engine process and the sole tool call
+   it observed starting. Process start times prevent PID reuse. A detached
+   `setsid nohup … &` installer can have been reparented already: the daemon reads
+   the session identity inherited in its OS process environment and checks that
+   it matches the still-live engine's identity. The caller never supplies a session
+   ID, tool-call ID, command text or success assertion over this socket. Disk-loaded
+   calls alone are not live observations.
+
+   The restarting daemon writes `update-pending.json` (0600) and a planned-update
+   marker in its owner-only state directory (0700). The pending record binds the
+   observed session, full-command hash, safety decisions and tool-call ID to the target executable
+   digest, commit and time. The replacement daemon consumes it before recovery,
+   even if invalid; a successful update requires that its own executable digest
+   and embedded commit match and the evidence is under five minutes old. A failed
+   restart cancels pending evidence when the old daemon is still reachable. An old
+   or rolled-back executable cannot verify success.
+
+   Process attribution accepts ordinary installer commands, make invocations and
+   background launches followed by wait loops, without a whole-command allowlist.
+   The wait must be in the **same tool call**, with a Bash timeout covering the build
+   and restart (120 seconds by default, 600 seconds maximum); if that call finishes
+   or times out first, ordinary recovery applies.
+   Recovery still checks the full shell input for additional destructive work.
+   Another session, a changed call, two interrupted calls, pending background work,
+   an unsuccessful update or expired evidence keeps the normal pause. Conversation,
+   waiting-for-person and once-per-turn guards apply to the successful requester too.
+
+   **Threat model:** a host session runs as the person. It can already replace the
+   same-user daemon and edit its state, so faking an update adds no authority. This
+   design intentionally does not establish a privilege boundary against that user.
+   No root supervisor, setgid installation, root service or sudo update policy is
+   needed. Normal consumption prevents accidental reuse; it does not claim to stop
+   a same-user process from deliberately restoring or forging state. Legacy
+   `restart-update.json` and `note-update` helpers remain unsupported.
+
+   Idle sessions get no restart row. A session that was working gets one compact row, for example
+   `↻ Updated to <commit> · continued` or
+   `↻ Host restarted · paused — check the interrupted command`. The chat draws a paused row
+   as `Paused after a restart` with a Resume button (it sends the session
+   "Continue the task you were working on."), and as `Resumed` once the session got a message
+   after it. Paused rows have a collapsed disclosure with a one-line reason and every
+   interrupted call, background task and subagent, without agent instructions. The driver receives
+   the full cut-off-work instructions once, with its next input; these instructions
+   do not become a chat bubble. A session that started the update is explicitly told
+   that its update succeeded and not to repeat it. A paused child also relays a
+   `child_turn` note to its live parent, naming the pause reason; duplicate reports
+   do not send duplicate notes and ended parents are not woken.
+
+   And, for an `interactive` session only: it
    was waiting for the person. That is `waiting` (a permission prompt, a native
    question), an open call that is a question (`blerg-runner ask` in a Bash command, or
    `AskUserQuestion`), or, for a record that cannot say (an older daemon kept neither
    `open_calls` nor `waiting`; a missing `waiting` reads as not waiting), an open ask the server
    holds: after each hello the server sends the daemon `open_asks`, the sessions among those it
-   reported that have an ask open, and the continue checks it once connected. A session that
-   waits shows the list below at once as a `system` `user_message` (one the server's asks stop
-   says so with a second notice, adds the cut-off question to the agent's note, and its continue
-   is not counted), the agent gets it with the person's next message (after the note), and the
+   reported that have an ask open, and the continue checks it once connected. A session that waits shows one compact paused row.
+   A server-side open question adds the cut-off question to the agent's note and its continue
+   is not counted; the agent gets it with the person's next message (after the note), and the
    daemon reports it to the server as `session_state_changed` `idle` and then `session_paused`
    (reason `restart`; below). So is a session it had already continued once (`auto_continues`
    1) and one whose conversation could not be restored. A session cut off before the engine
-   named its conversation is neither continued nor reported paused: a continue would reach an
-   agent that does not know its task, so the notice asks the person to send it again. In either kind of
+   named its conversation is paused without continuing: the agent does not know its task, so
+   the notice asks for the task again and a child relays this reason to its parent. In either kind of
    session, a message from the person that reaches the driver before the continue (held while
    the daemon was down, or written during the wait) replaces it: the continue is not sent, that
    message carries the note and the list, and the session is not reported paused. The list:

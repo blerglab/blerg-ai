@@ -1085,7 +1085,7 @@ textarea { resize: vertical; }
 /* the card's board, stated in the sheet header — after a cross-board search
    jump this is how you know where you are (click = reveal the board) */
 .chip.board-here {
-  cursor: pointer; color: var(--blaze); border-color: var(--blaze-soft);
+  cursor: pointer; color: var(--blaze); border-color: var(--blaze-soft); background: none;
   font-family: var(--display); text-transform: uppercase; letter-spacing: 0.08em;
   font-size: 10.5px;
 }
@@ -1263,6 +1263,9 @@ textarea { resize: vertical; }
     padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom);
   }
   .board-session-page { padding: 8px; }
+  /* The chat runs edge to edge on a phone, like the board session drawer: Stop now sits beside
+     Send in the composer (#233), and the page padding and frame would squeeze the message box. */
+  .board-session-page .session-chat { margin-inline: -8px; border-inline: 0; border-radius: 0; }
   .convo-head { flex-wrap: wrap; }
   .session-chat .agent-chat { min-width: 0; }
   :is(.btn, .link-btn, .topbar nav a, .topbar nav button, .sheet button, .board-chat-mini, .run-toggle, .session-chat button) {

@@ -32,6 +32,8 @@ import { openSseStream, type SseStream } from './sse'
 import type { FileLimits, OlderPage, SessionMeta, SubscribeHandlers, SubscribeOptions, Transport } from './types'
 
 export interface ProxyTransportOptions {
+  /** Stable account namespace for durable local attachments; absent keeps pending bytes in memory. */
+  attachmentScope?: () => string
   /** The public runner session URL for this app session (including any ID mapping).
    * No query/fragment. Omit when unknown; the embedder's own origin is not assumed to
    * be the runner. Allows published artifact links to open the chat's file viewer. */
@@ -67,7 +69,9 @@ function parseJson(text: string): unknown {
   }
 }
 
-/** A frame's or a page's event as the transcript wants it: every field present. */
+/** A frame's or a page's event as the transcript wants it: every field present. The stream and the
+ *  page are for one session, the one asked for, so that is its id: a broker (the board) names the
+ *  session by its own id while the runner's events carry the runner's id for the same session. */
 function normalizeEvent(raw: unknown, sessionId: string): AgentEvent | null {
   if (!raw || typeof raw !== 'object') return null
   const ev = raw as Partial<AgentEvent>
@@ -76,7 +80,7 @@ function normalizeEvent(raw: unknown, sessionId: string): AgentEvent | null {
   return {
     ...ev,
     type: 'agent_event',
-    session_id: typeof ev.session_id === 'string' ? ev.session_id : sessionId,
+    session_id: sessionId,
     client_event_id: typeof ev.client_event_id === 'string' ? ev.client_event_id : seq !== undefined ? `seq:${seq}` : `tmp:${Math.random().toString(36).slice(2)}`,
     ts: typeof ev.ts === 'string' ? ev.ts : '',
     kind: ev.kind,
@@ -103,7 +107,8 @@ function toMeta(body: Record<string, unknown>): SessionMeta {
     status,
     engine: str('engine'),
     steering_supported: typeof body.steering_supported === 'boolean' ? body.steering_supported : undefined,
-    runtime: str('runtime'),
+    // "none" is the runner withholding where a desktop session runs from this caller: nothing to show.
+    runtime: str('runtime') === 'none' ? undefined : str('runtime'),
     model: str('model'),
     effort: str('effort'),
     started_at: str('started_at') ?? '',
@@ -288,6 +293,7 @@ export function createProxyTransport(opts: ProxyTransportOptions): Transport {
     // The upload goes out by XMLHttpRequest (for its progress), which fetchImpl cannot wrap: it
     // gets the host's headers and the 401 check directly. Everything else is already wrapped.
     files: createFiles({
+      queueScope: opts.attachmentScope ? () => {const viewer = opts.attachmentScope!(); return viewer ? `${base}\0${viewer}` : ''} : undefined,
       base: session,
       fetch: fetchImpl,
       credentials,

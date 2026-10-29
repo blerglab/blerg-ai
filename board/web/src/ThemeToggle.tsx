@@ -6,6 +6,7 @@ export default function ThemeToggle() {
   const [theme, setThemeState] = useState<Theme>(effectiveTheme);
   const goDark = theme === "light";
   return (
+    // button-guard-ignore: rendered only in the top bar's nav (App.tsx), styled by .topbar nav .theme-toggle (styles.css).
     <button
       type="button"
       className="theme-toggle"

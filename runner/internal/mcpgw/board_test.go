@@ -37,6 +37,9 @@ var wantBoardTools = []string{
 	"blerg_card_move", "blerg_card_comment", "blerg_card_link",
 }
 
+// wantColumnTools manage columns (0.5.0): offered at level full where a person launched the session.
+var wantColumnTools = []string{"blerg_column_create", "blerg_column_update", "blerg_column_move", "blerg_column_delete"}
+
 // boardUpstreamTools is what the board's MCP serves: the eleven allowed tools and five it must
 // not hand a cron.
 func boardUpstreamTools() []fakeTool {
@@ -44,7 +47,7 @@ func boardUpstreamTools() []fakeTool {
 	for _, n := range wantBoardTools {
 		out = append(out, fakeTool{Name: n, Description: "the board's own " + n, Schema: `{"type":"object"}`})
 	}
-	for _, n := range []string{"blerg_card_archive", "blerg_column_create", "blerg_column_move", "blerg_board_create", "blerg_board_update"} {
+	for _, n := range []string{"blerg_card_archive", "blerg_column_create", "blerg_column_update", "blerg_column_move", "blerg_column_delete", "blerg_board_create", "blerg_board_update"} {
 		out = append(out, fakeTool{Name: n, Description: "dangerous " + n, Schema: `{"type":"object"}`})
 	}
 	return out
@@ -63,6 +66,7 @@ type fakeExchanger struct {
 	refs      []string
 	revoked   []string // "<account>:<sub>"
 	readOnly  []bool   // per exchange: whether it was ExchangeReadOnly
+	goneToken string   // a token proof that is no longer live (expired or revoked launch token)
 }
 
 func (f *fakeExchanger) Exchange(_ context.Context, p Proof, boardID, sessionRef string) (BoardToken, error) {
@@ -70,6 +74,9 @@ func (f *fakeExchanger) Exchange(_ context.Context, p Proof, boardID, sessionRef
 	defer f.mu.Unlock()
 	if f.err != nil {
 		return BoardToken{}, f.err
+	}
+	if f.goneToken != "" && p.TokenID == f.goneToken {
+		return BoardToken{}, ErrConnectionGone
 	}
 	f.n++
 	f.proofs = append(f.proofs, p)
@@ -159,7 +166,7 @@ func (b *boardHarness) authHeader() string {
 
 func TestBoardToolNamesAreExact(t *testing.T) {
 	got := BoardToolNames()
-	want := append([]string(nil), wantBoardTools...)
+	want := append(append([]string(nil), wantBoardTools...), wantColumnTools...)
 	sort.Strings(got)
 	sort.Strings(want)
 	if !slices.Equal(got, want) {
@@ -522,5 +529,35 @@ func TestTokenSub(t *testing.T) {
 		if got := tokenSub(bad); got != "" {
 			t.Errorf("tokenSub(%q) = %q, want empty", bad, got)
 		}
+	}
+}
+
+// boardObserved records what the gateway reports of a board connection's calls.
+type boardObserved struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (o *boardObserved) BoardToolCalled(sessionID, boardID, tool string, result json.RawMessage) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.calls = append(o.calls, sessionID+"|"+boardID+"|"+tool+"|"+string(result))
+}
+
+// A successful call on the built-in board connection is reported to the observer (the runner keeps
+// the session's plan from the moves it sees); a refused one is not.
+func TestBoardObserverHearsSuccessfulCalls(t *testing.T) {
+	b := newBoardHarness(t, nil)
+	o := &boardObserved{}
+	b.gw.SetBoardObserver(o)
+	gh := b.grant()
+	if r := b.callTool(gh, "blerg_card_move", map[string]any{"number": 12, "column_name": "Done"}); r.errMessage() != "" {
+		t.Fatalf("move: %s", r.raw)
+	}
+	b.callTool(gh, "blerg_column_create", map[string]any{})
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if len(o.calls) != 1 || !strings.HasPrefix(o.calls[0], gh.sessionID+"|"+boardTestID+"|blerg_card_move|") || !strings.Contains(o.calls[0], "ok:blerg_card_move") {
+		t.Fatalf("observed = %v", o.calls)
 	}
 }

@@ -23,6 +23,7 @@ func spawnPolicyAPI(t *testing.T) (*API, *DaemonConn, func(...string) string) {
 		t.Fatal(err)
 	}
 	api := NewAPI(hub, pool, "daemon-tok-1234567890", nil, "")
+	fixtureOwnDesktop(t, pool, dc, "user-1")
 	return api, dc, enableBrowserAuth(t, api)
 }
 

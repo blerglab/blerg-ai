@@ -104,7 +104,7 @@ same runtime target and bounded requests, retaining manual entry and retry durin
 
 Adding an engine requires its model rules and daemon adapter, plus a Cluster provider when its
 catalog needs native account access. It does not require another model endpoint or picker branch.
-Opaque Cluster credential imports remain snapshots and require reimport when rejected. An
+Opaque Cluster credential imports remain snapshots. Codex snapshots carry access only and need a dedicated managed login for renewal. An
 opt-in managed connection uses a separately registered Core credential adapter and a dedicated
 browser device login. Core alone retains encrypted refresh authority, serializes rotation and
 fences replacements by generation. Pods obtain short-lived access through their current runtime
@@ -138,3 +138,25 @@ agent's side in [`AGENTS.md`](../AGENTS.md).
 | `install/desktop/`, `install/k8s/` | The two installers, with their own documentation |
 | `docs/` | User documentation and, under `design/`, the notes behind larger decisions |
 | `scripts/` | Checks CI runs: links, the privacy scrub, the release tooling |
+
+## Workspace integration
+
+Workspace selection and physical runtime authority are separate. P1 persists an
+immutable authorized member manifest; P0b allocates a runtime generation and pins
+the prepared public root. P2 and P3 own preparation, settlement, retention and
+writer cleanup. P4 reads only through that runtime binding. P5 independently
+checks live human identity, policy, grants and containment; selection grants no
+shell permission.
+
+The desktop control adapter uses the enrolled outbound socket and persisted owner
+and connection fences. Migration 083 journals generation tokens and exact final
+outcomes. Results, terminal state and receipt commit atomically; reconnect can
+reconcile an identical completion even after ordinary live-runtime authority has
+ended. Files and shell bytes use bounded separate scheduling lanes and never
+become agent transcript events.
+
+Workspace and shell policy enables verified Linux/WSL hosts, local sandboxes and
+cluster pods. Native macOS host remains disabled (#181). Protected storage,
+containment and exact capability negotiation remain mandatory. The [integration
+status](workspace-integration.md) records runtime support and remaining acceptance
+work. Unavailable capabilities return explicit refusals.

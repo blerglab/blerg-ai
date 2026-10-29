@@ -25,7 +25,7 @@ type RawDoer interface {
 // streamClient has no overall timeout — a live stream is open-ended and ctx is
 // what ends it — but still gives up on a runner that accepts the connection and
 // never answers.
-var streamClient = &http.Client{Transport: streamTransport()}
+var streamClient = &http.Client{Transport: streamTransport(), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 func streamTransport() http.RoundTripper {
 	t, ok := http.DefaultTransport.(*http.Transport)
@@ -62,6 +62,11 @@ func (k *BlergRunner) RawAs(ctx context.Context, token, method, path string, bod
 		req.Header.Set(name, v)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Del("X-Blerg-Desktop-Viewer")
+	req.Header.Set("X-Blerg-Desktop-Viewer", "none")
+	if viewer := desktopViewerProof(ctx); viewer != "" {
+		req.Header.Set("X-Blerg-Desktop-Viewer", viewer)
+	}
 	return streamClient.Do(req)
 }
 

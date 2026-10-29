@@ -842,7 +842,7 @@ export default function TerminalDOMView({ sessionId, ref, readOnly = false }: Pr
   }, [sessionId])
 
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+    <div data-palette-shortcuts="ignore" style={{ position: 'relative', width: '100%', height: '100%' }}>
       {/* Hidden textarea — positioned off-screen so iOS doesn't scroll the page
           when it appears. fontSize 16 prevents iOS auto-zoom on focus. */}
       <textarea

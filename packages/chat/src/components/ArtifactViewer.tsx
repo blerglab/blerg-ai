@@ -16,8 +16,9 @@
 //                                  popups or top navigation) and a CSP meta ahead of the page cuts
 //                                  its network entirely.
 //   anything else                  no preview: name, size, type and the Download button.
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
+import { HostedViewerRequest, useViewerHost } from './ViewerHost'
 import { formatSize, parseCsv, prettyJson, withCsp } from '../model/artifacts'
 import { langFromName } from '../model/codeLang'
 import {
@@ -27,6 +28,7 @@ import {
   TEXT_PREVIEW_CAP,
   TEXT_VIEW_MAX,
   blobTypeFor,
+  keptMediaUrl,
   mediaUrl,
   releaseMediaUrl,
   isViewable,
@@ -39,14 +41,20 @@ import { MAXIMIZED_KEY, isMaximizeShortcut, localStorageChatStorage, type Viewer
 import { FILE_GONE_MESSAGE, FileRequestError, fileErrorText, isArtifactGone } from '../transport/files'
 import type { ArtifactInfo, TransportFiles } from '../transport/types'
 import { useChat } from './context'
+import { contentKeeper, peekContent } from '../model/viewCache'
 import CodeLines from './CodeLines'
 import DataTable from './DataTable'
 import ErrorId from './ErrorId'
+import SourceCode from './SourceCode'
+import ViewerToolbar, { ViewerAction, WrapToggle } from './ViewerToolbar'
+import { WrapHostContext, WrapScopeContext, isWrapShortcut, toggleWrapIn, wrapKind, type WrapTarget } from '../model/lineWrap'
+import { hasRenderedText } from '../model/rawView'
 import DiffView from './DiffView'
 import Markdown, { type MarkdownDocument } from './Markdown'
 import VisualBlock from './VisualBlock'
 import { visualFile } from '../model/visualKind'
 import MarkupMode from './markup/MarkupMode'
+import ImageView from './ImageView'
 import ReviewMode from './review/ReviewMode'
 import ReviewRequestBar from './ReviewRequestBar'
 
@@ -56,6 +64,11 @@ type Loaded =
   | { kind: 'error'; message?: string; errorId?: string }
   // The server still lists the file but no longer has its bytes (410, or the list said missing).
   | { kind: 'gone' }
+
+/** What an artifact view keeps (model/viewCache): a version's bytes never change, so a kept one is
+ *  shown and not read again. An SVG keeps the data: URL it drew from. */
+type KeptArtifact = { kind: 'text'; text: string } | { kind: 'blob'; blob: Blob; dataUrl?: string }
+const artifactIdentity = (a: ArtifactInfo) => `artifact:${a.id}:${a.version ?? ''}:${a.view}:${a.size}`
 
 /** What the dialog's body shows: the file, its review (markdown, pdf) or a draw-over (image). */
 type Mode = 'view' | 'review' | 'markup'
@@ -74,23 +87,43 @@ interface Props {
   autoplay?: boolean
   /** A diff opens at this commit's section (a checklist item's sha chip). */
   commit?: string | null
+  /** Additional controls for a host-owned tab header. */
+  headerActions?: ReactNode
+  /** Render in place as a region, without a modal portal or size limits. */
+  embedded?: boolean
   /** Open straight in review (a markdown or PDF file; a diff is always reviewed in place). */
   review?: boolean
 }
 
 export default function ArtifactViewer(props: Props) {
-  return <ArtifactViewerSession key={`${props.sessionId}:${props.artifact.id}:${props.artifact.view}:${props.artifact.version ?? ''}`} {...props}/>
+  const host = useViewerHost()
+  if (host && !props.embedded) return <HostedViewerRequest view={{ kind: 'artifact', artifact: props.artifact, commit: props.commit, review: props.review, autoplay: props.autoplay }} consumed={props.onClose} />
+  return <ArtifactViewerSession key={`${props.sessionId}:${props.artifact.id}:${props.artifact.view}:${props.artifact.version ?? ''}:${props.review ? 'review' : 'view'}`} {...props}/>
 }
 
-function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, onOpen, autoplay = false, commit = null, review = false }: Props) {
+function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, onOpen, autoplay = false, commit = null, review = false, embedded = false, headerActions }: Props) {
+  const viewerHost = useViewerHost()
   const titleId = useId()
   const dialogRef = useRef<HTMLDivElement | null>(null)
   useSelectAllIn(dialogRef)
   const backdrop = useBackdropClose(onClose)
-  const [loaded, setLoaded] = useState<Loaded | null>(null)
+  // The bytes last read for this version in this session show at once (model/viewCache).
+  const [restored] = useState(() => {
+    const kept = peekContent<KeptArtifact>(files, sessionId, artifactIdentity(artifact))
+    if (!kept) return null
+    if (kept.kind === 'text') return { identity: artifactIdentity(artifact), loaded: kept as Loaded }
+    const url = keptMediaUrl(kept.blob, artifact.view, artifact.content_type, kept.dataUrl)
+    return url ? { identity: artifactIdentity(artifact), loaded: { kind: 'blob', blob: kept.blob, url } as Loaded } : null
+  })
+  const [loaded, setLoaded] = useState<Loaded | null>(() => restored?.loaded ?? null)
+  // An object URL made for a kept file, freed when the view goes.
+  useEffect(() => () => { if (restored?.loaded.kind === 'blob') releaseMediaUrl(restored.loaded.url) }, [restored])
+  const [raw, setRaw] = useState(false)
+  // The kind of code on show, for the wrap toggle; null while the file is rendered, not code.
+  const [codeWrap, setCodeWrap] = useState<WrapTarget | null>(null)
   const [showAll, setShowAll] = useState(false)
   const [downloadError, setDownloadError] = useState<{ message: string; errorId?: string } | null>(null)
-  const [mode, setMode] = useState<Mode>(review && (artifact.view === 'markdown' || artifact.view === 'pdf') ? 'review' : 'view')
+  const [mode, setMode] = useState<Mode>(review && (artifact.view === 'markdown' || artifact.view === 'pdf' || artifact.view === 'diff') ? 'review' : 'view')
   // The feedback modes send through the chat; a viewer mounted alone has no send path.
   const chat = useChat()
   // A diff review's Conversation already shows the agent's ask as its body: the bar keeps only
@@ -107,17 +140,21 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
   const tooBig = tooBigToPreview(view, artifact.size)
   const previewable = spec !== null && !tooBig
 
-  useEffect(() => dialogRef.current?.focus(), [])
+  useEffect(() => { if (!embedded || viewerHost?.autoFocus !== false) dialogRef.current?.focus() }, [embedded, viewerHost?.autoFocus])
 
   useEffect(() => {
     if (artifact.missing || !previewable || !spec) return // a file listed as missing is not fetched
+    // A version's bytes never change: kept ones are not read again.
+    if (restored?.identity === artifactIdentity(artifact)) return
     let cancelled = false
     let url: string | null = null
+    const keep = contentKeeper<KeptArtifact>(files, sessionId, artifactIdentity(artifact))
     void (async () => {
       try {
         const blob = await files.raw(sessionId, artifact.id)
         if (spec.textual) {
           const text = await blob.text()
+          keep({ kind: 'text', text }, text.length * 2)
           if (!cancelled) setLoaded({ kind: 'text', text })
           return
         }
@@ -128,6 +165,7 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
         const made = await mediaUrl(buf, view, artifact.content_type)
         if (cancelled) { releaseMediaUrl(made); return }
         url = made
+        keep({ kind: 'blob', blob: typed, dataUrl: made.startsWith('data:') ? made : undefined }, typed.size + (made.startsWith('data:') ? made.length * 2 : 0))
         setLoaded({ kind: 'blob', url, blob: typed })
       } catch (e) {
         if (cancelled) return
@@ -140,7 +178,8 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
       cancelled = true
       releaseMediaUrl(url)
     }
-  }, [sessionId, files, artifact.id, artifact.content_type, artifact.missing, view, previewable, spec])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- artifact.version is read by artifactIdentity
+  }, [sessionId, files, artifact.id, artifact.version, artifact.size, artifact.content_type, artifact.missing, view, previewable, spec, restored])
 
   async function download() {
     setDownloadError(null)
@@ -155,7 +194,8 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
   // Which feedback mode this file takes, once its bytes are here.
   const gone = artifact.missing === true || loaded?.kind === 'gone'
   const ready = loaded !== null && loaded.kind !== 'error' && !gone
-  const inlineReview = view === 'diff' && !!chat && ready
+  // A file tab opens on the patch; its review conversation is an explicit toolbar action.
+  const inlineReview = view === 'diff' && !!chat && ready && (!embedded || mode === 'review')
 
   // Maximize: edge to edge, remembered per kind of layout (a review, a diff, a draw-over, a file).
   const layoutKind: LayoutKind = view === 'diff' ? 'diff' : mode === 'review' ? 'review' : mode === 'markup' ? 'markup' : 'file'
@@ -168,30 +208,38 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
-    if (e.key === 'Escape') {
+    if (!embedded && e.key === 'Escape') {
       e.stopPropagation()
       onClose()
     } else if (isMaximizeShortcut(e)) {
       e.preventDefault()
       e.stopPropagation()
       toggleMaximized()
+    } else if (isWrapShortcut(e) && toggleWrapIn(e.currentTarget)) {
+      e.preventDefault()
+      e.stopPropagation()
     }
   }
   const feedback: Exclude<Mode, 'view'> | null =
     !chat || !ready ? null : view === 'markdown' || view === 'pdf' || view === 'diff' ? 'review' : view === 'image' ? 'markup' : null
 
-  return createPortal(
-    <div className={`artifact-overlay artifact-overlay-viewer${maximized ? ' is-maximized' : ''}`} data-testid="artifact-viewer-overlay" {...backdrop}>
+  const body = (
+    <div className={embedded ? "embedded-viewer" : `artifact-overlay artifact-overlay-viewer${maximized ? ' is-maximized' : ''}`} data-testid="artifact-viewer-overlay" {...(embedded ? {} : backdrop)}>
       <div
         ref={dialogRef}
         className={`artifact-dialog artifact-viewer${mode !== 'view' || inlineReview ? ' is-review' : ''}${view === 'diff' ? ' is-diff' : ''}${maximized ? ' is-maximized' : ''}`}
-        role="dialog"
-        aria-modal="true"
+        role={embedded ? "region" : "dialog"}
+        aria-modal={embedded ? undefined : true}
         aria-labelledby={titleId}
         tabIndex={-1}
         onKeyDown={onKeyDown}
       >
-        <header className="artifact-header">
+        {embedded ? <ViewerToolbar titleId={titleId} title={title} copyValue={artifact.name} meta={['From Files', spec?.label, formatSize(artifact.size)].filter(Boolean).join(' · ')} toggle={loaded?.kind === 'text' && hasRenderedText(artifact.name, artifact.view, loaded.text) && <button type="button" className="artifact-btn" onClick={() => setRaw(!raw)}>{raw ? 'Rendered' : 'Raw'}</button>}>
+          {inlineReview && !embedded ? null : mode !== 'view' ? <ViewerAction icon="back" label="Back" onClick={() => setMode('view')} />
+            : feedback && <ViewerAction icon={feedback === 'review' ? 'review' : 'markup'} label={feedback === 'review' ? 'Review' : 'Mark up'} onClick={() => setMode(feedback)} />}
+          {codeWrap && <WrapToggle kind={codeWrap.kind} available={codeWrap.available} />}
+          {!gone && <ViewerAction icon="download" label="Download" onClick={() => void download()} />}
+        </ViewerToolbar> : <header className="artifact-header">
           <div className="artifact-header-text">
             <h2 id={titleId}>{title}</h2>
             <p className="artifact-meta">{[spec?.label, formatSize(artifact.size)].filter(Boolean).join(' · ')}</p>
@@ -214,8 +262,11 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
           >
             <span aria-hidden="true">{maximized ? '⤡' : '⤢'}</span>
           </button>
+          {loaded?.kind === 'text' && hasRenderedText(artifact.name, artifact.view, loaded.text) && <button type="button" className="artifact-btn" onClick={() => setRaw(!raw)}>{raw ? 'Rendered' : 'Raw'}</button>}
+          {codeWrap && <WrapToggle kind={codeWrap.kind} available={codeWrap.available} text />}
+          {headerActions}
           <button type="button" className="artifact-close" aria-label="Close" onClick={onClose}>✕</button>
-        </header>
+        </header>}
         {isOlder && (
           <p className="artifact-older" data-testid="artifact-older">
             This is an older version.
@@ -229,6 +280,8 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
             <p className="artifact-status" role="status" data-testid="artifact-gone">
               {FILE_GONE_MESSAGE} Its bytes were not kept on the server, so it can’t be viewed or downloaded.
             </p>
+          ) : raw && loaded?.kind === 'text' ? (
+            <SourceCode text={loaded.text} name={artifact.name} view={artifact.view} />
           ) : (mode === 'review' || inlineReview) && ready ? (
             <ReviewMode
               artifact={artifact}
@@ -264,9 +317,10 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
           )}
         </div>
       </div>
-    </div>,
-    document.body,
+    </div>
   )
+  const scoped = <WrapScopeContext.Provider value={files.queueScope?.() ?? ''}><WrapHostContext.Provider value={setCodeWrap}>{body}</WrapHostContext.Provider></WrapScopeContext.Provider>
+  return embedded ? scoped : createPortal(scoped, document.body)
 }
 
 export function NoPreview({ artifact, tooBig }: { artifact: ArtifactInfo; tooBig: boolean }) {
@@ -287,14 +341,15 @@ export function NoPreview({ artifact, tooBig }: { artifact: ArtifactInfo; tooBig
 }
 
 export function BlobView({ artifact, url, autoplay }: { artifact: ArtifactInfo; url: string; autoplay: boolean }) {
+  const viewerHost = useViewerHost()
   switch (artifact.view) {
     case 'image':
-      return <img className="artifact-image" src={url} alt={artifact.name} />
+      return <ImageView key={`${artifact.id}:${artifact.version ?? ''}:${url}`} src={url} name={artifact.name} />
     case 'pdf':
       return (
         <div className="artifact-pdf">
           <iframe className="artifact-frame" title={artifact.name} src={url} />
-          <a href={url} target="_blank" rel="noopener noreferrer">Open in new tab ↗</a>
+          {!viewerHost && <a href={url} target="_blank" rel="noopener noreferrer">Open in new tab ↗</a>}
         </div>
       )
     case 'audio':
@@ -328,7 +383,7 @@ export function TextView({ artifact, text, showAll, onShowAll, commit, document:
   if (visual) return <VisualBlock kind={visual} source={text} />
 
   const body = artifact.view === 'json' ? prettyJson(text) : text
-  // Code is coloured by its extension, json as json; no known language stays plain wrapped text.
+  // Code is coloured by its extension, json as json; no known language stays plain.
   const lang = artifact.view === 'json' ? 'json' : artifact.view === 'text' ? langFromName(artifact.name) : null
   const capped = !showAll && body.length > TEXT_PREVIEW_CAP
   const shown = capped ? body.slice(0, TEXT_PREVIEW_CAP) : body
@@ -336,9 +391,8 @@ export function TextView({ artifact, text, showAll, onShowAll, commit, document:
     <>
       {artifact.view === 'markdown'
         ? <Markdown text={shown} className="artifact-markdown md-doc md-box" document={doc} html />
-        : lang
-          ? <CodeLines text={shown} lang={lang} />
-          : <pre className="artifact-text" data-testid="artifact-text">{shown}</pre>}
+        // Code and plain text alike: numbered, with the line wrap toggle and the kind's default (#265).
+        : <CodeLines text={shown} lang={lang} kind={artifact.view === 'json' ? 'code' : wrapKind(artifact.name)} />}
       {capped && (
         <p className="artifact-status">
           Showing the first {formatSize(TEXT_PREVIEW_CAP)} of {formatSize(body.length)}.{' '}

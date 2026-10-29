@@ -222,6 +222,7 @@ func TestKillDuringRepoRootChangeStaysDead(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("kill never finished")
 	}
+	waitManagerLifecycle(t, mgr, "victim")
 	for _, r := range []string{oldRoot, newRoot} {
 		if _, err := os.Stat(recordPath(r, "victim")); !os.IsNotExist(err) {
 			t.Errorf("killed session's record survives under %s (err=%v): a reattach would revive it", r, err)

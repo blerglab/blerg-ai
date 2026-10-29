@@ -34,6 +34,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -99,6 +100,16 @@ type artifactListEntry struct {
 	// Missing: the row is here but its bytes are not on disk (a data directory that did not
 	// survive a restart). The file is listed so it can be deleted; it cannot be viewed.
 	Missing bool `json:"missing,omitempty"`
+	// CanDelete: whether the person asking may delete this file (#231): the session's owner or an
+	// administrator may delete any file, and a person their own attachments.
+	CanDelete bool `json:"can_delete"`
+}
+
+// sessionFileLimitsView is a session's `limits` in its file list: the install limits with this
+// session's own attachment total, and the most an administrator may raise that total to.
+type sessionFileLimitsView struct {
+	protocol.FileLimits
+	MaxSessionUploadCapBytes int64 `json:"max_session_upload_cap_bytes"`
 }
 
 // fileGoneMsg is the body of a 410: the row exists, its bytes do not.
@@ -249,11 +260,11 @@ func (h *artifactsHandler) store(w http.ResponseWriter, r *http.Request, sid str
 	if n, total, err := db.CountArtifactsOrigin(ctx, a.dbPool, sid, in.origin); err != nil {
 		writeDatabaseFailure(w, "count the session's files", "artifacts upload CountArtifactsOrigin", err)
 		return nil
-	} else if n >= in.maxFiles {
+	} else if in.maxFiles > 0 && n >= in.maxFiles {
 		writeError(w, http.StatusConflict, limitMsg)
 		return nil
 	} else if in.maxTotal > 0 && r.ContentLength > 0 && total+r.ContentLength > in.maxTotal {
-		writeError(w, http.StatusConflict, totalLimitMsg(in))
+		writeJSON(w, http.StatusConflict, map[string]any{"error": totalLimitMsg(in), "code": "file_space_required"})
 		return nil
 	}
 
@@ -315,7 +326,9 @@ func (h *artifactsHandler) store(w http.ResponseWriter, r *http.Request, sid str
 		return fail(http.StatusConflict, limitMsg)
 	}
 	if errors.Is(err, db.ErrArtifactBytesLimit) {
-		return fail(http.StatusConflict, totalLimitMsg(in))
+		_ = os.RemoveAll(dir)
+		writeJSON(w, http.StatusConflict, map[string]any{"error": totalLimitMsg(in), "code": "file_space_required"})
+		return nil
 	}
 	if err != nil {
 		_ = os.RemoveAll(dir)
@@ -441,23 +454,40 @@ func (h *artifactsHandler) artifact(w http.ResponseWriter, r *http.Request, sid 
 
 func (h *artifactsHandler) list(w http.ResponseWriter, r *http.Request) {
 	if sid, ok := h.person(w, r); ok {
-		h.listSession(w, r, sid)
+		p, valid := h.api.authBrowser(w, r)
+		if !valid {
+			return
+		}
+		h.listSession(w, r, sid, browserFileActor(p))
 	}
 }
 
-func (h *artifactsHandler) listSession(w http.ResponseWriter, r *http.Request, sid string) {
+func (h *artifactsHandler) listSession(w http.ResponseWriter, r *http.Request, sid string, actor fileActor) {
+	sess, err := db.GetSession(r.Context(), h.api.dbPool, sid)
+	if err != nil {
+		writeDatabaseFailure(w, "check the session", "artifacts list GetSession", err)
+		return
+	}
 	rows, err := db.ListArtifacts(r.Context(), h.api.dbPool, sid)
 	if err != nil {
 		writeDatabaseFailure(w, "list the files", "artifacts list", err)
 		return
 	}
+	limits, err := h.api.sessionFileLimits(r.Context(), sid)
+	if err != nil {
+		writeDatabaseFailure(w, "read the session's storage", "artifacts list storage", err)
+		return
+	}
 	latest := latestVersions(rows)
 	out := make([]artifactListEntry, 0, len(rows))
 	for _, a := range rows {
-		out = append(out, artifactListEntry{infoOf(a), latest[latestKey(a)], a.CreatedAt.UTC().Format(time.RFC3339), artifactFileMissing(sid, a)})
+		out = append(out, artifactListEntry{infoOf(a), latest[latestKey(a)], a.CreatedAt.UTC().Format(time.RFC3339), artifactFileMissing(sid, a), actor.canDelete(sess, a)})
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
-	writeJSON(w, http.StatusOK, map[string]any{"artifacts": out})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"artifacts": out, "limits": limits, "can_delete": actor.managesFiles(sess),
+		"can_increase": actor.admin && actor.account != "" && limits.MaxSessionUploadBytes < limits.MaxSessionUploadCapBytes,
+	})
 }
 
 func (h *artifactsHandler) download(w http.ResponseWriter, r *http.Request) { h.serve(w, r, false) }
@@ -507,16 +537,34 @@ func (h *artifactsHandler) serveSession(w http.ResponseWriter, r *http.Request, 
 
 func (h *artifactsHandler) remove(w http.ResponseWriter, r *http.Request) {
 	if sid, ok := h.person(w, r); ok {
-		h.removeSession(w, r, sid)
+		p, valid := h.api.authBrowser(w, r)
+		if !valid {
+			return
+		}
+		h.removeSession(w, r, sid, browserFileActor(p))
 	}
 }
 
-func (h *artifactsHandler) removeSession(w http.ResponseWriter, r *http.Request, sid string) {
+// fileDeleteRefusedMsg is the 403 for a person who may not delete this file.
+const fileDeleteRefusedMsg = "You can delete only the files you attached. The session's owner or an administrator can delete the others."
+
+func fileAdmin(p runnerPrincipal) bool { return slices.Contains(p.Caps, "account.manage") }
+
+func (h *artifactsHandler) removeSession(w http.ResponseWriter, r *http.Request, sid string, actor fileActor) {
 	row := h.artifact(w, r, sid)
 	if row == nil {
 		return
 	}
-	if _, err := db.DeleteArtifact(r.Context(), h.api.dbPool, sid, row.ID); err != nil {
+	sess, err := db.GetSession(r.Context(), h.api.dbPool, sid)
+	if err != nil {
+		writeDatabaseFailure(w, "check the session", "artifacts delete GetSession", err)
+		return
+	}
+	if !actor.canDelete(sess, *row) {
+		writeError(w, http.StatusForbidden, fileDeleteRefusedMsg)
+		return
+	}
+	if _, err := db.DeleteArtifactAudited(r.Context(), h.api.dbPool, *row, db.FileDeletion{Actor: actor.account, ActorAdmin: actor.admin, Via: actor.via}); err != nil {
 		writeDatabaseFailure(w, "delete the file", "artifacts delete", err)
 		return
 	}

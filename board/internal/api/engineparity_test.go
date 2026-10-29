@@ -60,7 +60,9 @@ func TestBoardScopedDiscoveryAndFreshControls(t *testing.T) {
 	srv, pool := testServer(t)
 	ctx := context.Background()
 	human := humanToken(t, srv)
-	fake := &parityRunner{identityRunner: &identityRunner{&fakeRunner{lifecycle: "running"}}, discovery: runner.LaunchOptions{State: "known", Engines: []runner.LaunchEngine{{Descriptor: engines.Descriptor{ID: "codex", Name: "Codex"}, Models: runner.ModelList{Models: []runner.Model{{ID: "codex-native", Efforts: []string{"high"}}}}}}}}
+	fake := &parityRunner{identityRunner: &identityRunner{&fakeRunner{lifecycle: "running"}}, discovery: runner.LaunchOptions{State: "known", Engines: []runner.LaunchEngine{{Descriptor: engines.Descriptor{ID: "codex", Name: "Codex"}, Models: runner.ModelList{Models: []runner.Model{{ID: "codex-native", Efforts: []string{"high"}}}}}},
+		// A current runner lists where sessions can run (an older one that does not is refused an unplaced start).
+		Targets: []runner.LaunchTarget{{Name: "Cluster", Runtimes: []string{"cluster"}, ResolvesBareRepos: true}}}}
 	srvAPI.SetRunner(api.RunnerConfig{Driver: fake, UIBase: "https://runner.example.test/sessions"})
 	board, err := db.CreateBoard(ctx, pool, db.BoardParams{Name: "parity", Repos: []string{"app"}, Model: strPtr("claude-old"), Effort: strPtr("high"), AutomationEngine: strPtr("codex")})
 	if err != nil {

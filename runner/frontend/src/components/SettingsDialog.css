@@ -63,3 +63,25 @@
   .st-form { flex-direction: column; align-items: stretch; }
   .st-field .select, .st-form .btn { width: 100%; }
 }
+.st-desktops-link { text-decoration: none; width: fit-content; }
+
+/* Shells (administrators): two limits, each for Desktop and Cluster; the groups sit side by side
+   when there is room and stack on a phone. */
+.st-limits { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 16px; margin-top: 4px; }
+.st-limit-group { margin: 0; padding: 8px 10px; border: 1px solid var(--stone); border-radius: 8px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.st-limit-legend { padding: 0 4px; font-size: var(--text-sm); color: var(--chalk); }
+.st-limit { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: var(--text-sm); color: var(--chalk); min-width: 0; }
+.st-limit-runtime { flex: 0 0 64px; color: var(--fog); }
+.st-limit-amount { display: inline-flex; align-items: center; gap: 6px; }
+.st-limit .select { width: auto; flex: 1 1 13em; max-width: 18em; }
+.st-limit-amount .select { flex: 0 0 auto; min-width: 8.5em; }
+.st-limit .st-limit-number { width: 6em; }
+.st-limit-error { flex-basis: 100%; padding-left: 72px; font-size: var(--text-xs); color: var(--danger); }
+.st-limit-hint { margin-left: 0; }
+.st-limit-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+@media (max-width: 640px) {
+  .st-limit-runtime { flex-basis: 100%; }
+  .st-limit .select { max-width: none; }
+  .st-limit-error { padding-left: 0; }
+  .st-limit-actions .btn { width: 100%; min-height: 40px; }
+}

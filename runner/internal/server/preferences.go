@@ -16,11 +16,12 @@ import (
 // Per-account preferences: GET/PUT /api/me/preferences. Only the signed-in person's browser may read
 // or write them (a human core token with the browser capability); an agent token acting for the
 // person is refused, and one account can never reach another's, because the account comes from the
-// token, never the request. Today the only key is code_colours.
+// token, never the request. Keys include code_colours and compact_folders.
 
 const (
 	preferencesBodyLimit = 16 << 10
 	prefCodeColours      = "code_colours"
+	prefCompactFolders   = "compact_folders"
 )
 
 // codeThemeIDs and codeTokenKeys mirror packages/chat/src/theme/codeThemes.ts; a test reads that file
@@ -104,13 +105,15 @@ func (a *API) HandleGetMyPreferences(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) writePreferences(w http.ResponseWriter, r *http.Request, account string) {
 	out := map[string]json.RawMessage{}
-	v, err := db.GetAccountPreference(r.Context(), a.dbPool, account, prefCodeColours)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not read preferences")
-		return
-	}
-	if v != nil {
-		out[prefCodeColours] = v
+	for _, key := range []string{prefCodeColours, prefCompactFolders} {
+		v, err := db.GetAccountPreference(r.Context(), a.dbPool, account, key)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not read preferences")
+			return
+		}
+		if v != nil {
+			out[key] = v
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -144,7 +147,7 @@ func (a *API) HandleRunnerGetPreferences(w http.ResponseWriter, r *http.Request)
 	a.writePreferences(w, r, account)
 }
 
-// HandlePutMyPreferences stores the keys in the body (today code_colours); the stored value comes back.
+// HandlePutMyPreferences stores the preference keys in the body; the stored value comes back.
 func (a *API) HandlePutMyPreferences(w http.ResponseWriter, r *http.Request) {
 	account, ok := a.personAccount(w, r)
 	if !ok {
@@ -162,11 +165,7 @@ func (a *API) HandlePutMyPreferences(w http.ResponseWriter, r *http.Request) {
 	}
 	stored := map[string]json.RawMessage{}
 	for k, raw := range in {
-		if k != prefCodeColours {
-			writeError(w, http.StatusBadRequest, "unknown preference "+k)
-			return
-		}
-		norm, err := validateCodeColours(raw)
+		norm, err := validatePreference(k, raw)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -186,4 +185,18 @@ func (a *API) HandlePutMyPreferences(w http.ResponseWriter, r *http.Request) {
 // its children (unreachable through authRunner, refused here as well).
 func preferencesRefused(p runnerPrincipal) bool {
 	return p.Kind == agentPrincipalKind || p.Kind == sessionDelegateKind
+}
+
+func validatePreference(key string, raw json.RawMessage) (json.RawMessage, error) {
+	switch key {
+	case prefCodeColours:
+		return validateCodeColours(raw)
+	case prefCompactFolders:
+		if string(raw) != "true" && string(raw) != "false" {
+			return nil, errors.New("compact_folders must be a boolean")
+		}
+		return raw, nil
+	default:
+		return nil, fmt.Errorf("unknown preference %s", key)
+	}
 }

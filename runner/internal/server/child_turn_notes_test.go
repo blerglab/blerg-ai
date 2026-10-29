@@ -167,3 +167,52 @@ func TestChildTurnNoteReportsAFailedSync(t *testing.T) {
 		t.Fatalf("the failed turn reported %q, want its own error", failure)
 	}
 }
+
+func TestParentIsToldWhenChildPausesAfterRestart(t *testing.T) {
+	fx := newDelegFx(t)
+	child := fx.childOf(fx.parent)
+	fx.hub.SetSessionOwner(fx.parent, fx.dc.ID)
+	fx.hub.SetSessionOwner(child, fx.dc.ID)
+	fx.childEvent(child, "u1", "user_message", `{"text":"build it","source":"session"}`)
+	report := protocol.SessionPaused{Type: "session_paused", SessionID: child, Reason: protocol.PausedByRestart}
+	// A report from a different daemon is ignored.
+	foreign := &DaemonConn{ID: "another-daemon"}
+	handleSessionPaused(t.Context(), fx.hub, fx.pool, foreign, report)
+	if note := fx.parentNote(fx.parent, 100*time.Millisecond); note.Type != "" {
+		t.Fatalf("foreign daemon relayed a pause: %+v", note)
+	}
+	handleSessionPaused(t.Context(), fx.hub, fx.pool, fx.dc, report)
+	note := fx.parentNote(fx.parent, 5*time.Second)
+	if note.Source != childTurnSource || !strings.HasPrefix(note.Text, `Child "Child" paused after a restart:`) || !strings.Contains(note.Text, "waiting for a message") {
+		t.Fatalf("paused child was silent or misreported: %+v", note)
+	}
+	handleSessionPaused(t.Context(), fx.hub, fx.pool, fx.dc, report)
+	if again := fx.parentNote(fx.parent, 300*time.Millisecond); again.Type != "" {
+		t.Fatalf("duplicate pause: %+v", again)
+	}
+}
+
+func TestChildRestartPauseReasonAndEndedParent(t *testing.T) {
+	fx := newDelegFx(t)
+	child := fx.childOf(fx.parent)
+	fx.hub.SetSessionOwner(fx.parent, fx.dc.ID)
+	fx.hub.SetSessionOwner(child, fx.dc.ID)
+	// A continued recovery is not a failed child turn and does not relay a pause.
+	fx.childEvent(child, "", "error", `{"message":"recovering","code":"session_recovery","retryable":true}`)
+	fx.childEvent(child, "", "user_message", `{"text":"[system] ↻ Updated to abc1234 · continued","source":"system"}`)
+	if note := fx.parentNote(fx.parent, 100*time.Millisecond); note.Type != "" {
+		t.Fatalf("continued child reported paused: %+v", note)
+	}
+	report := protocol.SessionPaused{SessionID: child, Reason: protocol.PausedByRestart, Detail: "check the interrupted command"}
+	handleSessionPaused(t.Context(), fx.hub, fx.pool, fx.dc, report)
+	if note := fx.parentNote(fx.parent, 5*time.Second); !strings.Contains(note.Text, `paused after a restart: "check the interrupted command"`) {
+		t.Fatalf("pause reason lost: %+v", note)
+	}
+	if _, err := fx.pool.Exec(t.Context(), `UPDATE sessions SET status='ended',ended_at=now() WHERE id=$1`, fx.parent); err != nil {
+		t.Fatal(err)
+	}
+	fx.api.noteChildTurn(t.Context(), child, childRestartPaused, "new pause")
+	if note := fx.parentNote(fx.parent, 100*time.Millisecond); note.Type != "" {
+		t.Fatalf("ended parent was woken: %+v", note)
+	}
+}

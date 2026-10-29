@@ -408,8 +408,8 @@ func TestChildLimitsCounters(t *testing.T) {
 	if n, err := db.CountRunningChildren(ctx, pool, parent); err != nil || n != 1 {
 		t.Fatalf("running children: %d %v", n, err)
 	}
-	// Per parent: both children, the pending request and the allowed one with no child.
-	if n, err := db.CountParentStarts(ctx, pool, parent); err != nil || n != 4 {
+	// Per parent: two children plus pending, allowed, denied and expired requests.
+	if n, _, err := db.ParentStartWindow(ctx, pool, parent, before, "", 20); err != nil || n != 6 {
 		t.Fatalf("parent starts: %d %v", n, err)
 	}
 	if n, err := db.CountAccountRunningChildren(ctx, pool, "owner-1"); err != nil || n != 1 {
@@ -761,5 +761,40 @@ func TestNoWaitQuestionIsNotAnOpenAsk(t *testing.T) {
 	}
 	if ids, _ := db.SessionsWithOpenAsks(ctx, pool, []string{child}); len(ids) != 1 {
 		t.Fatalf("a blocking ask is not open: %v", ids)
+	}
+}
+
+func TestParentStartWindowExpiryAndReservations(t *testing.T) {
+	pool := connect(t)
+	ctx := t.Context()
+	daemon := mustDaemon(t, pool)
+	parent := mustSession(t, pool, daemon, "owner-1")
+	now := time.Now().UTC().Truncate(time.Second)
+	since := now.Add(-time.Hour)
+	// The start exactly an hour ago has expired; three newer starts remain.
+	for i := range 4 {
+		id := mustSessionAs(t, pool, daemon, db.SessionOrigin{SpawningAccount: "owner-1", ParentSessionID: parent})
+		if _, err := pool.Exec(ctx, `UPDATE sessions SET started_at=$2,ended_at=$3,status='stopped' WHERE id=$1`, id, since.Add(time.Duration(i)*time.Minute), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, freeing, err := db.ParentStartWindow(ctx, pool, parent, since, "", 2)
+	// At a lowered cap of two, two entries must expire before another start fits.
+	want := since.Add(2 * time.Minute)
+	if err != nil || n != 3 || freeing == nil || !freeing.Equal(want) {
+		t.Fatalf("window: %d %v %v, want 3/%v", n, freeing, err, want)
+	}
+	req, _, err := db.InsertDelegationRequest(ctx, pool, db.DelegationRequest{ParentSessionID: parent, AccountID: "owner-1", DaemonID: daemon, IdempotencyKey: "self", RequestHash: "self", Request: json.RawMessage(`{}`), Offered: []string{"deny"}, ExpiresAt: now.Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, _, err := db.ParentStartWindow(ctx, pool, parent, since, "", 5); err != nil || n != 4 {
+		t.Fatalf("reservation: %d %v", n, err)
+	}
+	if n, _, err := db.ParentStartWindow(ctx, pool, parent, since, req.ID, 5); err != nil || n != 3 {
+		t.Fatalf("self exclusion: %d %v", n, err)
+	}
+	if n, freeing, err := db.ParentStartWindow(ctx, pool, parent, now.Add(time.Hour), "", 5); err != nil || n != 0 || freeing != nil {
+		t.Fatalf("expired: %d %v %v", n, freeing, err)
 	}
 }

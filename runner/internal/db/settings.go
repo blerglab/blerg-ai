@@ -11,6 +11,11 @@ const (
 	SettingPodIdleTimeoutSeconds = "pod_idle_timeout_seconds"
 	SettingPodTTLSeconds         = "pod_ttl_seconds"
 	SettingMaxSessions           = "max_sessions"
+	// Owner-shell inactivity limits per runtime class, in seconds; 0 means until the session ends.
+	SettingShellDesktopDetachedSeconds = "shell_desktop_detached_seconds"
+	SettingShellDesktopIdleSeconds     = "shell_desktop_idle_seconds"
+	SettingShellClusterDetachedSeconds = "shell_cluster_detached_seconds"
+	SettingShellClusterIdleSeconds     = "shell_cluster_idle_seconds"
 )
 
 // GetSettings returns every stored override, keyed by setting name.

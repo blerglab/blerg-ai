@@ -25,7 +25,15 @@
 //	GET    {prefix}/sessions/{id}/artifacts/{aid}/download -> GET /api/runner/sessions/{id}/artifacts/{aid}/download
 //	DELETE {prefix}/sessions/{id}/artifacts/{aid}      -> DELETE /api/runner/sessions/{id}/artifacts/{aid}
 //	POST   {prefix}/sessions/{id}/uploads              -> POST   /api/runner/sessions/{id}/uploads  (raw bytes, X-Artifact-Name)
+//	POST   {prefix}/sessions/{id}/storage              -> POST   /api/runner/sessions/{id}/storage  (an administrator raises the attachment total)
 //	GET    {prefix}/preferences                        -> GET    /api/runner/preferences?account=<Options.Account>
+//
+// The file routes (the list, delete, uploads, storage) carry the person Options.Acting names in
+// X-Blerg-Acting-Account (and X-Blerg-Acting-Admin: 1 as a hint the runner does not trust: it
+// checks the account and its role with core). A runner reached
+// with its shared key or a service token decides who may delete a file or raise the session's
+// storage for that person, and attributes an upload to them; without Acting, the runner acts for
+// nobody and refuses those changes. Name only a person Authorize has already let change the session.
 //
 // The last is the person's display preferences (today their code colours), read for the person signed in to the app:
 // Options.Account names them. It runs Authorize with an empty session id, and without an Account it
@@ -92,6 +100,9 @@ type Options struct {
 	// (the blerg-core account id), for GET {prefix}/preferences. Nil, or an
 	// empty answer: the route answers {} without calling the runner.
 	Account func(r *http.Request) string
+	// Acting names the person a file change is for (the blerg-core account id) and whether they
+	// are an administrator. Nil, or an empty account: no person is named.
+	Acting func(r *http.Request) (account string, admin bool)
 }
 
 // Mount registers the proxy contract under prefix (e.g. "/blerg") on mux.
@@ -110,7 +121,7 @@ func MountWith(mux *http.ServeMux, prefix string, client RunnerClient, opts Opti
 	if prefix != "" && !strings.HasPrefix(prefix, "/") {
 		panic("chatproxy: prefix must start with /")
 	}
-	p := &proxy{client: client, authorize: opts.Authorize, resolve: opts.Resolve, messageSource: opts.MessageSource, account: opts.Account}
+	p := &proxy{client: client, authorize: opts.Authorize, resolve: opts.Resolve, messageSource: opts.MessageSource, account: opts.Account, acting: opts.Acting}
 	base := prefix + "/sessions/{id}"
 
 	mux.HandleFunc("GET "+base, p.session)
@@ -125,6 +136,7 @@ func MountWith(mux *http.ServeMux, prefix string, client RunnerClient, opts Opti
 	mux.HandleFunc("GET "+base+"/artifacts/{aid}/download", p.artifactDownload)
 	mux.HandleFunc("DELETE "+base+"/artifacts/{aid}", p.artifactDelete)
 	mux.HandleFunc("POST "+base+"/uploads", p.uploads)
+	mux.HandleFunc("POST "+base+"/storage", p.storage)
 	mux.HandleFunc("GET "+prefix+"/preferences", p.preferences)
 }
 
@@ -166,6 +178,7 @@ type proxy struct {
 	client        RunnerClient
 	authorize     Authorize
 	account       func(r *http.Request) string
+	acting        func(r *http.Request) (string, bool)
 }
 
 // gate runs Authorize for the request's session and reports whether the
@@ -412,7 +425,33 @@ func (p *proxy) artifacts(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	p.forward(w, r, http.MethodGet, runnerPath(id, "/artifacts", nil), nil, nil)
+	p.forward(w, r, http.MethodGet, runnerPath(id, "/artifacts", nil), nil, p.actingHeaders(r, nil))
+}
+
+// actingHeaders adds the person Options.Acting names to headers (a new map when nil).
+func (p *proxy) actingHeaders(r *http.Request, headers map[string]string) map[string]string {
+	if headers == nil {
+		headers = map[string]string{}
+	}
+	if p.acting == nil {
+		return headers
+	}
+	if account, admin := p.acting(r); account != "" {
+		headers["X-Blerg-Acting-Account"] = account
+		if admin {
+			headers["X-Blerg-Acting-Admin"] = "1"
+		}
+	}
+	return headers
+}
+
+// storage asks the runner to raise the session's attachment total, for an administrator.
+func (p *proxy) storage(w http.ResponseWriter, r *http.Request) {
+	id, ok := p.gate(w, r)
+	if !ok {
+		return
+	}
+	p.forward(w, r, http.MethodPost, runnerPath(id, "/storage", nil), nil, p.actingHeaders(r, nil))
 }
 
 func (p *proxy) artifactRaw(w http.ResponseWriter, r *http.Request) {
@@ -448,7 +487,7 @@ func (p *proxy) artifactDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	p.forward(w, r, http.MethodDelete, runnerPath(id, "/artifacts/"+url.PathEscape(aid), nil), nil, nil)
+	p.forward(w, r, http.MethodDelete, runnerPath(id, "/artifacts/"+url.PathEscape(aid), nil), nil, p.actingHeaders(r, nil))
 }
 
 // uploads streams the browser's raw bytes to the runner with the file's
@@ -471,7 +510,7 @@ func (p *proxy) uploads(w http.ResponseWriter, r *http.Request) {
 	if r.ContentLength > 0 {
 		headers["Content-Length"] = strconv.FormatInt(r.ContentLength, 10)
 	}
-	p.forward(w, r, http.MethodPost, runnerPath(id, "/uploads", nil), r.Body, headers)
+	p.forward(w, r, http.MethodPost, runnerPath(id, "/uploads", nil), r.Body, p.actingHeaders(r, headers))
 }
 
 // ContentLength reads a "Content-Length" header value the proxy passed to a

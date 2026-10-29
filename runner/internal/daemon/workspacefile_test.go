@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -40,14 +41,44 @@ func TestWorkspaceFileReadAndClassification(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspaceLink(t, "docs/README.md", filepath.Join(root, "alias.md"))
-	if got = readWorkspaceFile(root, "alias.md", workspaceFileLimits{}); !got.OK {
-		t.Fatalf("safe internal link: %+v", got)
+	if got = readWorkspaceFile(root, "alias.md", workspaceFileLimits{}); got.OK || got.ErrorCode != "forbidden" {
+		t.Fatalf("internal symlink was followed: %+v", got)
 	}
 	workspaceLink(t, filepath.Join(root, "docs/README.md"), filepath.Join(root, "absolute-internal.md"))
-	if got = readWorkspaceFile(root, "absolute-internal.md", workspaceFileLimits{}); !got.OK {
-		t.Fatalf("safe absolute internal link: %+v", got)
+	if got = readWorkspaceFile(root, "absolute-internal.md", workspaceFileLimits{}); got.OK || got.ErrorCode != "forbidden" {
+		t.Fatalf("absolute internal symlink was followed: %+v", got)
 	}
 }
+
+// Direct chat references do not inherit explorer/search visibility: benign dot
+// folders and git-ignored output are readable, while protected names stay closed.
+func TestWorkspaceFileOpensBenignDotAndIgnoredFiles(t *testing.T) {
+	root := t.TempDir()
+	if out, err := exec.Command("git", "init", "--quiet", root).CombinedOutput(); err != nil {
+		t.Fatalf("initialize workspace repository: %v: %s", err, out)
+	}
+	workspaceFixture(t, root, ".gitignore", ".agent-notes/\nattachments/\n")
+	for _, name := range []string{".agent-notes/report.md", "attachments/report.md", ".notes/report.md"} {
+		workspaceFixture(t, root, name, "# Report\n")
+		got := readWorkspaceFile(root, name, workspaceFileLimits{})
+		body, err := base64.StdEncoding.DecodeString(got.ContentB64)
+		if !got.OK || got.Path != name || err != nil || string(body) != "# Report\n" {
+			t.Fatalf("benign file reference refused: %s: %+v %v", name, got, err)
+		}
+	}
+	ignored, err := exec.Command("git", "-C", root, "check-ignore", ".agent-notes/report.md", "attachments/report.md").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(ignored)) != ".agent-notes/report.md\nattachments/report.md" {
+		t.Fatalf("fixture files were not git-ignored: %v: %s", err, ignored)
+	}
+	for _, name := range []string{".env", ".ssh/report.md", ".git/config"} {
+		workspaceFixture(t, root, name, "protected")
+		got := readWorkspaceFile(root, name, workspaceFileLimits{})
+		if got.OK || got.ErrorCode != "forbidden" || !strings.Contains(got.Error, "hold secrets") || got.ContentB64 != "" {
+			t.Fatalf("protected file lacked a clear refusal: %+v", got)
+		}
+	}
+}
+
 func TestWorkspaceFileRejectsTraversal(t *testing.T) {
 	root := t.TempDir()
 	for _, path := range []string{"", ".", "..", "../outside", "a/../file", "/etc/passwd", "~/file", "~person/file", "a\\b", "a\x00b", "a\nb", "C:/file", "%2e%2e/file", "%252e%252e/file", "a/%2E%2E/file", "%2fetc/passwd", "%5cfile"} {
@@ -107,7 +138,8 @@ func TestWorkspaceFileRegularOnlyAndHardlinks(t *testing.T) {
 	if err := syscall.Mkfifo(filepath.Join(root, "pipe"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	listener, err := net.Listen("unix", filepath.Join(root, "socket"))
+	t.Chdir(root) // Keep the AF_UNIX bind pathname short in deep worktrees.
+	listener, err := net.Listen("unix", "socket")
 	if err != nil {
 		t.Fatal(err)
 	}

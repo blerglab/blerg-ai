@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react'
 import ChatView from './ChatView'
 import { QUEUED_IDLE_MS, QUEUED_LINGER_MS } from '../hooks/useSession'
 import { useTranscriptStore } from '../hooks/useTranscriptStore'
+import { useChatReportStore } from '../hooks/useLiveState'
 import { createFakeTransport } from '../test/fakeTransport'
 import { SESSION, ev as mk, meta, resetChatState, seed } from '../test/chat'
 import type { SessionMeta } from '../transport/types'
@@ -99,11 +100,11 @@ describe('ChatView queued messages and Esc', () => {
     expect(screen.getByTestId('queued-message').textContent).toContain('one more thing')
   })
 
-  it('Esc interrupts a running turn, and does nothing when idle', () => {
+  it('Esc never interrupts a running turn (the header Stop does), and does nothing when idle', () => {
     const t = createFakeTransport()
     const { unmount } = mount(t)
     fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' })
-    expect(t.interrupts).toBe(1)
+    expect(t.interrupts).toBe(0)
     unmount()
 
     const t2 = createFakeTransport()
@@ -112,10 +113,10 @@ describe('ChatView queued messages and Esc', () => {
     expect(t2.interrupts).toBe(0)
   })
 
-  it('tells you Enter sends and Esc interrupts while it works, and not when idle', () => {
+  it('tells you Enter sends while it works (no Esc hint), and not when idle', () => {
     const { unmount } = mount()
     expect(screen.getByTestId('composer-hint').textContent).toMatch(/Enter sends/)
-    expect(screen.getByTestId('composer-hint').textContent).toMatch(/Esc interrupts/)
+    expect(screen.getByTestId('composer-hint').textContent).not.toMatch(/Esc/)
     unmount()
     mount(createFakeTransport(), { ...base, status: 'idle' })
     expect(screen.queryByTestId('composer-hint')).toBeNull()
@@ -157,6 +158,24 @@ describe('ChatView queued messages and Esc', () => {
     // textarea first, then the Attach and Send buttons
     expect(box.compareDocumentPosition(attach) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(attach.compareDocumentPosition(send) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('keeps Stop out of the message box (it is in the host’s header): just Attach and Send, while working and idle', () => {
+    const t = createFakeTransport()
+    const { unmount } = mount(t)
+    expect(screen.queryByRole('button', { name: /^Stop/ })).toBeNull()
+    const actions = screen.getByRole('button', { name: 'Send' }).parentElement!
+    expect([...actions.querySelectorAll('button')].map(b => b.getAttribute('aria-label') ?? b.textContent)).toEqual(['Attach files', 'Send'])
+    // The host's Stop reads the chat's report.
+    expect(useChatReportStore.getState().reports[SESSION].busy).toBe(true)
+    // Send stays usable for a mid-turn message.
+    type('also this')
+    expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled()
+    unmount()
+
+    mount(createFakeTransport(), { ...base, status: 'idle' })
+    expect(screen.queryByRole('button', { name: /^Stop/ })).toBeNull()
+    expect(useChatReportStore.getState().reports[SESSION].busy).toBe(false)
   })
 
   it('puts the host’s own controls beside Send too', () => {
@@ -248,7 +267,7 @@ describe('ChatView queued messages and Esc', () => {
 
   it('keeps every toolbar button nameable and iconised so it can collapse to icons on a narrow screen', () => {
     const { container } = mount()
-    for (const name of [/Files/, 'Stop']) {
+    for (const name of [/Files/]) {
       const btn = screen.getByRole('button', { name })
       expect(btn.querySelector('.tb-icon')).not.toBeNull()
       expect(btn.querySelector('.tb-label')).not.toBeNull()

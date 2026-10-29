@@ -32,7 +32,7 @@ func TestCreateExchangeTokenClaims(t *testing.T) {
 	if p.OnBehalfOf != acct || p.Lineage != acct {
 		t.Errorf("on_behalf_of/lineage = %q/%q, want %q", p.OnBehalfOf, p.Lineage, acct)
 	}
-	if want := []string{"card.read", "card.write"}; len(p.Caps) != 2 || !p.Has(want[0]) || !p.Has(want[1]) || p.Has("column.write") {
+	if want := []string{"card.read", "card.write", "column.write"}; len(p.Caps) != 3 || !p.Has(want[0]) || !p.Has(want[1]) || !p.Has(want[2]) {
 		t.Errorf("caps = %v, want %v", p.Caps, want)
 	}
 	if d := time.Until(time.Unix(p.ExpiresAt, 0)); d < 9*time.Minute || d > 10*time.Minute+5*time.Second {
@@ -67,8 +67,8 @@ func TestCreateExchangeTokenCapsAreIntersectedWithRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(p.Caps) != 2 || p.Has("column.write") || p.Has("board.admin") || p.Has("gate.bypass") || p.Has("secrets.read") || p.Has("session.start") {
-		t.Errorf("admin exchange caps = %v, want exactly card.read/card.write", p.Caps)
+	if len(p.Caps) != 3 || !p.Has("column.write") || p.Has("board.admin") || p.Has("gate.bypass") || p.Has("secrets.read") || p.Has("session.start") {
+		t.Errorf("admin exchange caps = %v, want exactly card.read/card.write/column.write", p.Caps)
 	}
 
 	// A role that lacks a capability yields a token without it (the map is a package var).

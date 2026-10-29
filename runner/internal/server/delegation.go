@@ -18,7 +18,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/childlimits"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
 const (
@@ -29,8 +31,8 @@ const (
 	childrenChangedThrottle = 2 * time.Second
 	delegationMaxWait       = 25 * time.Second // long-poll cap, like maxAnswerHold
 
-	maxRunningChildrenPerParent  = 3
-	maxStartsPerParent           = 20
+	maxRunningChildrenPerParent  = childlimits.DefaultParallel
+	defaultMaxChildStartsPerHour = childlimits.DefaultStartsPerHour
 	maxRunningChildrenPerAccount = 6
 	maxStartsPerAccountPerHour   = 60
 
@@ -44,7 +46,7 @@ const (
 var _ = childrenChangedThrottle
 
 var delegationAllowedFields = map[string]bool{
-	"engine": true, "model": true, "effort": true, "repo": true, "no_repo": true,
+	"engine": true, "model": true, "effort": true, "repo": true, "repos": true, "all_repos": true, "no_repo": true,
 	"runtime": true, "title": true, "prompt": true, "keep_running": true, "boards": true,
 }
 
@@ -122,6 +124,7 @@ func (a *API) delegateParent(w http.ResponseWriter, r *http.Request, opts delega
 		writeError(w, http.StatusForbidden, msgDelegateNoOwner)
 		return nil, nil, false
 	}
+	*r = *r.WithContext(withDesktopViewer(r.Context(), a.desktopRecipient(r, derefOrEmpty(parent.SpawningAccountID))))
 	if isChildSession(parent) {
 		writeError(w, http.StatusForbidden, msgDelegateDepth)
 		return nil, nil, false
@@ -137,7 +140,7 @@ func (a *API) delegateParent(w http.ResponseWriter, r *http.Request, opts delega
 		writeError(w, http.StatusUnprocessableEntity, msgChildrenOnDaemon)
 		return nil, nil, false
 	}
-	dc := a.hub.GetHostDaemon(parent.DaemonID)
+	dc := a.hub.ownedHostDaemon(r.Context(), derefOrEmpty(parent.SpawningAccountID), parent.DaemonID)
 	if dc == nil {
 		if a.hub.GetDaemon(parent.DaemonID) != nil {
 			// Connected, but not a workstation (a cluster pod's own daemon).
@@ -265,6 +268,11 @@ func (a *API) delegateFor(ctx context.Context, parent *db.SessionRow, runtime, d
 
 // childStart is the allowlisted start (Task 4 parses it from the body; Task 5 from the stored row).
 type childStart struct {
+	Repos           []string                    `json:"repos,omitempty"`
+	AllRepos        bool                        `json:"all_repos,omitempty"`
+	WorkspaceLaunch string                      `json:"workspace_launch,omitempty"`
+	Workspace       *protocol.WorkspaceManifest `json:"-"`
+
 	// Set only by origin resolution; the child request allowlist rejects caller-supplied provider.
 	Provider    string `json:"provider,omitempty"`
 	Engine      string `json:"engine"`
@@ -307,9 +315,56 @@ func (a *API) startChildScoped(ctx context.Context, parent *db.SessionRow, cs ch
 	if apiErr := a.childBoardsProblem(ctx, parent, cs.Boards); apiErr != nil {
 		return StartResponse{}, apiErr
 	}
+	if a.dbPool != nil {
+		ws, err := db.GetSessionWorkspace(ctx, a.dbPool, parent.ID)
+		if err != nil {
+			return StartResponse{}, apiErrorf(409, "parent workspace unavailable")
+		}
+		if ws != nil && ws.Manifest != nil {
+			if ws.Manifest.Runtime == "cluster" {
+				if apiErr := selectClusterChild(&cs, *ws.Manifest); apiErr != nil {
+					return StartResponse{}, apiErr
+				}
+			}
+			if apiErr := selectWorkspaceChild(&cs, *ws.Manifest); apiErr != nil {
+				return StartResponse{}, apiErr
+			}
+		} else if len(cs.Repos) > 0 || cs.AllRepos {
+			return StartResponse{}, apiErrorf(422, "repository member selection requires a workspace parent")
+		}
+	}
 	req := childRunnerRequest(parent, cs, via)
 	req.IdemScope = scope
-	resp, apiErr := a.StartSession(ctx, a.delegateFor(ctx, parent, cs.Runtime, decidedSid), req, idemKey)
+	var resp StartResponse
+	var apiErr *APIError
+	var boundDesktop *DaemonConn
+	if cs.Workspace != nil && cs.Workspace.Runtime != "cluster" {
+		fenced := ctx
+		ws, err := db.GetSessionWorkspace(fenced, a.dbPool, parent.ID)
+		dc := a.hub.ownedHostDaemon(fenced, derefOrEmpty(parent.SpawningAccountID), parent.DaemonID)
+		if err != nil || ws == nil || ws.Manifest == nil || dc == nil || !dc.WorkspaceCapabilities.Supports(ws.Manifest.Runtime, false) {
+			return StartResponse{}, apiErrorf(409, "workspace runtime unavailable")
+		}
+		boundDesktop = dc
+		res, err := a.hub.requestWorkspaceDiscovery(fenced, cs.Workspace.OwnerID, dc, protocol.DiscoverWorkspace{Operation: "bind_child", ParentLaunchGeneration: ws.Manifest.LaunchGeneration, Manifest: cs.Workspace})
+		if err != nil || !res.OK {
+			return StartResponse{}, apiErrorf(409, "workspace runtime unavailable")
+		}
+	}
+	start := func(fenced context.Context) error {
+		if boundDesktop != nil && a.hub.ownedHostDaemon(fenced, cs.Workspace.OwnerID, parent.DaemonID) != boundDesktop {
+			return errDiscoveryUnavailable
+		}
+		resp, apiErr = a.StartSession(fenced, a.delegateFor(fenced, parent, cs.Runtime, decidedSid), req, idemKey)
+		return nil
+	}
+	if cs.Workspace != nil && cs.Workspace.Runtime != "cluster" {
+		if err := db.WithDesktopFence(ctx, a.dbPool, parent.DaemonID, start); err != nil {
+			apiErr = apiErrorf(409, "workspace selection changed or runtime unavailable")
+		}
+	} else if err := start(ctx); err != nil {
+		apiErr = apiErrorf(409, "workspace runtime unavailable")
+	}
 	if apiErr == nil && len(cs.Boards) > 0 {
 		a.seedChildBoards(context.WithoutCancel(ctx), parent, resp.SessionID, cs.Boards)
 	}

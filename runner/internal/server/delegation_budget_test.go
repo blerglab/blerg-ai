@@ -30,6 +30,7 @@ func TestBudgetFromTheParentsDaemonOnly(t *testing.T) {
 	fx.dc.SetUsageLimits(protocol.UsageLimits{Provider: "codex", Windows: []protocol.UsageWindow{
 		{ID: "capped", UsedPercent: 100, ResetsAt: reset}}})
 	other := registerDaemon(t, fx.api, fx.hub, "00000000-0000-4000-8000-0000000000d2", "desktop", "app")
+	fixtureOwnDesktop(t, fx.pool, other, "owner-1")
 	other.SetAvailableEngines([]string{"claude"})
 	other.SetUsageLimits(protocol.UsageLimits{Provider: "claude", Windows: []protocol.UsageWindow{{ID: "5h", UsedPercent: 5}}})
 
@@ -240,5 +241,45 @@ func TestHelloWithoutLocalEnginesLeavesLocalFalse(t *testing.T) {
 	fx.dc.SetLocalEngines(hello.LocalEngines)
 	if fx.dc.LocalEngine("hermes") || fx.dc.LocalEngine("openclaw") {
 		t.Fatal("a hello without local_engines left an engine local")
+	}
+}
+
+func TestBudgetExpiresWindowsWithoutAnotherReport(t *testing.T) {
+	now := time.Date(2030, time.October, 15, 15, 0, 0, 0, time.UTC)
+	dc := &DaemonConn{}
+	for _, provider := range []string{"claude", "codex"} {
+		dc.SetUsageLimits(protocol.UsageLimits{Provider: provider, Windows: []protocol.UsageWindow{
+			{ID: "5h", UsedPercent: 100, ResetsAt: now},
+			{ID: "7d", UsedPercent: 35, ResetsAt: now.Add(time.Hour)},
+			{ID: "capped", UsedPercent: 100, ResetsAt: now},
+		}})
+		before := budgetEngineFor(dc, provider, now.Add(-time.Second))
+		if len(before.Windows) != 3 || before.CappedUntil == nil {
+			t.Fatalf("before: %+v", before)
+		}
+		after := budgetEngineFor(dc, provider, now)
+		if len(after.Windows) != 1 || after.Windows[0].ID != "7d" || after.CappedUntil != nil {
+			t.Errorf("%s expired windows still shown at limit: %+v", provider, after)
+		}
+	}
+}
+
+func TestClusterBudgetExpiresWindowsWithoutAnotherReport(t *testing.T) {
+	now := time.Date(2030, time.October, 15, 15, 0, 0, 0, time.UTC)
+	dc := &DaemonConn{}
+	for _, provider := range []string{"claude", "codex"} {
+		dc.SetUsageLimits(protocol.UsageLimits{Provider: provider, Windows: []protocol.UsageWindow{
+			{ID: "5h", UsedPercent: 100, ResetsAt: now},
+			{ID: "7d", UsedPercent: 35, ResetsAt: now.Add(time.Hour)},
+		}})
+	}
+	got := budgetForCluster(dc, []string{"claude", "codex"}, true, nil, now)
+	for _, b := range got.Engines {
+		if b.Engine != "claude" && b.Engine != "codex" {
+			continue
+		}
+		if len(b.Windows) != 1 || b.Windows[0].ID != "7d" {
+			t.Errorf("%s expired cluster budget window retained: %+v", b.Engine, b)
+		}
 	}
 }

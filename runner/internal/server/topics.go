@@ -231,7 +231,10 @@ func topicsETag(through int64, files int, newest time.Time, status string, ended
 // URL names (a session the runner cloned for), else the origin its daemon reports for its folder
 // while that daemon is connected. ok=false when neither names a registered provider's repository;
 // nothing is guessed from the name alone.
-func (a *API) sessionRepo(row *db.SessionRow) (gitprovider.Ref, bool) {
+func (a *API) sessionRepo(ctx context.Context, viewer string, row *db.SessionRow) (gitprovider.Ref, bool) {
+	if !a.hub.desktopSessionVisible(ctx, viewer, row) || (derefOrEmpty(row.Runtime) != "cluster" && !ownsSession(viewer, row)) {
+		return gitprovider.Ref{}, false
+	}
 	if row.GitURL != nil && *row.GitURL != "" {
 		if ref, ok := gitprovider.Default.ParseRemoteURL(*row.GitURL); ok {
 			return ref, true
@@ -240,7 +243,7 @@ func (a *API) sessionRepo(row *db.SessionRow) (gitprovider.Ref, bool) {
 	if row.Repo == "" || a.hub == nil {
 		return gitprovider.Ref{}, false
 	}
-	dc := a.hub.GetDaemon(row.DaemonID)
+	dc := a.hub.ownedHostDaemon(ctx, viewer, row.DaemonID)
 	if dc == nil {
 		return gitprovider.Ref{}, false
 	}
@@ -259,6 +262,17 @@ func (a *API) sessionRepo(row *db.SessionRow) (gitprovider.Ref, bool) {
 // see the session; an agent token is refused and a private session of someone else's answers the
 // uniform 404. The ETag is three cheap reads, so an unchanged reel answers 304 without building it.
 func (a *API) HandleGetTopics(w http.ResponseWriter, r *http.Request) {
+	err := a.sessionReadFence(r.Context(), r.PathValue("id"), func(ctx context.Context) error {
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Second))
+		a.snapshotHandleGetTopics(w, r.WithContext(ctx))
+		return nil
+	})
+	if err != nil {
+		writeError(w, 409, "session source changed; refresh")
+	}
+}
+
+func (a *API) snapshotHandleGetTopics(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.authBrowser(w, r)
 	if !ok {
 		return
@@ -288,10 +302,10 @@ func (a *API) HandleGetTopics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	showTokens := ownsSession(p.Sub, row) || p.Has(insightsAdminCap)
-	repo, haveRepo := a.sessionRepo(row)
-	repoKey := ""
+	repo, haveRepo := a.sessionRepo(ctx, p.Sub, row)
+	repoKey := p.Sub + ":"
 	if haveRepo {
-		repoKey = repo.Key()
+		repoKey += repo.Key()
 	}
 	through, err := db.MaxAgentEventSeq(ctx, a.dbPool, sid)
 	if err != nil {

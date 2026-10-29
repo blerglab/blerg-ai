@@ -27,6 +27,20 @@ Hint: if a preview would help the user, publish a pdf, html or markdown version 
 Claude Code session reads point at it, so the agent picks a format you can read without
 downloading. The link opens the session with that file in the viewer.
 
+## Opening files the agent names
+
+A file reference in chat, such as `.agent-notes/report.md` or
+`attachments/report.md`, opens from the live session's folder for its owner.
+Benign dot folders and git-ignored files can be opened directly. Protected
+filenames and folders that commonly hold secrets stay blocked with an explanation.
+
+Upgrade-era desktops in shared-credential compatibility mode retain access for
+people with historical sessions on that desktop. Enrolling the desktop preserves
+the owner's access. If access is refused, use **Settings → Account → Your desktops
+→ Enroll**, or ask an administrator to assign the desktop to you. Another person's
+session files require that session's owner to open or publish the file for you;
+a private session remains invisible to other people.
+
 ## Inline in the chat
 
 An image (up to 10 MiB) is drawn in its card, and a video or audio file gets a play tile; the
@@ -150,9 +164,9 @@ The first publish of a name prints no version note.
 - 100 MiB per file (`BLERG_RUNNER_MAX_FILE_MB`). A larger file is refused before it is sent: the
   command checks it against the limit the runner reports, and says both sizes. It checks the
   session's 1 GiB total below the same way.
-- 50 files per session, every version counting as a file. A 51st is refused. The agent frees a slot
-  itself with `blerg-runner unpublish <name>` (`blerg-runner files` lists what it published); a file
-  you attached is yours to delete, from the Files panel.
+- There is no lifetime file-count cap. The agent frees published space with
+  `blerg-runner unpublish <name>` (`blerg-runner files` lists what it published); a file
+  you attached is removed from the Files panel by you, the session owner or an administrator.
 - 1 GiB in total for the files one session published (`BLERG_RUNNER_MAX_SESSION_ARTIFACTS_MB`).
   With the attachments below, one session can hold about 1.5 GiB, so size the runner's data volume
   for the sessions you keep, and on a shared machine or cluster node give it a disk quota (see
@@ -170,8 +184,14 @@ The first publish of a name prints no version note.
 
 The same people who can see the session. A session anyone on the install can see shows its files
 to everyone; a **private** session's files are visible to its owner alone, and everyone else gets
-the same "not found" an unknown file gets. Only a signed-in person can open, download or delete a
-file: an agent token cannot. Publishing uses the session's own messaging token, and that token
+the same "not found" an unknown file gets. The browser routes let a signed-in person open or
+download visible files. The session owner or an administrator may delete any file; a person may
+delete the attachments they attached. The runner contract applies the same visibility and deletion
+rules to credentials acting for an account; a broker credential (the shared runner key the board
+uses, or a service token) decides for the person it names in `X-Blerg-Acting-Account`, after
+the runner checks with core that the account exists, is active and can see the session (its real
+role decides administrator status); it deletes nothing when it names no valid person or core
+cannot be reached. Each deletion is recorded with who made it and how. Publishing uses the session's own messaging token, and that token
 only works for that one session.
 
 ## How a page is shown safely
@@ -226,16 +246,46 @@ an atomic append) or its MCP tool `blerg_card_link`.
 ## Uploading files to a session
 
 The other direction works too: you can attach files (for example two PDFs to analyze) to a message
-from the chat box, and the session's agent fetches them into its working folder.
+from the chat box, and the session's agent fetches them into a private folder outside repositories.
 
 - **Attach** with the paperclip next to the message box, by dragging files onto the chat, or by
   pasting them. Each file uploads immediately and shows as a chip under the box with its size and a
-  remove button; removing a chip deletes the upload. Send is disabled while an upload is running.
+  remove button; removing a completed chip deletes the upload. Send is disabled while an upload is
+  running; files waiting for space do not hold it: Send sends your message without them and they
+  stay waiting.
 - **Limits:** 100 MiB per file (larger ones are refused in the browser, which says the limit), 10
-  files per message, and per session at most 100 uploaded files and 500 MiB in total
-  (`BLERG_RUNNER_MAX_SESSION_UPLOADS_MB`). These are separate from the agent's own 50 files and
-  1 GiB; uploading is refused once the session has ended. A runner older than 0.2.1 does not report
+  files per message, and 500 MiB of attachments per session. The per-session total and the most
+  an administrator may raise one session to (5000 MiB) are administrator settings in Core
+  (**Settings → Session storage**); `BLERG_RUNNER_MAX_SESSION_UPLOADS_MB` is the initial
+  per-session value until one is saved. There is no lifetime attachment-count cap.
+  The agent’s published files have a separate 1 GiB quota; uploading is refused once the session has ended. A runner older than 0.2.1 does not report
   its limits, and the chat then assumes its old 25 MiB.
+- **Waiting for space:** an attachment that would exceed the session’s attachment total stays
+  queued with “Waiting for space,” and one note under the chips says the session’s attachments are
+  full and that you can delete older attachments to make room. (When the runner cannot be reached
+  to check, the chip says “Waiting to reach the server” instead.) Uploads to one session go one at
+  a time, so files chosen together that only fit one by one wait rather than fail. Its bytes and
+  unsent completed chips are saved locally in IndexedDB under the current account and runner, so
+  reloading or switching sessions (even mid-upload) keeps the queue without exposing it to another
+  account using the same browser. A waiting file belongs to the browser tab it was chosen in:
+  only that tab uploads it, and another tab on the same session shows it as “Waiting in another
+  tab” (or “Attached in another tab”) without sending it. When that tab is closed, the next tab
+  takes the file over; reloading a tab keeps its files. The saved bytes are removed when the sign-in ends, when the session is discarded, when it
+  ends (the waiting file then fails), and after seven days without the session being opened. If
+  saving to browser storage fails, the chat tells you to keep the page open. Removing a waiting
+  chip cancels it.
+- **Free up space…** on a waiting chip or in the session panel’s Files list opens the same
+  cleanup dialog. It lists all file versions oldest first with their sizes; when files are waiting,
+  it preselects the oldest attachments whose sizes cover the shortfall. Published files count
+  against a different quota and are not preselected for attachment space. Only files you may
+  delete can be chosen (your own attachments, or every file for the owner or an administrator).
+  Published files retain their removed marker in History. Each attachment can also be deleted on
+  its own from the session panel’s **Files** tab, where Delete shows only on files you may delete.
+  Waiting uploads resume after a deletion, on refocus, on reconnecting, or on the next five-second
+  space check. A single file over the per-file limit still fails immediately.
+- **Increase storage:** an administrator sees **Increase storage** under waiting files; each click
+  raises this session’s attachment total by 500 MiB, up to the install maximum, and is recorded
+  with who made it. Anyone else is told to ask an admin to increase this session’s storage.
 - **When an upload or a download fails**, the chat shows what the runner said: which step failed
   and why (for example that its disk is full, or that it may not write to its data folder) and what
   to do, followed by a short error id. Whoever runs Blerg finds the same id in the runner's log. Name handling and the content type
@@ -251,7 +301,7 @@ from the chat box, and the session's agent fetches them into its working folder.
   attached files." The chat shows the files as chips on your message. It works while the session is
   running too: the message is queued like any other.
 - **How the agent gets them:** `blerg-runner fetch --all` downloads every attachment into
-  `./attachments/` (or `--out DIR`), never overwriting an existing file. Same-name files are named
+  `$BLERG_RUNNER_ATTACHMENTS_DIR/` outside repositories (or an explicit `--out DIR`), never overwriting an existing file. Same-name files are named
   by upload time: the oldest keeps `name.ext`, later ones are `name-1.ext`, then `name-2.ext`,
   whichever order they are fetched in. Each `Saved` line names the attachment ID next to the local
   file, and a skipped file reads `Already have <id> at <path>`. `fetch --list` lists IDs and where
@@ -392,3 +442,41 @@ The pod image installs the same `blerg-runner` command on its `PATH` (the pod's 
 `blerg-runner-pod`), and each cluster session is started with its own `BLERG_RUNNER_SESSION_TOKEN`,
 as a desktop session is. Sessions started before the image and server carrying this feature have
 no token and cannot publish; start a new one. The token lasts 24 hours.
+
+### Raw source in file viewers
+
+Textual previews offer **Raw** in the viewer header and **Rendered** to return.
+This includes Markdown, Mermaid, Vega-Lite, HTML, CSV, JSON and diffs, for both
+published files and workspace files. Each open tab retains its choice while
+switching tabs. Binary media keep their existing viewer controls.
+Source highlighting follows **Code colors**, including Go modules/checksums,
+Dockerfile names (`Dockerfile`, `Dockerfile.*`, `*.dockerfile`) and Makefile
+names (`Makefile`, `GNUmakefile`, `*.mk`). Unknown languages remain plain text;
+large sources keep the existing bounded highlighting behavior.
+
+### Private attachment storage
+
+The daemon sets `BLERG_RUNNER_ATTACHMENTS_DIR` for each session. On the host it is
+`~/.blerg-runner-daemon/sessions/<session-id>/attachments/` (or under the configured
+daemon state directory). Sandbox and cluster sessions use their private home state
+under `/home/agent/`, outside `/workspace`. Isolated cluster pods mount a separate
+ephemeral volume there, initialized for the agent with mode 0700; sandbox pods use
+a private writable temporary mount. The attachment folder is mode 0700; the CLI prints
+absolute file paths. Review replies are stored in its `.reviews/` child. For in-flight
+reviews, the CLI still reads the old repository's `attachments/.reviews/` as a fallback.
+
+`fetch --out DIR` remains available. A destination inside a Git worktree is added to
+that repository's `.git/info/exclude`, idempotently, and the CLI reports the exclude.
+It never edits a tracked `.gitignore`. Existing repository `attachments/` folders are
+never moved or deleted automatically.
+
+Ending or discarding a session removes its private downloads and review state. On
+startup/reconnect and every minute, the host daemon checks the next batch of at
+most 128 session directories, and asks the server about attachment folders at
+least 24 hours old. Only ended, discarded or
+unknown sessions are eligible; locally running sessions and paths through symlinks
+are retained. The scan advances past retained folders and starts another pass at
+the end, retrying folders skipped earlier. A daemon restart starts a new pass.
+A missing or failed server reply retains the files. Cleanup stays
+inside the daemon's sessions root and never targets an explicit `--out` folder.
+A resumed session can fetch the attachments again.

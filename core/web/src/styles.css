@@ -671,3 +671,37 @@ textarea:focus {
 .shell-footer a.build-update:hover {
   text-decoration: underline;
 }
+
+.marketplace-policy-list { list-style: none; padding: 0; margin: 1rem 0; }
+.marketplace-policy-list li { display: flex; align-items: center; gap: .8rem; padding: .8rem 0; border-bottom: 1px solid var(--line); }
+.marketplace-policy-source { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.marketplace-policy-source small { display: block; font-family: inherit; opacity: .7; }
+.marketplace-policy-list .settings-toggle-control { flex-shrink: 0; }
+
+/* ── your desktops (settings, #193) ───────────────────────────────────────── */
+
+.desktop-toolbar { margin-bottom: 14px; }
+.desktop-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr)); gap: 14px; }
+.desktop-card { min-width: 0; }
+.desktop-card .card-head { flex-wrap: wrap; }
+.desktop-name { overflow-wrap: anywhere; min-width: 0; }
+.desktop-meta { overflow-wrap: anywhere; }
+.desktop-confirm { margin-top: 12px; padding: 12px; border: 1px solid var(--stone); border-radius: 8px; min-width: 0; }
+.desktop-confirm-title { margin: 0 0 6px; font-size: var(--text-sm); color: var(--chalk); }
+.desktop-details { display: grid; grid-template-columns: minmax(0, 22ch) minmax(0, 1fr); gap: 6px 14px; margin: 0 0 12px; font-size: var(--text-sm); }
+.desktop-details dt { color: var(--fog-dim); }
+.desktop-details dd { margin: 0; color: var(--chalk); overflow-wrap: anywhere; }
+.desktop-assign { display: inline-grid; min-width: 12rem; }
+.desktop-codes { list-style: none; padding: 0; margin: 14px 0 0; display: flex; flex-direction: column; gap: 6px; }
+.desktop-codes li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.desktop-add { margin: 0 0 14px; }
+.desktop-add .token-curl { margin-bottom: 12px; }
+.btn-danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--stone)); }
+.btn-danger:hover { border-color: var(--danger); }
+
+@media (max-width: 480px) {
+  .desktop-details { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .desktop-details dd { margin-bottom: 8px; }
+  .desktop-assign { min-width: 0; width: 100%; }
+}
+.desktop-list + .group { margin-top: 26px; }

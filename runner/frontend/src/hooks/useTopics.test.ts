@@ -4,6 +4,9 @@ import { useTranscriptStore, type AgentEvent } from '@blerglab/chat'
 import { MIN_GAP_MS, useTopics } from './useTopics'
 import type { TopicsReply } from '../lib/topics'
 
+vi.mock('../ws', () => import('../test/wsMock'))
+import { emit } from '../test/wsMock'
+
 vi.mock('../apiFetch', () => ({ apiFetch: vi.fn() }))
 import { apiFetch } from '../apiFetch'
 const fetchMock = vi.mocked(apiFetch)
@@ -40,6 +43,26 @@ afterEach(() => {
 })
 
 describe('useTopics', () => {
+  it('refreshes when a question closes without an answer, including while History is hidden', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(json(reply())))
+    const { rerender } = renderHook(({ on }) => useTopics('s1', on, ''), { initialProps: { on: true } })
+    await flush()
+    const closed = (session_id: string) => act(() => emit({ type: 'message_answered', message: { id: 'ask1', session_id, kind: 'ask', status: 'answered', answer: '', body: 'Question', created_at: '2026-10-24T10:00:00Z' } }))
+    closed('other')
+    await wait(MIN_GAP_MS)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    closed('s1')
+    await flush()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    rerender({ on: false })
+    closed('s1')
+    await wait(MIN_GAP_MS)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    rerender({ on: true })
+    await flush()
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
   it('reads nothing while History is not on screen', async () => {
     renderHook(() => useTopics('s1', false, ''))
     ingest('topic')
@@ -51,13 +74,13 @@ describe('useTopics', () => {
     fetchMock.mockResolvedValueOnce(json(reply({ through_seq: 7 }), '"a"'))
     const { result, rerender } = renderHook(({ on }) => useTopics('s1', on, ''), { initialProps: { on: true } })
     await flush()
-    expect(fetchMock).toHaveBeenCalledWith(URL_OF, { headers: {} })
+    expect(fetchMock).toHaveBeenCalledWith(URL_OF, { headers: {}, signal: expect.any(AbortSignal) })
     expect(result.current).toEqual({ status: 'ready', reply: reply({ through_seq: 7 }) })
     fetchMock.mockResolvedValueOnce(res(304, ''))
     rerender({ on: false })
     rerender({ on: true })
     await wait(MIN_GAP_MS)
-    expect(fetchMock).toHaveBeenLastCalledWith(URL_OF, { headers: { 'If-None-Match': '"a"' } })
+    expect(fetchMock).toHaveBeenLastCalledWith(URL_OF, { headers: { 'If-None-Match': '"a"' }, signal: expect.any(AbortSignal) })
     expect(result.current).toEqual({ status: 'ready', reply: reply({ through_seq: 7 }) })
   })
 
@@ -164,7 +187,7 @@ describe('useTopics', () => {
     fetchMock.mockResolvedValueOnce(res(304, ''))
     rerender({ k: 'c' })
     await wait(MIN_GAP_MS)
-    expect(fetchMock).toHaveBeenLastCalledWith(URL_OF, { headers: { 'If-None-Match': '"a"' } })
+    expect(fetchMock).toHaveBeenLastCalledWith(URL_OF, { headers: { 'If-None-Match': '"a"' }, signal: expect.any(AbortSignal) })
     expect(result.current).toEqual({ status: 'ready', reply: reply({ through_seq: 3 }) })
   })
 
@@ -192,13 +215,13 @@ describe('useTopics', () => {
     expect(result.current).toEqual({ status: 'loading' })
     await flush()
     expect(fetchMock).toHaveBeenCalledTimes(3)
-    expect(fetchMock).toHaveBeenLastCalledWith('/api/sessions/s2/topics', { headers: {} })
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/sessions/s2/topics', { headers: {}, signal: expect.any(AbortSignal) })
     expect(result.current).toEqual({ status: 'ready', reply: reply({ session_id: 's2', through_seq: 9 }) })
     await act(async () => { resolveOld(json(reply({ through_seq: 4 }), '"old"')); await vi.advanceTimersByTimeAsync(0) })
     expect(result.current).toEqual({ status: 'ready', reply: reply({ session_id: 's2', through_seq: 9 }) })
     fetchMock.mockResolvedValueOnce(res(304, ''))
     rerender({ id: 's2', k: 'c' })
     await wait(MIN_GAP_MS)
-    expect(fetchMock).toHaveBeenLastCalledWith('/api/sessions/s2/topics', { headers: { 'If-None-Match': '"b"' } })
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/sessions/s2/topics', { headers: { 'If-None-Match': '"b"' }, signal: expect.any(AbortSignal) })
   })
 })

@@ -28,7 +28,7 @@ type ReadPluginCatalog struct {
 }
 
 // CatalogMarketplace is one marketplace the engine knows. Source is its GitHub owner/repo when it
-// has one (the only kind Blerg installs from), "" otherwise.
+// has one, codex:<name> for a native Codex marketplace, or "" for other local catalogs.
 type CatalogMarketplace struct {
 	Name        string `json:"name"`
 	Source      string `json:"source,omitempty"`
@@ -39,14 +39,16 @@ type CatalogMarketplace struct {
 // for this session's project (user scope, or project/local scope for this workspace), or the
 // session loaded it through Blerg. Enabled: it is switched on for this session.
 type CatalogPlugin struct {
-	Name        string `json:"name"`
-	Marketplace string `json:"marketplace"`
-	Description string `json:"description,omitempty"`
-	Version     string `json:"version,omitempty"`
-	Author      string `json:"author,omitempty"`
-	Category    string `json:"category,omitempty"`
-	Installed   bool   `json:"installed,omitempty"`
-	Enabled     bool   `json:"enabled,omitempty"`
+	Name          string `json:"name"`
+	Marketplace   string `json:"marketplace"`
+	Description   string `json:"description,omitempty"`
+	Version       string `json:"version,omitempty"`
+	Author        string `json:"author,omitempty"`
+	Category      string `json:"category,omitempty"`
+	Installed     bool   `json:"installed,omitempty"`
+	Enabled       bool   `json:"enabled,omitempty"`
+	Managed       bool   `json:"managed,omitempty"`
+	InstallReason string `json:"install_reason,omitempty"`
 }
 
 // PluginCatalogResult answers ReadPluginCatalog. ErrorCode: "unsupported" (not a host Claude Code
@@ -122,7 +124,7 @@ func CatalogText(s string, limit int) string {
 }
 
 // SanitizePluginCatalog keeps only well-formed entries within the bounds: marketplace names that
-// pass the grammar, sources that are GitHub owner/repo, plugin names that pass
+// pass the grammar, sources that are GitHub owner/repo or codex:name, plugin names that pass
 // pluginspec.ValidPluginName and belong to a listed marketplace, and bounded plain text. Duplicates
 // (marketplace + plugin) are dropped. It returns the clean lists and whether anything was cut.
 func SanitizePluginCatalog(markets []CatalogMarketplace, plugins []CatalogPlugin) ([]CatalogMarketplace, []CatalogPlugin, bool) {
@@ -139,7 +141,7 @@ func SanitizePluginCatalog(markets []CatalogMarketplace, plugins []CatalogPlugin
 			continue
 		}
 		src := m.Source
-		if src != "" && !pluginspec.ValidMarketplaceSource(src) {
+		if src != "" && !pluginspec.ValidSource(src) {
 			src = ""
 		}
 		known[m.Name] = true
@@ -164,7 +166,8 @@ func SanitizePluginCatalog(markets []CatalogMarketplace, plugins []CatalogPlugin
 			Version:     CatalogText(p.Version, CatalogMaxShort),
 			Author:      CatalogText(p.Author, CatalogMaxShort),
 			Category:    CatalogText(p.Category, CatalogMaxShort),
-			Installed:   p.Installed, Enabled: p.Enabled,
+			Installed:   p.Installed, Enabled: p.Enabled, Managed: p.Managed,
+			InstallReason: CatalogText(p.InstallReason, CatalogMaxDescription),
 		})
 	}
 	return outM, outP, cut

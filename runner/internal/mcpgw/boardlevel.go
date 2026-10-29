@@ -27,8 +27,8 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 )
 
-// boardReadTools are the tools level read allows: they only read. Every other tool of the fixed set
-// (boardToolNames) needs level full.
+// boardReadTools are the tools level read allows: they only read. Every other board tool (the fixed
+// set and column management) needs level full.
 var boardReadTools = map[string]bool{
 	"blerg_board_get": true, "blerg_board_list": true, "blerg_board_schema": true,
 	"blerg_column_list": true, "blerg_card_search": true, "blerg_card_get": true,
@@ -38,7 +38,7 @@ var boardReadTools = map[string]bool{
 // the fixed set, and "" for a tool outside it (never callable).
 func BoardToolLevel(tool string) string {
 	switch {
-	case !boardToolSet[tool]:
+	case !allBoardToolSet[tool]:
 		return ""
 	case boardReadTools[tool]:
 		return db.BoardLevelRead
@@ -65,11 +65,14 @@ func BoardLevelRefusal(board, level, tool string) string {
 		"in the session's Permissions (Boards), or propose a card with blerg_ticket_file / `blerg-runner ticket file`, which asks them.", level, board, tool, need)
 }
 
-// boardGrantLevel is the level a built-in board grant serves at now. A database error answers
-// propose: the call is refused rather than served at a level nobody could read.
-func (g *Gateway) boardGrantLevel(ctx context.Context, gr *db.MCPGrant) string {
+// boardGrantAccess is the level a built-in board grant serves at now (a database error answers
+// propose: the call is refused rather than served at a level nobody could read) and the person's sign-in
+// behind it, if any: the current permission row's (a level the person set in Permissions, read on
+// every call), or for an untouched launch board the launch's own when a person launched it. Column
+// management needs that person (nil for a cron, or a token launch nobody raised since).
+func (g *Gateway) boardGrantAccess(ctx context.Context, gr *db.MCPGrant) (string, *Proof) {
 	if gr.Builtin != BuiltinBoard || g.cfg.DB == nil {
-		return db.BoardLevelFull
+		return db.BoardLevelFull, nil
 	}
 	lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -77,11 +80,20 @@ func (g *Gateway) boardGrantLevel(ctx context.Context, gr *db.MCPGrant) string {
 	switch {
 	case err != nil:
 		log.Printf("mcpgw: board level: %v", err)
-		return db.BoardLevelPropose
+		return db.BoardLevelPropose, nil
 	case state == nil:
-		return db.BoardLevelFull
+		if gr.ProofKind == "session_id" {
+			p := ProofFromGrant(gr.AccountID, gr.ProofKind, gr.ProofValue)
+			return db.BoardLevelFull, &p
+		}
+		return db.BoardLevelFull, nil
 	}
-	return state.Level()
+	level := state.Level()
+	if state.Live && state.Grant.ProofSessionID != "" && state.Grant.AccountID == gr.AccountID {
+		p := Proof{AccountID: state.Grant.AccountID, SessionID: state.Grant.ProofSessionID}
+		return level, &p
+	}
+	return level, nil
 }
 
 // BoardCall is one board tool call the runner makes for a session's own board tools.
@@ -174,7 +186,10 @@ func (g *Gateway) CallBoard(ctx context.Context, c BoardCall) (json.RawMessage, 
 	if !g.BoardConfigured() {
 		return nil, errBoardNotConfigured
 	}
-	if !boardToolSet[c.Tool] || c.BoardID == "" || !c.Proof.Valid() || c.Proof.AccountID == "" {
+	if !allBoardToolSet[c.Tool] || c.BoardID == "" || !c.Proof.Valid() || c.Proof.AccountID == "" {
+		return nil, ErrBoardCallInvalid
+	}
+	if boardColumnToolSet[c.Tool] && !PersonBehind(c.Proof) {
 		return nil, ErrBoardCallInvalid
 	}
 	if c.ReadOnly && !boardReadTools[c.Tool] {

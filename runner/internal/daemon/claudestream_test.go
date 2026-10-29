@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
@@ -24,8 +25,16 @@ func newSteeringDriver(t *testing.T, extraEnv ...string) (*claudeCodeDriver, *co
 	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", em, env)
 	d.steer.legacy = false
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go d.Run(ctx)
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			t.Error("streaming driver did not stop")
+		}
+	})
+	go func() { d.Run(ctx); close(done) }()
 	return d, em, logPath
 }
 
@@ -600,4 +609,383 @@ func TestSteeringRecordsShownTextAndClientID(t *testing.T) {
 			t.Fatalf("user_message = %+v, want client id cl-7", p)
 		}
 	}
+}
+
+// A second interrupt can already be in stdin when the first interrupted turn ends. Its ACK
+// belongs to the following turn; the preceding result must not erase its interruption state.
+func TestSteeringInterruptAckAfterPreviousResult(t *testing.T) {
+	em := &collectEmitter{}
+	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", em, nil)
+	d.steer.legacy = false
+	p := &ccProc{gen: 1, sawInit: true, inTurn: true, writeCh: make(chan []byte, 8)}
+	d.steer.proc, d.steer.running = p, true
+	t.Cleanup(func() {
+		d.sm.Lock()
+		defer d.sm.Unlock()
+		d.stopTimerLocked(&d.steer.killTimer)
+		d.stopTimerLocked(&d.steer.settleTimer)
+		d.stopIdleTimerLocked()
+	})
+	ack := func(id string) {
+		d.onControlResponse(p, []byte(fmt.Sprintf(`{"type":"control_response","response":{"subtype":"success","request_id":%q}}`, id)))
+	}
+	d.Interrupt()
+	ack(p.interruptID)
+	d.Interrupt() // queued for the next CLI turn while its predecessor is finishing
+	second := p.interruptID
+	d.Interrupt() // a third request must not hide the second request's later ACK
+	third := p.interruptID
+	d.onLine(p, []byte(`{"type":"result","subtype":"error_during_execution","is_error":true}`))
+	d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+	ack(second)
+	d.onLine(p, []byte(`{"type":"result","subtype":"error_during_execution","is_error":true}`))
+	d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+	ack(third)
+	d.onLine(p, []byte(`{"type":"result","subtype":"error_during_execution","is_error":true}`))
+	if em.count("error") != 0 || em.count("turn_done:interrupted") != 3 {
+		t.Fatalf("all interrupted turns must be recognized: %v", em.outline())
+	}
+	// The acknowledgment is consumed: a later, unrelated CLI failure remains a failure.
+	d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+	d.onLine(p, []byte(`{"type":"result","subtype":"error_during_execution","is_error":true}`))
+	if em.count("error") != 1 {
+		t.Fatalf("unrelated failure hidden: %v", em.outline())
+	}
+}
+
+func TestSteeringOutstandingInterruptsAreBounded(t *testing.T) {
+	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", &collectEmitter{}, nil)
+	d.steer.legacy = false
+	p := &ccProc{inTurn: true, writeCh: make(chan []byte, ccMaxPending*2)}
+	d.steer.proc, d.steer.running = p, true
+	t.Cleanup(func() { d.sm.Lock(); defer d.sm.Unlock(); d.stopTimerLocked(&d.steer.killTimer) })
+	for range ccMaxPending * 2 {
+		d.Interrupt()
+	}
+	if len(p.interrupts) != ccMaxPending || len(p.writeCh) != ccMaxPending {
+		t.Fatalf("pending=%d sent=%d", len(p.interrupts), len(p.writeCh))
+	}
+}
+
+func TestSteeringInterruptAckBeforeInit(t *testing.T) {
+	em := &collectEmitter{}
+	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", em, nil)
+	d.steer.legacy = false
+	p := &ccProc{gen: 1, writeCh: make(chan []byte, 8)}
+	d.steer.proc, d.steer.running = p, true
+	d.steer.awaiting = []awaitMsg{{uuid: "pending"}}
+	t.Cleanup(func() {
+		d.sm.Lock()
+		defer d.sm.Unlock()
+		d.stopTimerLocked(&d.steer.killTimer)
+		d.stopTimerLocked(&d.steer.settleTimer)
+		d.stopIdleTimerLocked()
+	})
+	d.Interrupt()
+	d.onControlResponse(p, []byte(fmt.Sprintf(`{"type":"control_response","response":{"subtype":"success","request_id":%q}}`, p.interruptID)))
+	d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+	d.onLine(p, []byte(`{"type":"user","uuid":"pending","isReplay":true,"message":{"content":"queued work"}}`))
+	d.onLine(p, []byte(`{"type":"result","subtype":"error_during_execution","is_error":true}`))
+	if em.count("error") != 0 || em.count("turn_done:interrupted") != 1 {
+		t.Fatalf("early acknowledged interrupt became an engine error: %v", em.outline())
+	}
+}
+func TestSteeringFailedInterruptsDoNotDisableFutureStop(t *testing.T) {
+	em := &collectEmitter{}
+	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", em, nil)
+	d.steer.legacy = false
+	p := &ccProc{gen: 1, writeCh: make(chan []byte, 2)}
+	d.steer.proc = p
+	t.Cleanup(func() {
+		d.sm.Lock()
+		defer d.sm.Unlock()
+		d.stopTimerLocked(&d.steer.killTimer)
+		d.stopTimerLocked(&d.steer.settleTimer)
+		d.stopIdleTimerLocked()
+	})
+	for range ccMaxPending {
+		d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+		d.Interrupt()
+		<-p.writeCh
+		d.onControlResponse(p, []byte(fmt.Sprintf(`{"type":"control_response","response":{"subtype":"error","request_id":%q,"error":"turn already finished"}}`, p.interruptID)))
+		d.onLine(p, []byte(`{"type":"result","subtype":"success"}`))
+	}
+	d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+	d.Interrupt()
+	if len(p.writeCh) != 1 {
+		t.Fatal("completed error responses permanently disable Interrupt for this process")
+	}
+}
+
+// The same early ACK ordering also occurs between turns of an existing process.
+func TestSteeringInterruptAckBeforeNextInit(t *testing.T) {
+	d, p, em := newInterruptFixture(t)
+	d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+	d.onLine(p, []byte(`{"type":"result","subtype":"success"}`))
+	d.steer.awaiting = []awaitMsg{{uuid: "pending"}}
+	d.steer.running = true
+	d.Interrupt()
+	interruptReply(d, p, p.interruptID, "success")
+	d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+	d.onLine(p, []byte(`{"type":"user","uuid":"pending","isReplay":true,"message":{"content":"queued work"}}`))
+	d.onLine(p, []byte(`{"type":"result","subtype":"error_during_execution","is_error":true}`))
+	if em.count("error") != 0 || em.count("turn_done:interrupted") != 1 {
+		t.Fatalf("acknowledged next turn failed: %v", em.outline())
+	}
+}
+
+func TestSteeringInterruptAckBeforeInitArmsResultTimeout(t *testing.T) {
+	d, p, em := newInterruptFixture(t)
+	d.steer.running = true
+	d.steer.awaiting = []awaitMsg{{uuid: "pending"}}
+	d.Interrupt()
+	interruptReply(d, p, p.interruptID, "success")
+	d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+	d.sm.Lock()
+	timer := d.steer.killTimer
+	if timer != nil {
+		timer.Reset(0) // exercise the callback captured for the new turn sequence
+	}
+	d.sm.Unlock()
+	if timer == nil {
+		t.Fatal("early ACK did not arm the acknowledged-result timeout at init")
+	}
+	waitUntil(t, "the acknowledged turn timeout", func() bool { return em.count("turn_done:interrupted") == 1 })
+	d.sm.Lock()
+	killed := p.killedByDriver && p.dying
+	d.sm.Unlock()
+	if !killed || em.count("error") != 0 {
+		t.Fatalf("acknowledged turn was not stopped: %v", em.outline())
+	}
+}
+
+func TestSteeringIdleInterruptAckDoesNotHideNextError(t *testing.T) {
+	d, p, em := newInterruptFixture(t)
+	d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+	d.Interrupt()
+	id := p.interruptID
+	d.onLine(p, []byte(`{"type":"result","subtype":"success"}`))
+	interruptReply(d, p, id, "success") // no written message awaits init
+	d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+	d.onLine(p, []byte(`{"type":"result","subtype":"error_during_execution","is_error":true}`))
+	if em.count("error") != 1 || em.count("turn_done:interrupted") != 0 {
+		t.Fatalf("idle ACK hid an unrelated failure: %v", em.outline())
+	}
+}
+
+func TestSteeringAbandonedInterruptsExpire(t *testing.T) {
+	d, p, em := newInterruptFixture(t)
+	for range ccMaxPending {
+		d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+		d.Interrupt()
+		<-p.writeCh
+		d.onLine(p, []byte(`{"type":"result","subtype":"success"}`))
+	}
+	if len(p.interrupts) != ccMaxPending {
+		t.Fatalf("results discarded outstanding ACKs: %d", len(p.interrupts))
+	}
+	// Advance request ages without wall-clock sleeps. Keep one recent request to
+	// prove expiry does not evict an outstanding ACK that can still arrive.
+	recent := p.interruptID
+	expired := ""
+	for id := range p.interrupts {
+		if id != recent {
+			p.interrupts[id] = time.Now().Add(-time.Second)
+			expired = id
+		}
+	}
+	d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+	d.Interrupt()
+	if len(p.writeCh) != 1 || len(p.interrupts) != 2 {
+		t.Fatalf("abandoned requests disabled Stop: pending=%d sent=%d", len(p.interrupts), len(p.writeCh))
+	}
+	interruptReply(d, p, recent, "success")
+	d.onLine(p, []byte(`{"type":"result","subtype":"error_during_execution","is_error":true}`))
+	if em.count("error") != 0 || em.count("turn_done:interrupted") != 1 {
+		t.Fatalf("recent outstanding ACK was lost: %v", em.outline())
+	}
+	d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+	interruptReply(d, p, expired, "success")
+	d.onLine(p, []byte(`{"type":"result","subtype":"error_during_execution","is_error":true}`))
+	if em.count("error") != 1 {
+		t.Fatalf("expired ACK hid an unrelated failure: %v", em.outline())
+	}
+}
+
+func TestSteeringSaturatedInterruptsKeepKillFallback(t *testing.T) {
+	d, p, em := newInterruptFixture(t)
+	for range ccMaxPending {
+		d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+		d.Interrupt()
+		<-p.writeCh
+		d.onLine(p, []byte(`{"type":"result","subtype":"success"}`))
+	}
+	d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+	d.Interrupt()
+	if len(p.interrupts) != ccMaxPending || len(p.writeCh) != 0 {
+		t.Fatalf("saturation evicted outstanding requests: pending=%d sent=%d", len(p.interrupts), len(p.writeCh))
+	}
+	d.sm.Lock()
+	timer := d.steer.killTimer
+	if timer != nil {
+		timer.Reset(0)
+	}
+	d.sm.Unlock()
+	if timer == nil {
+		t.Fatal("saturated interrupt budget disabled the kill fallback")
+	}
+	waitUntil(t, "the saturated Stop fallback", func() bool { return em.count("turn_done:interrupted") == 1 })
+}
+
+// Stop must survive the written-to-running transition even without a success ACK.
+func TestSteeringInterruptBeforeInitKeepsKillFallback(t *testing.T) {
+	for _, reply := range []string{"unacknowledged", "rejected", "saturated", "expired-before-init"} {
+		t.Run(reply, func(t *testing.T) {
+			d, p, em := newInterruptFixture(t)
+			if reply == "saturated" {
+				p.interrupts = make(map[string]time.Time)
+				for i := range ccMaxPending {
+					p.interrupts[fmt.Sprint(i)] = time.Now().Add(time.Minute)
+				}
+			}
+			d.steer.running = true
+			d.steer.awaiting = []awaitMsg{{uuid: "pending"}}
+			d.Interrupt()
+			if reply == "rejected" {
+				interruptReply(d, p, p.interruptID, "error")
+			}
+			if reply == "saturated" && (len(p.interrupts) != ccMaxPending || len(p.writeCh) != 0) {
+				t.Fatal("full-capacity Stop must retain outstanding requests without sending another")
+			}
+			oldTurn := d.steer.turnSeq
+			if reply == "expired-before-init" {
+				d.interruptTimeout(p.gen, oldTurn)
+			}
+			d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+			// A callback already dispatched before init must remain fenced out.
+			d.interruptTimeout(p.gen, oldTurn)
+			d.sm.Lock()
+			staleKilled := p.killedByDriver
+			timer := d.steer.killTimer
+			if timer != nil {
+				timer.Reset(0) // run the actual fallback captured for the started turn
+			}
+			d.sm.Unlock()
+			if staleKilled || timer == nil {
+				t.Fatal("init must fence the old callback and retain a fallback for the started turn")
+			}
+			deadline := time.Now().Add(time.Second)
+			for em.count("turn_done:interrupted") == 0 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			d.sm.Lock()
+			killed := p.killedByDriver && p.dying
+			d.sm.Unlock()
+			if !killed || em.count("turn_done:interrupted") != 1 || em.count("error") != 0 {
+				t.Fatalf("pre-init %s Stop lost its fallback: %v", reply, em.outline())
+			}
+		})
+	}
+}
+
+func TestSteeringInterruptBeforeInitClearedWhenSettled(t *testing.T) {
+	for _, end := range []string{"result", "settlement"} {
+		t.Run(end, func(t *testing.T) {
+			d, p, em := newInterruptFixture(t)
+			// An existing process can have a written turn between results and init.
+			d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+			d.onLine(p, []byte(`{"type":"result","subtype":"success"}`))
+			d.steer.running = true
+			d.steer.awaiting = []awaitMsg{{uuid: "pending"}}
+			d.Interrupt()
+			oldTurn := d.steer.turnSeq
+			d.sm.Lock()
+			oldTimer := d.steer.killTimer
+			d.sm.Unlock()
+			// Expiry before init must not kill an idle process or discard Stop intent.
+			d.interruptTimeout(p.gen, oldTurn)
+			if p.killedByDriver {
+				t.Fatal("pre-init fallback killed a process with no active turn")
+			}
+			if end == "result" {
+				d.onLine(p, []byte(`{"type":"result","subtype":"success"}`))
+				d.steer.awaiting = nil
+			} else {
+				d.settleFired(p.gen, oldTurn)
+			}
+			d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+			d.interruptTimeout(p.gen, oldTurn)
+			d.sm.Lock()
+			killed, timer := p.killedByDriver, d.steer.killTimer
+			d.sm.Unlock()
+			if killed || (end == "result" && timer != nil) || (end == "settlement" && timer != oldTimer) {
+				t.Fatalf("settled Stop reached an unrelated turn: %v", em.outline())
+			}
+		})
+	}
+}
+
+func TestSteeringInterruptBeforeInitIgnoredByEngine(t *testing.T) {
+	shrink(t, &ccInterruptKillAfter, 200*time.Millisecond)
+	d, em, _ := newSteeringDriver(t, "FAKE_REPLAY_MS=100")
+	d.Enqueue("HANG forever", "chat")
+	waitUntil(t, "written pending turn", func() bool {
+		d.sm.Lock()
+		defer d.sm.Unlock()
+		return d.steer.running && len(d.steer.awaiting) > 0 && d.steer.proc != nil && !d.steer.proc.inTurn
+	})
+	d.sm.Lock()
+	p := d.steer.proc
+	d.sm.Unlock()
+	d.Interrupt()
+	waitUntil(t, "the uncooperative tool", func() bool { return em.count("tool_call") == 1 })
+	// Observe the natural timer; do not reset it or invoke its callback.
+	deadline := time.Now().Add(3 * ccInterruptKillAfter)
+	for em.count("turn_done:interrupted") == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	d.sm.Lock()
+	killed := p.killedByDriver
+	d.sm.Unlock()
+	if !killed || em.count("turn_done:interrupted") != 1 || em.count("error") != 0 {
+		t.Fatalf("engine ignored Stop and its pre-init fallback did not kill it: %v", em.outline())
+	}
+}
+
+func TestSteeringExpiredInterruptAckDoesNotHideNextError(t *testing.T) {
+	d, p, em := newInterruptFixture(t)
+	d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+	d.Interrupt()
+	id := p.interruptID
+	p.interrupts[id] = time.Now().Add(-time.Second)
+	d.onLine(p, []byte(`{"type":"result","subtype":"success"}`))
+	d.onLine(p, []byte(`{"type":"system","subtype":"init","session_id":"fixture"}`))
+	interruptReply(d, p, id, "success") // expired, but not yet pruned by another Interrupt
+	d.onLine(p, []byte(`{"type":"result","subtype":"error_during_execution","is_error":true}`))
+	if len(p.interrupts) != 0 || em.count("error") != 1 {
+		t.Fatalf("expired ACK hid an unrelated failure: %v", em.outline())
+	}
+}
+
+func newInterruptFixture(t *testing.T) (*claudeCodeDriver, *ccProc, *collectEmitter) {
+	t.Helper()
+	em := &collectEmitter{}
+	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", em, nil)
+	d.steer.legacy = false
+	// No child process is needed: timeout tests exercise the real cancellation path
+	// with an empty command, whose Process is nil.
+	p := &ccProc{gen: 1, cmd: &exec.Cmd{}, writeCh: make(chan []byte, ccMaxPending*2)}
+	d.steer.proc = p
+	t.Cleanup(func() {
+		d.sm.Lock()
+		defer d.sm.Unlock()
+		d.stopTimerLocked(&d.steer.killTimer)
+		d.stopTimerLocked(&d.steer.settleTimer)
+		d.stopIdleTimerLocked()
+	})
+	return d, p, em
+}
+
+func interruptReply(d *claudeCodeDriver, p *ccProc, id, subtype string) {
+	d.onControlResponse(p, []byte(fmt.Sprintf(`{"type":"control_response","response":{"subtype":%q,"request_id":%q}}`, subtype, id)))
 }

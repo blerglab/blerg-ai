@@ -1,3 +1,4 @@
+import { expectOnlyFileIcons } from '../test/assertFileIcons'
 import {afterEach,describe,expect,it,vi} from 'vitest'
 import {fireEvent,render,waitFor} from '@testing-library/react'
 import {cdp} from 'vitest/browser'
@@ -50,7 +51,8 @@ describe('attachment preview adversarial Chromium cases',()=>{
    expect(green).toBeGreaterThan(100);proof.width=0;proof.height=0
    expect(view.container.querySelectorAll('img')).toHaveLength(2)
    expect(view.container.querySelector('.attach-chip-excerpt')).toHaveTextContent('<img src=')
-   expect(view.container.querySelector('svg,iframe,script,a,style')).toBeNull()
+   expect(view.container.querySelector('iframe,script,a,style')).toBeNull()
+   expectOnlyFileIcons(view.container)
    await new Promise(resolve=>setTimeout(resolve,100));expect(requests).toEqual([])
    fireEvent.click(view.getByRole('button',{name:'Remove safe.png'}));expect(view.queryByRole('img',{name:'Preview of safe.png'})).toBeNull()
    fireEvent.click(view.getByRole('button',{name:'Send fixture'}));expect(view.queryAllByTestId('attach-chip')).toHaveLength(0)

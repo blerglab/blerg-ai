@@ -97,7 +97,15 @@ describe('Pins and hovercards, in Chromium', () => {
     // it, however slowly a loaded machine runs the slide.
     await railReady()
     // The hovercard's clock is the test's: the delay is decided by it, not by the machine's load.
-    await userEvent.hover(chip)
+    await expect.poll(() => chip.closest('.hc-anchor, [data-hc-anchor]')).not.toBeNull()
+    // A drawer can settle before React has committed its hover binding. Reenter
+    // with real input until the cold-open timer registers; the delay assertions
+    // below remain exact and use only the manual clock.
+    await expect.poll(async () => {
+      await userEvent.unhover(chip)
+      await userEvent.hover(chip)
+      return clock.pending()
+    }).toBeGreaterThan(0)
     clock.advance(HOVERCARD.openDelayMs - 1)
     await frame()
     expect(hovercard()).toBeNull()

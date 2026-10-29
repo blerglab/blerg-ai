@@ -15,6 +15,7 @@ import (
 
 // SessionRow is the result of listing sessions (includes joined daemon name).
 type SessionRow struct {
+	WorkspaceKind      string
 	ID                 string
 	DaemonID           string
 	DaemonName         string
@@ -160,11 +161,21 @@ func UpsertDaemon(ctx context.Context, conn *pgxpool.Pool, id, name, mode, repos
 	return err
 }
 
+// FinishDaemonDisconnect finishes session recovery without replacing a newer
+// refusal or its actionable reason. Callers retain the connection authority fence.
+func FinishDaemonDisconnect(ctx context.Context, conn *pgxpool.Pool, id string) error {
+	_, err := conn.Exec(ctx, `UPDATE daemons SET status='disconnected',
+ status_reason='Desktop disconnected; check the daemon service and reconnect.',last_seen_at=now()
+ WHERE id=$1 AND status<>'refused'`, id)
+	return err
+}
+
 // SetDaemonStatus updates the status and last_seen_at timestamp for a daemon.
 func SetDaemonStatus(ctx context.Context, conn *pgxpool.Pool, id, status string) error {
 	tag, err := conn.Exec(ctx, `
 		UPDATE daemons
 		   SET status       = $2,
+ status_reason=CASE WHEN $2='connected' THEN '' ELSE 'Desktop disconnected; check the daemon service and reconnect.' END,
 		       last_seen_at = now()
 		 WHERE id = $1
 	`, id, status)
@@ -182,7 +193,8 @@ func GetDaemonByName(ctx context.Context, conn *pgxpool.Pool, name string) (*Dae
 	row := conn.QueryRow(ctx, `
 		SELECT id, name, mode, repos_root, status
 		  FROM daemons
-		 WHERE name = $1
+		 WHERE name = $1 AND desktop_owner_id IS NULL
+ ORDER BY created_at,id LIMIT 1
 	`, name)
 	var d DaemonRow
 	err := row.Scan(&d.ID, &d.Name, &d.Mode, &d.ReposRoot, &d.Status)
@@ -202,7 +214,7 @@ func GetDaemonByName(ctx context.Context, conn *pgxpool.Pool, name string) (*Dae
 func GetSession(ctx context.Context, conn *pgxpool.Pool, sessionID string) (*SessionRow, error) {
 	row := conn.QueryRow(ctx, `
 		SELECT id, daemon_id, status, project_path, repo, title, model, NULLIF(engine, ''), effort, started_at, ended_at, unread, starred, spawning_account_id, runtime, skip_permissions, error_reason, token_id, callback_url, callback_secret, git_url, auto_stop, kind, end_reason, ended_by_kind, ended_by_account, private, cron_id::text, started_by_kind, started_by_name, interaction, background_tasks, COALESCE(paused_reason, ''), parent_session_id::text, board_id::text, COALESCE(delegation_via, ''), keep_running
-		       , delegation_ended_at, archived_at, restrict_tools, discard_requested_at FROM sessions
+		       , delegation_ended_at, archived_at, restrict_tools, discard_requested_at, workspace_kind FROM sessions
 		 WHERE id = $1
 	`, sessionID)
 	var r SessionRow
@@ -211,7 +223,7 @@ func GetSession(ctx context.Context, conn *pgxpool.Pool, sessionID string) (*Ses
 		&r.Runtime, &r.SkipPermissions, &r.ErrorReason,
 		&r.TokenID, &r.CallbackURL, &r.CallbackSecret, &r.GitURL, &r.AutoStop, &r.Kind,
 		&r.EndReason, &r.EndedByKind, &r.EndedByAccount, &r.Private, &r.CronID, &r.StartedByKind, &r.StartedByName, &r.Interaction, &r.BackgroundTasks, &r.PausedReason,
-		&r.ParentSessionID, &r.BoardID, &r.DelegationVia, &r.KeepRunning, &r.DelegationEndedAt, &r.ArchivedAt, &r.RestrictTools, &r.DiscardRequestedAt)
+		&r.ParentSessionID, &r.BoardID, &r.DelegationVia, &r.KeepRunning, &r.DelegationEndedAt, &r.ArchivedAt, &r.RestrictTools, &r.DiscardRequestedAt, &r.WorkspaceKind)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -521,8 +533,8 @@ func DeleteSession(ctx context.Context, conn *pgxpool.Pool, id string) error {
 // session_started for the same ID is a harmless no-op.
 func CreateAssistSession(ctx context.Context, conn *pgxpool.Pool, sessionID, daemonID, boardID string, ticketID *string, repo, title string) error {
 	_, err := conn.Exec(ctx, `
-		INSERT INTO sessions (id, daemon_id, status, project_path, repo, title, board_id, ticket_id, assist)
-		VALUES ($1, $2, 'starting', '', $3, NULLIF($4, ''), $5, $6, true)
+		INSERT INTO sessions (id, daemon_id, status, project_path, repo, title, board_id, ticket_id, assist, kind)
+		VALUES ($1, $2, 'starting', '', $3, NULLIF($4, ''), $5, $6, true, 'tmux')
 		ON CONFLICT (id) DO NOTHING
 	`, sessionID, daemonID, repo, title, boardID, ticketID)
 	return err
@@ -600,7 +612,7 @@ func ListSessions(ctx context.Context, conn *pgxpool.Pool) ([]SessionRow, error)
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
 		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
-		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at
+		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at, s.workspace_kind
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 ORDER BY s.started_at DESC
@@ -618,7 +630,7 @@ func ListSessionsByStatus(ctx context.Context, conn *pgxpool.Pool, status string
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
 		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
-		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at
+		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at, s.workspace_kind
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 WHERE s.status = $1
@@ -739,11 +751,12 @@ func SessionAwaitsDaemon(ctx context.Context, conn *pgxpool.Pool, sessionID stri
 // while the replacement pod boots, and without this the reconciler would keep
 // measuring the resume-expiry and missing-Job windows from the moment the
 // session was lost — and could expire a session that is coming back right now.
+// The old pod failure stays in stage history, but its banner clears on resume.
 func TouchSessionStatusChanged(ctx context.Context, conn *pgxpool.Pool, sessionID string) error {
 	if conn == nil {
 		return nil
 	}
-	_, err := conn.Exec(ctx, `UPDATE sessions SET status_changed_at = now() WHERE id = $1`, sessionID)
+	_, err := conn.Exec(ctx, `UPDATE sessions SET status_changed_at = now(), error_reason = NULL WHERE id = $1`, sessionID)
 	return err
 }
 
@@ -777,7 +790,7 @@ func FinishLostDaemonSession(ctx context.Context, conn *pgxpool.Pool, sessionID,
 		   AND daemon_lost_at < $3
 		   AND status = 'error'
            AND NOT EXISTS (SELECT 1 FROM session_limit_resume lr WHERE lr.session_id=sessions.id
-             AND lr.enabled AND (lr.state IN ('pending','awaiting_host') OR (lr.state='dispatched' AND lr.dispatched_at>now()-interval '2 minutes'))
+             AND lr.enabled AND (lr.state IN ('pending','unknown') OR (lr.state='dispatched' AND lr.dispatched_at>now()-interval '2 minutes'))
              AND lr.expires_at>now() AND lr.attempts<=3 AND lr.turn_id<>lr.cancelled_turn_id)
 		RETURNING 1
 	`, sessionID, reason, cutoff).Scan(&updated)
@@ -835,7 +848,7 @@ func FinishClusterSession(ctx context.Context, conn *pgxpool.Pool, sessionID, st
 		   AND status IN ('starting', 'running', 'disconnected')
 
            AND NOT EXISTS (SELECT 1 FROM session_limit_resume lr WHERE lr.session_id=sessions.id
-             AND lr.enabled AND (lr.state IN ('pending','awaiting_host') OR (lr.state='dispatched' AND lr.dispatched_at>now()-interval '2 minutes'))
+             AND lr.enabled AND (lr.state IN ('pending','unknown') OR (lr.state='dispatched' AND lr.dispatched_at>now()-interval '2 minutes'))
              AND lr.expires_at>now() AND lr.attempts<=3 AND lr.turn_id<>lr.cancelled_turn_id)
 		   AND ($4::timestamptz IS NULL
 		        OR coalesce(status_changed_at, started_at) < $4::timestamptz)
@@ -858,7 +871,7 @@ func ListSessionsByDaemon(ctx context.Context, conn *pgxpool.Pool, daemonID stri
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
 		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
-		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at
+		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at, s.workspace_kind
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 WHERE s.daemon_id = $1
@@ -887,7 +900,7 @@ func ListSessionsByDaemonMode(ctx context.Context, conn *pgxpool.Pool, mode stri
 		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
 		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
 		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
-		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at
+		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at, s.workspace_kind
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 WHERE d.mode = $1
@@ -910,7 +923,7 @@ func scanSessionRows(rows pgx.Rows) ([]SessionRow, error) {
 			&r.Runtime, &r.SkipPermissions, &r.ErrorReason, &r.Kind,
 			&r.EndReason, &r.EndedByKind, &r.EndedByAccount, &r.SpawningAccountID, &r.Private, &r.CronID,
 			&r.StartedByKind, &r.StartedByName, &r.Interaction, &r.BackgroundTasks, &r.PausedReason,
-			&r.ParentSessionID, &r.BoardID, &r.DelegationVia, &r.KeepRunning, &r.ArchivedAt,
+			&r.ParentSessionID, &r.BoardID, &r.DelegationVia, &r.KeepRunning, &r.ArchivedAt, &r.WorkspaceKind,
 		); err != nil {
 			return nil, err
 		}
@@ -1867,15 +1880,6 @@ type AgentMemoryRow struct {
 	UpdatedAt time.Time
 }
 
-// AgentRuleRow is one row from agent_rules.
-type AgentRuleRow struct {
-	ID        string
-	Project   string
-	Content   string
-	Enabled   bool
-	CreatedAt time.Time
-}
-
 // UpsertAgentMemory writes a memory (upsert by project+name).
 func UpsertAgentMemory(ctx context.Context, conn *pgxpool.Pool, project, name, kind, content string, embedding []float32) error {
 	_, err := conn.Exec(ctx, `
@@ -1914,56 +1918,6 @@ func ListAgentMemories(ctx context.Context, conn *pgxpool.Pool, project string) 
 		out = append(out, r)
 	}
 	return out, rows.Err()
-}
-
-// InsertAgentRule adds a rule; enabled=false until a human approves.
-func InsertAgentRule(ctx context.Context, conn *pgxpool.Pool, project, content string) (string, error) {
-	var id string
-	err := conn.QueryRow(ctx, `
-		INSERT INTO agent_rules (project, content) VALUES ($1, $2) RETURNING id
-	`, project, content).Scan(&id)
-	return id, err
-}
-
-// ListAgentRules returns a project's rules, optionally only enabled ones.
-func ListAgentRules(ctx context.Context, conn *pgxpool.Pool, project string, enabledOnly bool) ([]AgentRuleRow, error) {
-	q := `SELECT id, project, content, enabled, created_at FROM agent_rules WHERE project = $1`
-	if enabledOnly {
-		q += ` AND enabled`
-	}
-	q += ` ORDER BY created_at`
-	rows, err := conn.Query(ctx, q, project)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []AgentRuleRow
-	for rows.Next() {
-		var r AgentRuleRow
-		if err := rows.Scan(&r.ID, &r.Project, &r.Content, &r.Enabled, &r.CreatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
-}
-
-// SetAgentRuleEnabled flips a rule's enabled flag (human approval action).
-func SetAgentRuleEnabled(ctx context.Context, conn *pgxpool.Pool, id string, enabled bool) error {
-	tag, err := conn.Exec(ctx, `UPDATE agent_rules SET enabled = $2 WHERE id = $1`, id, enabled)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("not found: %w", pgx.ErrNoRows)
-	}
-	return nil
-}
-
-// DeleteAgentRule removes a rule.
-func DeleteAgentRule(ctx context.Context, conn *pgxpool.Pool, id string) error {
-	_, err := conn.Exec(ctx, `DELETE FROM agent_rules WHERE id = $1`, id)
-	return err
 }
 
 // ─── runner_idempotency (agent contract v1) ──────────────────────────────────
@@ -2127,4 +2081,18 @@ func UndeliveredQuestionAnswers(ctx context.Context, conn *pgxpool.Pool, session
 		return nil, err
 	}
 	return scanMessageRows(rows)
+}
+
+// RecordClusterPodFailure explains a stopped pod without ending its resumable
+// session. Disconnected sessions keep their expiry clock; a running session
+// transitions to disconnected if socket-loss notification was missed. A resume/reconnect overtaking the poll
+// invalidates the observation. Repeated polls do not append duplicate stages.
+func RecordClusterPodFailure(ctx context.Context, conn *pgxpool.Pool, row ReconcileSessionRow, reason string) (bool, error) {
+	tag, err := conn.Exec(ctx, `UPDATE sessions SET error_reason=$2,
+ status=CASE WHEN status='running' THEN 'disconnected' ELSE status END,
+ status_changed_at=CASE WHEN status='running' THEN now() ELSE status_changed_at END
+ WHERE id=$1 AND runtime='cluster' AND status=$3
+ AND greatest(started_at, coalesce(status_changed_at, started_at))=$4
+ AND error_reason IS DISTINCT FROM $2`, row.ID, reason, row.Status, row.LastChange)
+	return tag.RowsAffected() > 0, err
 }

@@ -60,3 +60,27 @@ func TestAllowlist(t *testing.T) {
 		t.Fatal("* allows any VALID source only")
 	}
 }
+
+func TestCodexNativeMarketplacePolicy(t *testing.T) {
+	e := Entry{Marketplace: "codex:openai-curated", Plugin: "selected"}
+	if ValidateCodex(e) != nil {
+		t.Fatal("native Codex marketplace rejected")
+	}
+	if ValidateClaude(e) == nil {
+		t.Fatal("Claude accepted Codex marketplace")
+	}
+	allow, dropped := ParseAllowlist("codex:openai-curated")
+	if len(dropped) != 0 || !allow.Allows(e.Marketplace) || allow.Allows("codex:other") {
+		t.Fatal("native allow-list mismatch")
+	}
+	def, _ := ParseAllowlist("")
+	if !def.Allows(e.Marketplace) || !def.Allows("codex:openai-curated-remote") {
+		t.Fatal("official Codex marketplace missing from defaults")
+	}
+	star, _ := ParseAllowlist("*")
+	for _, source := range []string{"codex:", "codex:../escape", "codex:-flag", "codex:UPPER", "codex:x/y", "codex:https://host", "codex:x@other"} {
+		if star.Allows(source) || ValidateCodex(Entry{Marketplace: source, Plugin: "selected"}) == nil {
+			t.Fatalf("unsafe source accepted: %q", source)
+		}
+	}
+}

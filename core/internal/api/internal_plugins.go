@@ -79,7 +79,7 @@ func (d Deps) handleInternalPluginCatalog(w http.ResponseWriter, r *http.Request
 		writePluginError(w, err)
 		return
 	}
-	d.writePluginList(w, body.Engine, entries)
+	d.writePluginList(w, r, body.Engine, entries)
 }
 
 // Policy contains no account settings or credentials, so the authenticated
@@ -98,7 +98,7 @@ func (d Deps) handleInternalPluginPolicy(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "unknown engine", http.StatusBadRequest)
 		return
 	}
-	d.writePluginList(w, body.Engine, []plugins.Entry{})
+	d.writePluginList(w, r, body.Engine, []plugins.Entry{})
 }
 
 // Add is intentionally narrower than Settings PUT: an internal caller must name
@@ -130,5 +130,5 @@ func (d Deps) handleInternalPluginAdd(w http.ResponseWriter, r *http.Request) {
 		writePluginError(w, err)
 		return
 	}
-	d.writePluginList(w, body.Engine, list)
+	d.writePluginList(w, r, body.Engine, list)
 }

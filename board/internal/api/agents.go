@@ -95,6 +95,8 @@ var boardOperations = []agentsmanifest.Operation{
 	{Name: "move_column", Method: "POST", Path: "/api/columns/{id}/move", Cap: capColumnWrite,
 		Summary: "Reposition a column among its board's siblings."},
 
+	{Name: "list_cards", Method: "GET", Path: "/api/boards/{id}/cards", Cap: capCardRead, Idempotent: true,
+		Summary: "List all matching cards; unpaged lists have no default limit. Supports the same filters as search, explicit limits and optional cursor paging."},
 	{Name: "search_cards", Method: "GET", Path: "/api/boards/{id}/cards/search", Cap: capCardRead, Idempotent: true,
 		Summary: "Search a board's cards by text and filters. Always search before filing: the admission gate denies duplicates."},
 	{Name: "create_card", Method: "POST", Path: "/api/boards/{id}/cards", Cap: capCardWrite,

@@ -1,3 +1,4 @@
+import '../../../../packages/settings/settings.css'
 // McpPicker: choose which of the person's MCP connections a session may use, and for each
 // tool whether it is off, queued for approval, or allowed (spec 6.2, 6.3).
 //
@@ -221,7 +222,7 @@ export default function McpPicker({ value, onChange, requireExplicit = false, co
           <div style={{ ...muted, color: 'var(--danger)' }}>
             Connection {id} no longer exists (it was deleted, or is not yours), so its tools cannot be used.
           </div>
-          <button type="button" style={button} onClick={() => removeOrphan(id)} aria-label={`Remove missing connection ${id}`}>Remove</button>
+          <button className="settings-action" type="button" style={button} onClick={() => removeOrphan(id)} aria-label={`Remove missing connection ${id}`}>Remove</button>
         </div>
       ))}
       {conns.map(c => {
@@ -236,8 +237,8 @@ export default function McpPicker({ value, onChange, requireExplicit = false, co
         const acting = st?.status === 'ready' ? st.tools.filter(t => !isReadOnlyTool(t)).length : 0
         return (
           <div key={c.id} data-testid={`mcp-conn-${c.name}`} style={{ ...box, opacity: usable ? 1 : 0.6 }}>
-            <label style={{ display: 'flex', gap: 8, alignItems: 'center', cursor: usable || chosen ? 'pointer' : 'not-allowed' }}>
-              <input
+            <label className="settings-field" style={{ display: 'flex', gap: 8, alignItems: 'center', cursor: usable || chosen ? 'pointer' : 'not-allowed' }}>
+              <input className="settings-toggle-control"
                 type="checkbox"
                 checked={chosen}
                 disabled={!usable && !chosen}
@@ -251,7 +252,7 @@ export default function McpPicker({ value, onChange, requireExplicit = false, co
             {on && st?.status === 'error' && (
               <div data-testid={`mcp-tools-error-${c.name}`} style={{ ...muted, color: 'var(--danger)' }}>
                 Could not load tools: {st.message}{' '}
-                <button type="button" style={button} onClick={() => loadTools(c.id)}>Retry</button>
+                <button className="settings-action" type="button" style={button} onClick={() => loadTools(c.id)}>Retry</button>
               </div>
             )}
             {on && st?.status === 'ready' && (
@@ -260,7 +261,7 @@ export default function McpPicker({ value, onChange, requireExplicit = false, co
                 {!requireExplicit && st.tools.length > 0 && (
                   <div data-testid={`mcp-presets-${c.name}`} style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
                     {(['allow_all', 'approval', 'none'] as McpPreset[]).map(p => (
-                      <button
+                      <button className="settings-action"
                         key={p}
                         type="button"
                         data-testid={`mcp-preset-${c.name}-${p}`}
@@ -272,7 +273,7 @@ export default function McpPicker({ value, onChange, requireExplicit = false, co
                       </button>
                     ))}
                     {preset === 'custom' && <span data-testid={`mcp-preset-${c.name}-custom`} style={{ ...muted, fontWeight: 700 }}>Custom</span>}
-                    <button
+                    <button className="settings-action"
                       type="button"
                       data-testid={`mcp-customize-${c.name}`}
                       aria-expanded={showList}
@@ -301,12 +302,12 @@ export default function McpPicker({ value, onChange, requireExplicit = false, co
                           <span style={{ color: 'var(--chalk)', fontFamily: 'monospace', fontSize: 13 }}>{escapeHidden(t.name).text}</span>
                           {!isPlainName(t.name) && <span style={{ ...muted, color: 'var(--danger)', fontSize: 11 }}>name has unusual characters</span>}
                           {ro && <span style={{ ...muted, border: '1px solid var(--stone)', borderRadius: 4, padding: '0 4px', fontSize: 11 }}>read-only (claimed by the server)</span>}
-                          <select
+                          <select className="settings-field"
                             aria-label={`${c.name} ${t.name} mode`}
                             value={mode}
                             disabled={!!t.unsafe}
                             onChange={e => setMode(c.id, t.name, e.target.value as McpToolMode)}
-                            style={{ marginLeft: 'auto' }}
+                            style={{ marginLeft: 'auto', width: 'auto' }}
                           >
                             <option value="off">off</option>
                             <option value="propose" title={MCP_PROPOSE_LABEL}>propose ({MCP_PROPOSE_LABEL})</option>

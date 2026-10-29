@@ -26,14 +26,15 @@ const MERMAID_REFUSED: Array<[RegExp, string]> = [
 
 /** Color styling a diagram may set (classDef, style, linkStyle), and the values they may take:
  *  colors, numbers, lengths and keywords; no functions, quotes, escapes, slashes or "!important". */
-const MERMAID_STYLE_PROPS = new Set(['fill', 'stroke', 'color', 'stroke-width', 'stroke-dasharray', 'font-weight', 'font-style', 'opacity'])
+const MERMAID_STYLE_PROPS = new Set(['fill', 'stroke', 'color', 'stroke-width', 'stroke-dasharray', 'font-weight', 'font-style', 'opacity', 'radius'])
 const MERMAID_STYLE_VALUE = /^[#a-z0-9.% -]{1,64}$/i
 
 /** The keys an `A@{ … }` shape (or `e1@{ … }` edge) block may set, each with a literal value: a
- *  plain word or number, or a double-quoted label without escapes or braces. Never img, icon or
+ *  plain word or number, or a double-quoted label without escapes or braces. Kanban may also
+ *  assign a task and its priority. Never img, icon or
  *  any other key that loads something; never a quoted key. */
-const MERMAID_SHAPE_KEYS = new Set(['shape', 'label', 'w', 'h', 'pos', 'constraint', 'animate', 'animation', 'curve'])
-const MERMAID_SHAPE_ENTRY = /^ *([a-z]+) *: *("[^"\\{}\n]*"|[\w.%-]+) *(,|$)/i
+const MERMAID_SHAPE_KEYS = new Set(['shape', 'label', 'w', 'h', 'pos', 'constraint', 'animate', 'animation', 'curve', 'assigned', 'priority'])
+const MERMAID_SHAPE_ENTRY = /^\s*([a-z]+) *: *("[^"\\{}\n]*"|[\w.%-]+) *(,|\n|$)/i
 
 /** Why a diagram is refused: "line 12: url() not allowed". */
 export class DiagramRefused extends Error {}
@@ -86,12 +87,18 @@ export function validateMermaid(raw: string): string {
     if (hit) refuse(lineOf(hit.index), what)
   }
   checkShapes(checked, lineOf)
-  // Styling: every declaration on a classDef, style or linkStyle statement, whatever the
-  // diagram type, split on both , and ; (state diagrams split their styles on ;).
+  // Flowcharts terminate style statements at semicolons. Other grammars (notably state)
+  // consume the rest of the CSS line, including text that looks like another statement.
+  // Only flowcharts may stop at an inline class assignment; never leave a CSS tail unchecked.
+  // flow.jison uses CLASS SPACE idString SPACE idString: both operands can contain Unicode,
+  // commas, and punctuation. Recognize the two operands here; let Mermaid parse their tokens.
+  const diagram = checked.split('\n').slice(body).find(line => line.trim()) ?? ''
+  const styleStatement = /^ *(?:flowchart|graph)\b/i.test(diagram)
+    ? /(?:^|;) *(classDef|style|linkStyle)\b(.*?)(?=; *(?:classDef|style|linkStyle)\b|; *class +[^ ;]+ +[^ ;]+ *(?:;|$)|$)/g
+    : /(?:^|;) *(classDef|style|linkStyle)\b(.*)$/g
   checked.split('\n').forEach((line, i) => {
     if (i < body) return
-    const m = /(?:^|;) *(classDef|style|linkStyle)\b(.*)$/.exec(line)
-    if (m) checkStyle(m[1], m[2], i + 1)
+    for (const m of line.matchAll(styleStatement)) checkStyle(m[1], m[2], i + 1)
   })
   return source
 }
@@ -102,7 +109,7 @@ function checkShapes(checked: string, lineOf: (index: number) => number) {
     const end = checked.indexOf('}', start)
     const line = lineOf(open.index)
     if (end < 0) refuse(line, 'an unclosed @{…} block')
-    let rest = checked.slice(start, end).replace(/\n/g, ' ').trim()
+    let rest = checked.slice(start, end).trim()
     while (rest) {
       const entry = MERMAID_SHAPE_ENTRY.exec(rest)
       if (!entry) refuse(line, `this @{…} block ("${rest.slice(0, 40)}")`)
@@ -189,9 +196,11 @@ export function sanitizeSvg(source: string): string {
   const doc = new DOMParser().parseFromString(source, 'image/svg+xml')
   if (doc.querySelector('parsererror') || doc.documentElement.localName !== 'svg') throw new Error('Invalid SVG')
   for (const el of [doc.documentElement, ...doc.documentElement.querySelectorAll('*')]) {
-    if (el.namespaceURI !== SVG_NS || !SVG_TAGS.has(el.localName)) throw new Error('Unsupported SVG element')
+    if (el.namespaceURI !== SVG_NS || !SVG_TAGS.has(el.localName)) throw new Error(`Unsupported SVG element: ${el.localName}`)
     for (const attr of el.attributes) {
-      if (/^on/i.test(attr.name) || attr.localName === 'href' || (attr.namespaceURI && attr.namespaceURI !== 'http://www.w3.org/2000/xmlns/') || (!attr.name.startsWith('xmlns') && !safeStyle(attr.value))) throw new Error('Unsupported SVG attribute')
+      const xmlSpace = attr.namespaceURI === 'http://www.w3.org/XML/1998/namespace'
+        && attr.localName === 'space' && /^(preserve|default)$/.test(attr.value)
+      if (/^on/i.test(attr.name) || attr.localName === 'href' || (attr.namespaceURI && attr.namespaceURI !== 'http://www.w3.org/2000/xmlns/' && !xmlSpace) || (!attr.name.startsWith('xmlns') && !safeStyle(attr.value))) throw new Error(`Unsupported SVG attribute: ${attr.name}`)
     }
     if (el.localName === 'style' && !safeStyle(el.textContent ?? '')) throw new Error('Unsupported SVG styles')
   }

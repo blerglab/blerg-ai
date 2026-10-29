@@ -321,7 +321,7 @@ func (a *API) handleCreateColumn(w http.ResponseWriter, r *http.Request, p auth.
 		writeError(w, http.StatusBadRequest, "name required")
 		return
 	}
-	col, err := db.CreateColumn(r.Context(), a.Pool, boardID, req.Name, req.IsTerminal)
+	col, err := db.CreateColumn(r.Context(), a.Pool, boardID, req.Name, req.IsTerminal, ColumnAudit(WithRunnerSession(r.Context(), r.Header.Get(RunnerSessionHeader)), p))
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -347,7 +347,7 @@ func (a *API) handleRenameColumn(w http.ResponseWriter, r *http.Request, p auth.
 		writeError(w, http.StatusBadRequest, "name required")
 		return
 	}
-	if err := db.RenameColumn(r.Context(), a.Pool, col.ID, req.Name); err != nil {
+	if err := db.RenameColumn(r.Context(), a.Pool, col.ID, req.Name, ColumnAudit(WithRunnerSession(r.Context(), r.Header.Get(RunnerSessionHeader)), p)); err != nil {
 		writeDBError(w, err)
 		return
 	}
@@ -365,7 +365,7 @@ func (a *API) handleDeleteColumn(w http.ResponseWriter, r *http.Request, p auth.
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
-	if err := db.DeleteColumn(r.Context(), a.Pool, col.ID); err != nil {
+	if err := db.DeleteColumn(r.Context(), a.Pool, col.ID, ColumnAudit(WithRunnerSession(r.Context(), r.Header.Get(RunnerSessionHeader)), p)); err != nil {
 		writeDBError(w, err)
 		return
 	}
@@ -392,7 +392,7 @@ func (a *API) handleMoveColumn(w http.ResponseWriter, r *http.Request, p auth.Pr
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	moved, err := db.MoveColumn(r.Context(), a.Pool, col.ID, req.BeforeID)
+	moved, err := db.MoveColumn(r.Context(), a.Pool, col.ID, req.BeforeID, ColumnAudit(WithRunnerSession(r.Context(), r.Header.Get(RunnerSessionHeader)), p))
 	if err != nil {
 		writeDBError(w, err)
 		return
@@ -474,39 +474,45 @@ func (a *API) handleGetCard(w http.ResponseWriter, r *http.Request, p auth.Princ
 }
 
 func (a *API) handleListCards(w http.ResponseWriter, r *http.Request, p auth.Principal) {
-	boardID := r.PathValue("id")
-	if err := p.RequireBoard(boardID, "card.read"); err != nil {
-		writeError(w, http.StatusForbidden, err.Error())
-		return
-	}
-	archived := r.URL.Query().Get("archived") == "1"
-	cards, err := db.ListCards(r.Context(), a.Pool, boardID, archived)
-	if err != nil {
-		writeDBError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, cards)
+	a.handleCardSearch(w, r, p, true)
 }
 
 func (a *API) handleSearch(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	a.handleCardSearch(w, r, p, false)
+}
+
+func (a *API) handleCardSearch(w http.ResponseWriter, r *http.Request, p auth.Principal, list bool) {
 	boardID := r.PathValue("id")
 	if err := p.RequireBoard(boardID, "card.read"); err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
 	q := r.URL.Query()
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	params := db.SearchParams{
-		BoardID: boardID, Query: q.Get("q"), Type: q.Get("type"),
-		Tag: q.Get("tag"), Priority: q.Get("priority"),
-		IncludeArchived: q.Get("include_archived") == "1", Limit: limit,
-		Fields: map[string]string{},
+	params, err := parseCardSearchParams(boardID, q)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "supported": supportedCardSearchParams})
+		return
 	}
-	for key, vals := range q {
-		if k, ok := cutPrefix(key, "field."); ok && len(vals) > 0 {
-			params.Fields[k] = vals[0]
+	// The web app's unfiltered board load must retain its complete, ranked list.
+	if list && (len(q) == 0 || (len(q) == 1 && q.Has("archived"))) {
+		cards, err := db.ListCards(r.Context(), a.Pool, boardID, params.ArchivedOnly)
+		if err != nil {
+			writeDBError(w, err)
+			return
 		}
+		writeJSON(w, http.StatusOK, cards)
+		return
 	}
+	if q.Get("page") == "true" || q.Get("cursor") != "" {
+		page, err := db.SearchCardsPage(r.Context(), a.Pool, params, q.Get("cursor"))
+		if err != nil {
+			writeDBError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, page)
+		return
+	}
+	params.NoDefaultLimit = list
 	cards, err := db.SearchCards(r.Context(), a.Pool, params)
 	if err != nil {
 		writeDBError(w, err)
@@ -1049,4 +1055,47 @@ func (a *API) handleGlobalSearch(w http.ResponseWriter, r *http.Request, p auth.
 		return
 	}
 	writeJSON(w, http.StatusOK, cards)
+}
+
+func (a *API) handleBoardKeySuggestion(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	if err := p.RequireAdmin(""); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if len(name) > 1024 {
+		writeError(w, http.StatusBadRequest, "Board name is too long.")
+		return
+	}
+	key, err := db.AvailableBoardKey(r.Context(), a.Pool, name)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"key": key})
+}
+
+// Resolve just the requested card, including archived cards, with the same redaction as card GET.
+func (a *API) handleCardByNumber(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	board := r.PathValue("id")
+	if err := p.RequireBoard(board, "card.read"); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	number, err := strconv.Atoi(r.PathValue("number"))
+	if err != nil || number <= 0 {
+		writeError(w, http.StatusBadRequest, "Name a positive card number.")
+		return
+	}
+	card, err := db.GetCardByNumber(r.Context(), a.Pool, board, number)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	card, err = a.CardForPrincipal(r.Context(), p, card)
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, card)
 }

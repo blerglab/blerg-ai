@@ -21,11 +21,12 @@ import (
 // pinnedGitDir is a directory git runs in, held open by descriptor: a name retargeted after the
 // checks cannot make git read another repository.
 type pinnedGitDir struct {
-	root     *os.Root
-	dir      *os.File
-	info     os.FileInfo
-	resolved string
-	cwd      string
+	memoryLimitKB int
+	root          *os.Root
+	dir           *os.File
+	info          os.FileInfo
+	resolved      string
+	cwd           string
 }
 
 // pinGitDir opens path (symbolic links resolved) and, when expected is given, refuses it unless it
@@ -59,7 +60,7 @@ func pinGitDir(path string, expected os.FileInfo) (*pinnedGitDir, bool) {
 	switch runtime.GOOS {
 	case "linux":
 	case "darwin":
-		cwd = "/dev/fd/" + fd
+		cwd = "" // hostgit uses DirFile and Darwin's thread-local fchdir before forking.
 	default:
 		_ = directory.Close()
 		_ = root.Close()
@@ -75,10 +76,11 @@ func (p *pinnedGitDir) close() { _ = p.dir.Close(); _ = p.root.Close() }
 // safe.directory naming this directory alone and no repository looked for above it. extra are the
 // call site's own -c overrides (key=value).
 func (p *pinnedGitDir) gitWith(ctx context.Context, stdout io.Writer, extra []string, args ...string) error {
-	// Go changes cwd before remapping ExtraFiles, so name the inherited parent descriptor.
+	// Linux changes cwd before remapping ExtraFiles, so Dir names the parent descriptor.
+	// Darwin uses DirFile; /dev/fd/N supports opening a descriptor, not chdir.
 	return hostgit.Run(ctx, hostgit.Options{
-		Dir: p.cwd, ExtraFiles: []*os.File{p.dir}, SafeDirectory: p.resolved, Ceiling: filepath.Dir(p.resolved),
-		MemoryLimit: true, Untrusted: true, Config: extra, Stdout: stdout,
+		Dir: p.cwd, DirFile: p.dir, ExtraFiles: []*os.File{p.dir}, SafeDirectory: p.resolved, Ceiling: filepath.Dir(p.resolved),
+		MemoryLimit: true, LimitKB: p.memoryLimitKB, Untrusted: true, Config: extra, Stdout: stdout,
 	}, args...)
 }
 
@@ -91,11 +93,15 @@ func (p *pinnedGitDir) git(ctx context.Context, stdout io.Writer, args ...string
 const gitFileMax = 4096
 
 func (p *pinnedGitDir) readSmall(name string) (string, bool) {
-	f, err := p.root.Open(name)
+	f, err := workspaceOpenFile(p.root, name)
 	if err != nil {
 		return "", false
 	}
 	defer func() { _ = f.Close() }()
+	st, err := f.Stat()
+	if err != nil || !workspaceRegularFile(st) {
+		return "", false
+	}
 	raw, err := io.ReadAll(io.LimitReader(f, gitFileMax+1))
 	if err != nil || len(raw) > gitFileMax {
 		return "", false
@@ -104,11 +110,20 @@ func (p *pinnedGitDir) readSmall(name string) (string, bool) {
 }
 
 func readSmallFile(name string) (string, bool) {
-	f, err := os.Open(name) //nolint:gosec // a path git itself would read, vetted by the caller; bounded read
+	parent, err := openWorkspaceExternalRoot(filepath.Dir(name))
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = parent.Close() }()
+	f, err := workspaceOpenFile(parent, filepath.Base(name))
 	if err != nil {
 		return "", false
 	}
 	defer func() { _ = f.Close() }()
+	st, err := f.Stat()
+	if err != nil || !workspaceRegularFile(st) {
+		return "", false
+	}
 	raw, err := io.ReadAll(io.LimitReader(f, gitFileMax+1))
 	if err != nil || len(raw) > gitFileMax {
 		return "", false

@@ -1,3 +1,5 @@
+import { PaletteContext } from '../commands/context'
+import { CommandRegistry } from '../commands/registry'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Routes, Route, useNavigate } from 'react-router-dom'
@@ -37,11 +39,14 @@ function seedSession(over: Partial<SessionInfo> = {}) {
   return session
 }
 
+let commandRegistry: CommandRegistry
+function runCommand(title: string) { act(() => { commandRegistry.getSnapshot().items.find(i => i.title === title)!.run() }) }
 function renderDetail(id = 'sess-a') {
+  commandRegistry = new CommandRegistry()
   return render(
     <MemoryRouter initialEntries={[`/sessions/${id}`]}>
       <Routes>
-        <Route path="/sessions/:id" element={<SessionDetail />} />
+        <Route path="/sessions/:id" element={<PaletteContext.Provider value={{ registry: commandRegistry, open: () => {} }}><SessionDetail /></PaletteContext.Provider>} />
         <Route path="/sessions" element={<div>HOME</div>} />
       </Routes>
     </MemoryRouter>,
@@ -88,9 +93,9 @@ describe('SessionDetail', () => {
   })
 
   it('says Skills & plugins are not available for a terminal session', () => {
-    seedSession({ status: 'running' })
+    seedSession({ kind: 'tmux', status: 'running' })
     renderDetail()
-    fireEvent.click(screen.getByTestId('capabilities-toggle-terminal'))
+    runCommand('Skills & plugins')
     expect(screen.getByRole('dialog', { name: 'Skills & plugins' })).toBeInTheDocument()
     expect(screen.getByTestId('caps-unavailable')).toHaveTextContent('Not available for terminal sessions')
     fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
@@ -105,12 +110,13 @@ describe('SessionDetail', () => {
     fireEvent.click(screen.getByTestId('session-insights-toggle'))
     expect(screen.getByRole('dialog', { name: 'Fix the bug · Insights' })).toBeInTheDocument()
     await waitFor(() => expect(fetchMock.mock.calls.some((c) => String((c as unknown[])[0]).includes('/api/sessions/sess-a/insights'))).toBe(true))
-    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load insights')
-    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
+    const insights = screen.getByRole('dialog', { name: 'Fix the bug · Insights' })
+    expect(await within(insights).findByRole('alert')).toHaveTextContent('Could not load insights')
+    fireEvent.keyDown(insights, { key: 'Escape' })
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
-  it('on a phone the header holds the app\'s one Notifications bell, and Insights moves into ⋯ to leave the title room', () => {
+  it('on a phone the compact header keeps Commands and Stop; session actions live in the palette', () => {
     const desktop = window.matchMedia
     window.matchMedia = vi.fn().mockImplementation((query: string) => ({
       matches: true, media: query, onchange: null,
@@ -120,16 +126,13 @@ describe('SessionDetail', () => {
       seedSession({ title: 'Fix the bug', status: 'running', kind: 'agent' })
       renderDetail()
       const group = screen.getByTestId('session-header-controls')
-      const bells = screen.getAllByRole('button', { name: /^Notifications/ })
-      expect(bells).toHaveLength(1)
-      expect(group).toContainElement(bells[0])
-      expect(bells[0]).toHaveClass('icon-btn')
-      const controls = [...group.querySelectorAll<HTMLButtonElement>('button:not([role="menuitem"])')]
-      expect(controls.map(b => b.getAttribute('aria-label')?.replace(/ \(.*$/, ''))).toEqual(['Star', expect.any(String), 'Notifications', 'End session', 'More actions'])
-      const insights = screen.getByTestId('session-insights-toggle')
-      expect(insights).toHaveAttribute('role', 'menuitem')
-      fireEvent.click(screen.getByRole('button', { name: 'More actions' }))
-      fireEvent.click(insights)
+      expect(screen.queryByRole('button', { name: /^Notifications/ })).toBeNull()
+      const controls = [...group.querySelectorAll<HTMLButtonElement>('button')]
+      expect(controls.map(b => b.getAttribute('aria-label'))).toEqual(['Search commands and files', "Stop the agent's current turn"])
+      expect(screen.queryByTestId('session-more')).toBeNull()
+      runCommand('Star session')
+      expect(wsMock.send).toHaveBeenCalledWith({ type: 'set_session_star', session_id: 'sess-a', starred: true })
+      runCommand('Session insights')
       expect(screen.getByRole('dialog', { name: 'Fix the bug · Insights' })).toBeInTheDocument()
     } finally {
       window.matchMedia = desktop
@@ -154,8 +157,10 @@ describe('SessionDetail', () => {
     expect(screen.queryByTestId('background-head-chip')).not.toBeInTheDocument()
     expect(screen.queryByTestId('background-strip')).not.toBeInTheDocument()
     // This stub's server cannot answer the live state: the page reads the chat's loaded events.
-    await waitFor(() => expect(screen.getByTestId('rail-badge')).toHaveTextContent('1'))
+    await waitFor(() => expect(screen.getByTestId('rail-badge-inside')).toHaveTextContent(/^🤖1$/))
     expect(screen.getByTestId('rail-task')).toHaveTextContent('Wait for the deploy')
+    // No "working in background" chip in the header: the panel says it.
+    expect(screen.queryByTestId('detail-status')).toBeNull()
   })
 
   it('counts a pending proposal in Needs you only until its deadline: past it, it is listed as expired, not counted', async () => {
@@ -169,8 +174,9 @@ describe('SessionDetail', () => {
       ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ proposals }) })
       : Promise.resolve({ ok: true, json: () => Promise.resolve({}) })))
     renderDetail()
-    await waitFor(() => expect(screen.getByTestId('rail-badge')).toHaveTextContent('1'))
-    expect(screen.getByTestId('rail-toggle')).toHaveAccessibleName(expect.stringContaining('1 needs you'))
+    // The toggle counts no needs-you (owner rule); the panel's Needs you does.
+    await waitFor(() => expect(screen.getByTestId('rail-needs-count')).toHaveTextContent('1'))
+    expect(screen.getByTestId('rail-toggle')).toHaveAccessibleName('Session panel')
     // The panel counts the same way (its Needs you section and its Live tab), and still lists the
     // overdue one, as expired.
     await waitFor(() => expect(screen.getByTestId('rail-needs-count')).toHaveTextContent('1'))
@@ -179,7 +185,7 @@ describe('SessionDetail', () => {
     expect(screen.getByTestId('proposal-action-overdue')).toBeInTheDocument()
   })
 
-  it('on a phone the side panel toggle is an icon with a name and its count', async () => {
+  it('on a phone the side panel toggle is an icon with a name and its counts', async () => {
     const desktop = window.matchMedia
     window.matchMedia = vi.fn().mockImplementation((query: string) => ({
       matches: true, media: query, onchange: null,
@@ -190,9 +196,10 @@ describe('SessionDetail', () => {
       seedBackgroundTask()
       renderDetail()
       const toggle = screen.getByTestId('rail-toggle')
-      await waitFor(() => expect(toggle.textContent).toBe('1'))
+      await waitFor(() => expect(toggle.textContent).toBe('🤖1'))
+      expect(within(toggle).getByTestId('rail-badge-inside').querySelector('.icon-btn-count-glyph')).toHaveTextContent('🤖')
       expect(toggle.querySelector('svg')).not.toBeNull()
-      expect(toggle).toHaveAccessibleName('Session panel: 1 running')
+      expect(toggle).toHaveAccessibleName('Session panel: 1 subagent or background task')
     } finally {
       window.matchMedia = desktop
     }
@@ -205,7 +212,7 @@ describe('SessionDetail', () => {
   })
 
   it('sends an arrow key as send_input when an arrow button is clicked', () => {
-    seedSession({ status: 'running' })
+    seedSession({ kind: 'tmux', status: 'running' })
     renderDetail()
     wsMock.send.mockClear()
     fireEvent.click(screen.getByText('→'))
@@ -217,7 +224,7 @@ describe('SessionDetail', () => {
   })
 
   it('sends the enter sequence as send_input when the ⏎ button is clicked', () => {
-    seedSession({ status: 'running' })
+    seedSession({ kind: 'tmux', status: 'running' })
     renderDetail()
     wsMock.send.mockClear()
     fireEvent.click(screen.getByText('⏎'))
@@ -280,7 +287,7 @@ describe('SessionDetail', () => {
   })
 
   it('words a terminal session as a terminal, with no conversation', () => {
-    seedSession({ status: 'running', runtime: 'daemon' })
+    seedSession({ kind: 'tmux', status: 'running', runtime: 'daemon' })
     renderDetail()
     fireEvent.click(screen.getByTestId('stop-session'))
     expect(screen.getByRole('alertdialog')).toHaveAccessibleDescription('The terminal session stops. Files are kept.')
@@ -303,8 +310,11 @@ describe('SessionDetail', () => {
     expect(vi.mocked(fetch).mock.calls.filter(c => (c[1] as RequestInit | undefined)?.method === 'DELETE')).toHaveLength(1)
     await act(async () => { answer({ ok: false, status: 503 }) })
     await waitFor(() => expect(end).toBeEnabled())
+    const failure = screen.getByRole('alertdialog', { name: 'Ending the session failed' })
+    expect(within(failure).getByRole('button', { name: 'Dismiss' })).toHaveFocus()
+    fireEvent.click(within(failure).getByRole('button', { name: 'Dismiss' }))
     expect(end).toHaveFocus()
-    expect(useToastStore.getState().toasts).toHaveLength(1)
+    expect(useToastStore.getState().toasts).toHaveLength(0)
   })
 
   it('makes the rest of the page inert while it asks, and gives it back after', () => {
@@ -438,7 +448,7 @@ describe('SessionDetail', () => {
     expect(useToastStore.getState().toasts).toHaveLength(0)
   })
 
-  it('stays on session and shows a toast when DELETE responds not-ok', async () => {
+  it('stays on session and anchors the failure to End when DELETE responds not-ok', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: false, status: 503 })))
     const session = seedSession({ status: 'running' })
     renderDetail()
@@ -446,7 +456,8 @@ describe('SessionDetail', () => {
     fireEvent.click(screen.getByTestId('stop-session'))
     fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'End session' }))
 
-    await waitFor(() => expect(useToastStore.getState().toasts).toHaveLength(1))
+    await waitFor(() => expect(screen.getByRole('alertdialog')).toBeInTheDocument())
+    expect(useToastStore.getState().toasts).toHaveLength(0)
     expect(screen.queryByText('HOME')).not.toBeInTheDocument()
     expect(screen.getByText(session.title || session.repo!)).toBeInTheDocument()
   })
@@ -459,8 +470,7 @@ describe('SessionDetail', () => {
     seedSession({ id: 'sess-a', status: 'idle', runtime: 'cluster' })
     renderDetail()
 
-    fireEvent.click(screen.getByTestId('session-more'))
-    fireEvent.click(screen.getByRole('menuitem', { name: /Pause/ }))
+    runCommand('Pause session')
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled())
     expect(fetchMock).toHaveBeenCalledWith('/api/sessions/sess-a/pause', expect.objectContaining({ method: 'POST' }))
@@ -469,13 +479,13 @@ describe('SessionDetail', () => {
     expect(useToastStore.getState().toasts).toHaveLength(0)
   })
 
-  it('toasts when the pause fails', async () => {
+  it('anchors the failure when pause fails', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: false, status: 502 })))
     seedSession({ status: 'running', runtime: 'cluster' })
     renderDetail()
-    fireEvent.click(screen.getByTestId('session-more'))
-    fireEvent.click(screen.getByRole('menuitem', { name: /Pause/ }))
-    await waitFor(() => expect(useToastStore.getState().toasts).toHaveLength(1))
+    runCommand('Pause session')
+    await waitFor(() => expect(screen.getByRole('alertdialog')).toBeInTheDocument())
+    expect(useToastStore.getState().toasts).toHaveLength(0)
   })
 
   it('does not offer Pause on a desktop session, a starting one, or one already paused', () => {
@@ -504,12 +514,12 @@ describe('SessionDetail', () => {
 
   // ── The header's controls: one style, grouped by intent, no bell (card #87) ──
 
-  it('draws the header controls in one icon-button style, in order: star, insights, panel, end session, more', () => {
+  it('draws the header controls in one icon-button style, in order: star, insights, stop, end session', () => {
     seedSession({ status: 'running', kind: 'agent' })
     renderDetail()
     const group = screen.getByTestId('session-header-controls')
     const controls = [...group.querySelectorAll<HTMLButtonElement>('button:not([role="menuitem"])')]
-    expect(controls.map(b => b.getAttribute('aria-label'))).toEqual(['Star', 'Insights', expect.stringMatching(/panel|need|running|Session/i), 'End session', 'More actions'])
+    expect(controls.map(b => b.getAttribute('aria-label'))).toEqual(['Search commands and files', 'Star', 'Insights', "Stop the agent's current turn", 'End session'])
     for (const b of controls) {
       expect(b).toHaveClass('icon-btn')
       // Icons only: the word is in the tooltip and the label, no text or emoji drawn.
@@ -528,16 +538,14 @@ describe('SessionDetail', () => {
     expect(screen.queryByText('🔔')).toBeNull()
   })
 
-  it('reaches Discard from ⋯, with its one-line explanation, and confirms it while the session runs', () => {
+  it('reaches Discard from the palette and and confirms it while the session runs', () => {
     seedSession({ status: 'running', kind: 'agent', title: 'Busy work' })
     renderDetail()
     // Not a header button of its own any more.
     expect(screen.queryByRole('button', { name: 'Discard Busy work' })).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: 'More actions' }))
-    const item = screen.getByRole('menuitem', { name: 'Discard session and children' })
-    expect(item).toHaveTextContent('End the session and archive it; history and URL kept')
-    fireEvent.click(item)
-    expect(screen.getByRole('dialog', { name: 'Discard session and all children?' })).toBeInTheDocument()
+    expect(screen.queryByTestId('session-more')).toBeNull()
+    runCommand('Discard session…')
+    expect(screen.getByRole('alertdialog', { name: 'Discard session and all children?' })).toBeInTheDocument()
     expect(screen.getByTestId('discard-running')).toHaveTextContent('It is running now.')
     expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/discard'), expect.anything())
   })
@@ -545,9 +553,8 @@ describe('SessionDetail', () => {
   it('keeps an idle session\'s Discard confirmation free of the running warning', () => {
     seedSession({ status: 'idle', kind: 'agent', title: 'Quiet work' })
     renderDetail()
-    fireEvent.click(screen.getByRole('button', { name: 'More actions' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Discard session and children' }))
-    expect(screen.getByRole('dialog', { name: 'Discard session and all children?' })).toBeInTheDocument()
+    runCommand('Discard session…')
+    expect(screen.getByRole('alertdialog', { name: 'Discard session and all children?' })).toBeInTheDocument()
     expect(screen.queryByTestId('discard-running')).toBeNull()
   })
 
@@ -598,7 +605,7 @@ describe('SessionDetail', () => {
   // ── Per-session chat thread ────────────────────────────────────────────────
 
   it('Chat tab shows only this session\'s messages, not other sessions\'', () => {
-    seedSession({ id: 'sess-a', title: 'Session A' })
+    seedSession({ kind: 'tmux', id: 'sess-a', title: 'Session A' })
     useMessageStore.setState({
       messages: [
         makeMessage({ id: 'msg-a', session_id: 'sess-a', body: 'Message from A', status: 'answered' }),
@@ -625,8 +632,17 @@ describe('SessionDetail', () => {
     expect(screen.queryByTestId('tab-terminal')).toBeNull()
   })
 
+  // Owner test 2026-10-28: a cluster agent session showed the Terminal/Messages layout on a phone.
+  // Terminal sessions were removed in 0.5.0: a session whose kind is missing is an agent session.
+  it('gives a session with no kind the agent layout, never the terminal one', () => {
+    seedSession({ id: 'sess-nokind', status: 'running' })
+    renderDetail('sess-nokind')
+    expect(screen.queryByTestId('tab-terminal')).toBeNull()
+    expect(screen.queryByTestId('tab-chat')).toBeNull()
+  })
+
   it('a terminal session keeps its Messages tab', () => {
-    seedSession({ id: 'sess-term' })
+    seedSession({ kind: 'tmux', id: 'sess-term' })
     renderDetail('sess-term')
     expect(screen.getByTestId('tab-chat')).toHaveTextContent('Messages')
     expect(screen.getByTestId('tab-terminal')).toHaveTextContent('Terminal')
@@ -636,7 +652,7 @@ describe('SessionDetail', () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) })
     vi.stubGlobal('fetch', fetchMock)
 
-    seedSession({ id: 'sess-a' })
+    seedSession({ kind: 'tmux', id: 'sess-a' })
     useMessageStore.setState({
       messages: [
         makeMessage({ id: 'msg-42', session_id: 'sess-a', kind: 'ask', status: 'open', body: 'Question from A?' }),
@@ -663,21 +679,22 @@ describe('SessionDetail', () => {
   })
 
   it.each(['claude', 'codex', 'hermes'])('describes the Docker posture for %s using its own engine login', engine => {
-    seedSession({ runtime: 'docker', engine, skip_permissions: true })
+    seedSession({ kind: 'agent', runtime: 'docker', engine, skip_permissions: true })
     renderDetail()
-    expect(screen.getByTestId('posture-banner')).toHaveTextContent('Docker sandbox — repo mounted at /workspace; using your engine login · permission prompts bypassed')
+    expect(screen.getByTestId('rail-session')).toHaveTextContent('Runs in a sandbox on workstation, using your engine login')
+    expect(screen.queryByTestId('posture-banner')).toBeNull()
   })
   it('does not call a cluster agent session unsandboxed', () => {
     seedSession({ kind: 'agent', runtime: 'cluster' })
     renderDetail()
-    const banner = screen.getByTestId('posture-banner')
-    expect(banner).toHaveTextContent('Cluster session — runs in a Kubernetes pod')
+    const banner = screen.getByTestId('rail-session')
+    expect(banner).toHaveTextContent('Runs in a Kubernetes pod')
     expect(banner).not.toHaveTextContent('unsandboxed')
   })
   it('names agent-kind sessions as unsandboxed', () => {
     seedSession({ kind: 'agent', runtime: 'daemon' })
     renderDetail()
-    expect(screen.getByTestId('posture-banner')).toHaveTextContent('Agent session — runs unsandboxed on workstation as you, no permission prompts, using your engine login')
+    expect(screen.getByTestId('rail-session')).toHaveTextContent('Runs unsandboxed on workstation as you, using your engine login')
   })
 
   it('labels a session started unattended', () => {

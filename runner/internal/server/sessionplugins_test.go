@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
@@ -17,6 +18,7 @@ type pluginCoreFixture struct {
 	mu         sync.Mutex
 	adds       int
 	deny       bool
+	allowed    []string
 	policyHook func()
 }
 
@@ -27,7 +29,11 @@ func (f *pluginCoreFixture) Policy(context.Context, string) (sessionPluginCatalo
 	if f.deny {
 		return sessionPluginCatalog{Allowed: []string{}, Plugins: []pluginspec.Entry{}}, nil
 	}
-	return sessionPluginCatalog{Allowed: []string{pluginspec.DefaultMarketplaces}, Plugins: []pluginspec.Entry{}}, nil
+	allowed := f.allowed
+	if allowed == nil {
+		allowed = []string{"anthropics/claude-plugins-official"}
+	}
+	return sessionPluginCatalog{Allowed: allowed, Plugins: []pluginspec.Entry{}}, nil
 }
 func (f *pluginCoreFixture) Catalog(ctx context.Context, _ string, _ coreProof, engine string) (sessionPluginCatalog, error) {
 	return f.Policy(ctx, engine)
@@ -46,7 +52,7 @@ func pluginFx(t *testing.T) (*topicFx, *pluginCoreFixture) {
 	fx.api.RegisterProposalRoutes(fx.mux)
 	f := &pluginCoreFixture{}
 	fx.api.sessionPlugins = f
-	fx.api.pluginAllow, _ = pluginspec.ParseAllowlist("")
+	fx.api.pluginAllow, _ = pluginspec.ParseAllowlist("anthropics/claude-plugins-official")
 	return fx, f
 }
 func pluginReq(fx *topicFx, method, path, token string, body any) *httptest.ResponseRecorder {
@@ -252,7 +258,7 @@ func TestSessionPluginsAbandonedRequestsCannotStarveLiveReplay(t *testing.T) {
 	if err := db.UpdateSessionStatus(ctx, fx.pool, fx.ended, "running", nil); err != nil {
 		t.Fatal(err)
 	}
-	args, _ := json.Marshal(sessionPluginArguments{Entry: pluginspec.Entry{Marketplace: pluginspec.DefaultMarketplaces, Plugin: "release-notes"}, Engine: "claude"})
+	args, _ := json.Marshal(sessionPluginArguments{Entry: pluginspec.Entry{Marketplace: "anthropics/claude-plugins-official", Plugin: "release-notes"}, Engine: "claude"})
 	for range 20 {
 		p, err := db.InsertProposal(ctx, fx.pool, db.Proposal{AccountID: topicOwner, SessionID: fx.ended, ConnectionID: db.SessionPluginConnectionID, ConnectionName: "session-plugin", Tool: "request_plugin", ToolHash: "session-plugin-v1", URLSnapshot: "session-plugins:" + dc.ID, Arguments: args}, 50)
 		if err != nil {
@@ -321,7 +327,7 @@ func TestSessionPluginsPolicyRefusalAndLifecycleLeaveNoDraft(t *testing.T) {
 				t.Fatalf("refusal left drafts %d %v", len(rows), err)
 			}
 			if mode == "policy" {
-				w = pluginReq(fx, "POST", "/api/sessions/"+fx.sess+"/plugins", fx.token(topicOwner, "human"), map[string]string{"marketplace": pluginspec.DefaultMarketplaces, "plugin": "release-notes", "scope": "always"})
+				w = pluginReq(fx, "POST", "/api/sessions/"+fx.sess+"/plugins", fx.token(topicOwner, "human"), map[string]string{"marketplace": "anthropics/claude-plugins-official", "plugin": "release-notes", "scope": "always"})
 				if w.Code != 403 {
 					t.Fatalf("human policy %d", w.Code)
 				}
@@ -351,5 +357,166 @@ func TestSessionPluginsBuiltinRequestWorksWithoutShellAndCannotInstall(t *testin
 	w = pluginReq(fx, "POST", "/api/sessions/"+fx.sess+"/filing-tools", fx.otherTok, request)
 	if w.Code != 403 {
 		t.Fatalf("foreign builtin %d", w.Code)
+	}
+}
+
+func TestSessionPluginsCodexLiveAndStartupOnly(t *testing.T) {
+	for _, live := range []bool{false, true} {
+		t.Run(map[bool]string{false: "startup-only", true: "live"}[live], func(t *testing.T) {
+			fx, f := pluginFx(t)
+			if _, err := fx.pool.Exec(context.Background(), `UPDATE sessions SET engine='codex' WHERE id=$1`, fx.sess); err != nil {
+				t.Fatal(err)
+			}
+			dc := livePluginDaemon(fx)
+			if live {
+				dc.SetSessionPluginEngines([]string{"claude", "codex"})
+			}
+			owner := fx.token(topicOwner, "human")
+			options := pluginReq(fx, "GET", "/api/sessions/"+fx.sess+"/plugins", owner, nil)
+			var settings struct {
+				SessionApply bool `json:"session_apply"`
+				Reason       string
+			}
+			if options.Code != 200 || json.Unmarshal(options.Body.Bytes(), &settings) != nil || settings.SessionApply != live {
+				t.Fatalf("options %d %s", options.Code, options.Body.String())
+			}
+			if !live && !bytes.Contains([]byte(settings.Reason), []byte("loads plugins when a session starts")) {
+				t.Fatalf("unclear startup-only reason: %q", settings.Reason)
+			}
+			body := map[string]string{"marketplace": "anthropics/claude-plugins-official", "plugin": "release-notes", "scope": "session"}
+			if !live {
+				if refused := pluginReq(fx, "POST", "/api/sessions/"+fx.sess+"/plugins", owner, body); refused.Code != 409 {
+					t.Fatal("session-only should be refused")
+				}
+				body["scope"] = "always"
+			}
+			add := pluginReq(fx, "POST", "/api/sessions/"+fx.sess+"/plugins", owner, body)
+			if add.Code != 202 {
+				t.Fatalf("add %d %s", add.Code, add.Body.String())
+			}
+			if !live {
+				if f.adds != 1 || !bytes.Contains(add.Body.Bytes(), []byte("added for your next session")) {
+					t.Fatal("always-on did not save with clear next-session result")
+				}
+				select {
+				case <-dc.send:
+					t.Fatal("startup-only request dispatched")
+				default:
+				}
+				return
+			}
+			var command protocol.ApplySessionPlugins
+			if json.Unmarshal(<-dc.send, &command) != nil || len(command.Plugins) != 1 {
+				t.Fatal("Codex addition not dispatched")
+			}
+			// Both Core and the local holder revoke the installed marketplace.
+			fx.api.marketplacePolicy = &pluginspec.LivePolicy{}
+			if err := fx.api.marketplacePolicy.Apply(pluginspec.PolicyFromAllowlist(pluginspec.Allowlist{}), time.Second); err != nil {
+				t.Fatal(err)
+			}
+			f.deny = true
+			body["action"] = "remove"
+			remove := pluginReq(fx, "POST", "/api/sessions/"+fx.sess+"/plugins", owner, body)
+			if remove.Code != 202 {
+				t.Fatalf("remove %d %s", remove.Code, remove.Body.String())
+			}
+			if json.Unmarshal(<-dc.send, &command) != nil || len(command.Remove) != 1 {
+				t.Fatal("Codex removal not dispatched")
+			}
+			body["plugin"] = "../invalid"
+			if invalid := pluginReq(fx, "POST", "/api/sessions/"+fx.sess+"/plugins", owner, body); invalid.Code != 403 {
+				t.Fatal("invalid removal accepted")
+			}
+			body["plugin"] = "release-notes"
+			body["scope"] = "always"
+			if refused := pluginReq(fx, "POST", "/api/sessions/"+fx.sess+"/plugins", owner, body); refused.Code != 403 || f.adds != 0 {
+				t.Fatal("removal changed account settings")
+			}
+		})
+	}
+}
+
+func TestSessionPluginsFailedReplacementTellsOwnerAndStaysFailed(t *testing.T) {
+	fx, _ := pluginFx(t)
+	dc := livePluginDaemon(fx)
+	p := queuePlugin(t, fx)
+	owner := fx.token(topicOwner, "human")
+	w := pluginReq(fx, "POST", "/api/proposals/"+p.ID+"/approve", owner, map[string]string{"scope": "session", "expected_arguments_raw": string(p.Arguments)})
+	if w.Code != 200 {
+		t.Fatalf("approve: %d", w.Code)
+	}
+	<-dc.send
+	handleSessionPluginsResult(context.Background(), fx.api.hub, fx.pool, dc, protocol.SessionPluginsResult{RequestID: p.ID, SessionID: fx.sess, State: "failed", Error: "private plugin diagnostic"})
+	row, err := db.GetOwnedProposal(context.Background(), fx.pool, topicOwner, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(row.Result, []byte(`"state": "failed"`)) || !bytes.Contains(row.Result, []byte("Your session is continuing with its previous plugins.")) || bytes.Contains(row.Result, []byte("private plugin diagnostic")) {
+		t.Fatalf("unclear or unsafe failure: %s", row.Result)
+	}
+	handleSessionPluginsResult(context.Background(), fx.api.hub, fx.pool, dc, protocol.SessionPluginsResult{RequestID: p.ID, SessionID: fx.sess, State: "applied"})
+	after, err := db.GetOwnedProposal(context.Background(), fx.pool, topicOwner, p.ID)
+	if err != nil || !bytes.Equal(after.Result, row.Result) {
+		t.Fatal("late applied reply overwrote failed replacement")
+	}
+	replaySessionPlugins(context.Background(), fx.api.hub, fx.pool, dc)
+	select {
+	case <-dc.send:
+		t.Fatal("failed replacement replayed")
+	default:
+	}
+}
+
+func TestSessionPluginsNativeCodexApprovalAndPolicy(t *testing.T) {
+	for _, scope := range []string{"session", "always"} {
+		t.Run(scope, func(t *testing.T) {
+			fx, f := pluginFx(t)
+			if _, err := fx.pool.Exec(t.Context(), `UPDATE sessions SET engine='codex' WHERE id=$1`, fx.sess); err != nil {
+				t.Fatal(err)
+			}
+			dc := livePluginDaemon(fx)
+			dc.SetSessionPluginEngines([]string{"codex"})
+			fx.api.pluginAllow, _ = pluginspec.ParseAllowlist("codex:openai-curated")
+			f.allowed = []string{"codex:openai-curated"}
+			body := map[string]string{"marketplace": "codex:openai-curated", "plugin": "selected", "scope": scope}
+			owner := fx.token(topicOwner, "human")
+			// Neither agent-token calls nor a Core policy refusal may record approval.
+			if w := pluginReq(fx, "POST", "/api/sessions/"+fx.sess+"/plugins", fx.sessTok, body); w.Code == 202 {
+				t.Fatal("agent installed native plugin")
+			}
+			f.deny = true
+			if w := pluginReq(fx, "POST", "/api/sessions/"+fx.sess+"/plugins", owner, body); w.Code != 403 {
+				t.Fatalf("native policy refusal %d", w.Code)
+			}
+			f.deny = false
+			w := pluginReq(fx, "POST", "/api/sessions/"+fx.sess+"/plugins", owner, body)
+			if w.Code != 202 {
+				t.Fatalf("native approval %d %s", w.Code, w.Body.String())
+			}
+			var command protocol.ApplySessionPlugins
+			select {
+			case raw := <-dc.send:
+				if json.Unmarshal(raw, &command) != nil || len(command.Plugins) != 1 || command.Plugins[0].Marketplace != "codex:openai-curated" {
+					t.Fatal("native command identity changed")
+				}
+			default:
+				t.Fatal("approved native install not dispatched")
+			}
+			wantAdds := 0
+			if scope == "always" {
+				wantAdds = 1
+			}
+			if f.adds != wantAdds {
+				t.Fatalf("always adds %d", f.adds)
+			}
+			p, err := db.GetOwnedProposal(t.Context(), fx.pool, topicOwner, command.RequestID)
+			if err != nil || p.State != db.ProposalDone || !bytes.Contains(p.Result, []byte("queued")) {
+				t.Fatal("native approval not durably audited")
+			}
+			rows, err := db.ListSessionPluginProposals(t.Context(), fx.pool, topicOwner, fx.sess)
+			if err != nil || len(rows) != 1 {
+				t.Fatal("refused requests left approval records")
+			}
+		})
 	}
 }

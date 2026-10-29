@@ -12,16 +12,12 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 )
 
-// newAuthzMux registers the board / column / ticket / reply / assist / rule
+// newAuthzMux registers the board / column / ticket / reply / assist
 // routes exactly as cmd/server/main.go does, so the table below exercises the
 // real method+pattern matching and PathValue plumbing rather than handlers
 // called by hand.
 func newAuthzMux(api *API) *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/agent/rules", api.HandlePostRule)
-	mux.HandleFunc("GET /api/agent/rules", api.HandleGetRules)
-	mux.HandleFunc("PATCH /api/agent/rules/{id}", api.HandlePatchRule)
-	mux.HandleFunc("DELETE /api/agent/rules/{id}", api.HandleDeleteRule)
 	mux.HandleFunc("POST /api/messages/{id}/reply", api.HandlePostMessageReply)
 	mux.HandleFunc("GET /api/boards", api.HandleGetBoards)
 	mux.HandleFunc("POST /api/boards", api.HandlePostBoards)
@@ -58,7 +54,6 @@ type authzWorld struct {
 	a, b       authzFixture
 	noBoardMsg string // message on a session with no board
 	plainSess  string // that session (not private, so every person may see it)
-	rule       string
 	boardTokA  string // board token scoped to a.board with {board}
 }
 
@@ -113,12 +108,6 @@ func seedAuthzWorld(ctx context.Context, t *testing.T, api *API, tag string) aut
 	w.noBoardMsg = msg
 	w.plainSess = plainSess
 
-	rule, err := db.InsertAgentRule(ctx, pool, "proj-"+tag, "be nice")
-	if err != nil {
-		t.Fatalf("InsertAgentRule: %v", err)
-	}
-	w.rule = rule
-
 	raw, _, err := db.MintBoardToken(ctx, pool, w.a.board, plainSess, []string{"board"}, time.Hour)
 	if err != nil {
 		t.Fatalf("MintBoardToken: %v", err)
@@ -134,8 +123,6 @@ func seedAuthzWorld(ctx context.Context, t *testing.T, api *API, tag string) aut
 //	            board passes; another board's → 403
 //	"none"    — authBrowserOrBoard + requireCoreOrDaemon: board tokens → 403
 //	            (board create/delete, reply on a no-board session)
-//	"rules"   — authDaemonOrCoreCap: daemon or core token only; board token → 401
-//	"daemon"  — checkBearerToken: the daemon token only, everything else 401
 //	"browser" — authBrowser: core token with session.start only; daemon → 401
 type authzRoute struct {
 	name   string
@@ -182,12 +169,6 @@ var authzRoutes = []authzRoute{
 		func(authzFixture) string { return `{}` }, "session.start", "board"},
 	{"GET /api/boards", "GET", func(authzFixture, authzWorld) string { return "/api/boards" }, nil, "session.start", "browser"},
 	{"GET /api/sessions/x/insights", "GET", func(_ authzFixture, w authzWorld) string { return "/api/sessions/" + w.plainSess + "/insights" }, nil, "session.start", "browser"},
-	{"POST /api/agent/rules", "POST", func(authzFixture, authzWorld) string { return "/api/agent/rules" },
-		func(authzFixture) string { return `{"project":"p","content":"c"}` }, "", "daemon"},
-	{"GET /api/agent/rules", "GET", func(authzFixture, authzWorld) string { return "/api/agent/rules" }, nil, "board.admin", "rules"},
-	{"PATCH /api/agent/rules/x", "PATCH", func(_ authzFixture, w authzWorld) string { return "/api/agent/rules/" + w.rule },
-		func(authzFixture) string { return `{"enabled":true}` }, "board.admin", "rules"},
-	{"DELETE /api/agent/rules/x", "DELETE", func(_ authzFixture, w authzWorld) string { return "/api/agent/rules/" + w.rule }, nil, "board.admin", "rules"},
 	{"POST /api/boards", "POST", func(authzFixture, authzWorld) string { return "/api/boards" },
 		func(authzFixture) string { return `{"name":"New","repos":["r"]}` }, "card.write", "none"},
 	// Last on purpose: when a round is allowed through, the board is gone
@@ -236,20 +217,21 @@ var coreClassCaps = map[string][]string{
 // boardA (board token scoped to A, used on A), boardB (same token used on B),
 // daemon.
 func expectFor(rt authzRoute, class string) int {
+	if rt.name == "POST /api/boards/x/assist" && (class == "boardA" || class == "daemon") {
+		return http.StatusForbidden
+	}
 	switch class {
 	case "none", "garbage":
 		return http.StatusUnauthorized
 	}
 	if caps, isCore := coreClassCaps[class]; isCore {
 		switch rt.scope {
-		case "daemon":
-			return http.StatusUnauthorized
 		case "browser":
 			if hasCap(caps, "session.start") {
 				return wantSuccess
 			}
 			return http.StatusUnauthorized // authBrowser has no 403 tier
-		default: // board, none, rules
+		default: // board, none
 			if hasCap(caps, rt.cap) {
 				return wantSuccess
 			}
@@ -268,7 +250,7 @@ func expectFor(rt authzRoute, class string) int {
 			return wantSuccess
 		case "none":
 			return http.StatusForbidden
-		default: // rules, daemon, browser: a board token is not a credential there
+		default: // browser: a board token is not a credential there
 			return http.StatusUnauthorized
 		}
 	case "boardB":
@@ -278,7 +260,7 @@ func expectFor(rt authzRoute, class string) int {
 }
 
 // TestAuthzRoutes is the regression guard for the anonymous tier: every
-// board/column/ticket/reply/assist/rule route now demands a verified
+// board/column/ticket/reply/assist route now demands a verified
 // credential, and each credential class is held to the capability ruling.
 // DB-gated.
 func TestAuthzRoutes(t *testing.T) {
@@ -291,6 +273,7 @@ func TestAuthzRoutes(t *testing.T) {
 	}
 	hub.Register(&DaemonConn{ID: authzHubDaemonID, Name: "authz-hub-daemon", send: make(chan []byte, 256)})
 	api := NewAPI(hub, pool, daemonTok, nil, "")
+	fixtureOwnDesktop(t, pool, hub.GetDaemon(authzHubDaemonID), "user-1")
 	mint := enableBrowserAuth(t, api)
 	mux := newAuthzMux(api)
 
@@ -389,16 +372,6 @@ func TestAuthzRoutes(t *testing.T) {
 		w := seedAuthzWorld(ctx, t, api, "spot")
 		if got := do(routeByName(t, "GET /api/boards/x"), w.a, w, mint("card.read")).Code; got != http.StatusOK {
 			t.Errorf("GET /api/boards/<real> with card.read → %d, want 200", got)
-		}
-		get := routeByName(t, "GET /api/agent/rules")
-		if got := do(get, w.a, w, daemonTok).Code; got != http.StatusOK {
-			t.Errorf("GET /api/agent/rules with daemon token → %d, want 200", got)
-		}
-		if got := do(get, w.a, w, mint(memberCaps...)).Code; got != http.StatusForbidden {
-			t.Errorf("GET /api/agent/rules with member token → %d, want 403", got)
-		}
-		if got := do(get, w.a, w, mint(adminCaps...)).Code; got != http.StatusOK {
-			t.Errorf("GET /api/agent/rules with admin token → %d, want 200", got)
 		}
 	})
 }

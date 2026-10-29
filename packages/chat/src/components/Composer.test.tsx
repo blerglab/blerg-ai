@@ -7,7 +7,7 @@ const attachments = {
 } as unknown as ComposerProps['attachments']
 
 const props = (over: Partial<ComposerProps> = {}): ComposerProps => ({
-  draft: '', onDraft: () => {}, placeholder: 'Message', locked: false, busy: false, onSubmit: () => {}, attachments, ...over,
+  draft: '', onDraft: () => {}, placeholder: 'Message', locked: false, onSubmit: () => {}, attachments, ...over,
 })
 
 afterEach(() => { vi.unstubAllGlobals() })

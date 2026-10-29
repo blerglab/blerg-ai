@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -232,5 +233,169 @@ func TestCodexRootUsageManualNextModelDoesNotRelabelActiveTurn(t *testing.T) {
 	d.mu.Unlock()
 	if selected != "fixture-manual-next" {
 		t.Fatalf("manual next selection lost: %q", selected)
+	}
+}
+
+// The context meter (#191): a Claude turn_done carries the main agent's latest prompt (input + cache
+// read + cache write, never a subagent's) and the window the result line reports for that model; a
+// compaction drops the reading until the next call and is said.
+func TestClaudeTurnDoneCarriesContextReading(t *testing.T) {
+	em := &collectEmitter{}
+	d := newClaudeCodeDriver(t.TempDir(), "model-default", "", em, nil)
+	p := &ccProc{model: "model-default", sawInit: true, inTurn: true}
+	d.steer.proc = p
+	result := `{"type":"result","usage":{"input_tokens":3},"modelUsage":{"model-effective":{"contextWindow":200000},"model-small":{"contextWindow":100000}}}`
+	// Turn 1: two root calls (the later one counts) and a bigger subagent call (left out).
+	d.onLine(p, []byte(`{"type":"assistant","message":{"id":"m1","model":"model-effective","usage":{"input_tokens":5,"cache_read_input_tokens":50},"content":[]}}`))
+	d.onLine(p, []byte(`{"type":"assistant","message":{"id":"m2","model":"model-effective","usage":{"input_tokens":3,"cache_read_input_tokens":100,"cache_creation_input_tokens":20},"content":[]}}`))
+	d.onLine(p, []byte(`{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"id":"s1","model":"model-small","usage":{"input_tokens":90000},"content":[]}}`))
+	d.onLine(p, []byte(result))
+	// Turn 2: compacted at the end (a /compact turn): no reading after it.
+	p.inTurn = true
+	d.onLine(p, []byte(`{"type":"assistant","message":{"id":"m3","model":"model-effective","usage":{"input_tokens":150000},"content":[]}}`))
+	d.onLine(p, []byte(`{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":150000}}`))
+	d.onLine(p, []byte(result))
+	// Turn 3: compacted, then a call: its reading, and the compaction said.
+	p.inTurn = true
+	d.onLine(p, []byte(`{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":90000}}`))
+	d.onLine(p, []byte(`{"type":"assistant","message":{"id":"m4","model":"model-effective","usage":{"input_tokens":12,"cache_creation_input_tokens":8000},"content":[]}}`))
+	d.onLine(p, []byte(result))
+	// Turn 4: nothing reported about the context (no root call): no reading at all.
+	p.inTurn = true
+	d.onLine(p, []byte(result))
+	em.mu.Lock()
+	var got []*agent.ContextUsage
+	for _, event := range em.events {
+		if done, ok := event.Payload.(agent.TurnDonePayload); ok {
+			got = append(got, done.Context)
+		}
+	}
+	em.mu.Unlock()
+	d.sm.Lock()
+	d.stopIdleTimerLocked()
+	d.sm.Unlock()
+	want := []*agent.ContextUsage{
+		{Tokens: 123, Window: 200000},
+		{Compacted: true, CompactedFrom: 150000},
+		{Tokens: 8012, Window: 200000, Compacted: true, CompactedFrom: 90000},
+		nil,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("turns = %d", len(got))
+	}
+	for i := range want {
+		if (got[i] == nil) != (want[i] == nil) || got[i] != nil && *got[i] != *want[i] {
+			t.Fatalf("turn %d context = %+v, want %+v", i+1, got[i], want[i])
+		}
+	}
+}
+
+func TestClaudeResultContextWindowMatchesOnlyItsModel(t *testing.T) {
+	var l ccLine
+	if err := json.Unmarshal([]byte(`{"modelUsage":{"claude-x[1m]":{"contextWindow":1000000},"claude-y":{"contextWindow":200000}}}`), &l); err != nil {
+		t.Fatal(err)
+	}
+	for model, want := range map[string]int{"claude-x": 1000000, "claude-y": 200000, "claude-z": 0, "": 0} {
+		if got := l.contextWindow(model); got != want {
+			t.Errorf("contextWindow(%q) = %d, want %d", model, got, want)
+		}
+	}
+	_ = json.Unmarshal([]byte(`{"modelUsage":{"claude-x-a":{"contextWindow":1},"claude-x-b":{"contextWindow":2}}}`), &l)
+	if got := l.contextWindow("claude-x"); got != 0 {
+		t.Errorf("ambiguous window = %d, want 0", got)
+	}
+}
+
+func TestCodexTurnDoneCarriesContextReading(t *testing.T) {
+	for name, tc := range map[string]struct {
+		events string
+		want   *agent.ContextUsage
+	}{
+		"reading": {`[
+ {"method":"thread/tokenUsage/updated","params":{"threadId":"cx-thread-1","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":10,"outputTokens":3,"totalTokens":13},"total":{"inputTokens":10,"outputTokens":3},"modelContextWindow":272000}}},
+ {"method":"thread/tokenUsage/updated","params":{"threadId":"cx-thread-1","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":90000,"cachedInputTokens":80000,"outputTokens":500,"totalTokens":90500},"total":{"inputTokens":90010,"outputTokens":503},"modelContextWindow":272000}}},
+ {"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-1","status":"completed"}}}
+ ]`, &agent.ContextUsage{Tokens: 90500, Window: 272000}},
+		"compacted": {`[
+ {"method":"thread/tokenUsage/updated","params":{"threadId":"cx-thread-1","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":250000,"outputTokens":10},"total":{"inputTokens":250000,"outputTokens":10},"modelContextWindow":272000}}},
+ {"method":"item/completed","params":{"threadId":"cx-thread-1","turnId":"turn-1","item":{"type":"contextCompaction","id":"cmp-1"}}},
+ {"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-1","status":"completed"}}}
+ ]`, &agent.ContextUsage{Window: 272000, Compacted: true}},
+		// A model change mid-turn: the earlier model's window is not this count's (#191 review).
+		"rerouted, window unknown": {`[
+ {"method":"thread/tokenUsage/updated","params":{"threadId":"cx-thread-1","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":150000,"totalTokens":150000},"total":{"inputTokens":150000},"modelContextWindow":200000}}},
+ {"method":"model/rerouted","params":{"threadId":"cx-thread-1","turnId":"turn-1","toModel":"fixture-rerouted"}},
+ {"method":"thread/tokenUsage/updated","params":{"threadId":"cx-thread-1","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":100000,"totalTokens":100000},"total":{"inputTokens":250000},"modelContextWindow":null}}},
+ {"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-1","status":"completed"}}}
+ ]`, &agent.ContextUsage{Tokens: 100000}},
+		"settings changed, no report since": {`[
+ {"method":"thread/tokenUsage/updated","params":{"threadId":"cx-thread-1","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":150000,"totalTokens":150000},"total":{"inputTokens":150000},"modelContextWindow":200000}}},
+ {"method":"thread/settings/updated","params":{"threadId":"cx-thread-1","threadSettings":{"model":"fixture-other","effort":"low"}}},
+ {"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-1","status":"completed"}}}
+ ]`, &agent.ContextUsage{Tokens: 150000}},
+		"rerouted, new window reported": {`[
+ {"method":"thread/tokenUsage/updated","params":{"threadId":"cx-thread-1","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":150000,"totalTokens":150000},"total":{"inputTokens":150000},"modelContextWindow":200000}}},
+ {"method":"model/rerouted","params":{"threadId":"cx-thread-1","turnId":"turn-1","toModel":"fixture-rerouted"}},
+ {"method":"thread/tokenUsage/updated","params":{"threadId":"cx-thread-1","turnId":"turn-1","tokenUsage":{"last":{"inputTokens":100000,"totalTokens":100000},"total":{"inputTokens":250000},"modelContextWindow":400000}}},
+ {"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-1","status":"completed"}}}
+ ]`, &agent.ContextUsage{Tokens: 100000, Window: 400000}},
+		"unreported": {`[
+ {"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-1","status":"completed"}}}
+ ]`, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bin := fakeCodex(t)
+			t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+			t.Setenv("FAKE_CODEX_ROOT_USAGE_EVENTS", tc.events)
+			em := &collectEmitter{}
+			d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], Emitter: em, WorkDir: t.TempDir()})
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			stopDriver := startTestCodexDriver(ctx, t, d)
+			defer stopDriver()
+			d.Enqueue("Review fixture", "chat")
+			waitUntil(t, "turn done", func() bool { return countKind(em, "turn_done") == 1 })
+			got := rootDone(t, em).Context
+			if (got == nil) != (tc.want == nil) || got != nil && *got != *tc.want {
+				t.Fatalf("context = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A turn that compacted, then ended without a result line (interrupt timeout, the CLI exited) still
+// says it compacted: the reading before it is gone (#191 review).
+func TestClaudeCompactionThenInterruptOrExitSaysCompacted(t *testing.T) {
+	em := &collectEmitter{}
+	d := newClaudeCodeDriver(t.TempDir(), "model-default", "", em, nil)
+	p := &ccProc{model: "model-default", sawInit: true, inTurn: true, cmd: exec.Command("true")} // never started
+	d.steer.proc = p
+	d.onLine(p, []byte(`{"type":"assistant","message":{"id":"m1","model":"model-effective","usage":{"input_tokens":170000},"content":[]}}`))
+	d.onLine(p, []byte(`{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":170000}}`))
+	d.sm.Lock()
+	gen, turn := p.gen, d.steer.turnSeq
+	d.sm.Unlock()
+	d.interruptTimeout(gen, turn)
+	em.mu.Lock()
+	var got *agent.ContextUsage
+	found := false
+	for _, event := range em.events {
+		if done, ok := event.Payload.(agent.TurnDonePayload); ok {
+			got, found = done.Context, true
+		}
+	}
+	em.mu.Unlock()
+	if !found || got == nil || *got != (agent.ContextUsage{Compacted: true, CompactedFrom: 170000}) {
+		t.Fatalf("interrupted turn context = %+v (turn_done seen %v)", got, found)
+	}
+	var none claudeRootUsage
+	none.observe(&ccLine{Message: struct {
+		ID      string          `json:"id"`
+		Model   string          `json:"model"`
+		Usage   ccTokens        `json:"usage"`
+		Content json.RawMessage `json:"content"`
+	}{ID: "m", Model: "x", Usage: ccTokens{InputTokens: 5}}})
+	if c := none.compactionOnly(); c != nil {
+		t.Fatalf("a turn without a compaction replaced the reading: %+v", c)
 	}
 }

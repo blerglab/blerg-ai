@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config'
+import { defineConfig, defineProject } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import { playwright } from '@vitest/browser-playwright'
 import type { Plugin } from 'vite'
@@ -26,13 +26,14 @@ function beacon(): Plugin {
   }
 }
 
-// Two test projects:
+// Three test projects:
 //   • unit    — fast, jsdom, fake timers. Pure logic + DOM-structure tests.
-//   • browser — real Chromium (Playwright). The ONLY layer that can test
+//   • browser — real browsers (Playwright). The ONLY layer that can test
 //               scrolling, because scroll depends on real layout
 //               (scrollHeight / clientHeight / scrollTop) which jsdom does not
 //               implement. Scroll/touch/device-switch regressions kept slipping
 //               through precisely because they were never under a real browser.
+//   • browser-performance — strict timing budgets, serial files after all other projects.
 // Browser tests are named *.browser.test.tsx and excluded from the unit project.
 const prebundled = [
   'react',
@@ -52,9 +53,66 @@ const prebundled = [
   'vega',
   'vega-lite',
   'vega-interpreter',
+  'highlight.js/lib/languages/dockerfile',
+  'highlight.js/lib/languages/makefile',
 ]
 
+function browserProject(performance: boolean) {
+  return defineProject({
+    plugins: [react(), beacon()],
+    cacheDir: performance ? '../../.cache/vite-runner-performance' : '../../.cache/vite-runner-browser',
+    resolve: { alias: chatAliases },
+    // An inline project does not inherit the root's optimizeDeps: without its own list, a cold
+    // cache found react-dom/client partway through the run and reloaded the page.
+    optimizeDeps: { include: prebundled },
+    test: {
+      name: performance ? 'browser-performance' : 'browser',
+      // Bound simultaneous pages so the corpus and interactive tests share one browser
+      // without starving pointer/animation work on machines with many reported CPUs.
+      maxWorkers: performance ? 1 : 4,
+      // A strict <16 ms sample must not compete with other test files or projects.
+      fileParallelism: !performance,
+      sequence: { groupOrder: performance ? 2 : 1 },
+      // Only this app's files: the Board's browser tests have their own project in board/web,
+      // because files outside this root are not pre-scanned and a cold cache reloaded mid-run.
+      include: performance ? ['src/**/*.performance.browser.test.{ts,tsx}'] : ['src/**/*.browser.test.{ts,tsx}'],
+      exclude: performance ? [] : ['src/**/*.performance.browser.test.{ts,tsx}'],
+      // cleanup() after each test so mounted terminals don't accumulate across
+      // tests (they share one browser page and would otherwise leak).
+      setupFiles: ['./src/test/browserSetup.ts'],
+      // No fake timers: scrolling needs real requestAnimationFrame + real layout.
+      browser: {
+        enabled: true,
+        commands: {
+          async setUsageReducedMotion({ page }, reduce: boolean) {
+            await page.emulateMedia({ reducedMotion: reduce ? 'reduce' : 'no-preference' })
+          },
+        },
+        // The test iframe scales to fit Playwright's outer viewport. Owner
+        // captures need enough room to retain the requested pixel dimensions.
+        // Every browser runs in UTC, the timezone CI's runners use, so date rendering (Mermaid Gantt
+        // axes, formatted times) is the same on every machine.
+        provider: playwright((process.env.VITE_IMAGE_ZOOM_SHOTS_DIR || process.env.VITE_LOADER_SHOTS_DIR || process.env.VITE_LOADER_REDUCED_MOTION || process.env.VITE_TAB_FOCUS_SHOTS_DIR || process.env.VITE_FILE_TAB_SHOTS_DIR || process.env.VITE_LAUNCH_SHOTS_DIR || process.env.VITE_CHROME_SHOTS_DIR || process.env.VITE_SHELL_TAB_SHOTS_DIR) ? {
+          contextOptions: { timezoneId: 'UTC', viewport: { width: 3840, height: 2160 }, ...(process.env.VITE_LOADER_REDUCED_MOTION ? { reducedMotion: 'reduce' as const } : {}) },
+        } : { contextOptions: { timezoneId: 'UTC' } }),
+        headless: true,
+        instances: [
+          { browser: 'chromium' },
+          // Shortcut ownership must also hold in Firefox after normal session use.
+          // Playwright's Firefox focus emulation does not cover Vitest's child iframe:
+          // input in another page can leave activeElement set but suppress native Enter
+          // activation. Keep Firefox files serial; Chromium still exercises four workers.
+          // https://github.com/microsoft/playwright/issues/42933
+          ...(!performance ? [{ browser: 'firefox' as const, fileParallelism: false, include: ['src/components/PaletteClaim.browser.test.tsx', 'src/components/CommandPalette.browser.test.tsx', 'src/components/PaletteOwnership.browser.test.tsx', 'src/components/ShellWorkspace.browser.test.tsx', 'src/components/SessionTabOverflow.browser.test.tsx'] }] : []),
+        ],
+      },
+    },
+  })
+}
+
 export default defineConfig({
+  // Keep test caches in this checkout when node_modules is a shared symlink.
+  cacheDir: '../../.cache/vite-runner',
   resolve: { alias: chatAliases },
   // Pre-bundle these so the browser project doesn't trigger a mid-run Vite
   // re-optimize (which aborts the first test with "Failed to fetch dynamically
@@ -63,6 +121,7 @@ export default defineConfig({
   test: {
     projects: [
       {
+        cacheDir: '../../.cache/vite-runner-unit',
         plugins: [react()],
         resolve: { alias: chatAliases },
         test: {
@@ -78,29 +137,8 @@ export default defineConfig({
           },
         },
       },
-      {
-        plugins: [react(), beacon()],
-        resolve: { alias: chatAliases },
-        // An inline project does not inherit the root's optimizeDeps: without its own list, a cold
-        // cache found react-dom/client partway through the run and reloaded the page.
-        optimizeDeps: { include: prebundled },
-        test: {
-          name: 'browser',
-          // Only this app's files: the Board's browser tests have their own project in board/web,
-          // because files outside this root are not pre-scanned and a cold cache reloaded mid-run.
-          include: ['src/**/*.browser.test.{ts,tsx}'],
-          // cleanup() after each test so mounted terminals don't accumulate across
-          // tests (they share one browser page and would otherwise leak).
-          setupFiles: ['./src/test/browserSetup.ts'],
-          // No fake timers: scrolling needs real requestAnimationFrame + real layout.
-          browser: {
-            enabled: true,
-            provider: playwright(),
-            headless: true,
-            instances: [{ browser: 'chromium' }],
-          },
-        },
-      },
+      browserProject(false),
+      browserProject(true),
     ],
   },
 })

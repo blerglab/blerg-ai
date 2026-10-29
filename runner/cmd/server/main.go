@@ -261,8 +261,14 @@ func run() error {
 	}
 
 	api := server.NewAPI(hub, dbPool, cfg.DaemonToken, repoLister, cfg.VapidPublicKey)
+	// Restore policy before background consumers or HTTP can start sessions.
+	api.SetCoreCredentials(cfg.CoreURL, cfg.CoreInternalKey)
+	if err := api.StartPluginPolicy(ctx); err != nil {
+		return fmt.Errorf("marketplace policy: %w", err)
+	}
 	if jm := hub.JobManager(); jm != nil {
 		jm.Overrides = api.SettingsOverrides()
+		api.ConfigureClusterWorkspaces()
 		// The advisory-lock pools (pod frames, limit resume) are sized from the
 		// session cap in force when they are first used.
 		db.SetLockPoolSessions(jm.EffectiveMaxSessions)
@@ -304,9 +310,12 @@ func run() error {
 	// REST endpoints.
 	mux.HandleFunc("GET /api/daemons", api.HandleGetDaemons)
 	mux.HandleFunc("PUT /api/daemons/{id}/repos-root", api.HandlePutDaemonReposRoot)
+	mux.HandleFunc("POST /api/daemons/{id}/engine-check", api.HandleEngineCheck)
 	mux.HandleFunc("GET /api/cluster/status", api.HandleGetClusterStatus)
 	mux.HandleFunc("GET /api/site-board", api.HandleGetSiteBoard)
 	mux.HandleFunc("PUT /api/cluster/settings", api.HandlePutClusterSettings)
+	mux.HandleFunc("GET /api/settings/usage-notices", api.HandleUsageNoticeSettings)
+	mux.HandleFunc("PUT /api/settings/usage-notices", api.HandleUsageNoticeSettings)
 	mux.HandleFunc("GET /api/insights", api.HandleGetInsights)
 	mux.HandleFunc("GET /api/insights/prices", api.HandleGetInsightPrices)
 	mux.HandleFunc("PUT /api/insights/prices", api.HandlePutInsightPrice)
@@ -323,8 +332,11 @@ func run() error {
 	mux.HandleFunc("POST /api/sessions/{id}/pause", api.HandlePauseSession)
 	mux.HandleFunc("GET /api/sessions/{id}/limit-resume", api.HandleLimitResume)
 	mux.HandleFunc("PUT /api/sessions/{id}/limit-resume", api.HandleLimitResume)
+	mux.HandleFunc("GET /api/sessions/{id}/plan-nudges", api.HandlePlanNudges)
+	mux.HandleFunc("PUT /api/sessions/{id}/plan-nudges", api.HandlePlanNudges)
 	mux.HandleFunc("PATCH /api/sessions/{id}", api.HandlePatchSession)
 	mux.HandleFunc("GET /api/repos", api.HandleGetRepos)
+	api.RegisterWorkspaceDiscoveryRoutes(mux)
 	mux.HandleFunc("GET /api/board-repo-choices", api.HandleBoardRepoChoices)
 	mux.HandleFunc("GET /api/push/vapid-public-key", api.HandleGetVapidPublicKey)
 	mux.HandleFunc("POST /api/push/subscribe", api.HandlePostPushSubscribe)
@@ -348,9 +360,11 @@ func run() error {
 	// Additive: also accept blerg-core-issued tokens (aud "blerg-runner") once
 	// BLERG_CORE_URL is set, so blerg-core can act as identity authority.
 	api.SetCoreAuth(coreauth.New(cfg.CoreURL))
-	// Lets GET /api/me/credentials ask core which personal credentials the
-	// caller has; inert unless both env vars are set.
-	api.SetCoreCredentials(cfg.CoreURL, cfg.CoreInternalKey)
+	api.RegisterShellRoutes(mux)
+	// P0b/runtime adapters are deliberately absent until their containment gates pass.
+	if err := api.StartRuntimeShellChannel(ctx); err != nil {
+		log.Printf("shell channel unavailable: %v", err)
+	}
 	// The per-engine model pickers (GET /api/models/{engine}). One source per
 	// engine; an engine with none gets an empty list. Claude's is the public
 	// Claude Code catalog, fetched at startup and every 6 h, compiled-in list
@@ -377,10 +391,6 @@ func run() error {
 	mux.HandleFunc("DELETE /api/agent/memories", api.HandleDeleteMemory)
 	mux.HandleFunc("GET /api/agent/memories", api.HandleGetMemories)
 	mux.HandleFunc("POST /api/agent/knowledge-search", api.HandleKnowledgeSearch)
-	mux.HandleFunc("POST /api/agent/rules", api.HandlePostRule)
-	mux.HandleFunc("GET /api/agent/rules", api.HandleGetRules)
-	mux.HandleFunc("PATCH /api/agent/rules/{id}", api.HandlePatchRule)
-	mux.HandleFunc("DELETE /api/agent/rules/{id}", api.HandleDeleteRule)
 	mux.HandleFunc("POST /api/mockups", api.HandlePostMockup)
 	mux.HandleFunc("GET /m/", api.HandleServeMockup)
 	api.RegisterArtifactRoutes(mux)
@@ -389,6 +399,7 @@ func run() error {
 	mux.HandleFunc("POST /api/agent-config", api.HandlePostAgentConfig)
 	mux.HandleFunc("GET /api/agent-config", api.HandleGetAgentConfig)
 	mux.HandleFunc("POST /api/session/credentials/access", api.HandleManagedCredentialAccess)
+	mux.HandleFunc("GET /api/session/plugin-marketplace-policy", api.HandlePodPluginPolicy)
 	mux.HandleFunc("POST /api/messages", api.HandlePostMessages)
 	mux.HandleFunc("GET /api/messages", api.HandleGetMessages)
 	mux.HandleFunc("GET /api/messages/{id}/answer", api.HandleGetMessageAnswer)

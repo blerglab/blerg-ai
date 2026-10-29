@@ -128,6 +128,7 @@ func (a *API) reconcileClusterJobsOnce(ctx context.Context) {
 		return
 	}
 	if jm := a.hub.JobManager(); jm != nil {
+		jm.reconcileLaunchSecrets(ctx)
 		if err := jm.reclaimNativeHistory(ctx); err != nil {
 			log.Printf("cluster reconcile: native history cleanup unavailable")
 		}
@@ -140,6 +141,7 @@ func (a *API) reconcileClusterJobsOnce(ctx context.Context) {
 			}
 		}
 	}
+	a.reconcileLocalWorkspaceFinals(ctx)
 	a.finaliseLostDaemonSessions(ctx)
 }
 
@@ -149,6 +151,7 @@ func (a *API) reconcileClusterSession(ctx context.Context, jm *JobManager, row d
 	// the Job's state says nothing about whether the work is over. The only
 	// question is whether anyone still intends to resume it.
 	if row.Status == "disconnected" {
+		a.explainStoppedPod(ctx, jm, row)
 		cutoff := time.Now().Add(-a.resumeWindow())
 		if row.LastChange.After(cutoff) {
 			// A resume may be booting (its start attempt still open): pick
@@ -184,9 +187,23 @@ func (a *API) reconcileClusterSession(ctx context.Context, jm *JobManager, row d
 		// there is no error to explain.
 		status, endReason = "ended", db.EndReasonJobFinished
 	case jobStateFailed:
+		// A dead running pod remains resumable even when its socket-loss
+		// notification was missed. Startup failures retain their final semantics.
+		if row.Status == "running" && a.explainStoppedPod(ctx, jm, row) {
+			return
+		}
 		status, reason, endReason = "error", reasonJobFailed, db.EndReasonJobFailed
 		if condition != "" {
 			reason += ": " + condition
+		}
+		if pod, err := jm.sessionPod(ctx, row.ID); err == nil {
+			if fatal := podTermination(pod); fatal != nil {
+				reason = fatal.Detail + ". " + fatal.Hint
+				persistStartStages(ctx, a.hub, a.dbPool, row.ID, protocol.StartStagePayload{Stages: []protocol.StartStage{*fatal}})
+				if err := jm.labelEndedPod(ctx, pod, row.ID); err != nil {
+					log.Printf("cluster reconcile: failed pod end label unavailable")
+				}
+			}
 		}
 	case jobStateMissing:
 		// Only after the grace period: a Job that has not been created yet
@@ -284,7 +301,7 @@ func (a *API) broadcastReconciledStatus(ctx context.Context, sessionID, status s
 		unread = row.Unread
 		end = rowEnd(row)
 	}
-	broadcastWithEnd(a.hub, end, func(endReason string, endedBy *protocol.EndedBy) any {
+	broadcastWithEnd(a.hub, end, func(endReason string, endedBy *protocol.EndedBy) any { //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 		return protocol.SessionStateChanged{
 			Type:      "session_state_changed",
 			SessionID: sessionID,
@@ -302,8 +319,8 @@ func (a *API) broadcastReconciledStatus(ctx context.Context, sessionID, status s
 // never the condition message or a raw response body, which can carry
 // environment detail that has no business in a session's error text.
 func (j *JobManager) jobState(sessionID string) (state string, conditionReason string) {
-	resp, err := j.do(http.MethodGet,
-		"/apis/batch/v1/namespaces/"+j.Namespace+"/jobs/"+j.jobName(sessionID), nil)
+	resp, err := j.doWithContentType(context.Background(), http.MethodGet,
+		"/apis/batch/v1/namespaces/"+j.Namespace+"/jobs/"+j.jobName(sessionID), nil, "application/json")
 	if err != nil {
 		return jobStateUnknown, ""
 	}

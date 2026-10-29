@@ -27,13 +27,14 @@ package server
 import (
 	"context"
 	"errors"
-	"log"
 	"net/http"
 	"slices"
 	"time"
 
 	"github.com/blerglab/blerg-ai/contracts/engines"
+	"github.com/blerglab/blerg-ai/runner/internal/clusterworkspace"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -56,6 +57,8 @@ const msgClusterChildResumeNoProof = "the sign-in this child was started with is
 // childHost is where a parent's child runs: its desktop daemon (dc, nil while disconnected) or the
 // cluster (a cluster parent's children, and a desktop parent's runtime "cluster" child).
 type childHost struct {
+	workspace *protocol.WorkspaceManifest
+
 	repoSource *DaemonConn
 	dc         *DaemonConn
 	cluster    bool
@@ -128,7 +131,7 @@ func recordLaunchAuthSession(ctx context.Context, pool *pgxpool.Pool, sessionID,
 		return
 	}
 	if err := db.SetSessionLaunchAuthSession(ctx, pool, sessionID, sid); err != nil {
-		log.Printf("record launch proof %s: %v", sessionID, err)
+		logLaunchFailure("runtime_binding", &jobSubmissionError{reason: "InternalError"})
 	}
 }
 
@@ -151,7 +154,7 @@ func (a *API) sessionLaunchProof(ctx context.Context, sessionID string) coreProo
 	}
 	tokenID, sid, err := db.GetSessionLaunchProof(ctx, a.dbPool, sessionID)
 	if err != nil {
-		log.Printf("delegation: launch proof of %s: %v", sessionID, err)
+		logLaunchFailure("runtime_binding", &jobSubmissionError{reason: "InternalError"})
 		return coreProof{}
 	}
 	if sid != "" {
@@ -241,7 +244,7 @@ func budgetForCluster(pod *DaemonConn, available []string, known bool, local []s
 			continue
 		}
 		if pod != nil {
-			for _, u := range pod.UsageLimits() {
+			for _, u := range pod.usageLimitsAt(now) {
 				if u.Provider != e.provider {
 					continue
 				}
@@ -290,7 +293,7 @@ func clusterParentPod(h *Hub, parent *db.SessionRow) *DaemonConn {
 // refusal comes before the Job exists; a child row that could not be fully recorded is removed.
 func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, principal runnerPrincipal, sessionID string) *APIError {
 	jm := a.hub.JobManager()
-	if jm == nil {
+	if jm == nil && req.Workspace == nil {
 		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgClusterNotConfigured)
 	}
 	if a.dbPool == nil {
@@ -311,16 +314,42 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 	if account == "" || account != derefOrEmpty(parent.SpawningAccountID) {
 		return apiErrorf(http.StatusForbidden, "%s", msgDelegateNoOwner)
 	}
-	if jm.personalCredentialsWired() && !proof.valid() {
+	if jm != nil && jm.personalCredentialsWired() && !proof.valid() {
 		return apiErrorf(http.StatusConflict, "%s", msgClusterChildNoProof)
 	}
+	var parentManifest *protocol.WorkspaceManifest
+	var workspaceConsumer WorkspaceClusterChildConsumer
+	if req.Workspace != nil {
+		if a.workspaceCluster == nil || !a.workspaceCluster.Capabilities().Supports("cluster", false) {
+			return apiErrorf(409, "cluster workspace runtime is disabled")
+		}
+		saved, err := db.GetSessionWorkspace(ctx, a.dbPool, parent.ID)
+		consumer, ok := a.workspaceCluster.(WorkspaceClusterChildConsumer)
+		if err != nil || saved == nil || saved.Manifest == nil || !ok || a.workspaceCluster.Capabilities().ManifestVersion != 2 || req.Workspace.OwnerID != account || protocol.ValidateWorkspaceChild(*saved.Manifest, *req.Workspace) != nil {
+			return apiErrorf(409, "cluster child workspace unavailable")
+		}
+		parentManifest = saved.Manifest
+		workspaceConsumer = consumer
+	}
+	var workspace *protocol.WorkspaceManifest
+	var members []clusterworkspace.Member
+	if req.Workspace == nil {
+		var selectionErr *APIError
+		workspace, members, selectionErr = a.clusterChildWorkspace(ctx, parent, req, sessionID)
+		if selectionErr != nil {
+			return selectionErr
+		}
+	}
 	gitURL, workdir := "", clusterNoRepoWorkdir
-	if !req.NoRepo {
+	if workspace != nil {
+		workdir = clusterworkspace.PublicRoot
+	}
+	if !req.NoRepo && req.Workspace == nil && workspace == nil {
 		gitURL = jm.CloneURLFor(req.Provider, req.Repo)
 		workdir = "/workspace/" + req.Repo
 	}
 	if err := db.UpsertDaemon(ctx, a.dbPool, clusterDaemonID, "cluster", "runner", ""); err != nil {
-		log.Printf("cluster child: cluster daemon upsert: %v", err)
+		logLaunchFailure("queued", &jobSubmissionError{reason: "InternalError"})
 	}
 	origin := sessionOriginFor(account, parent.Private, "")
 	origin.ParentSessionID, origin.DelegationVia, origin.KeepRunning = req.ParentSessionID, req.DelegationVia, req.KeepRunning
@@ -330,7 +359,7 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 		if errors.Is(err, db.ErrDelegationEnded) {
 			return apiErrorf(http.StatusConflict, "%s", msgDelegateEnded)
 		}
-		log.Printf("cluster child %s: insert: %v", sessionID, err)
+		logLaunchFailure("queued", &jobSubmissionError{reason: "InternalError"})
 		return apiErrorCause(http.StatusServiceUnavailable, errDaemonUnavailable, "the child session could not be recorded — retry")
 	}
 	abort := func() *APIError {
@@ -339,7 +368,7 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 	}
 	// Must land: it is one of the marks that keep a child a child (isChildSession).
 	if err := db.SetSessionStartedBy(ctx, a.dbPool, sessionID, "session", a.parentLabel(ctx, parent.ID)); err != nil {
-		log.Printf("cluster child %s: started_by: %v", sessionID, err)
+		logLaunchFailure("queued", &jobSubmissionError{reason: "InternalError"})
 		return abort()
 	}
 	// A cron's child never runs on operator-supplied material, on this start or any resume: the
@@ -347,15 +376,20 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 	cronChild := derefOrEmpty(parent.CronID) != "" || parent.StartedByKind == "cron"
 	if cronChild {
 		if err := db.SetSessionNoOperatorFallback(ctx, a.dbPool, sessionID); err != nil {
-			log.Printf("cluster child %s: no_operator_fallback: %v", sessionID, err)
+			logLaunchFailure("queued", &jobSubmissionError{reason: "InternalError"})
 			return abort()
 		}
 	}
 	if err := db.SetSessionSpawningAccount(ctx, a.dbPool, sessionID, account); err != nil {
-		log.Printf("cluster child %s: SetSessionSpawningAccount: %v", sessionID, err)
+		logLaunchFailure("queued", &jobSubmissionError{reason: "InternalError"})
 	}
 	if err := db.SetSessionKind(ctx, a.dbPool, sessionID, "agent"); err != nil {
-		log.Printf("cluster child %s: SetSessionKind: %v", sessionID, err)
+		logLaunchFailure("queued", &jobSubmissionError{reason: "InternalError"})
+	}
+	if workspace != nil {
+		if err := db.InsertSessionWorkspace(ctx, a.dbPool, sessionID, *workspace); err != nil {
+			return abort()
+		}
 	}
 	recordLaunchEffort(ctx, a.dbPool, sessionID, req.Effort)
 	// The proof the child starts with is its own from now on: a desktop parent resumes the idle
@@ -363,15 +397,15 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 	recordLaunchAuthSession(ctx, a.dbPool, sessionID, proof.SessionID)
 	if proof.TokenID != "" {
 		if err := db.SetSessionTokenID(ctx, a.dbPool, sessionID, proof.TokenID); err != nil {
-			log.Printf("cluster child %s: SetSessionTokenID: %v", sessionID, err)
+			logLaunchFailure("queued", &jobSubmissionError{reason: "InternalError"})
 		}
 	}
 	if err := db.SetSessionEngine(ctx, a.dbPool, sessionID, req.Engine); err != nil {
-		log.Printf("cluster child %s: SetSessionEngine: %v", sessionID, err)
+		logLaunchFailure("queued", &jobSubmissionError{reason: "InternalError"})
 	}
 	if gitURL != "" {
 		if err := db.SetSessionGitURL(ctx, a.dbPool, sessionID, gitURL); err != nil {
-			log.Printf("cluster child %s: SetSessionGitURL: %v", sessionID, err)
+			logLaunchFailure("queued", &jobSubmissionError{reason: "InternalError"})
 		}
 	}
 	recordInteraction(ctx, a.dbPool, sessionID, req.Interaction)
@@ -401,12 +435,24 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 		PluginsResolved: true,
 		PluginsNote:     pluginsNoteDelegated,
 	}
+	if req.Workspace != nil {
+		if db.InsertSessionWorkspace(ctx, a.dbPool, sessionID, *req.Workspace) != nil {
+			return abort()
+		}
+		if err := workspaceConsumer.StartChild(ctx, *parentManifest, *req.Workspace, spec); err != nil {
+			a.markClusterStartFailed(ctx, sessionID, "workspace preparation failed")
+			_ = db.RevokeBoardTokensForSession(ctx, a.dbPool, sessionID)
+			return apiErrorf(409, "cluster child workspace unavailable")
+		}
+		return nil
+	}
+	spec.Workspace, spec.WorkspaceMembers = workspace, members
 	announceClusterStart(ctx, a.hub, a.dbPool, sessionID, req.Repo, false, pluginStage(nil, pluginsNoteDelegated))
 	if err := jm.CreateSessionJob(spec); err != nil { //nolint:contextcheck // cluster calls are bounded by the JobManager client timeout and deliberately not tied to the caller: a Job or Secret half-made because the caller went away would be orphaned
 		a.markClusterStartFailed(ctx, sessionID, err.Error())
 		// No pod will ever use the child's messaging token.
 		if rerr := db.RevokeBoardTokensForSession(ctx, a.dbPool, sessionID); rerr != nil {
-			log.Printf("cluster child %s: revoke token after a failed start: %v", sessionID, rerr)
+			logLaunchFailure("queued", &jobSubmissionError{reason: "InternalError"})
 		}
 		return apiErrorCause(clusterStartFailureStatus(err), startFailureCause(err), "%s", err.Error())
 	}

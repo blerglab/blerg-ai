@@ -42,6 +42,7 @@ import (
 	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/idempotency"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/blerglab/blerg-ai/runner/internal/scratch"
@@ -69,9 +70,9 @@ const coreAuthRunnerCap = "session.start"
 // runner-capable token would keep being accepted indefinitely while core is
 // down (see identity.Verify's StaleBeyondCeiling branch).
 //
-// board.admin (delete boards, approve/delete agent rules) and card.write
+// board.admin (delete boards) and card.write
 // (every board/column/ticket mutation) are writes with the same problem: a
-// revoked owner's token must not keep deleting boards or enabling rules while
+// revoked owner's token must not keep deleting boards or editing cards while
 // core is down. card.read is deliberately left out of this list, but that
 // only degrades a stale token to read-only in the narrow case where
 // card.read is the ONLY capability it carries — identity.Verify's staleness
@@ -181,6 +182,13 @@ func (a *API) AuthorizeRunner(w http.ResponseWriter, r *http.Request) (RunnerPri
 // not configured at all, 401 otherwise) and returns false, so callers need only
 // `if !ok { return }`.
 func (a *API) authRunner(w http.ResponseWriter, r *http.Request) (runnerPrincipal, bool) {
+	p, ok := a.authRunnerPrincipal(w, r)
+	if ok {
+		*r = *r.WithContext(withDesktopViewer(r.Context(), a.desktopRecipient(r, p.spawningAccountID())))
+	}
+	return p, ok
+}
+func (a *API) authRunnerPrincipal(w http.ResponseWriter, r *http.Request) (runnerPrincipal, bool) {
 	if a.runnerKey == "" {
 		writeError(w, http.StatusNotFound, "runner endpoints not configured")
 		return runnerPrincipal{}, false
@@ -219,6 +227,10 @@ func (a *API) authRunner(w http.ResponseWriter, r *http.Request) (runnerPrincipa
 }
 
 type runnerStartRequest struct {
+	WorkspaceRepos  []string                    `json:"workspace_repos,omitempty"`
+	WorkspaceLaunch string                      `json:"workspace_launch,omitempty"`
+	Workspace       *protocol.WorkspaceManifest `json:"-"`
+
 	resolvedRepoProvider bool
 	Repo                 string `json:"repo"`
 	GitURL               string `json:"git_url"` // optional override for cross-org repos
@@ -283,7 +295,7 @@ type runnerStartRequest struct {
 	CronID             string `json:"-"`
 	NoOperatorFallback bool   `json:"-"`
 	// IdemScope overrides the idempotency scope of this start (a cron's is stable across token
-	// renewals: "cron:<cron id>"). In process only, like the fields above.
+	// renewals: idempotency.Scope("cron", cron ID)). In process only, like the fields above.
 	IdemScope string `json:"-"`
 	// The three fields below describe a child session (delegation.go): the session that started
 	// it, how its owner allowed it ("rule:<id>" | "grant:<id>" | "request:<id>") and whether it
@@ -318,30 +330,6 @@ const runnerRuntimeMessage = `runtime must be "cluster", "docker" or "daemon"`
 // every start ever made.
 const idempotencyTTL = 24 * time.Hour
 
-// maxIdempotencyKeyLen bounds the caller-supplied key: it is a primary-key
-// column, and an unbounded header would let a caller write arbitrarily large
-// rows into it.
-const maxIdempotencyKeyLen = 128
-
-// idempotencyKeyMessage is what BOTH surfaces say about a key that was supplied
-// and cannot be used. It deliberately does not mention a header: an MCP caller
-// passes the key as a tool argument and has no header to correct. The HTTP
-// handler keeps its own header-shaped message for the faults only a header can
-// have (sent empty, sent twice).
-var idempotencyKeyMessage = fmt.Sprintf("idempotency key must be 1-%d characters", maxIdempotencyKeyLen)
-
-// CheckIdempotencyKey validates a key the caller actually supplied. A key that
-// is present but empty is a caller bug rather than "no key": it would silently
-// drop the retry protection the caller believes it has. Absent keys never reach
-// here — only the caller knows whether one was sent, which over MCP is the
-// difference between a missing argument and an empty string.
-func CheckIdempotencyKey(key string) *APIError {
-	if key == "" || len(key) > maxIdempotencyKeyLen {
-		return apiErrorf(http.StatusBadRequest, "%s", idempotencyKeyMessage)
-	}
-	return nil
-}
-
 // idempotencyConflictMessage is the documented 409 body for a key reused with
 // a different request (openapi.json's IdempotencyConflict).
 const idempotencyConflictMessage = "idempotency key reused with a different request"
@@ -351,9 +339,9 @@ const idempotencyConflictMessage = "idempotency key reused with a different requ
 // each other's session ids. The static operator key has no subject of its own.
 func (p runnerPrincipal) startScope() string {
 	if p.Kind == runnerKeyPrincipalKind || p.Sub == "" {
-		return runnerKeyPrincipalKind
+		return idempotency.Scope(runnerKeyPrincipalKind)
 	}
-	return p.Kind + ":" + p.Sub
+	return idempotency.Scope(p.Kind, p.Sub)
 }
 
 // spawningAccountID is the account a session started by this principal runs
@@ -521,13 +509,9 @@ func (a *API) HandleRunnerStart(w http.ResponseWriter, r *http.Request) {
 	}
 	// Read the key before the body: a malformed key is a caller bug worth
 	// reporting even if the body would also have been rejected.
-	idemKey := r.Header.Get("Idempotency-Key")
-	// A header that is present but empty is a caller bug, not "no key": it
-	// would silently drop the retry protection the caller thinks it has.
-	if sent, ok := r.Header["Idempotency-Key"]; ok &&
-		(idemKey == "" || len(idemKey) > maxIdempotencyKeyLen || len(sent) > 1) {
-		writeError(w, http.StatusBadRequest,
-			fmt.Sprintf("Idempotency-Key must be a single header of 1-%d characters", maxIdempotencyKeyLen))
+	idemKey, apiErr := requestIdempotencyKey(r, false)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
 		return
 	}
 	var raw json.RawMessage
@@ -575,6 +559,7 @@ type StartResponse struct {
 // it from the Idempotency-Key header, MCP from the tool's idempotency_key
 // argument.
 func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req RunnerStartRequest, idemKey string) (StartResponse, *APIError) {
+	ctx = withDesktopViewer(ctx, desktopViewer(ctx, principal.spawningAccountID()))
 	ctx = withFilingProject(withCoreProof(ctx, principal.proof()), principal.Project)
 	// A title reaches people and other agents: stored one line, nothing invisible (session_rename.go).
 	req.Title = cleanSessionTitle(req.Title)
@@ -587,8 +572,10 @@ func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req R
 		}
 		req.DaemonID = req.TargetDaemonID
 	}
-	if len(idemKey) > maxIdempotencyKeyLen {
-		return StartResponse{}, apiErrorf(http.StatusBadRequest, "%s", idempotencyKeyMessage)
+	if idemKey != "" {
+		if apiErr := CheckIdempotencyKey(idemKey); apiErr != nil {
+			return StartResponse{}, apiErr
+		}
 	}
 	// A grant is built in process (the scheduler) for the account the principal acts for; a
 	// request decoded from a body cannot carry one. Refuse one that is malformed or for
@@ -606,11 +593,16 @@ func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req R
 	if apiErr != nil {
 		return StartResponse{}, apiErr
 	}
-	if req.NoRepo {
+	switch {
+	case len(req.WorkspaceRepos) > 0 || req.WorkspaceLaunch != "":
+		if principal.Kind != sessionDelegateKind || req.Runtime != runnerRuntimeCluster || req.WorkspaceLaunch == "" || len(req.WorkspaceRepos) == 0 || req.Repo != "" || req.NoRepo || req.GitURL != "" || req.Provider != "" {
+			return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity, "invalid child workspace selection")
+		}
+	case req.NoRepo:
 		if msg := noRepoProblem(req.Repo, req.GitURL, req.Provider, false, false); msg != "" {
 			return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity, "%s", msg)
 		}
-	} else if req.Repo == "" {
+	case req.Repo == "":
 		return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity, "repo is required")
 	}
 	if err := validateCallbackURL(req.CallbackURL); err != nil {
@@ -624,7 +616,7 @@ func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req R
 	if msg := a.modelEffortProblem(ctx, req.Engine, req.Model, req.Effort, ""); msg != "" {
 		return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity, "%s", msg)
 	}
-	if req.Runtime == runnerRuntimeCluster && a.hub.JobManager() == nil {
+	if req.Runtime == runnerRuntimeCluster && a.hub.JobManager() == nil && (req.Workspace == nil || a.workspaceCluster == nil) {
 		return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity, "cluster runtime is not configured")
 	}
 	// Refuse env that would shadow blerg-owned variables.
@@ -637,7 +629,7 @@ func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req R
 	// root (desktop); both hosts join it onto a path, so reject traversal here
 	// before either does. The daemon re-checks containment itself. A no_repo
 	// start names none (checked empty above).
-	if !req.NoRepo {
+	if !req.NoRepo && len(req.WorkspaceRepos) == 0 {
 		if err := validateRepoName(req.Repo); err != nil {
 			return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity,
 				"repo must be a folder name or org/name (one slash at most, no '..', no leading dot)")
@@ -653,8 +645,8 @@ func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req R
 	// The session id is minted here, before anything is started, because the
 	// idempotency record has to name it: a retry that arrives while the first
 	// start is still in flight must be answered with the SAME id.
-	if !req.NoRepo && req.GitURL == "" && principal.Kind != sessionDelegateKind && a.hub.JobManager() != nil && (req.Runtime == "" || req.Runtime == runnerRuntimeCluster) {
-		repo, provider, problem := a.resolveClusterRepo(req.Repo, req.Provider, req.DaemonID)
+	if req.Workspace == nil && !req.NoRepo && req.GitURL == "" && principal.Kind != sessionDelegateKind && a.hub.JobManager() != nil && (req.Runtime == "" || req.Runtime == runnerRuntimeCluster) {
+		repo, provider, problem := a.resolveClusterRepo(ctx, req.Repo, req.Provider, req.DaemonID, principal.spawningAccountID())
 		if problem != "" {
 			return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity, "%s", problem)
 		}
@@ -703,6 +695,24 @@ func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req R
 		}
 		return StartResponse{}, apiErr
 	}
+	// The plan follows the start (plansync.go): a board-started session pins its card, a child
+	// naming #N is assigned to its parent's item naming #N.
+	parentID := req.ParentSessionID
+	if principal.Kind == sessionDelegateKind {
+		parentID = principal.Sub
+	}
+	if a.dbPool != nil && (parentID != "" || req.Env["BLERG_BOARD_BOARD"] != "") {
+		boardID, title, prompt := req.Env["BLERG_BOARD_BOARD"], req.Title, req.Prompt
+		func() {
+			// Assign the child before the start reply can let the parent end its turn.
+			pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), planCheckTimeout)
+			defer cancel()
+			a.planSessionStarted(pctx, sessionID, parentID, boardID, title, prompt)
+			if a.planMovedHook != nil {
+				a.planMovedHook(sessionID)
+			}
+		}()
+	}
 	return StartResponse{SessionID: sessionID}, nil
 }
 
@@ -721,8 +731,9 @@ func startRequestHash(req runnerStartRequest) (string, error) {
 			DelegationVia   string             `json:"delegation_via"`
 			KeepRunning     bool               `json:"keep_running"`
 			// Absent without boards: the hash of a start that passes none is what it was before.
-			Boards []childBoard `json:"boards,omitempty"`
-		}{req, req.ParentSessionID, req.DelegationVia, req.KeepRunning, childBoardsHashKey(req.ChildBoards)}
+			Boards  []childBoard `json:"boards,omitempty"`
+			Members []string     `json:"workspace_members,omitempty"`
+		}{req, req.ParentSessionID, req.DelegationVia, req.KeepRunning, childBoardsHashKey(req.ChildBoards), workspaceMemberKeys(req.Workspace)}
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -917,7 +928,7 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 	if req.Grant != nil && req.Runtime == runnerRuntimeDaemon {
 		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgMCPRuntime)
 	}
-	if req.DaemonID != "" && a.hub.GetHostDaemon(req.DaemonID) == nil {
+	if req.DaemonID != "" && a.hub.ownedHostDaemon(ctx, principal.spawningAccountID(), req.DaemonID) == nil {
 		return apiErrorCause(http.StatusServiceUnavailable, errDaemonUnavailable, "the pinned daemon is not a connected host execution target")
 	}
 
@@ -930,9 +941,9 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 		selection := HostSelection{Engine: req.Engine, Runtime: req.Runtime}
 		var candidate *DaemonConn
 		if req.NoRepo {
-			candidate = a.hub.DaemonForScratch(req.Runtime, selection)
+			candidate = a.hub.ownedDaemonForScratch(ctx, principal.spawningAccountID(), req.Runtime, selection)
 		} else {
-			candidate = a.hub.DaemonForRepo(req.Repo, selection)
+			candidate = a.hub.ownedDaemonForRepo(ctx, principal.spawningAccountID(), req.Repo, selection)
 		}
 		if candidate == nil {
 			return nil
@@ -952,11 +963,11 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 		// daemon exactly like a new folder.
 		if req.DaemonID != "" {
 			// An in-process pin (a cron's daemon_id): that daemon or none, never another one.
-			if dc = a.hub.GetHostDaemon(req.DaemonID); dc == nil {
+			if dc = a.hub.ownedHostDaemon(ctx, principal.spawningAccountID(), req.DaemonID); dc == nil {
 				return apiErrorCause(http.StatusServiceUnavailable, errDaemonUnavailable, "the pinned daemon is not connected")
 			}
 		} else {
-			dc = a.hub.DaemonForScratch(req.Runtime, HostSelection{Engine: req.Engine, Runtime: req.Runtime, Restricted: req.Grant != nil || req.CronID != ""})
+			dc = a.hub.ownedDaemonForScratch(ctx, principal.spawningAccountID(), req.Runtime, HostSelection{Engine: req.Engine, Runtime: req.Runtime, Restricted: req.Grant != nil || req.CronID != ""})
 		}
 		if dc == nil {
 			if problem := placementFailure(); problem != nil {
@@ -966,14 +977,16 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 		}
 		req.Repo = scratch.NewName()
 	case req.DaemonID != "":
-		dc = a.hub.GetHostDaemon(req.DaemonID)
-		if dc != nil {
+		dc = a.hub.ownedHostDaemon(ctx, principal.spawningAccountID(), req.DaemonID)
+		if dc != nil && dc.DiscoveryVersion != 1 {
 			// A pinned host (a card run on a chosen desktop) names the repository as its caller
-			// knows it; it runs in the folder this daemon has for it.
+			// knows it; it runs in the folder this daemon has for it. A desktop with workspace
+			// discovery resolves the name as asked, from fresh discovery (contract_workspace.go),
+			// never from this cached inventory.
 			req.Repo = repoFolderOn(dc, req.Repo, req.Provider)
 		}
 	default:
-		dc = a.hub.DaemonForRepo(req.Repo, HostSelection{Engine: req.Engine, Runtime: req.Runtime, Restricted: req.Grant != nil || req.CronID != ""})
+		dc = a.hub.ownedDaemonForRepo(ctx, principal.spawningAccountID(), req.Repo, HostSelection{Engine: req.Engine, Runtime: req.Runtime, Restricted: req.Grant != nil || req.CronID != ""})
 	}
 	if dc == nil {
 		if problem := placementFailure(); problem != nil {
@@ -982,6 +995,27 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 		return apiErrorf(http.StatusServiceUnavailable,
 			"no connected daemon has repo %q — check it out under the daemon's repos root, or connect a daemon", req.Repo)
 	}
+	// A desktop with workspace discovery launches only from a fresh, bound selection: resolve the
+	// repository this start names into one (contract_workspace.go), released if the start fails.
+	dispatched := false
+	if dc.DiscoveryVersion == 1 && req.Workspace == nil && !req.NoRepo && principal.Kind == sessionDelegateKind {
+		// A started session's workspace is its parent's selection (or a subset of it), never a
+		// repository it names on the desktop.
+		return apiErrorf(409, "Select an existing repository using fresh source references.")
+	}
+	if dc.DiscoveryVersion == 1 && req.Workspace == nil && !req.NoRepo {
+		m, apiErr := a.contractRepoWorkspace(ctx, principal.spawningAccountID(), dc, req.Repo, req.Provider, resolveDaemonRuntime(req.Runtime, dc.SandboxAvailable()))
+		if apiErr != nil {
+			return apiErr
+		}
+		req.Workspace, req.Repo, req.Prompt = m, "workspace", workspacePrompt(req.Prompt, m)
+		bound := dc
+		defer func() {
+			if !dispatched {
+				a.hub.releaseWorkspaceSelection(bound, m)
+			}
+		}()
+	}
 	if !hostMatchesSelection(dc, []HostSelection{{Engine: req.Engine, Runtime: req.Runtime, Restricted: req.Grant != nil || req.CronID != ""}}) {
 		return apiErrorf(http.StatusUnprocessableEntity, "the selected host cannot run the requested engine or runtime")
 	}
@@ -989,6 +1023,9 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 		return apiErrorf(http.StatusUnprocessableEntity, "%s", problem)
 	}
 
+	if req.Workspace != nil && dc.WorkspaceCapabilities.Require(*req.Workspace, false) != nil {
+		return apiErrorf(409, "workspace runtime is disabled or unnegotiated")
+	}
 	runtime := resolveDaemonRuntime(req.Runtime, dc.SandboxAvailable())
 	if principal.Kind == sessionDelegateKind && !dc.RecoveryReadyCapable {
 		return apiErrorf(http.StatusConflict, "update the daemon before starting child sessions")
@@ -1088,6 +1125,12 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 		}
 		recordInteraction(ctx, a.dbPool, sessionID, req.Interaction)
 	}
+	if req.Workspace != nil {
+		if sessionToken == "" || req.Workspace.OwnerID != principal.spawningAccountID() || dc.WorkspaceCapabilities.Require(*req.Workspace, false) != nil || db.InsertSessionWorkspace(ctx, a.dbPool, sessionID, *req.Workspace) != nil {
+			abortSpawnSessionToken(ctx, a.dbPool, sessionID)
+			return apiErrorf(409, "workspace runtime unavailable or selection changed")
+		}
+	}
 	// A cron's session is marked (cron_id) and made private, after its account is recorded.
 	if apiErr := a.markCronSession(ctx, req, sessionID); apiErr != nil {
 		abortSpawnSessionToken(ctx, a.dbPool, sessionID)
@@ -1118,9 +1161,11 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 		plugins, pluginNote = a.daemonPlugins(ctx, dc, principal.spawningAccountID(), principal.proof(), "agent", req.Engine, restricted)
 	}
 	raw, err := json.Marshal(protocol.SpawnSession{ //nolint:gosec // the spawn message must carry the session token (and any MCP gateway grant) to the daemon over the authenticated websocket; never logged
-		RequireRecoveryReady: principal.Kind == sessionDelegateKind,
-		MCPGateway:           gateway,
-		Plugins:              plugins,
+		Workspace:             req.Workspace,
+		WorkspaceCapabilities: dc.WorkspaceCapabilities,
+		RequireRecoveryReady:  principal.Kind == sessionDelegateKind,
+		MCPGateway:            gateway,
+		Plugins:               plugins,
 		// Every cron session and every grant session runs restricted (mcpstart.go).
 		RestrictTools: req.Grant != nil || req.CronID != "",
 		// Unattended unless the caller said a person is reading (interaction.go).
@@ -1157,6 +1202,7 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 	}
 	select {
 	case dc.send <- raw:
+		dispatched = true
 	default:
 		abortSpawnSessionToken(ctx, a.dbPool, sessionID)
 		return apiErrorCause(http.StatusServiceUnavailable, errDaemonUnavailable, "daemon send buffer full — retry")
@@ -1224,6 +1270,17 @@ func resolveDaemonRuntime(requested string, sandboxAvailable bool) string {
 
 // HandleRunnerStatus reports the three-axis status.
 func (a *API) HandleRunnerStatus(w http.ResponseWriter, r *http.Request) {
+	err := a.sessionReadFence(r.Context(), r.PathValue("id"), func(ctx context.Context) error {
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Second))
+		a.snapshotHandleRunnerStatus(w, r.WithContext(ctx))
+		return nil
+	})
+	if err != nil {
+		writeError(w, 409, "session source changed; refresh")
+	}
+}
+
+func (a *API) snapshotHandleRunnerStatus(w http.ResponseWriter, r *http.Request) {
 	principal, ok := a.authRunner(w, r)
 	if !ok {
 		return
@@ -1246,7 +1303,11 @@ func (a *API) SessionStatus(ctx context.Context, principal RunnerPrincipal, sess
 	if apiErr != nil {
 		return nil, apiErr
 	}
-	runtime := a.runnerRuntimeAxis(sessionID, derefOrEmpty(row.Runtime)) //nolint:contextcheck // cluster calls are bounded by the JobManager client timeout and deliberately not tied to the caller: a Job or Secret half-made because the caller went away would be orphaned
+	visible := a.hub.desktopSessionVisible(ctx, desktopViewer(ctx, principal.spawningAccountID()), row)
+	runtime := "none"
+	if visible {
+		runtime = a.runnerRuntimeAxis(sessionID, derefOrEmpty(row.Runtime)) //nolint:contextcheck // JobManager bounds this cluster status probe independently
+	}
 	// The documented five-value enum, not the raw column: runnerLifecycle
 	// (result.go) is shared with the result endpoint so the two can never
 	// disagree about what state a session is in. It also carries the rule that
@@ -1260,12 +1321,17 @@ func (a *API) SessionStatus(ctx context.Context, principal RunnerPrincipal, sess
 	// trial hit. Cleared by any non-error transition.
 	errorReason := ""
 	if row.ErrorReason != nil {
-		errorReason = *row.ErrorReason
+		errorReason = podErrorReasonFor(row, desktopViewer(ctx, principal.spawningAccountID()), *row.ErrorReason)
 	}
 	// Why it ended and what kind of actor ended it — never which account:
 	// the contract answers brokers, not people.
 	endReason, endedBy := endAttribution(row, "")
-	resumable, resumeMode, resumeReason := sessionResumeEligibility(ctx, a.dbPool, a.hub.JobManager(), row, principal.spawningAccountID(), principal.proof())
+	resumable, resumeMode, resumeReason := false, "", ""
+	if visible {
+		resumable, resumeMode, resumeReason = sessionResumeEligibility(ctx, a.dbPool, a.hub.JobManager(), row, principal.spawningAccountID(), principal.proof())
+	} else {
+		errorReason = ""
+	}
 	return map[string]any{
 		"lifecycle":          lifecycle,
 		"runtime":            runtime,
@@ -1321,7 +1387,7 @@ func (a *API) HandleRunnerMessage(w http.ResponseWriter, r *http.Request) {
 // relays go through sendRelay.
 func reservedMessageSource(source string) bool {
 	switch source {
-	case "review", "proposal", "system", "ask_answer", "note_reply", "limit_resume", childTurnSource, questionAnswerSource:
+	case "review", "proposal", "system", "ask_answer", "note_reply", "limit_resume", childTurnSource, questionAnswerSource, planDriftSource, usageNoticeSource:
 		return true
 	}
 	return false
@@ -1331,7 +1397,7 @@ func reservedMessageSource(source string) bool {
 // or dismissal, a review's or a proposal's outcome, a child's turn, a board-access change). A caller
 // may not use one: the outbox keeps one row per id, so a message under "question-<id>" would stand
 // in for the owner's answer, which would then never be sent, and the chat would draw it as a relay.
-var reservedClientIDPrefixes = []string{"question-", "review-", "proposal-", "child-turn-", "board-access-"}
+var reservedClientIDPrefixes = []string{"question-", "review-", "proposal-", "child-turn-", "board-access-", "usage-notice-"}
 
 // reservedClientID reports whether id is one the server keeps for its own relays.
 func reservedClientID(id string) bool {
@@ -1346,7 +1412,7 @@ func reservedClientID(id string) bool {
 // sendRelay is SendMessage for a note Blerg relays in its own voice (source "review", "proposal",
 // childTurnSource or questionAnswerSource): the server's own paths only, never a caller's.
 func (a *API) sendRelay(ctx context.Context, principal RunnerPrincipal, sessionID, text, source string, clientIDs ...string) *APIError {
-	if source != "review" && source != "proposal" && source != childTurnSource && source != questionAnswerSource {
+	if source != "review" && source != "proposal" && source != childTurnSource && source != questionAnswerSource && source != planDriftSource && source != usageNoticeSource {
 		return apiErrorf(http.StatusInternalServerError, "not a relay source")
 	}
 	_, apiErr := a.deliverMessage(ctx, principal, sessionID, text, source, clientIDs...)
@@ -1622,7 +1688,14 @@ func (a *API) Stop(ctx context.Context, principal RunnerPrincipal, sessionID str
 	if err := a.stopSession(ctx, sessionID, stopEndByRunner(principal)); err != nil {
 		return nil, apiErrorf(http.StatusServiceUnavailable, "continuation is busy; retry stop shortly")
 	}
-	return map[string]string{"status": "stopped"}, nil
+	status := "stopped"
+	if a.dbPool != nil {
+		var pending bool
+		if err := a.dbPool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM local_workspace_authority WHERE session_id=$1 AND stop_requested AND final_digest IS NULL AND NOT aborted)`, sessionID).Scan(&pending); err == nil && pending {
+			status = "stopping"
+		}
+	}
+	return map[string]string{"status": status}, nil
 }
 
 // stopSession is the body of a stop with no authorization in it: kill whatever
@@ -1634,7 +1707,7 @@ func (a *API) Stop(ctx context.Context, principal RunnerPrincipal, sessionID str
 // end is why, and by whom: recorded with the "ended" status (first write wins,
 // so an auto-stop's claim, which already recorded auto_stopped, keeps it).
 func (a *API) stopSession(ctx context.Context, sessionID string, end db.SessionEnd) error {
-	err := withCancelledLimitResume(ctx, a.dbPool, sessionID, func() error { a.stopSessionUnlocked(ctx, sessionID, end); return nil })
+	err := withCancelledLimitResume(ctx, a.dbPool, sessionID, func() error { return a.stopSessionWithDelivery(ctx, sessionID, end, false) })
 	if err != nil {
 		log.Printf("stop %s: continuation cancellation: %v", sessionID, err)
 	}
@@ -1648,27 +1721,63 @@ func (a *API) stopSessionUnlocked(ctx context.Context, sessionID string, end db.
 // Discard requires successful stop delivery before the session may leave the worker lists.
 // Ordinary stop retains its existing best-effort cleanup behavior.
 func (a *API) stopSessionWithDelivery(ctx context.Context, sessionID string, end db.SessionEnd, strict bool) error {
-	// Desktop (R9): a board-driven session lives in a daemon process, not a
-	// Job. Marking the row "ended" without telling the daemon would leave the
-	// agent running — and still holding the repo — so kill it first.
-	if dc := a.hub.FindDaemonForSession(sessionID); dc != nil {
-		if raw, err := json.Marshal(protocol.KillSession{Type: "kill_session", SessionID: sessionID}); err == nil {
-			select {
-			case dc.send <- raw:
-			default:
-				if strict {
-					return fmt.Errorf("daemon stop queue is full")
-				}
-				log.Printf("runner stop: daemon %s send buffer full, kill_session dropped for %s", dc.ID, sessionID)
-			}
-		}
-	} else if strict && a.dbPool != nil {
-		row, err := db.GetSession(ctx, a.dbPool, sessionID)
+	if a.dbPool != nil {
+		w, err := db.GetSessionWorkspace(ctx, a.dbPool, sessionID)
 		if err != nil {
 			return err
 		}
-		if row != nil && !terminalSessionStatus(row.Status) && onDesktopDaemon(row) {
-			return fmt.Errorf("child daemon disconnected before stop could be delivered")
+		if w != nil && w.Manifest != nil && (w.Manifest.Runtime == "host" || w.Manifest.Runtime == "sandbox") {
+			var active bool
+			if err := a.dbPool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM local_workspace_authority WHERE session_id=$1 AND NOT aborted)`, sessionID).Scan(&active); err != nil {
+				return err
+			}
+			if active {
+				return a.requestLocalWorkspaceStop(ctx, sessionID, end, strict)
+			}
+		}
+		if w != nil && w.Manifest != nil && w.Manifest.Runtime == "cluster" {
+			// Serialize with replacement, but never hold the frame fence while
+			// waiting for the authenticated runtime's final settlement reply.
+			trusted, cancel := context.WithTimeout(context.WithoutCancel(ctx), 95*time.Second)
+			defer cancel()
+			return db.WithSessionNativeHistoryLock(trusted, a.dbPool, sessionID, func() error {
+				if err := a.settleClusterStop(trusted, sessionID); err != nil {
+					return err
+				}
+				return a.finishSessionStop(trusted, sessionID, end, strict, true)
+			})
+		}
+	}
+	return a.finishSessionStop(ctx, sessionID, end, strict, false)
+}
+
+func (a *API) finishSessionStop(ctx context.Context, sessionID string, end db.SessionEnd, strict, workspaceSettled bool) error {
+	// Workspace stops require confirmed cleanup and durable terminal marking.
+	strict = strict || workspaceSettled
+
+	// Desktop (R9): a board-driven session lives in a daemon process, not a
+	// Job. Marking the row "ended" without telling the daemon would leave the
+	// agent running — and still holding the repo — so kill it first.
+	if !workspaceSettled {
+		if dc := a.hub.FindDaemonForSession(sessionID); dc != nil {
+			if raw, err := json.Marshal(protocol.KillSession{Type: "kill_session", SessionID: sessionID}); err == nil {
+				select {
+				case dc.send <- raw:
+				default:
+					if strict {
+						return fmt.Errorf("daemon stop queue is full")
+					}
+					log.Printf("runner stop: daemon %s send buffer full, kill_session dropped for %s", dc.ID, sessionID)
+				}
+			}
+		} else if strict && a.dbPool != nil {
+			row, err := db.GetSession(ctx, a.dbPool, sessionID)
+			if err != nil {
+				return err
+			}
+			if row != nil && !terminalSessionStatus(row.Status) && onDesktopDaemon(row) {
+				return fmt.Errorf("child daemon disconnected before stop could be delivered")
+			}
 		}
 	}
 	if jm := a.hub.JobManager(); jm != nil {
@@ -1681,7 +1790,26 @@ func (a *API) stopSessionWithDelivery(ctx context.Context, sessionID string, end
 	}
 	now := time.Now()
 	if a.dbPool != nil {
-		if err := db.EndSessionStatus(ctx, a.dbPool, sessionID, "ended", &now, end); err != nil {
+		// Cleanup of an already terminal workspace must not rewrite its end
+		// timestamp, status or attribution. Recoverable observations still get
+		// the explicit confirmed stop through EndSessionStatus.
+		terminal := false
+		finalStatus := "ended"
+		if workspaceSettled {
+			row, err := db.GetSession(ctx, a.dbPool, sessionID)
+			if err != nil || row == nil {
+				return errClusterWorkspace
+			}
+			terminal = db.TerminallyEnded(row)
+			if terminal {
+				finalStatus = row.Status
+			}
+		}
+		var endErr error
+		if !terminal {
+			endErr = db.EndSessionStatus(ctx, a.dbPool, sessionID, "ended", &now, end)
+		}
+		if err := endErr; err != nil {
 			if strict {
 				return err
 			}
@@ -1689,7 +1817,7 @@ func (a *API) stopSessionWithDelivery(ctx context.Context, sessionID string, end
 		} else {
 			// Tell open browsers, reason included, rather than leaving the
 			// session looking alive until the next reload.
-			a.broadcastReconciledStatus(ctx, sessionID, "ended")
+			a.broadcastReconciledStatus(ctx, sessionID, finalStatus)
 			a.hub.SessionTerminallyEnded(sessionID)
 		}
 	}
@@ -1762,6 +1890,17 @@ func (a *API) interrupt(ctx context.Context, principal RunnerPrincipal, sessionI
 // the plain agent-events REST route returns a bare array (has_more is
 // WS-only there), which the runner contract cannot use.
 func (a *API) HandleRunnerEvents(w http.ResponseWriter, r *http.Request) {
+	err := a.sessionReadFence(r.Context(), r.PathValue("id"), func(ctx context.Context) error {
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Second))
+		a.snapshotHandleRunnerEvents(w, r.WithContext(ctx))
+		return nil
+	})
+	if err != nil {
+		writeError(w, 409, "session source changed; refresh")
+	}
+}
+
+func (a *API) snapshotHandleRunnerEvents(w http.ResponseWriter, r *http.Request) {
 	principal, ok := a.authRunner(w, r)
 	if !ok {
 		return
@@ -1811,7 +1950,7 @@ func (a *API) EventsBefore(ctx context.Context, principal RunnerPrincipal, sessi
 			"seq":     ev.Seq,
 			"ts":      ev.Ts.UTC().Format("2006-01-02T15:04:05.000Z"),
 			"kind":    ev.Kind,
-			"payload": json.RawMessage(ev.Payload),
+			"payload": a.hub.desktopEventPayload(ctx, desktopViewer(ctx, principal.spawningAccountID()), sessionID, ev.Kind, ev.Payload),
 		})
 	}
 	var firstSeq int64
@@ -1849,7 +1988,7 @@ func (a *API) Events(ctx context.Context, principal RunnerPrincipal, sessionID s
 			"seq":     ev.Seq,
 			"ts":      ev.Ts.UTC().Format("2006-01-02T15:04:05.000Z"),
 			"kind":    ev.Kind,
-			"payload": json.RawMessage(ev.Payload),
+			"payload": a.hub.desktopEventPayload(ctx, desktopViewer(ctx, principal.spawningAccountID()), sessionID, ev.Kind, ev.Payload),
 		})
 	}
 	return map[string]any{"events": events, "has_more": hasMore}, nil

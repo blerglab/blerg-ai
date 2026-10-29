@@ -1,0 +1,11 @@
+# Send only the helper's Go modules, never checkout caches or local state.
+**
+!contracts/
+!contracts/**
+!runner/
+!runner/**
+runner/**/node_modules/
+runner/data/
+runner/bin/
+runner/**/.env
+runner/**/.env.*

@@ -323,7 +323,7 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
       <div style={field}>
         {launchOptions.state === 'loading' ? <p role="status">Checking available engines…</p>
           : launchOptions.state === 'unknown' ? <p role="status">{launchOptions.error ?? 'Engine availability is unknown.'}{' '}
-            <button type="button" onClick={launchOptions.retry}>Retry engines</button></p>
+            <button type="button" className="btn small" onClick={launchOptions.retry}>Retry engines</button></p>
           : launchOptions.engines.length === 0 ? <p role="status">No engines available for this runtime. Connect an engine in Settings or choose another runtime.</p>
           : launchOptions.engines.length > 1 ? <>
             <label style={label} htmlFor="cron-engine">Engine</label>
@@ -389,7 +389,7 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
         </>}
         {boardDiscovery.state === 'loading' && <p style={note} role="status">Checking available boards…</p>}
         {boardDiscovery.state === 'failed' && <p style={note} role="status">
-          Couldn't load boards.{' '}<button type="button" onClick={boardDiscovery.retry}>Retry boards</button>
+          Couldn't load boards.{' '}<button type="button" className="btn small" onClick={boardDiscovery.retry}>Retry boards</button>
         </p>}
         {boardId && !boardKnown && boardDiscovery.state !== 'loading' && <p data-testid="cron-board-unavailable" style={note}>
           The saved board is currently unavailable. Saving keeps its ID unless you explicitly clear or change it; runs cannot use it until access is restored.

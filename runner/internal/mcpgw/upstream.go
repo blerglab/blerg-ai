@@ -263,6 +263,10 @@ func (st *grantState) post(ctx context.Context, cred Credential, payload []byte,
 	if proto != "" {
 		req.Header.Set("Mcp-Protocol-Version", proto)
 	}
+	if st.builtin && st.sessionID != "" {
+		// The board records which runner session a change came from in its audit (column changes).
+		req.Header.Set(BoardSessionHeader, st.sessionID)
+	}
 	client := st.g.client
 	if st.builtin {
 		client = st.g.boardClient

@@ -249,7 +249,7 @@ func TestForwardBrowserSpawnInteraction(t *testing.T) {
 	_, hub, dc, pool := spawnTokenFixture(t)
 	ctx := context.Background()
 	for asked, want := range map[string]string{"": protocol.InteractionInteractive, "unattended": protocol.InteractionUnattended} {
-		sid, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1"}, protocol.BrowserSpawnSession{
+		sid, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1", AccountID: "user-1"}, protocol.BrowserSpawnSession{
 			Kind: "agent", Type: "spawn_session", DaemonID: dc.ID, Repo: "app", Title: "t", Interaction: asked,
 		}, pool)
 		if err != nil {
@@ -262,7 +262,7 @@ func TestForwardBrowserSpawnInteraction(t *testing.T) {
 			t.Errorf("asked %q: row = %+v, %v", asked, row, err)
 		}
 	}
-	if _, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1"}, protocol.BrowserSpawnSession{
+	if _, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1", AccountID: "user-1"}, protocol.BrowserSpawnSession{
 		Kind: "agent", Type: "spawn_session", DaemonID: dc.ID, Repo: "app", Interaction: "maybe",
 	}, pool); err == nil || len(dc.send) != 0 {
 		t.Errorf("an unknown interaction was forwarded (err %v)", err)

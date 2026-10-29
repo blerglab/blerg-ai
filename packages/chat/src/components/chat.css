@@ -28,15 +28,6 @@
   font-size: 12px;
 }
 
-.agent-stop {
-  margin-left: auto;
-  background: var(--chat-surface-2);
-  color: var(--chat-fg);
-  border: 1px solid var(--chat-border);
-  border-radius: 6px;
-  padding: 3px 10px;
-  cursor: pointer;
-}
 
 .agent-timeline {
   flex: 1;
@@ -572,6 +563,28 @@
   overflow-wrap: anywhere;
 }
 
+.restart-disclosure > summary {
+  cursor: pointer;
+}
+
+.restart-details {
+  margin-top: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* A paused restart row's Resume: beside the line, never squeezed by it. */
+.restart-resume {
+  flex-shrink: 0;
+  align-self: center;
+  white-space: nowrap;
+  min-height: 26px;
+}
+
+@media (max-width: 640px) {
+  .restart-resume { min-height: 36px; }
+}
+
 .system-head {
   display: flex;
   align-items: baseline;
@@ -770,10 +783,6 @@
   padding: 2px 8px;
   border-radius: 6px;
   margin-left: auto;
-}
-
-.agent-working.compact + .agent-stop {
-  margin-left: 0;
 }
 
 .agent-working-time {
@@ -1732,9 +1741,9 @@
 
 /* A markdown document in a viewer reads in GitHub's box (markdown.css, .md-box): a centered, bordered
    column of GitHub's width, however large the dialog is or when it is maximized. The body is the size
-   container the box's narrow rule reads. */
+   container the box's narrow rule reads; its height also sizes scroll-past-end space. */
 .artifact-viewer .artifact-body {
-  container-type: inline-size;
+  container-type: size;
 }
 .artifact-viewer .artifact-body > .artifact-markdown {
   margin-top: 4px;
@@ -2507,26 +2516,26 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
   box-sizing: border-box;
 }
 
-.sp-done {
+.sp-icon.sp-done {
   background: color-mix(in srgb, var(--chat-success) 22%, transparent);
   color: var(--chat-success);
 }
 
-.sp-warning {
+.sp-icon.sp-warning {
   background: color-mix(in srgb, var(--chat-accent) 22%, transparent);
   color: var(--chat-accent);
 }
 
-.sp-failed {
+.sp-icon.sp-failed {
   background: color-mix(in srgb, var(--chat-danger) 22%, transparent);
   color: var(--chat-danger);
 }
 
-.sp-pending {
+.sp-icon.sp-pending {
   border: 2px solid var(--chat-border);
 }
 
-.sp-spinner {
+.sp-icon.sp-spinner {
   border: 2px solid color-mix(in srgb, var(--chat-accent) 25%, transparent);
   border-top-color: var(--chat-accent);
   animation: blerg-spin 0.8s linear infinite;
@@ -2593,8 +2602,13 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
   border: 0;
 }
 
+/* The chat's own: an embedding app (the board) does not define it. */
+@keyframes blerg-spin {
+  to { transform: rotate(360deg); }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .sp-spinner {
+  .sp-icon.sp-spinner {
     animation: none;
     border-color: var(--chat-accent);
     border-top-color: var(--chat-accent);
@@ -2693,6 +2707,28 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
   white-space: pre;
 }
 .code-viewer-code code { color: inherit; }
+/* Wrapped lines (#265): one block per line, numbered once in its own gutter cell (data-n), the
+   continuation rows blank beside it; no horizontal scroll. */
+.code-viewer-scroll.is-wrapped { display: block; overflow-x: hidden; overflow-y: auto; }
+.code-viewer-scroll.is-wrapped .code-viewer-code { padding-left: 0; white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+.code-viewer-scroll.is-wrapped .code-line { display: block; position: relative; padding-left: calc(var(--chat-code-gutter, 3ch) + 37px); }
+.code-viewer-scroll.is-wrapped .code-line::before {
+  content: attr(data-n);
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: var(--chat-code-gutter, 3ch);
+  padding: 0 12px;
+  text-align: right;
+  color: var(--chat-code-linenum);
+  border-right: 1px solid var(--chat-border);
+  user-select: none;
+}
+.code-viewer-scroll.is-wrapped .code-line.is-marked { background: color-mix(in srgb, var(--chat-accent, #6d8cff) 22%, transparent); }
+.code-viewer-scroll.is-wrapped .code-line.is-marked::before { color: var(--chat-fg); box-shadow: inset 3px 0 var(--chat-accent, #6d8cff); }
+/* A line number never wraps, and the app's letter spacing does not widen it past its cell. */
+.code-viewer-scroll.is-wrapped .code-line::before { white-space: pre; letter-spacing: 0; overflow-wrap: normal; }
 .code-viewer-code .hljs-keyword,
 .diff-code .hljs-keyword,
 .code-viewer-code .hljs-literal,
@@ -3217,3 +3253,73 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
 .artifact-preview-diagram { min-width: 0; max-width: 100%; margin: 2px 0 8px; }
 .artifact-preview-diagram > .visual-block,
 .artifact-preview-diagram > .visual-failed { margin: 0; }
+
+/* Immutable child selections can contain long folder-relative member paths. */
+.delegation-members { margin: 8px 0; padding-inline-start: 20px; min-width: 0; }
+.delegation-members li { overflow-wrap: anywhere; }
+.delegation-members code { white-space: normal; overflow-wrap: anywhere; }
+
+/* A host can dock the existing viewers without their modal portal or size limits. */
+.embedded-viewer { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+.embedded-viewer > .artifact-dialog.artifact-viewer { width: 100%; max-width: none; height: 100%; max-height: none; min-height: 0; border: 0; border-radius: 0; box-shadow: none; margin: 0; }
+/* A single bounded row: paths yield space to keyboard-accessible actions. */
+.viewer-toolbar { display: flex; align-items: center; flex: none; gap: 4px; height: 38px; box-sizing: border-box; padding: 3px 8px; border-bottom: 1px solid var(--chat-border); background: var(--chat-bg); min-width: 0; }
+.viewer-toolbar h2 { flex: 1; min-width: 0; margin: 0; display: flex; }
+.viewer-path { display: block; width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; border: 0; border-radius: 4px; padding: 6px 2px; background: none; color: var(--chat-muted); font: 12px var(--chat-font); cursor: pointer; }
+.viewer-action { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 30px; height: 30px; border: 1px solid transparent; border-radius: 4px; background: none; color: var(--chat-muted); cursor: pointer; }
+.viewer-action:hover, .viewer-path:hover { background: var(--chat-surface); color: var(--chat-fg); }
+.viewer-action[aria-pressed="true"] { background: var(--chat-selected-bg); border-color: var(--chat-selected-border); color: var(--chat-selected-text); }
+.viewer-action:focus-visible, .viewer-path:focus-visible { outline: 2px solid var(--chat-accent); outline-offset: -2px; }
+.viewer-action:disabled { opacity: .5; cursor: default; }
+.viewer-toolbar > .artifact-btn { flex: none; font-size: 12px; padding: 4px 6px; white-space: nowrap; }
+.embedded-viewer .artifact-body { padding: 0; }
+.embedded-viewer .code-viewer-scroll { border: 0; border-radius: 0; }
+/* A docked HTML or PDF frame takes the body it is given, however short its group (#259): the
+   document scrolls inside the frame, never the body around it. */
+.embedded-viewer .artifact-frame { min-height: 0; }
+/* Keep the input mounted: draft, selection, attachments and composer isolation survive tabs. */
+.chat-composer-surface { display: contents; }
+.chat-composer-surface[hidden] { display: none; }
+
+/* Every chat/viewer is a bounded flex pane. Wide code and tables keep their own scrollers. */
+.agent-chat { min-width: 0; overflow: hidden; }
+.agent-toolbar, .agent-composer, .agent-composer-hint, .attach-chips { flex-shrink: 0; }
+.embedded-viewer, .artifact-dialog { min-width: 0; }
+
+.agent-toolbar:empty { display: none; }
+
+/* Space management stays usable inside a narrow composer and at desktop widths. */
+.attach-space-panel { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; margin: 4px 0 0; border: 1px solid var(--chat-border); border-radius: 8px; background: var(--chat-surface-2); font-size: var(--chat-text-sm); line-height: 1.45; flex-shrink: 0; max-width: 100%; box-sizing: border-box; }
+.attach-space-text { margin: 0; color: var(--chat-muted); overflow-wrap: anywhere; }
+.attach-space-text.is-error { color: var(--chat-danger); }
+.attach-space-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.attach-space-buttons .artifact-btn { white-space: normal; text-align: left; min-height: 32px; }
+.free-space-overlay { z-index: 1200; padding: 12px; align-items: center; }
+.free-space-dialog { box-sizing: border-box; width: min(900px, calc(100vw - 24px)); height: auto; max-height: calc(100dvh - 24px); font-family: var(--chat-font); font-size: var(--chat-text-sm); line-height: 1.5; }
+.free-space-dialog .artifact-body { overflow: auto; min-height: 0; }
+.free-space-dialog .artifact-header h2 { margin: 0; font-size: 18px; }
+.free-space-list { list-style: none; padding: 0; margin: 12px 0; }
+.free-space-list label { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--chat-border); }
+.free-space-list label > span { min-width: 0; overflow-wrap: anywhere; }
+.free-space-list strong { display: block; font-weight: 500; }
+.free-space-list small { color: var(--chat-muted); }
+.free-space-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding: 12px; border-top: 1px solid var(--chat-border); }
+.free-space-dialog .artifact-close { margin-left: auto; }
+.free-space-actions .artifact-btn { min-height: 36px; }
+/* EOF can move into reading space without enlarging the viewer or session. The body is a
+   bounded size container, so cqh follows a resized split rather than the browser window. */
+.artifact-viewer .code-viewer-code::after,
+.artifact-viewer .code-viewer-gutter::after,
+.artifact-viewer .artifact-text::after,
+.artifact-viewer .diff-main::after {
+  content: '';
+  display: block;
+  height: max(6lh, calc(100cqh / 3));
+}
+.artifact-viewer .diff-main::after { font: var(--chat-text-xs)/1.5 var(--chat-font-mono); }
+.artifact-viewer .artifact-body > .artifact-markdown { padding-bottom: max(2lh, 32px); }
+
+/* A Blerg notice's text is inline Markdown in one compact row. */
+.system-text .md.md-inline { display: inline; overflow-wrap: anywhere; }
+.system-text .md.md-inline code { overflow-wrap: anywhere; white-space: normal; }
+.system-text .md.md-inline img { display: none; }

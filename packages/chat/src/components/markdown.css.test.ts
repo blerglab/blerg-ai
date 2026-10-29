@@ -16,4 +16,14 @@ describe('markdown.css', () => {
       expect(rule).toContain(decl)
     }
   })
+  // A card or commit reference outside Markdown (a diff's commit header, the review's commit list)
+  // drew as a bare browser button: the reference style must not depend on the .md container.
+  it('styles a reference link anywhere, not only inside Markdown', () => {
+    const css = fs.readFileSync(`${DIR}/markdown.css`, 'utf8')
+    const rule = [...css.matchAll(/(^|\n)button\.md-ref\s*\{([^}]*)\}/g)].map(m => m[2]).join('')
+    for (const decl of ['border: 0', 'background: none', 'padding: 0', 'font: inherit', 'color: var(--chat-info)']) {
+      expect(rule).toContain(decl)
+    }
+    expect(css).not.toMatch(/\.md button\.md-ref/)
+  })
 })

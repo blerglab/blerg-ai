@@ -130,7 +130,7 @@ process's file. Interrupt uses the control request; the PID is for the fallback 
 
 No protocol change. `user_message` still appears when the agent picks the message up, and the queued bubble
 resolves then. Wording (delivery is "when the agent reaches a step", not guaranteed mid-turn):
-composer hint `Working — Enter sends it · Esc interrupts`; queued bubble `Sent — the agent picks it up as
+composer hint `Working — Enter sends it` (Esc no longer interrupts since 0.5.0; use Stop); queued bubble `Sent — the agent picks it up as
 soon as it can`. Also: `turnStartTimes` resets `start` only after a `turn_done` (several folded messages =
 one turn), and a mid-turn `user_message` must not reset live tool calls (`liveCalls`) or split a tool group.
 

@@ -58,6 +58,9 @@ func newTopicFx(t *testing.T) *topicFx {
 	}
 	hub := NewHub()
 	api := NewAPI(hub, pool, topicDaemonToken, nil, "")
+	if _, err := pool.Exec(ctx, `UPDATE daemons SET desktop_owner_id=$2 WHERE id=$1`, daemonID, topicOwner); err != nil {
+		t.Fatal(err)
+	}
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -573,6 +576,7 @@ func TestGetTopicsCommitLinks(t *testing.T) {
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc.SetRepoOrigins(map[string]protocol.RepoOrigin{"app": {Provider: "gitlab", FullName: "example-group/app"}}, nil)
 	fx.api.hub.Register(dc)
+	fixtureOwnDesktop(t, fx.pool, dc, topicOwner)
 	rec := fx.get(fx.sess, owner, tag)
 	if rec.Code != http.StatusOK || rec.Header().Get("ETag") == tag {
 		t.Fatalf("learning the repository must bust the tag: %d %q", rec.Code, rec.Header().Get("ETag"))

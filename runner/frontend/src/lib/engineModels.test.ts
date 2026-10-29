@@ -258,9 +258,10 @@ describe('useEngineModels with a cache', () => {
   it('keeps cached choices visible when a background refresh reports an error', async () => {
     const cache = memo()
     cache.put('codex', undefined, { ...CACHED, source: 'live' })
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ models: [], source: 'none', error: 'Please reconnect Codex.' }) })))
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ models: [], source: 'none', error: 'Please reconnect Codex.', reconnect: true }) })))
     const { result } = renderHook(() => useEngineModels('codex', undefined, { runtime: 'cluster', cache }))
     await waitFor(() => expect(result.current.error).toBe('Please reconnect Codex.'))
+    expect(result.current.reconnect).toBe(true)
     expect(result.current.models[0].id).toBe('gpt-cached')
     expect(result.current.loading).toBe(false)
   })

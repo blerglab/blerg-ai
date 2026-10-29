@@ -27,7 +27,8 @@ export function BoardChat({ boardId, onClosed }: { boardId: string; onClosed: ()
     return () => window.removeEventListener("blerg-board:chat-focus", focusComposer);
   }, [setMin]);
 
-  // reattach to a live board session, or start one
+  // reattach to a live board session, or start one (again, after Try again)
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let stop = false;
     (async () => {
@@ -43,7 +44,7 @@ export function BoardChat({ boardId, onClosed }: { boardId: string; onClosed: ()
       }
     })();
     return () => { stop = true; };
-  }, [boardId]);
+  }, [boardId, attempt]);
 
   // keep the board's own row fresh: it drives the chip, the mini dot and whether
   // the person may still write
@@ -96,7 +97,22 @@ export function BoardChat({ boardId, onClosed }: { boardId: string; onClosed: ()
           title="minimize — the session keeps running">—</button>
         <button className="btn ghost small" onClick={close} title="ends the session">✕ Close</button>
       </div>
-      {error && <p role="alert" style={{ color: "var(--danger)", fontSize: 13, padding: "0 12px" }}>{error}</p>}
+      {error && (
+        <div className="board-chat-error" style={{ padding: "0 12px" }}>
+          <p role="alert" style={{ color: "var(--danger)", fontSize: 13, margin: "0 0 8px" }}>
+            The board session could not start: {error}
+          </p>
+          <div className="row" style={{ gap: 8 }}>
+            {/* Where it runs and the board's repos live in its settings: always one click away. */}
+            <button type="button" className="btn small" onClick={() => window.dispatchEvent(new Event("blerg-board:open-settings"))}>
+              Open board settings
+            </button>
+            <button type="button" className="btn ghost small" onClick={() => { setError(""); setAttempt((n) => n + 1); }}>
+              Try again
+            </button>
+          </div>
+        </div>
+      )}
       {!session && !error && <div className="empty" style={{ padding: 12, fontSize: 13 }}>starting…</div>}
       {session?.lifecycle === "disconnected" && (
         <p className="adv-banner working" style={{ margin: 8 }}>

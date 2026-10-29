@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import { MessageThread } from './MessageThread'
 import { useMessageStore } from '../hooks/useMessageStore'
@@ -164,7 +164,7 @@ describe('MessageThread', () => {
     expect(body.indexOf('Old open question')).toBeLessThan(body.indexOf('Newer answered 2'))
   })
 
-  it('failed reply (non-2xx) keeps the input populated and shows an error toast', async () => {
+  it('failed reply (non-2xx) keeps the input populated and shows an anchored action error', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 409, json: async () => ({}) })
     vi.stubGlobal('fetch', fetchMock)
 
@@ -187,7 +187,11 @@ describe('MessageThread', () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled())
     expect((input as HTMLInputElement).value).toBe('My answer')
-    expect(useToastStore.getState().toasts).toHaveLength(1)
+    const error = await screen.findByRole('alertdialog', { name: 'Reply failed' })
+    expect(error).toHaveTextContent('Server returned 409')
+    expect(useToastStore.getState().toasts).toHaveLength(0)
+    fireEvent.click(within(error).getByRole('button', { name: 'Dismiss' }))
+    expect(screen.getByRole('button', { name: 'Send' })).toHaveFocus()
   })
 
   it('successful reply clears the input', async () => {
@@ -487,4 +491,20 @@ it('keeps archived-session questions readable without a reply form', () => {
   expect(screen.getByText('Keep this question in history')).toBeInTheDocument()
   expect(screen.queryByPlaceholderText('Type your reply…')).toBeNull()
   expect(screen.queryByRole('button',{name:/Send/})).toBeNull()
+})
+
+it('retries a network failure with the saved reply and clears it after success', async () => {
+  const fetchMock = vi.fn().mockRejectedValueOnce(new Error('Offline')).mockResolvedValueOnce({ ok: true })
+  vi.stubGlobal('fetch', fetchMock)
+  render(<MemoryRouter><MessageThread messages={[makeMessage({ kind: 'ask', status: 'open' })]} /></MemoryRouter>)
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Keep this answer' } })
+  fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' })
+  const error = await screen.findByRole('alertdialog', { name: 'Reply failed' })
+  expect(error).toHaveTextContent('Network error')
+  expect(useToastStore.getState().toasts).toHaveLength(0)
+  fireEvent.click(within(error).getByRole('button', { name: 'Retry' }))
+  await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue(''))
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+  expect(fetchMock).toHaveBeenLastCalledWith('/api/messages/msg-1/reply', expect.objectContaining({ body: JSON.stringify({ answer: 'Keep this answer' }) }))
+  vi.unstubAllGlobals()
 })

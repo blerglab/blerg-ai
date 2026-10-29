@@ -4,6 +4,7 @@ import { MemoryRouter, useLocation } from 'react-router-dom'
 import SessionCard from './SessionCard'
 import { makeDaemon, makeSession } from '../test/fixtures'
 import * as wsMock from '../test/wsMock'
+import { useSessionStore } from '../hooks/useSessionStore'
 
 const apiFetch=vi.hoisted(()=>vi.fn())
 vi.mock('../apiFetch',()=>({apiFetch}))
@@ -35,7 +36,7 @@ describe('SessionCard', () => {
     renderCard(makeSession({id:'child /',parent_session_id:'parent /',title:'Review child'}))
     fireEvent.click(screen.getByRole('button',{name:'Actions for Review child'}))
     fireEvent.click(screen.getByRole('menuitem',{name:'Discard child session'}))
-    expect(screen.getByRole('dialog',{name:'Discard child session?'})).toBeInTheDocument()
+    expect(screen.getByRole('alertdialog',{name:'Discard child session?'})).toBeInTheDocument()
     expect(screen.getByTestId('location')).toHaveTextContent('/')
     expect(apiFetch).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button',{name:'Discard child session'}))
@@ -49,9 +50,9 @@ describe('SessionCard', () => {
     fireEvent.click(screen.getByRole('button',{name:'Actions for Parent'}))
     expect(screen.queryByRole('menuitem',{name:'Discard child session'})).toBeNull()
     fireEvent.click(screen.getByRole('menuitem',{name:'Discard session and children'}))
-    expect(screen.getByRole('dialog',{name:'Discard session and all children?'})).toBeInTheDocument()
+    expect(screen.getByRole('alertdialog',{name:'Discard session and all children?'})).toBeInTheDocument()
     expect(screen.getByText(/including children marked Keep running and work in progress/)).toBeInTheDocument()
-    expect(screen.getByText(/conversations, files, history and insights remain available/)).toBeInTheDocument()
+    expect(screen.getByText(/Conversations, files, history and insights remain available/)).toBeInTheDocument()
     expect(apiFetch).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button',{name:'Discard session and children'}))
     await waitFor(()=>expect(apiFetch).toHaveBeenCalledWith('/api/sessions/parent%20%2F/discard',{method:'POST'}))
@@ -342,25 +343,30 @@ describe('SessionCard', () => {
   describe('runtime and kind chips', () => {
     it('labels a cluster session', () => {
       renderCard(makeSession({ runtime: 'cluster', kind: 'agent' }))
-      expect(screen.getByTestId('runtime-chip')).toHaveTextContent('Cluster')
+      expect(screen.getByTestId('runtime-chip').querySelector('[data-runtime]')).toHaveAttribute('data-runtime', 'cluster')
       // An agent session is the default kind: no chip says so (Terminal, the exception, does).
       expect(screen.queryByTestId('kind-chip')).not.toBeInTheDocument()
     })
 
     it('labels a sandboxed session', () => {
       renderCard(makeSession({ runtime: 'docker', kind: 'tmux' }))
-      expect(screen.getByTestId('runtime-chip')).toHaveTextContent('Sandbox')
+      expect(screen.getByTestId('runtime-chip').querySelector('[data-runtime]')).toHaveAttribute('data-runtime', 'sandbox')
       expect(screen.getByTestId('kind-chip')).toHaveTextContent('Terminal')
     })
 
     it('labels an unsandboxed host session', () => {
       renderCard(makeSession({ runtime: 'daemon', kind: 'agent' }))
-      expect(screen.getByTestId('runtime-chip')).toHaveTextContent('Host')
+      expect(screen.getByTestId('runtime-chip').querySelector('[data-runtime]')).toHaveAttribute('data-runtime', 'host')
     })
 
-    it('treats the legacy empty kind as a terminal session', () => {
-      renderCard(makeSession({ kind: '' }))
+    it('labels only an explicit tmux session as a terminal (terminal sessions were removed in 0.5.0)', () => {
+      renderCard(makeSession({ kind: 'tmux' }))
       expect(screen.getByTestId('kind-chip')).toHaveTextContent('Terminal')
+    })
+
+    it('gives a session with an empty kind no terminal label', () => {
+      renderCard(makeSession({ kind: '' }))
+      expect(screen.queryByTestId('kind-chip')).toBeNull()
     })
 
     it('shows no runtime chip when the session predates the runtime column', () => {
@@ -380,4 +386,19 @@ describe('SessionCard', () => {
       expect(screen.queryByTestId('cron-badge')).not.toBeInTheDocument()
     })
   })
+})
+
+it.each([undefined, 'example-org/widget', 'example-org/another-widget'])('puts the type icon first and task chip last (parent repo=%s)', parentRepo => {
+  const nested = parentRepo !== undefined
+  useSessionStore.setState({ sessions: nested ? [makeSession({ id: 'parent', repo: parentRepo })] : [] })
+  const session = makeSession({ id: 'ordered', title: 'Build widgets', runtime: 'daemon', kind: 'agent', repo: 'example-org/widget', model: 'model-next', status: 'running', ...(nested ? { parent_session_id: 'parent' } : {}) })
+  const card = (tasks: number) => <MemoryRouter><SessionCard session={{ ...session, background_tasks: tasks }} daemon={makeDaemon()} nested={nested} /></MemoryRouter>
+  const view = render(card(0))
+  const expected = ['runtime-chip', ...(parentRepo !== session.repo ? ['session-repo'] : []), 'model-chip']
+  const row = () => screen.getByTestId('runtime-chip').parentElement!
+  expect([...row().children].map(item => item.getAttribute('data-testid'))).toEqual(expected)
+  view.rerender(card(3))
+  expect([...row().children].map(item => item.getAttribute('data-testid'))).toEqual([...expected, 'background-chip'])
+  view.rerender(card(0))
+  expect([...row().children].map(item => item.getAttribute('data-testid'))).toEqual(expected)
 })

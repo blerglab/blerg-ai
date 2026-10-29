@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { asOfLabel, capabilityCount, enabledCapabilityCount, humanModelName, latestCapabilities, matchesQuery, middleTruncate, newerReport, normalizeCapabilities, permissionLabel, statusGlyph, statusWord, withLiveMcp } from './capabilities'
+import { launchPermission, asOfLabel, capabilityCount, enabledCapabilityCount, humanModelName, latestCapabilities, matchesQuery, middleTruncate, newerReport, normalizeCapabilities, permissionLabel, statusGlyph, statusWord, withLiveMcp } from './capabilities'
 import type { AgentEvent, AgentEventKind } from '../types'
 
 const ev = (seq: number, kind: AgentEventKind, payload: unknown): AgentEvent => ({
@@ -94,17 +94,32 @@ it('describes on-demand MCP honestly without counting it as connected', () => {
 })
 
 describe('the Capabilities header card (card #132)', () => {
-  it('names permission modes in words, amber only for the ones that act without asking', () => {
-    expect(permissionLabel('bypassPermissions')).toEqual({ label: 'Bypass permissions', risky: true })
-    expect(permissionLabel('default')).toEqual({ label: 'Default', risky: false })
-    expect(permissionLabel('acceptEdits')).toEqual({ label: 'Accept edits', risky: false })
-    expect(permissionLabel('plan')).toEqual({ label: 'Plan', risky: false })
-    expect(permissionLabel('never')).toEqual({ label: 'Never asks', risky: true })
-    expect(permissionLabel('restricted')).toEqual({ label: 'Restricted', risky: false })
-    expect(permissionLabel('danger-full-access')).toEqual({ label: 'Full access', risky: true })
-    // Unknown: as reported, neutral; never a prototype key.
-    expect(permissionLabel('someNewMode')).toEqual({ label: 'someNewMode', risky: false })
-    expect(permissionLabel('constructor')).toEqual({ label: 'constructor', risky: false })
+  it.each([
+    ['claude', 'bypassPermissions', '', 'No prompts', true, 'full access', 'Claude Code: bypassPermissions'],
+    ['claude', 'default', '', 'Asks first', false, 'Asks first', 'Claude Code: default'],
+    ['claude', 'acceptEdits', '', 'Allows edits', false, 'edits allowed', 'Claude Code: acceptEdits'],
+    ['claude', 'plan', '', 'Read only', false, 'Read only', 'Claude Code: plan'],
+    ['codex', 'never', 'danger-full-access', 'No prompts', true, 'full access', 'Codex: approval never, sandbox danger-full-access'],
+    ['codex', 'never', 'workspace-write', 'No prompts', true, 'workspace only', 'Codex: approval never, sandbox workspace-write'],
+    ['codex', 'never', 'read-only', 'No prompts', true, 'read only', 'Codex: approval never, sandbox read-only'],
+    ['codex', 'on-request', 'workspace-write', 'Asks first', false, 'workspace only', 'Codex: approval on-request, sandbox workspace-write'],
+    ['codex', 'on-failure', 'workspace-write', 'Failure prompts', false, 'workspace only', 'Codex: approval on-failure, sandbox workspace-write'],
+    ['codex', 'untrusted', 'read-only', 'Asks first', false, 'untrusted commands', 'Codex: approval untrusted, sandbox read-only'],
+    ['codex', 'restricted', 'read-only', 'Read only', false, 'granted tools', 'Codex: approval never, sandbox read-only'],
+    ['codex', 'never', '', 'No prompts', true, 'scope not reported', 'Codex: approval never'],
+    ['hermes', 'bypassPermissions', '', 'No prompts', true, 'protected actions may still ask', 'Hermes: HERMES_YOLO_MODE=1'],
+  ])('describes %s %s %s with concise effect and native details', (engine, mode, sandbox, label, risky, effect, native) => {
+    const p = permissionLabel(mode, engine, sandbox)
+    expect(p).toMatchObject({ label, risky })
+    expect(p.description).toContain(effect)
+    expect(p.description).toContain(native)
+    expect(p.label).not.toContain('·')
+  })
+
+  it('keeps unknown permission modes neutral and preserves their terms', () => {
+    for (const mode of ['someNewMode', 'constructor']) {
+      expect(permissionLabel(mode)).toMatchObject({ label: mode, risky: false })
+    }
   })
 
   it('gives a model its human name, the raw id staying for the tooltip', () => {
@@ -143,5 +158,27 @@ describe('the Capabilities header card (card #132)', () => {
     expect(statusGlyph('error').tone).toBe('bad')
     expect(statusGlyph('needs-auth').tone).toBe('warn')
     expect(statusGlyph('whatever').tone).toBe('other')
+  })
+})
+
+
+describe('permission combinations', () => {
+  it.each(['never', 'on-request', 'on-failure', 'untrusted'])('keeps each Codex %s sandbox scope separate from its chip', mode => {
+    for (const sandbox of ['danger-full-access', 'workspace-write', 'read-only']) {
+      const p = permissionLabel(mode, 'codex', sandbox)
+      expect(p.description).toContain(`Codex: approval ${mode}, sandbox ${sandbox}`)
+      expect(p.label.split(' ').length).toBeLessThanOrEqual(2)
+      expect(p.risky).toBe(mode === 'never' || sandbox === 'danger-full-access')
+    }
+  })
+  it.each(['auto', 'dontAsk'])('retains the native Claude %s mode in the tooltip', mode => {
+    const p = permissionLabel(mode, 'claude')
+    expect(p.description).toContain(`Claude Code: ${mode}`)
+    expect(p.label.split(' ').length).toBeLessThanOrEqual(2)
+  })
+  it('does not infer a terminal approval or sandbox mode from engine defaults', () => {
+    expect(launchPermission('codex', 'tmux')).toMatchObject({ label: 'Engine default', risky: false })
+    expect(launchPermission('codex', 'tmux').description).toContain('scope not reported')
+    expect(launchPermission('codex', 'tmux', true).description).toContain('Codex: approval never, sandbox danger-full-access')
   })
 })

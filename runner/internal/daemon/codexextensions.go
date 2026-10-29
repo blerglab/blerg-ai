@@ -116,7 +116,21 @@ func (c *codexExtensions) Catalog(ctx context.Context) (extCatalog, error) {
 		}
 		homesRead = append(homesRead, codexHomeMarketplaces{Dir: h.codexHome, List: list})
 	}
-	return readCodexCatalog(homesRead, c.home, c.loaded), nil
+	out := readCodexCatalog(homesRead, c.home, c.loaded)
+	// Remote-only entries have no local manifest. Read them from this session's
+	// trusted engine, never from a catalog path supplied by a browser or agent.
+	if c.d != nil {
+		c.d.mu.Lock()
+		app := c.d.app
+		c.d.mu.Unlock()
+		if app != nil {
+			raw, err := app.callContext(ctx, "plugin/list", map[string]any{"forceRefetch": false})
+			if err == nil {
+				out = appendCodexRemoteCatalog(out, raw, c.loaded)
+			}
+		}
+	}
+	return out, nil
 }
 
 func (c *codexExtensions) AddMarketplace(ctx context.Context, source string) error {
@@ -124,7 +138,7 @@ func (c *codexExtensions) AddMarketplace(ctx context.Context, source string) err
 	if w == nil {
 		return extUnsupported
 	}
-	if !w.allow.Allows(source) {
+	if !w.currentAllow().Allows(source) {
 		return extNotAllowed
 	}
 	w.mu.Lock()
@@ -136,7 +150,7 @@ func (c *codexExtensions) AddMarketplace(ctx context.Context, source string) err
 		}
 	}
 	opts := pluginsinstall.Options{Bin: "codex", Env: pluginsinstall.ChildEnv(empty, append([]string{"CODEX_HOME=" + wh}, gitSafetyEnv()...)...),
-		Allow: w.allow, Run: w.run, LogPrefix: "daemon: codex plugins"}
+		Allow: w.currentAllow(), Run: w.run, LogPrefix: "daemon: codex plugins"}
 	if err := pluginsinstall.AddMarketplace(ctx, opts, source); err != nil {
 		return extAddFailed
 	}
@@ -287,6 +301,7 @@ func readCodexCatalog(homes []codexHomeMarketplaces, personHome string, loaded [
 				}
 				id := entry.Name + "@" + m.Name
 				fromBlerg := m.Source != "" && loadedBy[strings.ToLower(m.Source)+"\x00"+entry.Name]
+				entry.Managed = fromBlerg
 				entry.Installed = installed[id] || fromBlerg
 				entry.Enabled = (installed[id] && enabled[id]) || fromBlerg
 				out.Plugins = append(out.Plugins, entry)
@@ -471,4 +486,72 @@ func (d *codexDriver) recordProjectMCP() {
 		d.projectMCPNames[n] = true
 	}
 	d.projectMCPAll = d.projectMCPAll || all
+}
+
+// appendCodexRemoteCatalog accepts only native remote entries, never arbitrary
+// local paths masquerading as an installable marketplace source.
+func appendCodexRemoteCatalog(out extCatalog, raw []byte, loaded []pluginspec.Entry) extCatalog {
+	if len(raw) > protocol.CatalogResultMaxFrame {
+		return out
+	}
+	var response struct {
+		Marketplaces []struct {
+			Name    string
+			Path    *string
+			Plugins []struct {
+				Name, Version, LocalVersion, InstallPolicy, Availability, DisabledReason string
+				Installed, Enabled                                                       bool
+				Source                                                                   struct{ Type string }
+				Interface                                                                struct{ ShortDescription, DeveloperName, Category string }
+			}
+		}
+	}
+	if json.Unmarshal(raw, &response) != nil {
+		return out
+	}
+	known := map[string]bool{}
+	for _, market := range out.Marketplaces {
+		known[market.Name] = true
+	}
+	for _, market := range response.Marketplaces {
+		source := "codex:" + market.Name
+		if _, ok := pluginspec.CodexMarketplaceName(source); !ok || market.Path != nil || known[market.Name] {
+			continue
+		}
+		if len(out.Marketplaces) >= protocol.CatalogMaxMarketplaces {
+			out.Truncated = true
+			break
+		}
+		added := false
+		for _, p := range market.Plugins {
+			if p.Source.Type != "remote" || !pluginspec.ValidPluginName(p.Name) {
+				continue
+			}
+			if len(out.Plugins) >= protocol.CatalogMaxPlugins {
+				out.Truncated = true
+				break
+			}
+			if !added {
+				out.Marketplaces = append(out.Marketplaces, protocol.CatalogMarketplace{Name: market.Name, Source: source})
+				known[market.Name] = true
+				added = true
+			}
+			managed := false
+			for _, e := range loaded {
+				if e.Marketplace == source && e.Plugin == p.Name {
+					managed = true
+				}
+			}
+			reason := ""
+			if p.InstallPolicy == "NOT_AVAILABLE" || p.Availability == "DISABLED_BY_ADMIN" || p.DisabledReason != "" {
+				reason = "Codex does not allow this plugin for your account."
+			}
+			version := p.Version
+			if version == "" {
+				version = p.LocalVersion
+			}
+			out.Plugins = append(out.Plugins, protocol.CatalogPlugin{Name: p.Name, Marketplace: market.Name, Description: p.Interface.ShortDescription, Version: version, Author: p.Interface.DeveloperName, Category: p.Interface.Category, Installed: p.Installed || managed, Enabled: p.Enabled || managed, Managed: managed, InstallReason: reason})
+		}
+	}
+	return out
 }

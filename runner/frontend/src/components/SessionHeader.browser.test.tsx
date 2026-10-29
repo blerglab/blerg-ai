@@ -50,13 +50,23 @@ describe('the session header', () => {
     await page.viewport(width, width === 3840 ? 2160 : 844)
     mount(width > 1000)
     const group = await screen.findByTestId('session-header-controls')
+    await within(group).findByRole('button', { name: "Stop the agent's current turn" })
     const buttons = [...group.querySelectorAll<HTMLButtonElement>('button:not([role="menuitem"])')]
-    expect(buttons).toHaveLength(5)
+    // Search was added to this group after the original five-control layout test.
+    // Name every control so missing, duplicated or unexpected actions still fail.
+    expect(buttons).toEqual([
+      within(group).getByRole('button', { name: 'Search commands and files' }),
+      ...(width > 1000 ? [within(group).getByRole('button', { name: 'Star' })] : []),
+      ...(width > 1000 ? [within(group).getByRole('button', { name: 'Insights' })] : []),
+      // The session runs: Stop, immediately left of End session (a phone's End session is in the palette).
+      within(group).getByRole('button', { name: "Stop the agent's current turn" }),
+      ...(width > 1000 ? [within(group).getByRole('button', { name: 'End session' })] : []),
+    ])
     // Exactly one Notifications bell on the page: in the header on a phone (no sidebar there), in
     // the sidebar beside + New on a wide screen.
-    const bells = screen.getAllByRole('button', { name: /^Notifications/ })
-    expect(bells).toHaveLength(1)
-    expect(group.contains(bells[0])).toBe(width < 900)
+    const bells = screen.queryAllByRole('button', { name: /^Notifications/ })
+    expect(bells).toHaveLength(width > 1000 ? 1 : 0)
+    if (bells[0]) expect(group.contains(bells[0])).toBe(false)
     const rects = buttons.map(b => b.getBoundingClientRect())
     // One row, inside the screen.
     for (const r of rects) {
@@ -70,19 +80,20 @@ describe('the session header', () => {
       expect(cs.borderTopWidth).toBe('1px')
       expect(cs.borderTopLeftRadius).toBe('6px')
       expect(rects[i].height).toBe(rects[0].height)
-      if (b.dataset.testid !== 'rail-toggle') expect(rects[i].width).toBe(rects[0].width)
+      expect(rects[i].width).toBe(rects[0].width)
       expect(b.querySelector('svg')!.getAttribute('stroke-width') ?? b.querySelector('svg')!.getAttribute('strokeWidth')).toBe('1.75')
     }
     // The title keeps room.
     const title = group.parentElement!.querySelector<HTMLElement>('div[style*="cursor: text"]')!
     expect(title.textContent).toMatch(/Ship the release notes/)
-    expect(title.getBoundingClientRect().width).toBeGreaterThan(width > 1000 ? 600 : 100)
-    // The ⋯ menu opens inside the screen.
-    await userEvent.click(screen.getByRole('button', { name: 'More actions' }))
-    const menu = screen.getByRole('menu', { name: 'More actions' }).getBoundingClientRect()
-    expect(menu.left).toBeGreaterThanOrEqual(0)
-    expect(menu.right).toBeLessThanOrEqual(width)
-    expect(screen.getByRole('menuitem', { name: 'Discard session and children' })).toBeVisible()
+    expect(title.getBoundingClientRect().width).toBeGreaterThan(100)
+    expect(title.parentElement!.getBoundingClientRect().width).toBeGreaterThan(width > 1000 ? 600 : 100)
+    expect(within(group).queryByRole('button', { name: 'Toggle explorer' })).toBeNull()
+    expect(screen.queryByRole('toolbar', { name: 'Session tools' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'More actions' })).toBeNull()
+    const folder = screen.getByRole('button', { name: 'Toggle explorer' })
+    expect(folder.closest('nav')?.getAttribute('aria-label')).toBe(width < 900 ? 'Session navigation' : 'Workspace')
+
   })
 
   // Card #128: an open / pressed control is the selected blue, never the accent (Blaze), which beside
@@ -113,7 +124,8 @@ describe('the session header', () => {
       expect(accentValues).not.toContain(cs.borderTopColor)
       expect(cs.borderTopColor).not.toBe(danger)
       // End session stays the only red control.
-      expect(getComputedStyle(screen.getByTestId('stop-session')).color).toBe(danger)
+      if (width > 1000) expect(getComputedStyle(screen.getByTestId('stop-session')).color).toBe(danger)
+      else expect(screen.queryByTestId('stop-session')).toBeNull()
     } finally {
       delete document.documentElement.dataset.theme
     }

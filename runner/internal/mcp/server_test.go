@@ -522,3 +522,22 @@ func TestMCPStartSessionInteraction(t *testing.T) {
 		t.Errorf("an unknown interaction was accepted: %v", res)
 	}
 }
+
+func TestMCPIdempotencyKeySchema(t *testing.T) {
+	srv := clusterMCPServer(t)
+	_, env := rpc(t, srv, mcpTestKey, map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+	result := env["result"].(map[string]any)
+	for _, raw := range result["tools"].([]any) {
+		tool := raw.(map[string]any)
+		if tool["name"] != "start_session" {
+			continue
+		}
+		schema := tool["inputSchema"].(map[string]any)
+		key := schema["properties"].(map[string]any)["idempotency_key"].(map[string]any)
+		if key["type"] != "string" || key["minLength"] != float64(1) || key["maxLength"] != float64(128) || key["pattern"] != "^[A-Za-z0-9_.:-]{1,128}$" {
+			t.Fatalf("key schema: %v", key)
+		}
+		return
+	}
+	t.Fatal("start_session tool missing")
+}

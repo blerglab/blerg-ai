@@ -15,17 +15,17 @@ import { STATE_GLYPH, type PinState } from '../lib/pins'
 /** An item's text, a confirmed "#N" an inline link with the card's hovercard. */
 export function CardRefText({ text }: { text: string }) {
   const ctx = useContext(ChecklistRefsContext)
-  if (!ctx || ctx.cards.size === 0) return <>{text}</>
+  if (!ctx || ctx.cards.size === 0 && !ctx.references?.size) return <>{text}</>
   const out: ReactNode[] = []
   splitRefs(text).forEach((p, i) => {
     const n = 'key' in p && p.key.startsWith('card:') ? Number(p.key.slice(5)) : 0
-    const t = n ? ctx.cards.get(n) : undefined
+    const t = ('key' in p ? ctx.references?.get(p.key) : undefined) ?? (n ? ctx.cards.get(n) : undefined)
     if (!t) { out.push(p.text); return }
     out.push(
       <Hover key={i} target={t}>
         <button type="button" className="md-ref plan-ref" data-testid="plan-ref" data-ref={`card:${n}`}
           aria-label={`Open card ${t.key}${t.title ? `: ${t.title}` : ''}`}
-          onClick={e => { e.stopPropagation(); ctx.open(t) }}>{p.text}</button>
+          onClick={e => { e.stopPropagation(); ctx.open(t) }}>{t.key}</button>
       </Hover>,
     )
   })

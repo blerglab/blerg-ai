@@ -4,6 +4,7 @@
 // +/−), then 📎 name · v3 · size · [Download] [View]. The version shows from v2 on, and on a v1
 // whose file has later versions; a lone v1 has none. Clicking the preview opens the viewer; a video or audio
 // file then plays at once, and an HTML page becomes usable.
+import { FileIcon } from './FileIcon'
 import { useEffect, useRef, useState } from 'react'
 import { useChat } from './context'
 import { formatSize, withCsp } from '../model/artifacts'
@@ -372,7 +373,7 @@ export default function ArtifactCard({ payload, ts, eventId }: { payload: Artifa
     <div className="agent-card artifact-card" data-testid="artifact-card" data-event-id={eventId}>
       {chat && files && <MediaPreview sessionId={chat.sessionId} files={files} artifact={payload} onOpen={autoplay => chat.view(payload, { autoplay })} />}
       <div className="artifact-card-row">
-        <span className="artifact-card-icon" aria-hidden="true">📎</span>
+        <FileIcon name={payload.name} className="artifact-card-icon" />
         <span className="artifact-card-name">{payload.name}</span>
         {showVersion && <>{' '}<span className="artifact-card-version" data-testid="artifact-card-version">· v{version}</span></>}
         {' '}<span className="artifact-card-size">· {formatSize(payload.size)}</span>

@@ -132,7 +132,7 @@ describe('the session panel\'s History tab', () => {
     const { unmount } = renderPage()
     expect(within(rail()!).getAllByRole('tab').map(t => t.textContent)).toEqual(['Live', 'History', 'Files', 'Capabilities'])
     expect(tab('Live')).toHaveAttribute('aria-selected', 'true')
-    expect(within(rail()!).getByTestId('rail-needs')).toBeInTheDocument()
+    expect(await within(rail()!).findByTestId('rail-needs')).toBeInTheDocument()
     fireEvent.click(tab('History'))
     expect(tab('History')).toHaveAttribute('aria-selected', 'true')
     expect(localStorage.getItem(RAIL_TAB_KEY)).toBe('history')
@@ -152,7 +152,7 @@ describe('the session panel\'s History tab', () => {
     askNow(useSessionStore.getState().sessions[0].id)
     expect(rail()).toBeVisible()
     expect(tab('Live')).toHaveAttribute('aria-selected', 'true')
-    expect(within(rail()!).getByTestId('rail-needs')).toBeInTheDocument()
+    expect(await within(rail()!).findByTestId('rail-needs')).toBeInTheDocument()
     expect(localStorage.getItem(RAIL_TAB_KEY)).toBe('history')
   })
 

@@ -4,7 +4,7 @@
 /* About the whole viewport, no pixel cap: a 4K display gets a 4K review. A phone keeps the full-screen
    sheet (chat.css). */
 @media (min-width: 900px) {
-  .artifact-dialog.artifact-viewer.is-review {
+  .artifact-overlay > .artifact-dialog.artifact-viewer.is-review:not(.is-maximized) {
     width: 96vw;
     height: 92vh;
   }
@@ -364,6 +364,21 @@
 /* Bound the diff flex layout so navigation and code own their scroll positions. */
 .review-inline-scroll { min-height: 0; min-width: 0; overflow: hidden; flex: 1; display: flex; flex-direction: column; }
 .review-inline-mode .review-bar { flex-shrink: 0; }
+/* A short viewer (a small tab group, a short window; the body is a size container): the bars keep
+   to one row each (they scroll sideways) and the help yields, so the patch keeps most of the height (#259). Below its
+   floor the body scrolls the bars away. */
+@container (max-height: 520px) {
+  .review-inline-mode, .review-inline-mode .diff-view { gap: 4px; }
+  .review-inline-mode .review-diff-hint, .review-inline-mode .diff-selection-help { display: none; }
+  .review-inline-mode .review-bar, .review-inline-mode .diff-toolbar { flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; padding-top: 0; }
+  .review-inline-mode .review-bar > *, .review-inline-mode .diff-toolbar > :not(.diff-file-picker) { flex-shrink: 0; }
+  /* The floor is handed up the chain: the bars and the patch's floor give the review its minimum
+     height, so below it the body (the size container, overflow:auto) scrolls rather than an
+     inner box clipping the patch. The layout is size-contained so its rows do not count. */
+  .review-inline-mode, .review-inline-mode .review-inline-scroll, .review-inline-mode .diff-view { min-height: auto; }
+  .review-inline-mode .review-inline-scroll { overflow: visible; }
+  .review-inline-mode .diff-layout { min-height: min(96px, 100cqh); contain: size; }
+}
 .review-inline-mode .review-inline-thread, .review-inline-mode .review-inline-composer { margin: 8px; text-align: left; white-space: normal; font-family: var(--chat-font); }
 .review-inline-thread .review-request-head { justify-content: flex-start; flex-wrap: wrap; }
 .review-inline-thread .review-delete { margin-left: auto; }

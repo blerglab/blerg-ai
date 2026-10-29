@@ -17,19 +17,19 @@ import (
 
 func TestLaunchOptionsUsesTargetAvailability(t *testing.T) {
 	hub := NewHub()
-	dc := reportingDaemon(hub, "fixture-host", map[string]models.Report{"codex": rep(time.Now(), mdl("gpt-host", "low", "high"))})
+	dc := reportingDaemon(hub, "00000000-0000-4000-8000-000000000073", map[string]models.Report{"codex": rep(time.Now(), mdl("gpt-host", "low", "high"))})
 	dc.SetAvailableEngines([]string{"codex"})
-	a := NewAPI(hub, nil, "fixture-daemon", nil, "")
+	a := ownedInventoryAPI(t, hub, "fixture-daemon", nil, "")
 	a.SetModelSources(NewModelSources(nil, hub))
-	options, err := a.DiscoverLaunchOptions(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, LaunchOptionsRequest{Runtime: "daemon", DaemonID: dc.ID})
+	options, err := a.DiscoverLaunchOptions(context.Background(), workspaceFixturePrincipal(), LaunchOptionsRequest{Runtime: "daemon", DaemonID: dc.ID})
 	if err != nil || options.State != "known" || len(options.Engines) != 1 || options.Engines[0].ID != "codex" || options.Engines[0].Models.Models[0].ID != "gpt-host" {
 		t.Fatalf("wrong target discovery: %+v %v", options, err)
 	}
-	options, err = a.DiscoverLaunchOptions(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, LaunchOptionsRequest{Runtime: "docker", DaemonID: dc.ID})
+	options, err = a.DiscoverLaunchOptions(context.Background(), workspaceFixturePrincipal(), LaunchOptionsRequest{Runtime: "docker", DaemonID: dc.ID})
 	if err != nil || len(options.Engines) != 0 {
 		t.Fatal("advertised missing sandbox")
 	}
-	options, err = a.DiscoverLaunchOptions(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, LaunchOptionsRequest{Runtime: "daemon", DaemonID: "missing"})
+	options, err = a.DiscoverLaunchOptions(context.Background(), workspaceFixturePrincipal(), LaunchOptionsRequest{Runtime: "daemon", DaemonID: "missing"})
 	if err != nil || len(options.Engines) != 0 || options.Error == "" {
 		t.Fatal("substituted another target")
 	}
@@ -39,14 +39,14 @@ func TestLaunchOptionsRegisteredEngineNeedsNoSelectorBranch(t *testing.T) {
 	t.Cleanup(engines.Register(engines.Descriptor{ID: "fixture-engine", Name: "Fixture Engine", Runtimes: []string{"daemon"}}))
 	t.Cleanup(models.RegisterEngineRules("fixture-engine", models.EngineRules{}))
 	h := NewHub()
-	dc := reportingDaemon(h, "fixture-host", nil)
+	dc := reportingDaemon(h, "00000000-0000-4000-8000-000000000073", nil)
 	dc.SetAvailableEngines([]string{"fixture-engine"})
-	a := NewAPI(h, nil, "fixture-daemon", nil, "")
-	options, err := a.DiscoverLaunchOptions(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, LaunchOptionsRequest{Runtime: "daemon", DaemonID: dc.ID})
+	a := ownedInventoryAPI(t, h, "fixture-daemon", nil, "")
+	options, err := a.DiscoverLaunchOptions(context.Background(), workspaceFixturePrincipal(), LaunchOptionsRequest{Runtime: "daemon", DaemonID: dc.ID})
 	if err != nil || len(options.Engines) != 1 || options.Engines[0].ID != "fixture-engine" || options.Engines[0].Models.Models == nil {
 		t.Fatalf("new descriptor not discovered: %+v %v", options, err)
 	}
-	options, err = a.DiscoverLaunchOptions(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, LaunchOptionsRequest{Runtime: "daemon", DaemonID: dc.ID, Restricted: true})
+	options, err = a.DiscoverLaunchOptions(context.Background(), workspaceFixturePrincipal(), LaunchOptionsRequest{Runtime: "daemon", DaemonID: dc.ID, Restricted: true})
 	if err != nil || len(options.Engines) != 0 {
 		t.Fatal("unverified engine inherited confinement support")
 	}
@@ -57,7 +57,7 @@ func TestLaunchOptionsOperatorCatalogCannotReadAccountCache(t *testing.T) {
 	h := NewHub()
 	j := newTestJobManager(t, f)
 	h.SetJobManager(j)
-	a := NewAPI(h, nil, "fixture-daemon", nil, "")
+	a := ownedInventoryAPI(t, h, "fixture-daemon", nil, "")
 	a.SetRunnerKey("fixture-operator")
 	a.clusterModels.entries = map[clusterModelCacheKey]*clusterModelCacheEntry{{"private-account", "codex", j.Image}: {list: cacheFixture(time.Now(), "gpt-private"), loaded: true}}
 	started := make(chan struct{})
@@ -129,10 +129,10 @@ func TestLaunchOptionsColdReadinessDoesNotWaitForKubernetes(t *testing.T) {
 	defer close(release)
 	h := NewHub()
 	h.SetJobManager(&JobManager{Image: "fixture-image", BaseURL: kubernetes.URL, Namespace: "fixture", SecretName: "fixture", Client: kubernetes.Client()})
-	a := NewAPI(h, nil, "fixture-daemon", nil, "")
+	a := ownedInventoryAPI(t, h, "fixture-daemon", nil, "")
 	done := make(chan LaunchOptions, 1)
 	go func() {
-		options, _ := a.DiscoverLaunchOptions(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, LaunchOptionsRequest{Runtime: "cluster"})
+		options, _ := a.DiscoverLaunchOptions(context.Background(), workspaceFixturePrincipal(), LaunchOptionsRequest{Runtime: "cluster"})
 		done <- options
 	}()
 	select {
@@ -152,16 +152,16 @@ func TestLaunchOptionsColdReadinessDoesNotWaitForKubernetes(t *testing.T) {
 
 func TestLaunchOptionsUnpinnedHostsResolvePerEngine(t *testing.T) {
 	h := NewHub()
-	first := reportingDaemon(h, "a-no-sandbox", nil)
+	first := reportingDaemon(h, "00000000-0000-4000-8000-000000000066", nil)
 	first.SetAvailableEngines([]string{"claude"})
-	second := reportingDaemon(h, "b-sandbox", map[string]models.Report{"codex": rep(time.Now(), mdl("gpt-b-host"))})
+	second := reportingDaemon(h, "00000000-0000-4000-8000-000000000069", map[string]models.Report{"codex": rep(time.Now(), mdl("gpt-b-host"))})
 	second.SetAvailableEngines([]string{"codex"})
 	second.SetSandboxAvailable(true)
-	third := reportingDaemon(h, "c-sandbox", nil)
+	third := reportingDaemon(h, "00000000-0000-4000-8000-00000000006a", nil)
 	third.SetAvailableEngines([]string{"claude"})
 	third.SetSandboxAvailable(true)
-	a := NewAPI(h, nil, "fixture-daemon", nil, "")
-	options, err := a.DiscoverLaunchOptions(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, LaunchOptionsRequest{Runtime: "docker"})
+	a := ownedInventoryAPI(t, h, "fixture-daemon", nil, "")
+	options, err := a.DiscoverLaunchOptions(context.Background(), workspaceFixturePrincipal(), LaunchOptionsRequest{Runtime: "docker"})
 	if err != nil || len(options.Engines) != 2 || options.DaemonID != "" {
 		t.Fatalf("invalid multi-host discovery %+v %v", options, err)
 	}
@@ -177,20 +177,20 @@ func TestLaunchOptionsUnpinnedHostsResolvePerEngine(t *testing.T) {
 
 func TestLaunchOptionsTerminalRequiresCLIAndCannotBeRestricted(t *testing.T) {
 	h := NewHub()
-	host := reportingDaemon(h, "fixture-host", nil)
+	host := reportingDaemon(h, "00000000-0000-4000-8000-000000000073", nil)
 	host.SetHostClaude(false, true, nil)
-	a := NewAPI(h, nil, "fixture-daemon", nil, "")
-	options, _ := a.DiscoverLaunchOptions(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, LaunchOptionsRequest{Runtime: "daemon", DaemonID: host.ID, Kind: "agent"})
+	a := ownedInventoryAPI(t, h, "fixture-daemon", nil, "")
+	options, _ := a.DiscoverLaunchOptions(context.Background(), workspaceFixturePrincipal(), LaunchOptionsRequest{Runtime: "daemon", DaemonID: host.ID, Kind: "agent"})
 	if len(options.Engines) != 1 || options.Engines[0].ID != "claude" {
 		t.Fatal("API-backed agent not available")
 	}
-	options, _ = a.DiscoverLaunchOptions(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, LaunchOptionsRequest{Runtime: "daemon", DaemonID: host.ID, Kind: "tmux"})
+	options, _ = a.DiscoverLaunchOptions(context.Background(), workspaceFixturePrincipal(), LaunchOptionsRequest{Runtime: "daemon", DaemonID: host.ID, Kind: "tmux"})
 	if len(options.Engines) != 0 {
 		t.Fatal("API key advertised as terminal executable")
 	}
 	host.SetSandboxAvailable(true)
 	host.SetAvailableEngines([]string{"claude", "codex"})
-	options, _ = a.DiscoverLaunchOptions(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, LaunchOptionsRequest{Runtime: "docker", DaemonID: host.ID, Kind: "tmux", Restricted: true})
+	options, _ = a.DiscoverLaunchOptions(context.Background(), workspaceFixturePrincipal(), LaunchOptionsRequest{Runtime: "docker", DaemonID: host.ID, Kind: "tmux", Restricted: true})
 	if len(options.Engines) != 0 {
 		t.Fatal("restricted terminal advertised")
 	}
@@ -198,17 +198,17 @@ func TestLaunchOptionsTerminalRequiresCLIAndCannotBeRestricted(t *testing.T) {
 
 func TestLaunchOptionsAutoRuntimeResolvesForEachEngine(t *testing.T) {
 	h := NewHub()
-	host := reportingDaemon(h, "a-codex-host", map[string]models.Report{"codex": rep(time.Now(), mdl("gpt-host"))})
+	host := reportingDaemon(h, "00000000-0000-4000-8000-000000000064", map[string]models.Report{"codex": rep(time.Now(), mdl("gpt-host"))})
 	host.SetAvailableEngines([]string{"codex"})
-	other := reportingDaemon(h, "b-empty-sandbox", nil)
+	other := reportingDaemon(h, "00000000-0000-4000-8000-000000000067", nil)
 	other.SetAvailableEngines([]string{})
 	other.SetSandboxAvailable(true)
-	a := NewAPI(h, nil, "fixture-daemon", nil, "")
-	options, problem := a.DiscoverLaunchOptions(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, LaunchOptionsRequest{})
+	a := ownedInventoryAPI(t, h, "fixture-daemon", nil, "")
+	options, problem := a.DiscoverLaunchOptions(context.Background(), workspaceFixturePrincipal(), LaunchOptionsRequest{})
 	if problem != nil || len(options.Engines) != 1 || options.Engines[0].ID != "codex" || options.Engines[0].DaemonID != host.ID || options.Engines[0].Runtime != "daemon" {
 		t.Fatalf("auto discovery lost eligible engine: %+v %v", options, problem)
 	}
-	if _, problem := a.StartSession(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, runnerStartRequest{NoRepo: true, Engine: "codex"}, ""); problem != nil {
+	if _, problem := a.StartSession(context.Background(), workspaceFixturePrincipal(), runnerStartRequest{NoRepo: true, Engine: "codex"}, ""); problem != nil {
 		t.Fatal(problem)
 	}
 	select {
@@ -216,7 +216,7 @@ func TestLaunchOptionsAutoRuntimeResolvesForEachEngine(t *testing.T) {
 	default:
 		t.Fatal("auto launch disagreed with discovery")
 	}
-	options, problem = a.DiscoverLaunchOptions(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, LaunchOptionsRequest{DaemonID: host.ID})
+	options, problem = a.DiscoverLaunchOptions(context.Background(), workspaceFixturePrincipal(), LaunchOptionsRequest{DaemonID: host.ID})
 	if problem != nil || len(options.Engines) != 1 || options.Engines[0].Runtime != "daemon" {
 		t.Fatal("auto pinned host discovery failed")
 	}
@@ -230,10 +230,10 @@ func TestLaunchReadinessTransportFailureIsUnknown(t *testing.T) {
 	defer backend.Close()
 	h := NewHub()
 	h.SetJobManager(&JobManager{Image: "fixture", BaseURL: backend.URL, Client: backend.Client(), Namespace: "fixture", SecretName: "fixture"})
-	a := NewAPI(h, nil, "fixture-daemon", nil, "")
+	a := ownedInventoryAPI(t, h, "fixture-daemon", nil, "")
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		options, problem := a.DiscoverLaunchOptions(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, LaunchOptionsRequest{Runtime: "cluster"})
+		options, problem := a.DiscoverLaunchOptions(context.Background(), workspaceFixturePrincipal(), LaunchOptionsRequest{Runtime: "cluster"})
 		if problem != nil {
 			t.Fatal(problem)
 		}
@@ -292,7 +292,7 @@ func TestLaunchReadinessPersonalOnlyExcludesOperatorAndHasSeparateCache(t *testi
 	defer core.Close()
 	hub := NewHub()
 	hub.SetJobManager(&JobManager{Image: "fixture", BaseURL: kubernetes.URL, Client: kubernetes.Client(), SecretName: "fixture", Namespace: "fixture"})
-	api := NewAPI(hub, nil, "fixture-daemon", nil, "")
+	api := ownedInventoryAPI(t, hub, "fixture-daemon", nil, "")
 	api.SetCoreCredentials(core.URL, "fixture-key")
 	principal := runnerPrincipal{Kind: "agent", Sub: "fixture-token", OnBehalfOf: "fixture-owner"}
 	read := func(personal bool) []string {
@@ -329,18 +329,18 @@ func TestLaunchReadinessPersonalOnlyExcludesOperatorAndHasSeparateCache(t *testi
 // so the Board can pick the one desktop with a board's repository.
 func TestLaunchOptionsTargetsReportRepoPresence(t *testing.T) {
 	hub := NewHub()
-	a1 := &DaemonConn{ID: "desktop-a", Name: "A", send: make(chan []byte, 8)}
+	a1 := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006f", Name: "A", send: make(chan []byte, 8)}
 	a1.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	a1.SetCheckedOutRepos([]string{"app"})
 	a1.SetRepoRemotes(map[string]string{"app": "example-org/app"})
 	hub.Register(a1)
-	b := &DaemonConn{ID: "desktop-b", Name: "B", send: make(chan []byte, 8)}
+	b := &DaemonConn{ID: "00000000-0000-4000-8000-000000000070", Name: "B", send: make(chan []byte, 8)}
 	b.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	b.SetCheckedOutRepos([]string{"other"})
 	hub.Register(b)
-	a := NewAPI(hub, nil, "fixture-daemon", nil, "")
+	a := ownedInventoryAPI(t, hub, "fixture-daemon", nil, "")
 	has := func(repo string) map[string]any {
-		options, err := a.DiscoverLaunchOptions(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, LaunchOptionsRequest{Repo: repo, Kind: "agent"})
+		options, err := a.DiscoverLaunchOptions(context.Background(), workspaceFixturePrincipal(), LaunchOptionsRequest{Repo: repo, Kind: "agent"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -355,11 +355,11 @@ func TestLaunchOptionsTargetsReportRepoPresence(t *testing.T) {
 		return out
 	}
 	for _, repo := range []string{"app", "example-org/app"} {
-		if got := has(repo); got["desktop-a"] != true || got["desktop-b"] != false {
+		if got := has(repo); got["00000000-0000-4000-8000-00000000006f"] != true || got["00000000-0000-4000-8000-000000000070"] != false {
 			t.Fatalf("%s: %v", repo, got)
 		}
 	}
-	if got := has(""); got["desktop-a"] != nil || got["desktop-b"] != nil {
+	if got := has(""); got["00000000-0000-4000-8000-00000000006f"] != nil || got["00000000-0000-4000-8000-000000000070"] != nil {
 		t.Fatalf("no repo asked: %v", got)
 	}
 }
@@ -369,12 +369,12 @@ func TestLaunchOptionsTargetsReportRepoPresence(t *testing.T) {
 // one desktop the person chose. A folder with no remote reports none.
 func TestLaunchOptionsReportOnlyTheNamedDesktopsRemote(t *testing.T) {
 	hub := NewHub()
-	mine := &DaemonConn{ID: "desktop-a", Name: "A", send: make(chan []byte, 8)}
+	mine := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006f", Name: "A", send: make(chan []byte, 8)}
 	mine.SetSandboxClones(true)
 	mine.SetCheckedOutRepos([]string{"app", "scratch"})
 	mine.SetRepoRemotes(map[string]string{"app": "example-org/app"})
 	hub.Register(mine)
-	other := &DaemonConn{ID: "desktop-b", Name: "B", send: make(chan []byte, 8)}
+	other := &DaemonConn{ID: "00000000-0000-4000-8000-000000000070", Name: "B", send: make(chan []byte, 8)}
 	other.SetSandboxClones(true)
 	other.SetCheckedOutRepos([]string{"app", "scratch"})
 	other.SetRepoRemotes(map[string]string{"app": "someone/app", "scratch": "someone/scratch"})
@@ -382,9 +382,9 @@ func TestLaunchOptionsReportOnlyTheNamedDesktopsRemote(t *testing.T) {
 	jm := newTestJobManager(t, &fakeK8s{})
 	jm.GitHubOrg, jm.ExplicitGitURLBase = "", ""
 	hub.SetJobManager(jm)
-	a := NewAPI(hub, nil, "fixture-daemon", nil, "")
+	a := ownedInventoryAPI(t, hub, "fixture-daemon", nil, "")
 	origins := func(repo, daemon string) (map[string]string, LaunchTarget) {
-		options, err := a.DiscoverLaunchOptions(context.Background(), runnerPrincipal{Kind: runnerKeyPrincipalKind}, LaunchOptionsRequest{Repo: repo, DaemonID: daemon, Runtime: "daemon", Kind: "agent"})
+		options, err := a.DiscoverLaunchOptions(context.Background(), workspaceFixturePrincipal(), LaunchOptionsRequest{Repo: repo, DaemonID: daemon, Runtime: "daemon", Kind: "agent"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -400,24 +400,24 @@ func TestLaunchOptionsReportOnlyTheNamedDesktopsRemote(t *testing.T) {
 		}
 		return out, cluster
 	}
-	got, cluster := origins("app", "desktop-a")
-	if len(got) != 1 || got["desktop-a"] != "github:example-org/app" {
+	got, cluster := origins("app", "00000000-0000-4000-8000-00000000006f")
+	if len(got) != 1 || got["00000000-0000-4000-8000-00000000006f"] != "github:example-org/app" {
 		t.Fatalf("named desktop: %v", got)
 	}
 	if cluster.ResolvesBareRepos {
 		t.Fatal("no default org or git base, yet the cluster says it resolves bare names")
 	}
-	if got, _ := origins("scratch", "desktop-a"); len(got) != 0 {
+	if got, _ := origins("scratch", "00000000-0000-4000-8000-00000000006f"); len(got) != 0 {
 		t.Fatalf("a folder with no remote on the named desktop borrowed another desktop's: %v", got)
 	}
 	if got, _ := origins("app", ""); len(got) != 0 {
 		t.Fatalf("no desktop named, yet a remote was reported: %v", got)
 	}
-	if got, _ := origins("example-org/app", "desktop-a"); len(got) != 0 {
+	if got, _ := origins("example-org/app", "00000000-0000-4000-8000-00000000006f"); len(got) != 0 {
 		t.Fatalf("owner/name needs no resolving: %v", got)
 	}
 	jm.GitHubOrg = "example-org"
-	if _, cluster := origins("app", "desktop-a"); !cluster.ResolvesBareRepos {
+	if _, cluster := origins("app", "00000000-0000-4000-8000-00000000006f"); !cluster.ResolvesBareRepos {
 		t.Fatal("a default org resolves bare names on the cluster")
 	}
 }

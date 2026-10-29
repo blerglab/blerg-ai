@@ -16,6 +16,7 @@ const apiFetch = vi.hoisted(() => vi.fn())
 vi.mock('../apiFetch', () => ({ apiFetch }))
 
 import SessionDetail from './SessionDetail'
+import CommandPaletteProvider from './CommandPalette'
 
 const shotDir = (import.meta.env as Record<string, string | undefined>).VITE_END_SHOT_DIR
 const json = (body: unknown) => Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } }))
@@ -39,12 +40,12 @@ afterEach(() => {
 function mount() {
   return render(
     <MemoryRouter initialEntries={['/sessions/sess-a']}>
-      <div style={{ height: '100vh' }}>
+      <CommandPaletteProvider><div style={{ height: '100vh' }}>
         <Routes>
           <Route path="/sessions/:id" element={<SessionDetail />} />
           <Route path="/sessions" element={<p>HOME</p>} />
         </Routes>
-      </div>
+      </div></CommandPaletteProvider>
     </MemoryRouter>,
   )
 }
@@ -64,20 +65,26 @@ describe.each([
   { width: 3840, height: 2160 },
 ])('End session at $width px', ({ width, height }) => {
   beforeEach(async () => { await page.viewport(width, height) })
+  async function requestEnd() {
+    const end = width === 390 ? screen.getByRole('button', { name: 'Search commands and files' }) : screen.getByTestId('stop-session')
+    await userEvent.click(end)
+    if (width === 390) { await userEvent.fill(screen.getByRole('combobox', { name: /^Search commands/ }), '>End session'); await userEvent.keyboard('{ArrowDown}{Enter}') }
+    return end
+  }
+
 
   it('asks in an alertdialog anchored to the ✕, never by arming the ✕', async () => {
     mount()
-    const end = await screen.findByTestId('stop-session')
-    await userEvent.click(end)
+    const end = await requestEnd()
     const dialog = screen.getByRole('alertdialog', { name: 'End this session?' })
     expect(dialog.getAttribute('aria-describedby')).toBeTruthy()
     expect(document.getElementById(dialog.getAttribute('aria-describedby')!)!.textContent).toBe('The agent stops. The conversation and files are kept.')
     // No arming: the ✕ keeps its name, its look is the selected blue (not a filled red), nothing ended.
-    expect(end.getAttribute('aria-label')).toBe('End session')
+    expect(end.getAttribute('aria-label')).toBe(width === 390 ? 'Search commands and files' : 'End session')
     expect(end.className).not.toContain('armed')
     // (after the button's 0.15 s color transition)
     const blue = color(cssVar('--selected-border'))
-    await waitFor(() => expect(getComputedStyle(end).borderTopColor).toBe(blue))
+    if (width > 390) await waitFor(() => expect(getComputedStyle(end).borderTopColor).toBe(blue))
     expect(deletes()).toHaveLength(0)
     // The focus starts on Cancel; End session is the only red.
     const cancel = within(dialog).getByRole('button', { name: 'Cancel' })
@@ -88,6 +95,7 @@ describe.each([
     expect(getComputedStyle(cancel).backgroundColor).not.toBe(red)
     expect(getComputedStyle(end).color).not.toBe(red)
     // Placed: under the ✕ and inside the screen on a wide one; a bottom sheet on a phone.
+    if (width <= 640) await waitFor(() => expect(Math.round(dialog.getBoundingClientRect().bottom)).toBe(height))
     const d = dialog.getBoundingClientRect()
     const a = end.getBoundingClientRect()
     expect(d.left).toBeGreaterThanOrEqual(0)
@@ -127,8 +135,7 @@ describe.each([
 
   it('Esc cancels and the focus goes back to the ✕', async () => {
     mount()
-    const end = await screen.findByTestId('stop-session')
-    await userEvent.click(end)
+    const end = await requestEnd()
     // The focus starts on Cancel.
     await waitFor(() => expect(document.activeElement).toBe(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' })))
     await userEvent.keyboard('{Tab}')
@@ -138,15 +145,14 @@ describe.each([
     await userEvent.keyboard('{Escape}')
     expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(document.activeElement).toBe(end)
-    expect(end.getAttribute('aria-expanded')).toBe('false')
+    if (width > 390) expect(end.getAttribute('aria-expanded')).toBe('false')
     expect(end.closest('[inert]')).toBeNull()
     expect(deletes()).toHaveLength(0)
   })
 
   it('End session ends the session', async () => {
     mount()
-    const end = await screen.findByTestId('stop-session')
-    await userEvent.click(end)
+    await requestEnd()
     await userEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'End session' }))
     await waitFor(() => expect(deletes()).toHaveLength(1))
     expect(await screen.findByText('HOME')).toBeTruthy()

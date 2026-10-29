@@ -112,16 +112,6 @@
   text-overflow: ellipsis;
 }
 
-.caps-perm {
-  flex: none;
-  line-height: 16px;
-}
-
-.caps-perm.risky {
-  color: var(--amber);
-  border-color: color-mix(in srgb, var(--amber) 45%, var(--stone));
-}
-
 .caps-asof {
   flex: none;
   margin-left: auto;

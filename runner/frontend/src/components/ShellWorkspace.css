@@ -1,0 +1,12 @@
+.shell-workspace{display:flex;flex-direction:column;position:relative;height:100%;min-height:0;min-width:0;overflow:hidden}
+.shell-chat{display:flex;flex:1;flex-direction:column;min-height:0;min-width:0;position:relative;overflow:hidden}
+.shell-terminal{position:relative;min-height:0;min-width:0;flex:1;overflow:hidden;padding:4px;box-sizing:border-box;background:var(--basalt);color:var(--chalk)}
+.shell-terminal-renderer{width:100%;overflow:hidden}
+.shell-connection{display:flex;align-items:center;gap:4px;flex-wrap:wrap;background:var(--scree);color:var(--chalk);padding:6px;font-size:12px}
+.shell-connection>span{flex:1}
+.shell-connection button{font:inherit;background:var(--scree-2);color:var(--chalk);border:1px solid var(--stone);border-radius:4px;padding:4px 8px;cursor:pointer}
+@media(max-width:767px){.shell-terminal{padding-bottom:max(4px,env(safe-area-inset-bottom))}.shell-connection button{min-height:36px}}
+/* Keep xterm glyphs on its cell grid so mouse selection reaches every character. */
+.shell-terminal-renderer,.shell-terminal-renderer *{letter-spacing:0;text-rendering:auto;font-kerning:none;font-variant-ligatures:none}
+
+.shell-initial-loader { position: absolute; inset: 0; pointer-events: none; z-index: 1; }

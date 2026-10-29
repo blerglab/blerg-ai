@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useToastStore, type Toast } from '../hooks/useToastStore'
+import NoticeRegion from './NoticeRegion'
 import { playToastSound, playMessageSound } from '../sound'
 
 // How long a toast stays before auto-dismissing.
@@ -33,34 +34,21 @@ function ToastItem({ toast }: { toast: Toast }) {
         if (toast.url) navigate(toast.url)
         removeToast(toast.id)
       }}
-      style={{
-        background: 'var(--basalt)',
-        border: isMessage ? '1px solid var(--scree-2)' : '1px solid var(--stone)',
-        borderLeft: isMessage ? '3px solid var(--blaze)' : '3px solid var(--amber)',
-        borderRadius: '6px',
-        padding: '10px 14px',
-        boxShadow: '0 6px 20px rgba(0,0,0,0.45)',
-        cursor: clickable ? 'pointer' : 'default',
-        maxWidth: '340px',
-        pointerEvents: 'auto',
-      }}
+      className="message-toast"
+      style={{ cursor: clickable ? 'pointer' : 'default' }}
     >
+      <button type="button" aria-label="Dismiss notification" onClick={event => { event.stopPropagation(); removeToast(toast.id) }} style={{ float: 'right', marginLeft: 8, background: 'transparent', border: 0, color: 'var(--chalk)', cursor: 'pointer' }}>×</button>
       <div
         data-testid="toast-title"
-        style={{
-          color: isMessage ? 'var(--blaze)' : 'var(--chalk)',
-          fontSize: '13px',
-          fontWeight: 600,
-          letterSpacing: '0.03em',
-        }}
+        className="confirm-popover-title"
       >
         {toast.title}
       </div>
-      <div style={{ color: 'var(--fog-dim)', fontSize: '12px', marginTop: '2px' }}>{toast.body}</div>
+      <div className="confirm-popover-text">{toast.body}</div>
       {toast.action && (
         <button
           type="button"
-          className="toast-action"
+          className="toast-action confirm-popover-btn"
           data-testid="toast-action"
           onClick={event => {
             event.stopPropagation()
@@ -83,24 +71,10 @@ export default function ToastContainer() {
   if (toasts.length === 0) return null
 
   return (
-    <div
-      style={{
-        position: 'fixed',
-        // Sit below the sticky header / +New button bar so toasts don't cover
-        // (and block clicks on) the top controls.
-        top: '64px',
-        right: '12px',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '8px',
-        // Above the phone's rail drawer (1000): a toast's Undo must stay reachable there.
-        zIndex: 1100,
-        pointerEvents: 'none',
-      }}
-    >
+    <NoticeRegion>
       {toasts.map((t) => (
         <ToastItem key={t.id} toast={t} />
       ))}
-    </div>
+    </NoticeRegion>
   )
 }

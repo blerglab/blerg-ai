@@ -123,3 +123,28 @@ func TestArtifactsOriginCapsAreSeparateAndBytesAreCapped(t *testing.T) {
 		t.Fatalf("default origin = %+v", first)
 	}
 }
+
+// With no count cap (limit 0) a long-running session keeps accepting files past the old
+// 100-file lifetime count; only the size total refuses.
+func TestArtifactsWithoutCountCapAcceptPastOldLimit(t *testing.T) {
+	pool := artifactTestPool(t)
+	ctx := context.Background()
+	const daemon, session = "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f", "1a1a1a1a-1a1a-4a1a-8a1a-1a1a1a1a1a1a"
+	if err := db.UpsertDaemon(ctx, pool, daemon, "laptop", "local", "/repos"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertSession(ctx, pool, session, daemon, "running", "/repos/app", "app", "t", ""); err != nil {
+		t.Fatal(err)
+	}
+	row := func(i int, size int64) db.ArtifactRow {
+		return db.ArtifactRow{ID: fmt.Sprintf("%032x", 1000+i), SessionID: session, Name: fmt.Sprintf("f%d.txt", i), Size: size, ContentType: "text/plain", SHA256: "x", Origin: db.OriginUser, UploadedBy: "acct-1"}
+	}
+	for i := range 120 {
+		if _, err := db.InsertArtifactCapped(ctx, pool, row(i, 1), 0, 1000); err != nil {
+			t.Fatalf("file %d refused without a count cap: %v", i, err)
+		}
+	}
+	if _, err := db.InsertArtifactCapped(ctx, pool, row(500, 900), 0, 1000); !errors.Is(err, db.ErrArtifactBytesLimit) {
+		t.Fatalf("the size total no longer refuses: %v", err)
+	}
+}

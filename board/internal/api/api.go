@@ -18,6 +18,7 @@ import (
 	"github.com/blerglab/blerg-ai/board/internal/auth"
 	"github.com/blerglab/blerg-ai/board/internal/db"
 	"github.com/blerglab/blerg-ai/board/internal/gate"
+	"github.com/blerglab/blerg-ai/board/internal/runner"
 	"github.com/blerglab/blerg-ai/board/prompts"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -91,6 +92,9 @@ func (a *API) Routes(mux *http.ServeMux) {
 			if board, scoped := p.ProjectScoped(); scoped && !a.scopeDecision(w, r, board) {
 				return
 			}
+			if p.IsHuman() {
+				r = r.WithContext(runner.WithDesktopViewerProof(r.Context(), auth.BearerToken(r)))
+			}
 			h(w, r, p)
 		}
 	}
@@ -98,6 +102,8 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/me", authed(a.handleMe))
 
 	mux.HandleFunc("GET /api/boards", authed(a.handleListBoards))
+	mux.HandleFunc("GET /api/board-key-suggestion", authed(a.handleBoardKeySuggestion))
+	mux.HandleFunc("GET /api/boards/{id}/cards/by-number/{number}", authed(a.handleCardByNumber))
 	mux.HandleFunc("POST /api/boards", authed(a.handleCreateBoard))
 	mux.HandleFunc("POST /api/boards/create-approved", authed(a.handleCreateApprovedBoard))
 	mux.HandleFunc("GET /api/repo-choices", authed(a.handleRepoChoices))
@@ -170,6 +176,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // writeDBError maps db sentinel errors onto HTTP statuses.
 func writeDBError(w http.ResponseWriter, err error) {
 	var fe *db.FieldError
+	var columnErr *db.UnknownSearchColumnError
 	switch {
 	case errors.Is(err, db.ErrSensitiveBodyForbidden):
 		writeError(w, http.StatusForbidden, "Sensitive reproduction details require board administration.")
@@ -191,6 +198,8 @@ func writeDBError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 			"error": db.ErrAutomationKeyMissing.Error(), "field": "automation_token",
 		})
+	case errors.As(err, &columnErr):
+		writeError(w, http.StatusBadRequest, columnErr.Error())
 	case errors.As(err, &fe):
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 			"error": fe.Error(), "field": fe.Key,

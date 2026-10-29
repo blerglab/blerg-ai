@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -324,5 +325,77 @@ func TestRawCredentialFailuresNeverSelectOperator(t *testing.T) {
 				t.Fatal("provider detail escaped")
 			}
 		})
+	}
+}
+
+// Connecting in Settings grants future person-owned launches, never ambient
+// access to an old snapshot runtime. A new launch supplies the missing binding.
+func TestSnapshotSessionManagedConnectionNeedsNewLaunch(t *testing.T) {
+	api, _, dc, pool := spawnTokenFixture(t)
+	ctx := t.Context()
+	oldID := "00000000-0000-4000-8000-000000000031"
+	newID := "00000000-0000-4000-8000-000000000032"
+	for _, id := range []string{oldID, newID} {
+		if _, err := pool.Exec(ctx, `INSERT INTO sessions(id,daemon_id,status,project_path,repo,engine,runtime,spawning_account_id) VALUES($1,$2,'starting','/repos/project','project','codex','cluster','fixture-owner')`, id, dc.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var connected atomic.Bool
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/internal/credentials/fetch":
+			if connected.Load() {
+				w.WriteHeader(409)
+				_, _ = w.Write([]byte(`{"code":"not_managed"}`))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(internalCredentialFetchResponse{PlaintextBase64: b64(`{"tokens":{"access_token":"fixture-access-private","refresh_token":"fixture-refresh-private"}}`)})
+		case "/internal/credentials/managed/access":
+			if !connected.Load() {
+				w.WriteHeader(404)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(managedAccessFixture())
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer core.Close()
+	api.SetCoreCredentials(core.URL, "fixture-key")
+	launch := func(id string) (*fakeK8s, string) {
+		f := &fakeK8s{}
+		jm := newTestJobManager(t, f)
+		jm.historyPool = pool
+		jm.CoreURL, jm.CoreInternalKey = core.URL, "fixture-key"
+		spec := SessionJobSpec{SessionID: id, Engine: "codex", NoRepo: true, PluginsResolved: true, SpawningAccountID: "fixture-owner", AuthSessionID: testSID}
+		if err := jm.CreateSessionJob(spec); err != nil {
+			t.Fatal("session launch failed")
+		}
+		return f, createdSessionSecretData(t, f)[runtimeTokenEnv]
+	}
+	oldPod, oldToken := launch(oldID)
+	before, _ := json.Marshal(oldPod.createdSecrets)
+	connected.Store(true) // Settings completes the managed login after pod startup.
+	access := func(token string) int {
+		request := httptest.NewRequest(http.MethodPost, "/api/session/credentials/access", strings.NewReader(`{}`))
+		request.Header.Set("Authorization", "Bearer "+token)
+		response := httptest.NewRecorder()
+		api.HandleManagedCredentialAccess(response, request)
+		return response.Code
+	}
+	if access(oldToken) == http.StatusOK {
+		t.Fatal("Settings silently rebound a snapshot pod")
+	}
+	newPod, newToken := launch(newID)
+	after, _ := json.Marshal(oldPod.createdSecrets)
+	if string(before) != string(after) {
+		t.Fatal("new launch mutated old pod credentials")
+	}
+	if access(newToken) != http.StatusOK || access(oldToken) == http.StatusOK {
+		t.Fatal("new launch did not establish exclusive managed access")
+	}
+	raw, _ := json.Marshal(newPod.created)
+	if !strings.Contains(string(raw), managedCredentialEnv) || strings.Contains(string(raw), "CODEX_AUTH_JSON") {
+		t.Fatal("replacement kept snapshot authentication")
 	}
 }

@@ -32,6 +32,7 @@ type Model struct {
 
 // List is what GET /api/models/{engine} serves.
 type List struct {
+	Reconnect bool `json:"reconnect,omitempty"`
 	// Refreshing means a background runtime catalog refresh is in progress.
 	Refreshing bool `json:"refreshing,omitempty"`
 	// Error is a safe refresh failure; an existing model list remains usable.

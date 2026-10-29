@@ -12,7 +12,7 @@ import (
 
 func assertSessionWorkGuide(t *testing.T, text string) {
 	t.Helper()
-	for _, line := range []string{childSessionGuideLine, workGuideLine, topicGuideLine, checklistWorkMapGuideLine, boardAccessGuideLine} {
+	for _, line := range []string{childSessionGuideLine, workGuideLine, topicGuideLine, checklistWorkMapGuideLine, planAutoGuideLine, boardAccessGuideLine} {
 		if !strings.Contains(text, line) {
 			t.Fatalf("missing shared guidance: %s", line)
 		}
@@ -194,5 +194,15 @@ func TestChildSessionGuideIsInjected(t *testing.T) {
 	}
 	if !strings.Contains(managedBlock, "- `blerg-runner session` / `blerg-runner budget` — "+childSessionGuideLine) {
 		t.Errorf("managed block lacks the session bullet")
+	}
+}
+
+func TestUsageNoticeGuidanceIsInEverySessionGuide(t *testing.T) {
+	for _, text := range []string{sessionWorkGuidePrompt(), sessionWorkGuideManaged()} {
+		for _, want := range []string{"usage_limit", "80% prefer other engines", "90% start nothing new", "95% finish the current step and save state"} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("guide omits %q", want)
+			}
+		}
 	}
 }

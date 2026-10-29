@@ -747,7 +747,7 @@ func TestArtifactsDeleteRemovesRowAndFile(t *testing.T) {
 	if _, err := os.Stat(fx.path(fx.sess, m.ID)); err != nil {
 		t.Fatal(err)
 	}
-	rec := fx.get("DELETE", "/api/sessions/"+fx.sess+"/artifacts/"+m.ID, fx.human(artOther)) // anyone who can see the session
+	rec := fx.get("DELETE", "/api/sessions/"+fx.sess+"/artifacts/"+m.ID, fx.human(artUser)) // the session owner
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("delete = %d: %s", rec.Code, rec.Body.String())
 	}

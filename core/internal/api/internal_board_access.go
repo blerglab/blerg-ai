@@ -20,8 +20,10 @@ import (
 const boardResponseLimit = 1 << 20
 
 type accessibleBoard struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	Key        string   `json:"key,omitempty"`
+	KeyAliases []string `json:"key_aliases,omitempty"`
 }
 
 // Board uses global card.read for people; Core projects are unrelated. Discovery delegates

@@ -42,6 +42,7 @@ if [ -f "$script_dir/.env" ]; then
   # shellcheck disable=SC1090
   set -a; source "$script_dir/.env"; set +a
 fi
+runner_config_aliases
 
 REGISTRY="${REGISTRY:-localhost:32000}"
 TAG="${TAG:-latest}"
@@ -65,6 +66,7 @@ AGENT_SECRET_EXTERNAL="${AGENT_SECRET_EXTERNAL:-}"
 AGENT_NAMESPACE=blerg-runner-sessions
 # The runner's data volume (runner-data-pvc.yaml): its size, and a StorageClass when the cluster
 # has no default one (or you want another). Both apply only when deploy.sh first creates the claim.
+WORKSPACE_STORAGE_CLASS="${WORKSPACE_STORAGE_CLASS:-}"
 RUNNER_DATA_SIZE="${RUNNER_DATA_SIZE:-10Gi}"
 RUNNER_DATA_STORAGE_CLASS="${RUNNER_DATA_STORAGE_CLASS:-}"
 
@@ -98,19 +100,17 @@ case "$TRUSTED_PROXIES" in
   *[!0-9A-Fa-f.:/,\ ]*) echo "TRUSTED_PROXIES must be a comma-separated list of CIDRs or addresses" >&2; exit 1 ;;
 esac
 
-if [ "$cluster_runtime" = off ]; then
-  AGENT_IMAGE=""
-else
-  AGENT_IMAGE="${REGISTRY}/blerg-runner-agent:${TAG}"
-fi
+runner_config_agent_image "$cluster_runtime" "$REGISTRY" "$TAG"
 
 command -v docker >/dev/null || { echo "docker is required" >&2; exit 1; }
 command -v kubectl >/dev/null || { echo "kubectl is required" >&2; exit 1; }
 # envsubst renders the manifests and openssl generates BLERG_CORE_LOCAL_KEY on a first deploy —
 # check both up front, before any image is built or pushed, instead of failing half-way.
 command -v envsubst >/dev/null || { echo "envsubst is required (package: gettext / gettext-base)" >&2; exit 1; }
+command -v python3 >/dev/null || { echo "python3 is required (renders operator ConfigMap values)" >&2; exit 1; }
 command -v openssl >/dev/null || { echo "openssl is required (generates BLERG_CORE_LOCAL_KEY on a first deploy)" >&2; exit 1; }
 runner_data_size_ok "$RUNNER_DATA_SIZE" || { echo "RUNNER_DATA_SIZE is not a Kubernetes quantity (e.g. 10Gi): $RUNNER_DATA_SIZE" >&2; exit 1; }
+runner_data_class_ok "$WORKSPACE_STORAGE_CLASS" || { echo "WORKSPACE_STORAGE_CLASS is not a StorageClass name" >&2; exit 1; }
 runner_data_class_ok "$RUNNER_DATA_STORAGE_CLASS" || { echo "RUNNER_DATA_STORAGE_CLASS is not a StorageClass name: $RUNNER_DATA_STORAGE_CLASS" >&2; exit 1; }
 
 # Say which cluster this will change, and make the operator agree, before anything is
@@ -138,6 +138,9 @@ if deploy_needs_confirmation "$@"; then
     *) echo "aborted" >&2; exit 1 ;;
   esac
 fi
+
+# Warn before building even when --yes is set; this read-only check never adds a prompt.
+cluster_authorization_notice
 
 rand() { openssl rand -hex 24 2>/dev/null || head -c 48 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 48; }
 rand_b64() { openssl rand -base64 32; }
@@ -303,6 +306,26 @@ else
     --dry-run=client -o yaml | kubectl apply -f -
 fi
 
+# The runner's data volume goes in before the Deployment that mounts it, and only once: an existing
+# claim is never re-applied (its size and class are fixed once bound) and never deleted — it holds
+# every file the sessions published. See README.md, "Runner data volume".
+claim_state=0
+runner_data_claim_check "$RUNNER_DATA_SIZE" "$RUNNER_DATA_STORAGE_CLASS" || claim_state=$?
+if [ "$claim_state" -eq 1 ]; then
+  exit 1
+elif [ "$claim_state" -eq 2 ]; then
+  echo "==> Creating the runner data claim blerg-runner-data (${RUNNER_DATA_SIZE}, storage class: ${RUNNER_DATA_STORAGE_CLASS:-cluster default})"
+  runner_data_claim_render "$script_dir/runner-data-pvc.yaml" "$RUNNER_DATA_SIZE" "$RUNNER_DATA_STORAGE_CLASS" > "$work_dir/runner-data-pvc.yaml"
+  kubectl apply -f "$work_dir/runner-data-pvc.yaml"
+fi
+
+# Standard workspace claims use the data claim's class (README.md, "Workspace storage"). Read it
+# from the claim itself (an existing claim's class wins over RUNNER_DATA_STORAGE_CLASS; a new
+# claim has its class once created, before it binds) and export it under its exact name, so the
+# renderer prefers it over a stale live value, even when it is empty.
+WORKSPACE_DEFAULT_CLASS="$(workspace_default_class)" || exit 1
+export BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS="$WORKSPACE_DEFAULT_CLASS"
+
 echo "==> Rendering manifests (REGISTRY=${REGISTRY} TAG=${TAG} DOMAIN=${DOMAIN}) and applying"
 render_dir="$work_dir/render"
 mkdir "$render_dir"
@@ -315,10 +338,17 @@ for f in $(grep -E '^\s+- ' "$script_dir/kustomization.yaml" | sed 's/^\s*- //')
 done
 cp "$script_dir/kustomization.yaml" "$render_dir/"
 for f in "$render_dir"/*.yaml; do
-  REGISTRY="$REGISTRY" TAG="$TAG" DOMAIN="$DOMAIN" SCHEME="$SCHEME" AGENT_IMAGE="$AGENT_IMAGE" WEBHOOK_ALLOW_PRIVATE="$WEBHOOK_ALLOW_PRIVATE" TRUSTED_PROXIES="$TRUSTED_PROXIES" \
-    envsubst '${REGISTRY} ${TAG} ${DOMAIN} ${SCHEME} ${AGENT_IMAGE} ${WEBHOOK_ALLOW_PRIVATE} ${TRUSTED_PROXIES}' < "$f" > "$f.rendered"
+  REGISTRY="$REGISTRY" TAG="$TAG" DOMAIN="$DOMAIN" SCHEME="$SCHEME" AGENT_IMAGE="$AGENT_IMAGE" WEBHOOK_ALLOW_PRIVATE="$WEBHOOK_ALLOW_PRIVATE" TRUSTED_PROXIES="$TRUSTED_PROXIES" WORKSPACE_STORAGE_CLASS="$WORKSPACE_STORAGE_CLASS" WORKSPACE_DEFAULT_CLASS="$WORKSPACE_DEFAULT_CLASS" \
+    envsubst '${REGISTRY} ${TAG} ${DOMAIN} ${SCHEME} ${AGENT_IMAGE} ${WEBHOOK_ALLOW_PRIVATE} ${TRUSTED_PROXIES} ${WORKSPACE_STORAGE_CLASS} ${WORKSPACE_DEFAULT_CLASS}' < "$f" > "$f.rendered"
   mv "$f.rendered" "$f"
 done
+
+# Keep existing operator patches when .env has no override. An API/RBAC failure
+# must stop the deploy, rather than silently replace live values with defaults.
+kubectl -n blerg get configmap blerg-config --ignore-not-found -o json > "$work_dir/live-config.json"
+python3 "$script_dir/render_runner_config.py" "$script_dir/runner-deployment.yaml" "$work_dir/live-config.json" \
+  < "$render_dir/configmap.yaml" > "$render_dir/configmap.yaml.next"
+mv "$render_dir/configmap.yaml.next" "$render_dir/configmap.yaml"
 
 # cluster-runtime.yaml is applied directly, NOT via the kustomization: that
 # kustomization sets `namespace: blerg`, and kustomize's namespace transformer
@@ -331,19 +361,6 @@ if [ "$cluster_runtime" = off ]; then
 else
   echo "==> Applying cluster-runtime namespace/RBAC"
   kubectl apply -f "$script_dir/cluster-runtime.yaml"
-fi
-
-# The runner's data volume goes in before the Deployment that mounts it, and only once: an existing
-# claim is never re-applied (its size and class are fixed once bound) and never deleted — it holds
-# every file the sessions published. See README.md, "Runner data volume".
-claim_state=0
-runner_data_claim_check "$RUNNER_DATA_SIZE" "$RUNNER_DATA_STORAGE_CLASS" || claim_state=$?
-if [ "$claim_state" -eq 1 ]; then
-  exit 1
-elif [ "$claim_state" -eq 2 ]; then
-  echo "==> Creating the runner data claim blerg-runner-data (${RUNNER_DATA_SIZE}, storage class: ${RUNNER_DATA_STORAGE_CLASS:-cluster default})"
-  runner_data_claim_render "$script_dir/runner-data-pvc.yaml" "$RUNNER_DATA_SIZE" "$RUNNER_DATA_STORAGE_CLASS" > "$work_dir/runner-data-pvc.yaml"
-  kubectl apply -f "$work_dir/runner-data-pvc.yaml"
 fi
 
 kubectl apply -k "$render_dir"
@@ -375,5 +392,6 @@ if [ "$cluster_runtime" = off ]; then
   echo "==> Cluster runtime: off (CLUSTER_RUNTIME=off)"
 else
   echo "==> Cluster runtime: on (users add their own credentials at ${SCHEME}://${DOMAIN}/settings)"
+  workspace_storage_notice "$render_dir/configmap.yaml"
 fi
 first_run_setup_notice

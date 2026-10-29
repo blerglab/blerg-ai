@@ -1,0 +1,24 @@
+/* Pane chrome is shared by left and right panes; the divider faces the content. */
+.pane-rail { display: flex; flex-direction: column; align-items: center; gap: 7px; flex: 0 0 40px; box-sizing: border-box; padding: 7px 3px; border-right: 1px solid var(--stone); background: var(--basalt); }
+.pane-toggle { flex: 0 0 auto; }
+.pane-toggle:focus-visible { outline: 2px solid var(--selected-border); outline-offset: 1px; }
+.side-pane { position: relative; display: flex; flex-direction: column; flex: 0 0 auto; min-height: 0; box-sizing: border-box; background: var(--basalt); color: var(--chalk); }
+.side-pane-left { border-right: 1px solid var(--stone); }
+.side-pane-right { border-left: 1px solid var(--stone); }
+.pane-resize { position: absolute; top: 0; bottom: 0; width: 8px; cursor: col-resize; touch-action: none; z-index: 20; }
+.pane-resize-left { right: -4px; }
+.pane-resize-right { left: -4px; }
+.pane-resize:focus-visible { background: var(--selected-border); outline: none; }
+.pane-collapse { position: absolute; top: 9px; z-index: 20; display: grid; place-items: center; width: 23px; height: 28px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--fog); cursor: pointer; }
+.pane-collapse-left { right: 5px; }
+.pane-collapse-right { left: 5px; }
+.pane-collapse:hover, .pane-collapse:focus-visible { color: var(--chalk); background: var(--scree); outline: 1px solid var(--selected-border); }
+
+.side-pane[hidden] { display: none; }
+.pane-rail { min-height: 0; }
+.pane-rail-right { border-right: 0; border-left: 1px solid var(--stone); }
+.pane-rail-bottom { flex: 0 0 40px; flex-direction: row; border-right: 0; border-top: 1px solid var(--stone); padding: 3px 7px; }
+.side-pane-bottom { width: 100%; border-top: 1px solid var(--stone); }
+.pane-resize-bottom { top: -4px; bottom: auto; left: 0; right: 0; height: 8px; width: auto; cursor: row-resize; }
+.pane-collapse-bottom { left: 5px; top: 9px; }
+.pane-rail:not(.pane-rail-bottom) { width: 40px; min-width: 40px; max-width: 40px; padding-left: 0; padding-right: 0; }

@@ -21,10 +21,32 @@ import java from 'highlight.js/lib/languages/java'
 import c from 'highlight.js/lib/languages/c'
 import cpp from 'highlight.js/lib/languages/cpp'
 import markdown from 'highlight.js/lib/languages/markdown'
+import dockerfile from 'highlight.js/lib/languages/dockerfile'
+import makefile from 'highlight.js/lib/languages/makefile'
 import type { CodeLang } from './codeLang'
 import type { Token } from './highlight'
 
-const lowlight = createLowlight({ javascript, typescript, go, python, bash, json, yaml, sql, xml, css, rust, java, c, cpp, markdown })
+const lowlight = createLowlight({ javascript, typescript, go, python, bash, json, yaml, sql, xml, css, rust, java, c, cpp, markdown, dockerfile, makefile,
+  gomod: () => ({ keywords: 'module go toolchain require exclude replace retract tool', contains: [
+    { className: 'comment', begin: /\/\//, end: /$/ },
+    { className: 'string', begin: /"/, end: /"/ },
+    { className: 'number', begin: /\bv?\d+\.\d+(?:\.\d+)?(?:-[\w.-]+)?/ },
+  ] }),
+  gosum: () => ({ contains: [
+    { className: 'number', begin: /\bv\d+[\w.+-]*/ },
+    { className: 'string', begin: /h1:/, end: /$/ },
+  ] }),
+  mermaid: () => ({ keywords: 'graph flowchart TD TB BT LR RL subgraph end sequenceDiagram participant actor classDiagram class stateDiagram stateDiagram-v2 erDiagram gantt pie journey mindmap timeline', contains: [
+    { className: 'comment', begin: /%%/, end: /$/ },
+    { className: 'string', begin: /"/, end: /"/ },
+    { className: 'operator', begin: /[-=]+[->]|<[-=]+/ },
+  ] }),
+  csv: () => ({ contains: [
+    { className: 'string', begin: /"/, end: /"/, contains: [{ begin: /""/ }] },
+    { className: 'number', begin: /\b\d+(?:\.\d+)?\b/ },
+    { className: 'punctuation', begin: /[,\t]/ },
+  ] }),
+})
 
 type Tree = ReturnType<typeof lowlight.highlight>
 type Node = Tree['children'][number]

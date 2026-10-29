@@ -1,7 +1,8 @@
 // A commit chip with no published diff opens the commit's diff, generated on demand from the
 // session's workspace, in Blerg's own diff viewer (card #131).
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import * as patchModel from '../model/patch'
 import { CommitChips } from './CommitChips'
 import { CommitViewerHost } from './CommitViewer'
 import type { CommitDiff, TransportFiles } from '../transport/types'
@@ -105,5 +106,40 @@ describe('CommitViewer: a commit chip with no published diff', () => {
     fireEvent.click(screen.getByRole('button', { name: `Copy commit ${SHA}` }))
     fireEvent.click(screen.getByRole('button', { name: `Copy commit ${'b'.repeat(40)}` }))
     expect(writeText).toHaveBeenCalledTimes(2)
+  })
+})
+
+it('carries a chip member and launch to its on-demand diff reader', async () => {
+  const member = { member_id: 'second', launch_generation: 'launch', generation: 7 }
+  const files = filesWith(async () => ({ text: PATCH }))
+  render(<CommitViewerHost files={files}><CommitChips commits={[{ sha: SHA, member }]} hover={{ sessionId: 's1' }} /></CommitViewerHost>)
+  fireEvent.click(screen.getByRole('button', { name: `Open commit ${SHA.slice(0, 7)} in the diff` }))
+  await waitFor(() => expect(files.commitDiff).toHaveBeenCalledWith('s1', SHA, expect.any(AbortSignal), member))
+})
+
+describe('large commit rendering (#215)', () => {
+  const patch = (files: number, lines: number) => Array.from({ length: files }, (_, i) => [
+    `diff --git a/file${i}.txt b/file${i}.txt`, `--- a/file${i}.txt`, `+++ b/file${i}.txt`, `@@ -0,0 +1,${lines} @@`,
+    ...Array.from({ length: lines }, (_, n) => `+line ${n}`), '',
+  ].join('\n')).join('')
+  it.each([[60, 1], [1, 401]])('starts %i files with %i changed lines collapsed', async (count, lines) => {
+    const buildRows = vi.spyOn(patchModel, 'foldContext')
+    const files = filesWith(async () => ({ text: patch(count, lines) }))
+    render(<CommitViewerHost files={files}><CommitChips commits={[{ sha: SHA }]} hover={{ sessionId: 's1' }} /></CommitViewerHost>)
+    fireEvent.click(screen.getByRole('button', { name: /Open commit aaaaaaa/ }))
+    await screen.findByTestId('diff-view')
+    const built = buildRows.mock.calls.length
+    buildRows.mockRestore()
+    expect(built).toBe(0) // Collapsed bodies must skip row construction as well as DOM mounting.
+    expect(document.querySelectorAll('.diff-file-body')).toHaveLength(0)
+    fireEvent.click(document.querySelector('.diff-file-toggle')!)
+    expect(document.querySelectorAll('.diff-file-body')).toHaveLength(1)
+    expect(document.querySelectorAll('.diff-row').length).toBeLessThanOrEqual(400)
+    if (lines > 400) {
+      fireEvent.click(screen.getByRole('button', { name: 'Show full file' }))
+      expect(document.querySelectorAll('.diff-row')).toHaveLength(lines)
+    }
+    fireEvent.click(document.querySelector('.diff-file-toggle')!)
+    expect(document.querySelectorAll('.diff-row')).toHaveLength(0)
   })
 })

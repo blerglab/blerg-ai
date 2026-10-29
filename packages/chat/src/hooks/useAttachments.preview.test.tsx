@@ -34,7 +34,7 @@ describe('attachment preview lifetime',()=>{
   expect(result.current.items).toEqual([])
  })
  it('does not let the old upload or preview appear in a newly selected session',async()=>{
-  let finishUpload!:(up:ReturnType<typeof uploaded>)=>void
+  let finishUpload:((up:ReturnType<typeof uploaded>)=>void)|undefined
   let finishPreview!:(value:AttachmentPreview)=>void
   let signal!:AbortSignal
   const transport=files();transport.upload=vi.fn(()=>new Promise<ReturnType<typeof uploaded>>(resolve=>{finishUpload=resolve}))
@@ -43,9 +43,12 @@ describe('attachment preview lifetime',()=>{
   const file=new File(['abc'],'private-A.md')
   act(()=>result.current.addFiles([file]))
   rerender({sid:'B'});expect(result.current.items).toEqual([]);expect(signal.aborted).toBe(true)
-  await act(async()=>{finishUpload(uploaded(file));finishPreview({kind:'text',text:'A content'})})
+  // Uploads start from the session's queue: one abandoned before it began never reaches the transport.
+  await act(async()=>{finishUpload?.(uploaded(file));finishPreview({kind:'text',text:'A content'})})
   expect(result.current.items).toEqual([])
-  rerender({sid:'A'});expect(result.current.items).toEqual([])
+  // Back in A, the cut-off upload waits to be sent again (#231 review, finding 8), without the
+  // preview that was abandoned.
+  rerender({sid:'A'});expect(result.current.items).toMatchObject([{name:'private-A.md',status:'waiting'}]);expect(result.current.items[0]?.preview).toBeUndefined()
  })
  it('evicts only preview data while preserving unsent attachment metadata across many sessions',async()=>{
   const transport=files();const{result,rerender}=renderHook(({sid})=>useAttachments(sid,transport),{initialProps:{sid:'session-0'}})

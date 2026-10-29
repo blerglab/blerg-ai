@@ -78,6 +78,10 @@ async function hover(el: Element) {
   const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2)
   await moveTo(x, y - 1)
   await moveTo(x, y)
+  await opened()
+}
+async function opened() {
+  await expect.poll(() => clock.pending()).toBeGreaterThan(0)
   clock.advance(HOVERCARD.openDelayMs)
   await expect.poll(hovercard).not.toBeNull()
 }
@@ -153,6 +157,20 @@ for (const [width, height] of [[390, 800], [3840, 2000]] as const) {
       // An unpin.
       expect(unpin.textContent).toMatch(/^📌Unpinned#127\(done\)/)
       expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
+    })
+
+    it('waits for a pinned chip hover delivered on a later frame before advancing time', async () => {
+      renderPage()
+      const [single] = await rows()
+      single.scrollIntoView({ block: 'center' })
+      const chip = within(single).getByTestId('ticket-chip')
+      const r = chip.getBoundingClientRect()
+      const moved = new Promise<void>((resolve, reject) => {
+        requestAnimationFrame(() => { void moveTo(r.left + r.width / 2, r.top + r.height / 2).then(resolve, reject) })
+      })
+      await opened()
+      await moved
+      expect(hovercard()!.textContent).toContain('#160')
     })
 
     it('#N is the card chip: its hovercard, and a click opens the live ticket dialog (#96), not the pinned copy', async () => {

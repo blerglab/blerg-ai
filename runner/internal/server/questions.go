@@ -507,7 +507,7 @@ func (a *API) dismissMessageUnlocked(w http.ResponseWriter, r *http.Request, id,
 	// queued in the session's outbox, and redelivered on a heartbeat if it never got there
 	// (db.UndeliveredQuestionAnswers). One it waits on hears from its CLI (exit code 4).
 	a.hub.QuestionAnswered(*row, "", person)
-	a.hub.BroadcastJSON(protocol.MessageAnswered{Type: "message_answered", Message: messageRowToInfo(*row)})
+	a.hub.BroadcastJSON(protocol.MessageAnswered{Type: "message_answered", Message: messageRowToInfo(*row)}) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 	a.hub.ChildActivity(row.SessionID)
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "dismissed": true})
 }

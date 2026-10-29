@@ -7,8 +7,10 @@ import SettingsDialog from './SettingsDialog'
 const apiFetch = vi.hoisted(() => vi.fn())
 vi.mock('../apiFetch', () => ({ apiFetch }))
 
-const limits = { per_parent_running: 3, per_parent_starts: 20, per_account_running: 6, per_account_starts_per_hour: 60 }
+const limits = { per_parent_running: 3, per_parent_starts_per_hour: 120, per_account_running: 6, per_account_starts_per_hour: 60 }
 const rule = { id: 'rule', engine: 'codex', runtime: 'docker', daemon_id: 'host', daemon_name: 'Workstation', local_only: false, created_at: '2026-10-17T10:00:00Z' }
+const shellLimits = { desktop: { detached_seconds: 0, idle_seconds: 0 }, cluster: { detached_seconds: 300, idle_seconds: 1800 } }
+const unset = { desktop: { detached_seconds: null, idle_seconds: null }, cluster: { detached_seconds: null, idle_seconds: null } }
 const json = (body: unknown, ok = true) => Promise.resolve({ ok, status: ok ? 200 : 500, json: () => Promise.resolve(body) })
 
 // The app's styled classes for a button (the general .btn, and the dialog's own close ✕, preview
@@ -26,9 +28,12 @@ describe('Settings controls', () => {
   it('has no unstyled native button or select, with rules listed and a color customized', async () => {
     apiFetch.mockImplementation((path: string) => path === '/api/daemons'
       ? json([{ id: 'host', name: 'Workstation', mode: 'workstation', available_engines: ['codex', 'claude'] }])
-      : path === '/api/cluster/status' ? json({ configured: false }) : json({ rules: [rule], limits }))
+      : path === '/api/cluster/status' ? json({ configured: false })
+        : path === '/api/shells/settings' ? json({ ...shellLimits, defaults: shellLimits, stored: unset, min_seconds: 600, max_seconds: 315360000 })
+          : json({ rules: [rule], limits }))
     render(<SettingsDialog onClose={() => {}} />)
     await screen.findByRole('button', { name: 'Add rule' })
+    await screen.findByRole('button', { name: 'Save shell limits' })
     // A Reset appears once a color is changed.
     fireEvent.change(screen.getAllByLabelText(/ color$/)[0], { target: { value: '#123456' } })
     expect(screen.getByRole('button', { name: 'Reset' })).toBeInTheDocument()
@@ -42,7 +47,7 @@ describe('Settings controls', () => {
   it('styles the Retry a failed rules load offers', async () => {
     apiFetch.mockImplementation(() => json({}, false))
     render(<SettingsDialog onClose={() => {}} />)
-    await screen.findByRole('button', { name: 'Retry' })
+    expect((await screen.findAllByRole('button', { name: 'Retry' })).length).toBe(2)
     expect(unstyled(screen.getByRole('dialog', { name: 'Settings' }))).toEqual([])
   })
 })

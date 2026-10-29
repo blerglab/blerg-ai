@@ -15,6 +15,19 @@ const codex: UsageLimits = {
 const claudeCapped: UsageLimits = { provider: 'claude', windows: [{ id: 'capped', used_percent: 100, resets_at: at(130) }] }
 
 describe('UsageMeters', () => {
+  it('labels each model weekly window independently', () => {
+    render(<UsageMeters now={NOW} daemons={[makeDaemon({ usage_limits: [{ provider: 'claude', windows: [
+      { id: '7d_fable', used_percent: 20 }, { id: '7d_opus', used_percent: 100 },
+      { id: '7d', used_percent: 40 }, { id: '7d_sonnet', used_percent: 99 },
+    ] }] })]} />)
+    expect(screen.getAllByRole('progressbar').map(w => w.dataset.testid)).toEqual([
+      'usage-window-7d', 'usage-window-7d_opus', 'usage-window-7d_sonnet', 'usage-window-7d_fable',
+    ])
+    for (const model of ['Opus', 'Sonnet', 'Fable']) {
+      expect(screen.getByTestId(`usage-window-7d_${model.toLowerCase()}`).title).toContain(`${model} weekly window`)
+    }
+  })
+
   it('draws nothing when no provider reports', () => {
     const { container } = render(<UsageMeters daemons={[makeDaemon(), makeDaemon({ id: 'd2', usage_limits: [] })]} now={NOW} />)
     expect(container).toBeEmptyDOMElement()
@@ -78,7 +91,7 @@ describe('UsageMeters', () => {
         'usage-window-5h', 'usage-window-7d', 'usage-window-month', 'usage-window-capped',
       ])
       const capped = screen.getByTestId('usage-window-capped')
-      expect(capped).toHaveTextContent(/^capped$/)
+      expect(capped).toHaveTextContent(/^capped!$/)
       expect(capped.title).toBe('Claude usage limit reached · reset time unknown')
     })
 
@@ -95,8 +108,17 @@ describe('UsageMeters', () => {
     })
   })
 
+  it.each([79.9, 80, 89.9, 90, 94.9, 95, 100])('uses the severity and pulse for %s percent', percent => {
+    render(<UsageMeters daemons={[makeDaemon({ usage_limits: [{ provider: 'codex', windows: [{ id: '7d', used_percent: percent, resets_at: at(60) }] }] })]} now={NOW} />)
+    const meter = screen.getByRole('progressbar')
+    expect(meter).toHaveClass(`usage-meter--${Math.round(percent) >= 90 ? 'danger' : Math.round(percent) >= 80 ? 'warning' : 'quiet'}`)
+    expect(meter.classList.contains('usage-meter--pulse')).toBe(Math.round(percent) >= 95)
+    if (Math.round(percent) >= 95) expect(meter.querySelector('[aria-label="Usage limit nearly reached"]')).toHaveTextContent('!')
+    expect(meter.title).toContain(`resets ${clockTime(new Date(at(60)))}`)
+  })
+
   it('colours a window by how much is used', () => {
-    expect([0, 69.9, 70, 89.9, 90, 100].map(meterLevel)).toEqual(['quiet', 'quiet', 'warning', 'warning', 'danger', 'danger'])
+    expect([0, 79.9, 80, 89.9, 90, 100].map(meterLevel)).toEqual(['quiet', 'quiet', 'warning', 'warning', 'danger', 'danger'])
     render(<UsageMeters daemons={[makeDaemon({ usage_limits: [codex] })]} now={NOW} />)
     expect(screen.getByTestId('usage-window-5h')).toHaveClass('usage-meter--quiet')
     expect(screen.getByTestId('usage-window-7d')).toHaveClass('usage-meter--danger')
@@ -117,8 +139,9 @@ describe('UsageMeters', () => {
     const capped = screen.getByTestId('usage-window-capped')
     const clock = new Date(at(130)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
     expect(capped).toHaveTextContent(`capped · resets ${clock}`)
-    expect(capped).toHaveClass('usage-meter--danger')
-    expect(capped.title).toBe('Claude refused a call for its usage limit · resets in 2h 10m')
+    expect(capped).toHaveClass('usage-meter--danger', 'usage-meter--pulse')
+    expect(capped.querySelector('.usage-meter__critical')).toHaveAccessibleName('Usage limit reached')
+    expect(capped.title).toBe(`Claude refused a call for its usage limit · resets ${clock} (in 2h 10m)`)
     expect(capped).toHaveAttribute('role', 'status')
     // Past the reset: nothing left to show.
     rerender(<UsageMeters daemons={[makeDaemon({ usage_limits: [claudeCapped] })]} now={new Date(at(131))} />)

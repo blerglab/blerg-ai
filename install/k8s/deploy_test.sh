@@ -10,12 +10,123 @@ for f in $(grep -E '^\s+- ' "$here/kustomization.yaml" | sed 's/^\s*- //'); do c
 cp "$here/kustomization.yaml" "$tmp/"
 for f in "$tmp"/*.yaml; do
   REGISTRY=reg.example TAG=t1 DOMAIN=blerg.example SCHEME=https \
-  AGENT_IMAGE=reg.example/blerg-runner-agent:t1 WEBHOOK_ALLOW_PRIVATE=false TRUSTED_PROXIES=192.0.2.0/24 \
-    envsubst '${REGISTRY} ${TAG} ${DOMAIN} ${SCHEME} ${AGENT_IMAGE} ${WEBHOOK_ALLOW_PRIVATE} ${TRUSTED_PROXIES}' < "$f" > "$f.r" && mv "$f.r" "$f"
+  AGENT_IMAGE=reg.example/blerg-runner-agent:t1 WEBHOOK_ALLOW_PRIVATE=false TRUSTED_PROXIES=192.0.2.0/24 WORKSPACE_STORAGE_CLASS=bounded-fixture \
+  WORKSPACE_DEFAULT_CLASS=default-fixture \
+    envsubst '${REGISTRY} ${TAG} ${DOMAIN} ${SCHEME} ${AGENT_IMAGE} ${WEBHOOK_ALLOW_PRIVATE} ${TRUSTED_PROXIES} ${WORKSPACE_STORAGE_CLASS} ${WORKSPACE_DEFAULT_CLASS}' < "$f" > "$f.r" && mv "$f.r" "$f"
 done
 fail=0
+# Render through the same helper deploy.sh uses. Explicit values (including empty)
+# win, live operator patches survive two deploys, and unknown env keys stay out.
+python3 - "$here" "$tmp" <<'PYTEST' || fail=1
+import json, os, pathlib, subprocess, sys
+here, tmp = map(pathlib.Path, sys.argv[1:])
+live = tmp / "live.json"
+live.write_text(json.dumps({"data": {"BLERG_RUNNER_POD_MEM_LIMIT": "12Gi",
+    "BLERG_RUNNER_POD_CPU_LIMIT": "4", "BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS": "true",
+    "BLERG_RUNNER_MAX_PARALLEL_CHILDREN": "9"}}))
+base = (tmp / "configmap.yaml").read_text()
+helper = here / "render_runner_config.py"
+def render(text, env):
+    return subprocess.check_output(["python3", str(helper), str(here / "runner-deployment.yaml"), str(live)],
+        input=text, text=True, env=env)
+env = {k: v for k, v in os.environ.items() if not k.startswith("BLERG_RUNNER_")}
+first = render(base, env)
+import yaml
+values = yaml.safe_load(first)["data"]
+assert values["BLERG_RUNNER_POD_MEM_LIMIT"] == "12Gi"
+assert values["BLERG_RUNNER_POD_CPU_LIMIT"] == "4"
+assert values["BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS"] == "true"
+assert values["BLERG_RUNNER_MAX_PARALLEL_CHILDREN"] == "9"
+live.write_text(json.dumps({"data": values}))
+assert yaml.safe_load(render(base, env))["data"] == values
+# Every optional runner ConfigMap reference participates, not just today's examples.
+deployment = next(d for d in yaml.safe_load_all((here / "runner-deployment.yaml").read_text()) if d["kind"] == "Deployment")
+keys = [e["valueFrom"]["configMapKeyRef"]["key"] for e in deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+    if e.get("valueFrom", {}).get("configMapKeyRef", {}).get("optional")]
+for key in keys:
+    got = yaml.safe_load(render(base, dict(env, **{key: "operator's \"value\"\nnext line"})))['data']
+    assert got[key] == "operator's \"value\"\nnext line", key
+assert yaml.safe_load(render(base, dict(env, BLERG_RUNNER_AGENT_GIT_BASE="")))["data"]["BLERG_RUNNER_AGENT_GIT_BASE"] == ""
+assert "BLERG_RUNNER_UNKNOWN" not in yaml.safe_load(render(base, dict(env, BLERG_RUNNER_UNKNOWN="no")))["data"]
+# deploy.sh derives the standard workspace class on every run and exports it: the derived value
+# replaces a stale live one, and an empty derived value clears it.
+live.write_text(json.dumps({"data": {"BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS": "old"}}))
+for derived in ["new", ""]:
+    got = yaml.safe_load(render(base, dict(env, BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS=derived)))["data"]
+    assert got["BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS"] == derived, (derived, got)
+assert 'export BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS="$WORKSPACE_DEFAULT_CLASS"' in (here / "deploy.sh").read_text()
+live.write_text(json.dumps({"data": {"BLERG_RUNNER_POD_MEM_LIMIT": "12Gi",
+    "BLERG_RUNNER_POD_CPU_LIMIT": "4", "BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS": "true",
+    "BLERG_RUNNER_MAX_PARALLEL_CHILDREN": "9"}}))
+# An old ConfigMap without an explicit limit still means 4Gi, even if
+# it has no data keys. Only a missing ConfigMap is a fresh install.
+for old in [{"data": {"BLERG_RUNNER_MAX_SESSIONS": "4"}}, {"data": {}}, {"metadata": {"name": "blerg-config"}}, {"data": None, "metadata": {"name": "blerg-config"}}]:
+    live.write_text(json.dumps(old))
+    upgraded = yaml.safe_load(render(base, env))["data"]
+    assert upgraded["BLERG_RUNNER_POD_MEM_LIMIT"] == "4Gi", upgraded
+    live.write_text(json.dumps({"data": upgraded}))
+    assert yaml.safe_load(render(base, env))["data"]["BLERG_RUNNER_POD_MEM_LIMIT"] == "4Gi"
+    assert yaml.safe_load(render(base, dict(env, BLERG_RUNNER_POD_MEM_LIMIT="8Gi")))["data"]["BLERG_RUNNER_POD_MEM_LIMIT"] == "8Gi"
+# A directly configured binary must also preserve the historical fallback.
+source = (here.parent.parent / "runner/internal/server/k8sjobs.go").read_text()
+assert 'envOr("BLERG_RUNNER_POD_MEM_LIMIT", "4Gi")' in source
+live.write_text("{}")
+assert yaml.safe_load(render(base, env))["data"]["BLERG_RUNNER_POD_MEM_LIMIT"] == "8Gi"
+script = (here / "deploy.sh").read_text()
+assert 'render_runner_config.py' in script and 'get configmap blerg-config' in script
+assert script.index('source "$script_dir/.env"') < script.index('render_runner_config.py') < script.index('kubectl apply -k "$render_dir"')
+# The data claim exists (namespace first) before its class is read, and the class is exported
+# before the manifests and the ConfigMap are rendered.
+assert (script.index('kubectl create namespace blerg') < script.index('runner_data_claim_check "$RUNNER_DATA_SIZE"')
+    < script.index('WORKSPACE_DEFAULT_CLASS="$(workspace_default_class)"')
+    < script.index('export BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS=') < script.index('echo "==> Rendering manifests')
+    < script.index('render_runner_config.py') < script.index('kubectl apply -k "$render_dir"'))
+# Execute deploy.sh's real configuration prefix in a private fixture. It
+# stops before tool checks, builds, context lookup or any Kubernetes call.
+import shutil, shlex
+prefix_dir = tmp / "deploy-prefix"
+prefix_dir.mkdir()
+shutil.copyfile(here / "deploy_lib.sh", prefix_dir / "deploy_lib.sh")
+prefix = script[:script.index("command -v docker")]
+prefix_path = prefix_dir / "deploy.sh"
+prefix_path.write_text(prefix + "\n" + "python3 " + shlex.quote(str(helper)) + " " +
+    shlex.quote(str(here / "runner-deployment.yaml")) + " " + shlex.quote(str(live)) +
+    " < " + shlex.quote(str(tmp / "configmap.yaml")) + "\n")
+fixture_env = {"PATH": os.environ["PATH"], "HOME": os.environ["HOME"], "TMPDIR": str(tmp)}
+def deploy_values(settings):
+    (prefix_dir / ".env").write_text(settings)
+    return yaml.safe_load(subprocess.check_output(["bash", str(prefix_path)], text=True, env=fixture_env))["data"]
+live.write_text(json.dumps({"data": {
+    "BLERG_RUNNER_AGENT_IMAGE": "reg.example/blerg-runner-agent:old",
+    "BLERG_RUNNER_TRUSTED_PROXIES": "192.0.2.0/24",
+    "BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE": "false",
+    "BLERG_RUNNER_WORKSPACE_STORAGE_CLASS": "bounded-old",
+    "BLERG_RUNNER_POD_MEM_LIMIT": "12Gi"}}))
+settings = "REGISTRY=reg.example\nTAG=new\nTRUSTED_PROXIES=198.51.100.0/24\nWEBHOOK_ALLOW_PRIVATE=yes\nWORKSPACE_STORAGE_CLASS=bounded-new\n"
+values = deploy_values(settings)
+assert values["BLERG_RUNNER_AGENT_IMAGE"] == "reg.example/blerg-runner-agent:new", values
+assert values["BLERG_RUNNER_TRUSTED_PROXIES"] == "198.51.100.0/24", values
+assert values["BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE"] == "true", values
+assert values["BLERG_RUNNER_WORKSPACE_STORAGE_CLASS"] == "bounded-new", values
+assert values["BLERG_RUNNER_POD_MEM_LIMIT"] == "12Gi", values
+assert deploy_values(settings + "CLUSTER_RUNTIME=off\n")["BLERG_RUNNER_AGENT_IMAGE"] == ""
+values = deploy_values(settings + "BLERG_RUNNER_TRUSTED_PROXIES=203.0.113.0/24\nBLERG_RUNNER_AGENT_IMAGE=reg.example/custom:chosen\n")
+assert values["BLERG_RUNNER_TRUSTED_PROXIES"] == "203.0.113.0/24"
+assert values["BLERG_RUNNER_AGENT_IMAGE"] == "reg.example/custom:chosen"
+assert deploy_values(settings + "BLERG_RUNNER_AGENT_IMAGE=reg.example/custom:chosen\nCLUSTER_RUNTIME=off\n")["BLERG_RUNNER_AGENT_IMAGE"] == ""
+values = deploy_values(settings + "TRUSTED_PROXIES=\nWORKSPACE_STORAGE_CLASS=\nWEBHOOK_ALLOW_PRIVATE=no\n")
+assert values["BLERG_RUNNER_TRUSTED_PROXIES"] == ""
+assert values["BLERG_RUNNER_WORKSPACE_STORAGE_CLASS"] == ""
+assert values["BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE"] == "false"
+# No alias override: live operator settings survive, while the managed image advances.
+values = deploy_values("REGISTRY=reg.example\nTAG=next\n")
+assert values["BLERG_RUNNER_TRUSTED_PROXIES"] == "192.0.2.0/24"
+assert values["BLERG_RUNNER_WORKSPACE_STORAGE_CLASS"] == "bounded-old"
+assert values["BLERG_RUNNER_AGENT_IMAGE"] == "reg.example/blerg-runner-agent:next"
+PYTEST
+
 if grep -rn '\${' "$tmp"/*.yaml; then echo "FAIL: unsubstituted placeholder"; fail=1; fi
-for want in BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE BLERG_CORE_INTERNAL_KEY BLERG_RUNNER_CORE_INTERNAL_KEY BLERG_CORE_LOCAL_KEY BLERG_BOARD_SECRET_KEY \
+for want in BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE BLERG_CORE_INTERNAL_KEY BLERG_CORE_RUNNER_URL BLERG_RUNNER_CORE_INTERNAL_KEY BLERG_CORE_LOCAL_KEY BLERG_BOARD_SECRET_KEY \
             BLERG_CORE_BOARD_MINT_KEY BLERG_BOARD_DEFAULT_RUN_AS_CREATOR \
             BLERG_CORE_PUBLIC_URL BLERG_BOARD_PUBLIC_URL BLERG_BOARD_AGENT_URL RUNNER_UI_BASE \
             BLERG_RUNNER_DATA_DIR proxy-body-size runAsNonRoot 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'; do
@@ -50,6 +161,10 @@ for want in 'BLERG_RUNNER_AGENT_NAMESPACE: "blerg-runner-sessions"' \
             'BLERG_RUNNER_SANDBOX_CLUSTER_CHILDREN: "once"'; do
   grep -qF -- "$want" "$tmp/configmap.yaml" || { echo "FAIL: $want not wired"; fail=1; }
 done
+grep -qF 'BLERG_RUNNER_WORKSPACE_STORAGE_CLASS: "bounded-fixture"' "$tmp/configmap.yaml" || { echo "FAIL: workspace CSI class not rendered"; fail=1; }
+grep -qF 'key: BLERG_RUNNER_WORKSPACE_STORAGE_CLASS, optional: true' "$tmp/runner-deployment.yaml" || { echo "FAIL: workspace CSI class not passed to runner"; fail=1; }
+grep -qF 'BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS: "default-fixture"' "$tmp/configmap.yaml" || { echo "FAIL: standard workspace class not rendered"; fail=1; }
+grep -qF 'key: BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS, optional: true' "$tmp/runner-deployment.yaml" || { echo "FAIL: standard workspace class not passed to runner"; fail=1; }
 # BLERG_RUNNER_AGENT_GIT_BASE must stay UNSET: the runner already defaults to
 # https://github.com, and setting it explicitly disables the clean 422 for bare
 # repo names and overrides BLERG_RUNNER_GITHUB_ORG. Documented-only key.
@@ -57,8 +172,8 @@ grep -qE '^\s+BLERG_RUNNER_AGENT_GIT_BASE:' "$tmp/configmap.yaml" \
   && { echo "FAIL: BLERG_RUNNER_AGENT_GIT_BASE must not be set in the ConfigMap data"; fail=1; }
 # CLUSTER_RUNTIME=off renders the same ConfigMap with an empty image — the
 # runner's on/off switch — and must not leave a placeholder behind.
-AGENT_IMAGE= WEBHOOK_ALLOW_PRIVATE=false REGISTRY=reg.example TAG=t1 DOMAIN=blerg.example SCHEME=https \
-  envsubst '${REGISTRY} ${TAG} ${DOMAIN} ${SCHEME} ${AGENT_IMAGE} ${WEBHOOK_ALLOW_PRIVATE}' < "$here/configmap.yaml" > "$tmp/configmap-off.yaml"
+WORKSPACE_STORAGE_CLASS= WORKSPACE_DEFAULT_CLASS= AGENT_IMAGE= WEBHOOK_ALLOW_PRIVATE=false REGISTRY=reg.example TAG=t1 DOMAIN=blerg.example SCHEME=https \
+  envsubst '${REGISTRY} ${TAG} ${DOMAIN} ${SCHEME} ${AGENT_IMAGE} ${WEBHOOK_ALLOW_PRIVATE} ${WORKSPACE_STORAGE_CLASS} ${WORKSPACE_DEFAULT_CLASS}' < "$here/configmap.yaml" > "$tmp/configmap-off.yaml"
 grep -q 'BLERG_RUNNER_AGENT_IMAGE: ""' "$tmp/configmap-off.yaml" \
   || { echo "FAIL: empty AGENT_IMAGE does not render BLERG_RUNNER_AGENT_IMAGE: \"\""; fail=1; }
 
@@ -154,6 +269,88 @@ BLERG_ASSUME_YES=no deploy_must_refuse || { echo "FAIL: BLERG_ASSUME_YES=no was 
 stdin_is_tty() { return 0; }
 deploy_must_refuse && { echo "FAIL: a terminal run was refused"; fail=1; }
 grep -qF 'kubectl config current-context' "$here/deploy.sh" || { echo "FAIL: deploy.sh does not show the kube context"; fail=1; }
+
+# Authorization preflight: ask as the runner, never as the installing administrator. No Blerg
+# Role grants reads in kube-system. Fake executables also exercise the real deploy entry point,
+# stopping at the first image build so no cluster, registry or Docker daemon is touched.
+preflight="$tmp/preflight"
+mkdir -p "$preflight/bin" "$preflight/install/k8s"
+cp "$here/deploy.sh" "$here/deploy_lib.sh" "$preflight/install/k8s/"
+cat > "$preflight/bin/kubectl" <<'SH'
+#!/usr/bin/env bash
+echo "$*" >> "$PREFLIGHT_CALLS"
+case "$*" in
+  'config current-context') echo fixture-cluster ;;
+  'config view --minify -o jsonpath={.clusters[0].cluster.server}') echo https://cluster.example ;;
+  'auth can-i get secrets --namespace=kube-system --as=system:serviceaccount:blerg:blerg-runner-agent-launcher --as-group=system:serviceaccounts --as-group=system:serviceaccounts:blerg --as-group=system:authenticated --request-timeout=10s')
+    printf '%s\n' "$PREFLIGHT_ANSWER"
+    echo 'fixture diagnostic: do not echo raw errors' >&2
+    exit "$PREFLIGHT_STATUS" ;;
+  *) echo "unexpected kubectl call" >&2; exit 99 ;;
+esac
+SH
+cat > "$preflight/bin/docker" <<'SH'
+#!/usr/bin/env bash
+echo 'reached image build'
+exit 17
+SH
+# Only command availability is checked before the first build.
+for tool in envsubst openssl; do printf '#!/usr/bin/env bash\nexit 99\n' > "$preflight/bin/$tool"; done
+chmod +x "$preflight/bin/"*
+preflight_run() { # answer, kubectl status, then a bash command and arguments
+  local answer="$1" status="$2"; shift 2
+  : > "$tmp/preflight.calls"
+  env -i HOME="$HOME" PATH="$preflight/bin:$PATH" TMPDIR="$tmp" LANG=C.UTF-8 \
+    PREFLIGHT_CALLS="$tmp/preflight.calls" PREFLIGHT_ANSWER="$answer" PREFLIGHT_STATUS="$status" \
+    BLERG_COMMIT=test BLERG_ASSUME_YES="${preflight_yes:-}" CLUSTER_RUNTIME="${preflight_runtime:-on}" \
+    bash "$@" >"$tmp/preflight.out" 2>&1 </dev/null
+}
+probe_command='source "$1"; cluster_authorization_notice'
+for result in allowed denied error empty misleading; do
+  case "$result" in
+    allowed) answer=yes; status=0 ;;
+    denied) answer=no; status=1 ;;
+    error) answer=''; status=1 ;;
+    empty) answer=''; status=0 ;;
+    misleading) answer=yes; status=1 ;;
+  esac
+  preflight_run "$answer" "$status" -c "$probe_command" bash "$here/deploy_lib.sh" \
+    || { echo "FAIL: authorization notice blocked the deploy ($result)"; fail=1; }
+  grep -qF -- '--as=system:serviceaccount:blerg:blerg-runner-agent-launcher' "$tmp/preflight.calls" \
+    || { echo "FAIL: authorization probe did not impersonate the runner ($result)"; fail=1; }
+  if [ "$result" = allowed ]; then
+    for text in 'WARNING' 'AlwaysAllow' 'no pods/exec' 'namespace-scoped Roles' 'microk8s enable rbac'; do
+      grep -qF "$text" "$tmp/preflight.out" || { echo "FAIL: authorization warning missing $text"; fail=1; }
+    done
+  elif [ "$result" = denied ]; then
+    [ ! -s "$tmp/preflight.out" ] || { echo "FAIL: a denied probe printed a warning"; fail=1; }
+  else
+    grep -qF 'could not verify' "$tmp/preflight.out" \
+      || { echo "FAIL: an inconclusive authorization check was silent ($result)"; fail=1; }
+  fi
+  grep -qF 'fixture diagnostic' "$tmp/preflight.out" && { echo "FAIL: raw kubectl errors reached the notice"; fail=1; }
+done
+for mode in --yes -y environment runtime-off; do
+  args=(); preflight_yes=''; preflight_runtime=on
+  case "$mode" in
+    environment) preflight_yes=1 ;;
+    runtime-off) preflight_runtime=off; args=(--yes) ;;
+    *) args=("$mode") ;;
+  esac
+  rc=0; preflight_run yes 0 "$preflight/install/k8s/deploy.sh" "${args[@]}" || rc=$?
+  { [ "$rc" -eq 17 ] && grep -qF 'microk8s enable rbac' "$tmp/preflight.out" && grep -qF 'reached image build' "$tmp/preflight.out"; } \
+    || { echo "FAIL: non-terminal $mode did not warn and continue to build"; fail=1; }
+done
+for result in denied error; do
+  answer=no; [ "$result" = error ] && answer=''
+  rc=0; preflight_run "$answer" 1 "$preflight/install/k8s/deploy.sh" --yes || rc=$?
+  { [ "$rc" -eq 17 ] && grep -qF 'reached image build' "$tmp/preflight.out"; } \
+    || { echo "FAIL: non-terminal --yes did not continue to build ($result)"; fail=1; }
+done
+preflight_yes=''
+rc=0; preflight_run yes 0 "$preflight/install/k8s/deploy.sh" || rc=$?
+{ [ "$rc" -eq 2 ] && ! grep -qF 'auth can-i' "$tmp/preflight.calls" && ! grep -qF 'reached image build' "$tmp/preflight.out"; } \
+  || { echo "FAIL: authorization preflight bypassed non-terminal deployment consent"; fail=1; }
 
 # MCP gateway: the runner serves it on its own port, exposed ONLY through an internal ClusterIP
 # Service. No Ingress may route to that Service or port (the gateway must never be reachable
@@ -298,6 +495,80 @@ rc=0; claim_check '10Gi|standard|2026-10-16T10:00:00Z' 0 10Gi || rc=$?
 rc=0; claim_check 'error: You must be logged in to the server (Unauthorized)' 1 10Gi || rc=$?
 [ "$rc" -eq 1 ] || { echo "FAIL: an unreadable claim (not NotFound) does not stop the deploy ($rc)"; fail=1; }
 grep -vE '^\s*#' "$here/deploy.sh" | grep -qE 'delete (pvc|persistentvolumeclaim)|blerg-runner-data.*delete' && { echo "FAIL: deploy.sh deletes the data claim"; fail=1; }
+
+# workspace_default_class against a stubbed kubectl (the class standard workspace claims use).
+default_class() { # $1 = what the stub answers, $2 = its exit status
+  local answer="$1" status="$2"
+  kubectl() { printf '%s' "$answer"; return "$status"; }
+  local rc=0
+  ( unset BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS; workspace_default_class ) >"$tmp/class.out" 2>"$tmp/class.err" || rc=$?
+  unset -f kubectl
+  return "$rc"
+}
+rc=0; default_class 'microk8s-hostpath' 0 || rc=$?
+{ [ "$rc" -eq 0 ] && [ "$(cat "$tmp/class.out")" = microk8s-hostpath ]; } \
+  || { echo "FAIL: an existing data claim's class is not used for workspaces"; fail=1; }
+rc=0; default_class '' 0 || rc=$?
+{ [ "$rc" -eq 0 ] && [ ! -s "$tmp/class.out" ]; } || { echo "FAIL: a data claim with no class does not leave the workspace class empty"; fail=1; }
+rc=0; default_class 'error: You must be logged in to the server (Unauthorized)' 1 || rc=$?
+{ [ "$rc" -eq 1 ] && [ ! -s "$tmp/class.out" ] && grep -q 'cannot read' "$tmp/class.err"; } \
+  || { echo "FAIL: an unreadable data claim does not stop the deploy ($rc)"; fail=1; }
+rc=0; default_class 'Error from server (NotFound): persistentvolumeclaims "blerg-runner-data" not found' 1 || rc=$?
+[ "$rc" -eq 1 ] || { echo "FAIL: a missing data claim does not stop the class lookup ($rc)"; fail=1; }
+rc=0; default_class 'Warning: something odd' 0 || rc=$?
+[ "$rc" -eq 1 ] || { echo "FAIL: an unexpected class answer is used as a class ($rc)"; fail=1; }
+# A newly created claim: the check finds none, deploy.sh creates it, and the class the cluster gave
+# it on creation (before it binds) is the one read.
+created_state="$tmp/claim-created"; rm -f "$created_state"
+kubectl() {
+  case "$*" in
+    *"apply -f"*) : > "$created_state"; return 0 ;;
+    *storageClassName*)
+      if [ -e "$created_state" ]; then
+        case "$*" in *resources.requests*) printf '10Gi|fast-ssd|' ;; *) printf 'fast-ssd' ;; esac; return 0
+      fi
+      printf 'Error from server (NotFound): persistentvolumeclaims "blerg-runner-data" not found'; return 1 ;;
+  esac
+  return 1
+}
+rc=0; runner_data_claim_check 10Gi >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 2 ] && kubectl apply -f /dev/null
+created_class="$( unset BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS; workspace_default_class 2>/dev/null )" || created_class="<failed>"
+unset -f kubectl
+[ "$created_class" = fast-ssd ] || { echo "FAIL: a newly created data claim's class is not used for workspaces ($created_class)"; fail=1; }
+# An explicit BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS (even empty) wins and asks the cluster nothing;
+# a bad one stops.
+kubectl() { echo called >>"$tmp/class.calls"; printf 'other'; }
+rm -f "$tmp/class.calls"
+[ "$(BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS=chosen workspace_default_class)" = chosen ] || { echo "FAIL: an explicit standard workspace class is not used"; fail=1; }
+[ -z "$(BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS= workspace_default_class)" ] || { echo "FAIL: an explicit empty standard workspace class is not kept"; fail=1; }
+[ ! -e "$tmp/class.calls" ] || { echo "FAIL: an explicit standard workspace class still asked the cluster"; fail=1; }
+( BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS='Bad Class' workspace_default_class >/dev/null 2>&1 ) && { echo "FAIL: a bad BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS was accepted"; fail=1; }
+unset -f kubectl
+# The printed mode comes from the rendered ConfigMap values.
+notice() { # $1 = bounded class, $2 = default class
+  printf 'data:\n  BLERG_RUNNER_DATA_DIR: "/data"\n  BLERG_RUNNER_WORKSPACE_STORAGE_CLASS: %s\n  BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS: %s\n' \
+    "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1")" "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$2")" > "$tmp/notice-config.yaml"
+  workspace_storage_notice "$tmp/notice-config.yaml"
+}
+out="$(notice fast-bounded microk8s-hostpath)"
+{ grep -qF 'Workspace storage: bounded (fast-bounded).' <<<"$out" && ! grep -q standard <<<"$out"; } \
+  || { echo "FAIL: a bounded class does not print bounded mode: $out"; fail=1; }
+out="$(notice '' microk8s-hostpath)"
+{ grep -qF 'Workspace storage: standard (class microk8s-hostpath; no size limit per workspace).' <<<"$out" \
+  && grep -qF 'Set WORKSPACE_STORAGE_CLASS to a size-limited StorageClass' <<<"$out"; } \
+  || { echo "FAIL: standard mode with a class is not printed: $out"; fail=1; }
+out="$(notice '' '')"
+{ grep -qF 'Workspace storage: standard (cluster default class;' <<<"$out" && grep -qF 'workspace class setting' <<<"$out"; } \
+  || { echo "FAIL: standard mode with no class does not say so: $out"; fail=1; }
+out="$(workspace_storage_notice "$tmp/does-not-exist.yaml" 2>/dev/null)" || { echo "FAIL: the storage notice failed the deploy"; fail=1; }
+grep -q 'could not read' <<<"$out" || { echo "FAIL: an unreadable rendered ConfigMap is not reported"; fail=1; }
+# ...from the ConfigMap deploy.sh actually renders (the template with its placeholders filled).
+out="$(workspace_storage_notice "$tmp/configmap.yaml")"
+grep -qF 'Workspace storage: bounded (bounded-fixture).' <<<"$out" || { echo "FAIL: the rendered ConfigMap's mode is not printed: $out"; fail=1; }
+out="$(workspace_storage_notice "$tmp/configmap-off.yaml")"
+grep -qF 'Workspace storage: standard (cluster default class;' <<<"$out" || { echo "FAIL: an empty rendered ConfigMap does not print standard mode: $out"; fail=1; }
+grep -qF 'workspace_storage_notice "$render_dir/configmap.yaml"' "$here/deploy.sh" || { echo "FAIL: deploy.sh does not print the workspace storage mode"; fail=1; }
 
 # First-run setup at the end of a deploy, against a stubbed kubectl: a fresh install prints the
 # setup link from `blerg-core setup-link` (on a terminal only — the link is a credential; without

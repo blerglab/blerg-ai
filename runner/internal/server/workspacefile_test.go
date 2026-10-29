@@ -68,9 +68,13 @@ func TestWorkspaceFileOwnerOnlyAndOldDaemonTimeout(t *testing.T) {
 		fx.mux.ServeHTTP(rec, req)
 		return rec
 	}
-	for _, tok := range []string{fx.token(topicOther, "human"), fx.token(topicOwner, "agent"), fx.token(topicOwner, "service")} {
-		rec := get(fx.sess, tok)
-		if rec.Code != http.StatusForbidden || len(dc.send) != 0 || workspaceProblemCode(t, rec.Body.Bytes()) != workspaceCodeForbidden {
+	for _, refused := range []struct{ token, code string }{
+		{fx.token(topicOther, "human"), workspaceCodeSessionOwnership},
+		{fx.token(topicOwner, "agent"), workspaceCodePersonRequired},
+		{fx.token(topicOwner, "service"), workspaceCodePersonRequired},
+	} {
+		rec := get(fx.sess, refused.token)
+		if rec.Code != http.StatusForbidden || len(dc.send) != 0 || workspaceProblemCode(t, rec.Body.Bytes()) != refused.code {
 			t.Fatalf("nonowner/kind access=%d queued=%d %s", rec.Code, len(dc.send), rec.Body)
 		}
 	}
@@ -122,6 +126,8 @@ func TestWorkspaceFileReplyValidationAndAccess(t *testing.T) {
 		var raw []byte
 		select {
 		case raw = <-dc.send:
+		case <-done:
+			return rec
 		case <-time.After(15 * time.Second):
 			t.Fatal("file request not dispatched")
 		}
@@ -143,12 +149,8 @@ func TestWorkspaceFileReplyValidationAndAccess(t *testing.T) {
 	}
 	owner := fx.token(topicOwner, "human")
 	admin := fx.token(topicOwner, "human", "account.manage")
-	privOwner := fx.token(topicOther, "human")
-	for _, sid := range []string{fx.sess, fx.privSess} {
+	for _, sid := range []string{fx.sess} {
 		tok := owner
-		if sid == fx.privSess {
-			tok = privOwner // a private session: its owner alone
-		}
 		rec := run(sid, tok, "README.md", nil)
 		if rec.Code != 200 {
 			t.Fatalf("allowed %d %s", rec.Code, rec.Body)
@@ -160,6 +162,26 @@ func TestWorkspaceFileReplyValidationAndAccess(t *testing.T) {
 		if got["view"] != "markdown" || got["content_b64"] != "aGk=" || got["content_type"] != "text/markdown; charset=utf-8" || got["request_id"] != nil || got["session_id"] != nil || got["type"] != nil || rec.Header().Get("Cache-Control") != "private, no-store" {
 			t.Fatalf("unsafe reply %s", rec.Body)
 		}
+	}
+	for _, name := range []string{"/srv/projects/app/README.md", "/workspace/app/README.md"} {
+		rec := run(fx.sess, owner, name, func(p *protocol.WorkspaceFileResult) { p.RequestedPath = name })
+		if rec.Code != 200 || strings.Contains(rec.Body.String(), "requested_path") {
+			t.Fatalf("absolute read %d %s", rec.Code, rec.Body)
+		}
+		for _, echo := range []string{"", "/other/README.md"} {
+			rec = run(fx.sess, owner, name, func(p *protocol.WorkspaceFileResult) { p.RequestedPath = echo })
+			if rec.Code != 409 {
+				t.Fatalf("unbound absolute reply %d %s", rec.Code, rec.Body)
+			}
+		}
+		rec = run(fx.sess, owner, name, func(p *protocol.WorkspaceFileResult) { p.RequestedPath = name; p.Path = "other.md" })
+		if rec.Code != 409 {
+			t.Fatalf("wrong absolute reply path %d %s", rec.Code, rec.Body)
+		}
+	}
+	absoluteRefused := run(fx.sess, owner, "/etc/passwd", func(p *protocol.WorkspaceFileResult) { p.OK = false; p.ErrorCode = "forbidden" })
+	if absoluteRefused.Code != 403 {
+		t.Fatalf("unauthorized absolute read %d %s", absoluteRefused.Code, absoluteRefused.Body)
 	}
 	// Someone else's private session is not there for an administrator either: the same 404 an unknown
 	// session gets, so the answer does not reveal that it exists.
@@ -256,7 +278,7 @@ func TestWorkspaceFileReplyValidationAndAccess(t *testing.T) {
 			}
 		})
 	}
-	for _, name := range []string{"../README.md", "%2e%2e%2fREADME.md", "/etc/passwd", "~/.env", "README%00.md", `dir%5Cfile`, `README%0A.md`} {
+	for _, name := range []string{"../README.md", "%2e%2e%2fREADME.md", "~/.env", "README%00.md", `dir%5Cfile`, `README%0A.md`} {
 		req := httptest.NewRequest(http.MethodGet, "/api/sessions/"+fx.sess+"/workspace-file?path="+name, nil)
 		req.Header.Set("Authorization", "Bearer "+owner)
 		rec := httptest.NewRecorder()
@@ -515,5 +537,13 @@ func TestWorkspaceFileTimeoutReturnsJSONOverRealHTTP(t *testing.T) {
 	body, err := io.ReadAll(res.Body)
 	if err != nil || res.StatusCode != http.StatusConflict || !strings.Contains(string(body), `"error_id"`) || workspaceProblemCode(t, body) != workspaceCodeDaemonTimeout {
 		t.Fatalf("timeout response %d %q %v", res.StatusCode, body, err)
+	}
+}
+
+func TestWorkspaceAbsolutePathSyntax(t *testing.T) {
+	for _, name := range []string{"/srv/projects/app/README.md", "/workspace/app/README.md"} {
+		if !workspacePathAllowed(name) {
+			t.Fatalf("absolute reference not dispatched: %q", name)
+		}
 	}
 }

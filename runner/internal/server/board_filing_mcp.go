@@ -10,7 +10,7 @@ import (
 
 func filingToolDefinition() any {
 	stringField := map[string]string{"type": "string"}
-	return map[string]any{"name": "blerg_ticket_file", "description": "Search before filing a ticket on any Board available to your person. list_boards lists targets; search finds duplicates; propose queues an exact draft for human approval and never writes before approval.", "inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"action"}, "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"list_boards", "search", "propose"}}, "board": stringField, "query": stringField, "title": stringField, "body": stringField, "type": stringField, "sensitive": map[string]string{"type": "boolean"}, "repos": map[string]any{"type": "array", "items": stringField, "maxItems": 20}}}}
+	return map[string]any{"name": "blerg_ticket_file", "description": "Search before filing a ticket on any Board available to your person. list_boards lists targets; search finds duplicates and returns next_cursor (repeat with cursor until empty); propose queues an exact draft for human approval and never writes before approval.", "inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"action"}, "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"list_boards", "search", "propose"}}, "board": stringField, "query": stringField, "cursor": stringField, "title": stringField, "body": stringField, "type": stringField, "sensitive": map[string]string{"type": "boolean"}, "repos": map[string]any{"type": "array", "items": stringField, "maxItems": 20}}}}
 }
 
 func pluginRequestToolDefinition() any {
@@ -108,6 +108,7 @@ func (a *API) HandleFilingTools(w http.ResponseWriter, r *http.Request) {
 			Action    string   `json:"action"`
 			Board     string   `json:"board"`
 			Query     string   `json:"query"`
+			Cursor    string   `json:"cursor"`
 			Title     string   `json:"title"`
 			Body      string   `json:"body"`
 			Type      string   `json:"type"`
@@ -128,7 +129,7 @@ func (a *API) HandleFilingTools(w http.ResponseWriter, r *http.Request) {
 			a.HandleFilingBoards(capture, inner)
 		case "search":
 			inner.Method = "GET"
-			inner.URL.RawQuery = url.Values{"board": {args.Board}, "q": {args.Query}}.Encode()
+			inner.URL.RawQuery = url.Values{"board": {args.Board}, "q": {args.Query}, "cursor": {args.Cursor}}.Encode()
 			a.HandleFilingSearch(capture, inner)
 		case "propose":
 			inner.Method = "POST"

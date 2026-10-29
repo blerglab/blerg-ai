@@ -62,6 +62,7 @@ export interface MessageInfo {
 }
 
 export interface DaemonInfo {
+ compatibility?: boolean;
   id: string;
   name: string;
   mode: string;
@@ -94,6 +95,9 @@ export interface UsageLimits {
 }
 
 export interface SessionInfo {
+ desktop_compatibility?: boolean;
+ desktop_status?: string;
+ desktop_status_reason?: string;
   steering_supported?: boolean;
   limit_resume_supported?: boolean;
   id: string;
@@ -308,6 +312,7 @@ export interface CapabilitiesPayload {
   version?: string
   cwd?: string
   permission_mode?: string
+  sandbox_mode?: string
   note?: string
   groups: CapabilityGroup[]
 }
@@ -589,7 +594,14 @@ export interface TicketDependencyChanged {
 // Discriminated union of all server→browser messages.
 export interface ChildrenChanged { type: 'children_changed'; session_id: string }
 
+export interface DesktopSourcesChanged { type: "desktop_sources_changed"; desktop_id: string }
+export interface DesktopOwnershipChanged { type: "desktop_ownership_changed"; desktop_id: string; ownership_revision: number }
+export interface DesktopInventoryInvalidated { type: "desktop_inventory_invalidated" }
+
 export type ServerMessage =
+  | DesktopOwnershipChanged
+  | DesktopInventoryInvalidated
+  | DesktopSourcesChanged
   | ChildrenChanged
   | InitialState
   | DaemonConnected

@@ -85,7 +85,7 @@ func TestPluginsHumanRoundTripKeepsOrder(t *testing.T) {
 	if len(got.Plugins) != 2 || got.Plugins[0].Plugin != "superpowers" || got.Plugins[1].Plugin != "frontend-design" {
 		t.Fatalf("order not kept: %+v", got.Plugins)
 	}
-	if len(got.Allowed) != 1 || got.Allowed[0] != officialMarketplace || got.Max != 20 {
+	if len(got.Allowed) != 3 || got.Allowed[0] != officialMarketplace || got.Max != 20 {
 		t.Fatalf("allow-list/max not reported: %+v", got)
 	}
 	// Reorder and remove in one replace.

@@ -71,6 +71,22 @@ var ErrNoStartIdentity = errors.New("runner: no start identity (automation token
 // about the card being started.
 var ErrStartUnauthorized = errors.New("runner refused the start credential (the board's automation token is expired, revoked, or not a run-sessions token)")
 
+// StartRefusedError: the runner answered the start with a refusal or failure (HTTP 4xx other than
+// 401/403, or 5xx) for the reason in Message, its own words when it gave them. Callers show that
+// reason, never the raw HTTP exchange.
+type StartRefusedError struct {
+	Status  int
+	Message string
+}
+
+func (e *StartRefusedError) Error() string {
+	return "the runner could not start this session: " + e.Message
+}
+
+// ClusterBareRepoRefusal is the runner's refusal of a cluster start whose repo is a bare folder
+// name it cannot resolve (runner/internal/server/cluster_repo.go msgClusterBareRepo).
+const ClusterBareRepoRefusal = "repo must be given as org/name for cluster sessions"
+
 type Status struct {
 	SteeringSupported *bool  `json:"steering_supported,omitempty"`
 	Lifecycle         string `json:"lifecycle"`
@@ -145,7 +161,7 @@ type BlergRunner struct {
 func NewBlergRunner(url, key, gitBase string) *BlergRunner {
 	return &BlergRunner{url: strings.TrimRight(url, "/"), key: key,
 		gitBase: strings.TrimRight(gitBase, "/"),
-		client:  &http.Client{Timeout: 15 * time.Second}}
+		client:  &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 }
 
 // SetRuntime pins the runtime every start asks for (a value ParseRuntime
@@ -200,6 +216,9 @@ func (k *BlergRunner) req(ctx context.Context, method, path string, body, out an
 type respMeta struct {
 	Status      int
 	ContentType string
+	// ErrorText is the runner's own {"error": ...} message on a failed response (redacted like
+	// the error), or "" when the body carried none.
+	ErrorText string
 }
 
 func (k *BlergRunner) do(ctx context.Context, method, path string, body, out any) (respMeta, error) {
@@ -221,6 +240,10 @@ func (k *BlergRunner) doAs(ctx context.Context, bearer, method, path string, bod
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+bearer)
+	req.Header.Set("X-Blerg-Desktop-Viewer", "none")
+	if viewer := desktopViewerProof(ctx); viewer != "" {
+		req.Header.Set("X-Blerg-Desktop-Viewer", viewer)
+	}
 	resp, err := k.client.Do(req)
 	if err != nil {
 		return meta, err
@@ -228,10 +251,19 @@ func (k *BlergRunner) doAs(ctx context.Context, bearer, method, path string, bod
 	defer func() { _ = resp.Body.Close() }()
 	meta.Status, meta.ContentType = resp.StatusCode, resp.Header.Get("Content-Type")
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= 300 {
 		safeBody := string(raw)
+		if viewer := desktopViewerProof(ctx); viewer != "" {
+			safeBody = strings.ReplaceAll(safeBody, viewer, "[redacted]")
+		}
 		if bearer != "" {
 			safeBody = strings.ReplaceAll(safeBody, bearer, "[redacted]")
+		}
+		var problem struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal([]byte(safeBody), &problem) == nil {
+			meta.ErrorText = problem.Error
 		}
 		httpErr := fmt.Errorf("blerg-runner %s %s: HTTP %d: %.200s", method, path, resp.StatusCode, safeBody)
 		if resp.StatusCode == http.StatusNotFound {
@@ -284,6 +316,13 @@ func (k *BlergRunner) Start(ctx context.Context, r StartRequest) (string, error)
 	meta, err := k.doAs(ctx, r.Token, "POST", "/api/runner/start", body, &out)
 	if err != nil && (meta.Status == http.StatusUnauthorized || meta.Status == http.StatusForbidden) {
 		return "", fmt.Errorf("%w (HTTP %d)", ErrStartUnauthorized, meta.Status)
+	}
+	if err != nil && meta.Status >= 400 {
+		msg := meta.ErrorText
+		if msg == "" {
+			msg = fmt.Sprintf("it answered HTTP %d; retry, and check that the desktop or cluster it runs on is connected", meta.Status)
+		}
+		return "", &StartRefusedError{Status: meta.Status, Message: msg}
 	}
 	return out.SessionID, err
 }

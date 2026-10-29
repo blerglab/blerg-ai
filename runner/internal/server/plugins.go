@@ -68,13 +68,13 @@ func fetchCorePlugins(ctx context.Context, client *http.Client, coreURL, interna
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, coreURL+"/internal/plugins/list", bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, coreURL+"/internal/plugins/list", bytes.NewReader(raw)) // #nosec G704 -- Target is operator-configured Core URL; requester fields are JSON data and redirects are disabled.
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-Key", internalKey)
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- Target is operator-configured Core URL; requester fields are JSON data and redirects are disabled.
 	if err != nil {
 		return nil, fmt.Errorf("request to core failed: %w", err)
 	}
@@ -103,7 +103,7 @@ func pluginAllowlistFromEnv() (pluginspec.Allowlist, string) {
 	raw := os.Getenv("BLERG_RUNNER_PLUGIN_MARKETPLACES")
 	a, dropped := pluginspec.ParseAllowlist(raw)
 	for _, d := range dropped {
-		log.Printf("ignoring invalid BLERG_RUNNER_PLUGIN_MARKETPLACES entry %q (want GitHub owner/repo)", d)
+		log.Printf("ignoring invalid BLERG_RUNNER_PLUGIN_MARKETPLACES entry %q (want owner/repo or codex:<marketplace>)", d)
 	}
 	return a, raw
 }
@@ -151,29 +151,37 @@ func (j *JobManager) ResolvePlugins(ctx context.Context, spec *SessionJobSpec) {
 	if j.personalCredentialsWired() && !spec.proof().valid() {
 		// No named live token/session: nothing can be asked of core, and a start that needs
 		// core at all refuses in CreateSessionJob (errNoLivenessProof), so no note here.
-		log.Printf("cluster session %s: always-on plugins skipped: %v", spec.SessionID, errNoLivenessProof)
+		logLaunchFailure("plugins_resolve", &jobSubmissionError{reason: "Unauthorized"})
 		return
 	}
 	list, err := fetchCorePlugins(ctx, j.CredentialClient, j.CoreURL, j.CoreInternalKey, spec.SpawningAccountID, spec.proof(), spec.Engine)
 	if err != nil {
-		log.Printf("cluster session %s: always-on plugins unavailable, starting without them: %v", spec.SessionID, err)
+		logLaunchFailure("plugins_resolve", jobSubmissionTransportError(err))
 		spec.PluginsNote = errPluginsUnavailable.Error()
 		return
 	}
-	spec.Plugins, spec.PluginsNote = resolvePluginList(list, j.PluginAllow, "cluster session "+spec.SessionID)
+	spec.Plugins, spec.PluginsNote = resolvePluginList(list, j.currentPluginAllow(), "cluster", spec.Engine)
 }
 
 // resolvePluginList re-checks a list from core against this server's own allow-list: malformed,
 // duplicate (case-insensitive marketplace) and disallowed entries are skipped, never installed,
 // and the list is capped at MaxEntries. note says what was skipped ("" when nothing was).
-func resolvePluginList(list []pluginspec.Entry, allow pluginspec.Allowlist, who string) ([]pluginspec.Entry, string) {
+func resolvePluginList(list []pluginspec.Entry, allow pluginspec.Allowlist, who string, engines ...string) ([]pluginspec.Entry, string) {
+	engine := pluginspec.EngineClaude
+	if len(engines) > 0 && engines[0] != "" {
+		engine = engines[0]
+	}
 	var out []pluginspec.Entry
 	skipped := 0
 	seen := map[pluginspec.Entry]bool{}
 	for _, e := range list {
 		key := pluginspec.Entry{Marketplace: strings.ToLower(e.Marketplace), Plugin: e.Plugin}
-		if pluginspec.ValidateClaude(e) != nil || !allow.Allows(e.Marketplace) || seen[key] {
-			log.Printf("%s: skipping plugin %q from %q (malformed, duplicate or marketplace not allowed)", who, e.Plugin, e.Marketplace)
+		if pluginspec.Validate(engine, e) != nil || !allow.Allows(e.Marketplace) || seen[key] {
+			if who == "cluster" {
+				logLaunchFailure("plugins_resolve", &jobSubmissionError{reason: "Invalid"})
+			} else {
+				log.Printf("%s: skipping plugin %q from %q (malformed, duplicate or marketplace not allowed)", who, e.Plugin, e.Marketplace)
+			}
 			skipped++
 			continue
 		}
@@ -221,7 +229,7 @@ func (a *API) daemonPlugins(ctx context.Context, d *DaemonConn, accountID string
 		log.Printf("daemon %s: always-on plugins unavailable, starting without them: %v", d.Name, err)
 		return nil, errPluginsUnavailable.Error()
 	}
-	return resolvePluginList(list, a.pluginAllow, "daemon "+d.Name)
+	return resolvePluginList(list, a.currentPluginAllow(), "daemon "+d.Name, engine)
 }
 
 // pluginEnv is the pod env carrying the list: the entries as compact JSON plus the allow-list the
@@ -235,9 +243,12 @@ func (j *JobManager) pluginEnv(spec SessionJobSpec) []map[string]any {
 		return nil
 	}
 	env := []map[string]any{{"name": "BLERG_RUNNER_PLUGINS", "value": string(raw)}}
-	if j.PluginAllowRaw != "" {
-		env = append(env, map[string]any{"name": "BLERG_RUNNER_PLUGIN_MARKETPLACES", "value": j.PluginAllowRaw})
+	sources, anySource := j.currentPluginAllow().List()
+	rawAllow := strings.Join(sources, ",") + ","
+	if anySource {
+		rawAllow += "*"
 	}
+	env = append(env, map[string]any{"name": "BLERG_RUNNER_PLUGIN_MARKETPLACES", "value": rawAllow})
 	return env
 }
 

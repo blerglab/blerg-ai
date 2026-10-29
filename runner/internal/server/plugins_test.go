@@ -144,8 +144,8 @@ func TestCreateSessionJobCarriesPluginsForHumanSession(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &got); err != nil || len(got) != 2 || got[0].Plugin != "frontend-design" {
 		t.Fatalf("env = %q (%v)", raw, err)
 	}
-	if v, _ := envValue(t, f, "BLERG_RUNNER_PLUGIN_MARKETPLACES"); v != "" {
-		t.Fatalf("empty operator allow-list must not be sent as an env value, got %q", v)
+	if v, _ := envValue(t, f, "BLERG_RUNNER_PLUGIN_MARKETPLACES"); v != pluginspec.DefaultMarketplaces+"," {
+		t.Fatalf("effective default policy missing from pod env: %q", v)
 	}
 	// Non-secret configuration: a literal value, never a secretKeyRef.
 	if _, isRef := jobEnv(t, f.created[0])["BLERG_RUNNER_PLUGINS"]["valueFrom"]; isRef {
@@ -269,7 +269,7 @@ func TestDisallowedMarketplaceIsSkippedWithNote(t *testing.T) {
 	if err := jm2.CreateSessionJob(spec); err != nil {
 		t.Fatal(err)
 	}
-	if v, _ := envValue(t, f2, "BLERG_RUNNER_PLUGIN_MARKETPLACES"); v != "evil/plugins" {
+	if v, _ := envValue(t, f2, "BLERG_RUNNER_PLUGIN_MARKETPLACES"); v != "evil/plugins," {
 		t.Fatalf("allow-list env = %q", v)
 	}
 }
@@ -328,5 +328,18 @@ func TestResumeClusterSessionCarriesPlugins(t *testing.T) {
 		if _, has := envValue(t, f, "BLERG_RUNNER_PLUGINS"); has != tc.want {
 			t.Errorf("%s: has plugins = %v, want %v", tc.requester, has, tc.want)
 		}
+	}
+}
+
+func TestResolvePluginListPreservesAllowedNativeCodexAtStartup(t *testing.T) {
+	allow, _ := pluginspec.ParseAllowlist("codex:market")
+	entry := pluginspec.Entry{Marketplace: "codex:market", Plugin: "selected"}
+	got, note := resolvePluginList([]pluginspec.Entry{entry}, allow, "daemon", "codex")
+	if len(got) != 1 || got[0] != entry || note != "" {
+		t.Fatalf("native startup lost %+v %q", got, note)
+	}
+	got, note = resolvePluginList([]pluginspec.Entry{entry}, allow, "daemon", "claude")
+	if len(got) != 0 || note == "" {
+		t.Fatal("Claude startup accepted Codex identity")
 	}
 }

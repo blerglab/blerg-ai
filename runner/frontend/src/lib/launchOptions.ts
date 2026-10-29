@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { apiFetch } from '../apiFetch'
 import { parseModelList, type EngineModelsState } from './engineModels'
 import type { ModelList } from '../types'
+import { parseEngineRows, type EngineStatusRow } from './engineStatus'
 
 export interface LaunchEngine {
   id: string
@@ -19,6 +20,8 @@ interface Snapshot {
   key: string
   state: 'loading' | 'known' | 'unknown'
   engines: LaunchEngine[]
+  /** Every other known engine, with the server's reason and fix (engine discovery after install). */
+  unavailable?: EngineStatusRow[]
   error?: string
   refreshing?: boolean
 }
@@ -71,7 +74,8 @@ export function useLaunchOptions({ runtime, daemonId, kind = 'agent', restricted
           }
           if (!live) return
           const refreshing = raw.refreshing === true || engines.some(e => e.models?.refreshing === true)
-          setSnapshot({ key: requestKey, state: raw.state === 'unknown' && refreshing ? 'loading' : raw.state, engines: raw.state === 'known' ? engines : [], refreshing, error: typeof raw.error === 'string' ? raw.error : undefined })
+          const unavailable = raw.state === 'known' ? parseEngineRows(raw.unavailable).filter(row => !engines.some(e => e.id === row.id)) : []
+          setSnapshot({ key: requestKey, state: raw.state === 'unknown' && refreshing ? 'loading' : raw.state, engines: raw.state === 'known' ? engines : [], unavailable, refreshing, error: typeof raw.error === 'string' ? raw.error : undefined })
           if (refreshing) poll = setTimeout(read, 500)
           else clearTimeout(timer)
         })

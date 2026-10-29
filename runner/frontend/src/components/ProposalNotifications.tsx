@@ -31,7 +31,7 @@ function QuestionRow({ question }: { question: MessageInfo }) {
     <p className="proposal-question-text">{question.body}</p>
     <div className="proposal-question-actions">
       <Link to={`/sessions/${encodeURIComponent(question.session_id)}`}>Answer in the session</Link>
-      <button type="button" data-testid="bell-dismiss" aria-label={`Dismiss question: ${question.body.slice(0, 80)}`}
+      <button type="button" className="btn small" data-testid="bell-dismiss" aria-label={`Dismiss question: ${question.body.slice(0, 80)}`}
         title="Dismiss: you answered elsewhere, or it no longer needs you. The agent is told."
         onClick={() => dismissWithUndo(`ask:${question.id}`, `Question: ${question.body.slice(0, 80)}`)}>Dismiss</button>
     </div>
@@ -47,7 +47,7 @@ function ReviewRow({ review }: { review: MyReviewRequest }) {
     <p className="proposal-question-text"><strong>{review.artifact_name}</strong>{review.artifact_version > 1 ? ` v${review.artifact_version}` : ''}{review.ask ? `: ${review.ask}` : ''}</p>
     <div className="proposal-question-actions">
       <Link to={review.url}>Review in the session</Link>
-      <button type="button" data-testid="bell-dismiss" aria-label={`Dismiss review request: ${review.artifact_name}`}
+      <button type="button" className="btn small" data-testid="bell-dismiss" aria-label={`Dismiss review request: ${review.artifact_name}`}
         title="Dismiss: you answered elsewhere, or it no longer needs you. The agent is told."
         onClick={() => dismissWithUndo(`review:${review.request_id}`, `Review: ${review.artifact_name}`)}>Dismiss</button>
     </div>
@@ -129,7 +129,7 @@ export function ProposalBell({ inbox }: { inbox: ProposalInbox }) {
     </button>
     {open && createPortal(<section className="proposal-notification-list" aria-label="Notifications" style={place ?? undefined}>
       <div className="proposal-attention-actions"><h2>Needs you</h2><button type="button" onClick={() => setOpen(false)}>Close notifications</button></div>
-      {inbox.error && <p role="alert">{inbox.error} <button type="button" onClick={() => void inbox.refresh()}>Retry</button></p>}
+      {inbox.error && <p role="alert">{inbox.error} <button type="button" className="btn small" onClick={() => void inbox.refresh()}>Retry</button></p>}
       {questions.map(q => <QuestionRow key={q.id} question={q} />)}
       {reviews.map(r => <ReviewRow key={r.request_id} review={r} />)}
       {!inbox.error && inbox.pending.length === 0 && <p>No proposals waiting.</p>}

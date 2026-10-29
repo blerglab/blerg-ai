@@ -3,6 +3,22 @@
      here the same way blerg-board defines it inline in styles.css). Every
      surface in this app is painted from these — without them the whole UI
      collapses to undefined-variable defaults. */
+  --terminal-black: #161c26;
+  --terminal-red: var(--danger);
+  --terminal-green: #63d68b;
+  --terminal-yellow: var(--amber);
+  --terminal-blue: var(--batch);
+  --terminal-magenta: #d8a0ef;
+  --terminal-cyan: #65cfdb;
+  --terminal-white: #c2ccd8;
+  --terminal-bright-black: #48525f;
+  --terminal-bright-red: var(--diff-del);
+  --terminal-bright-green: #8ed6a6;
+  --terminal-bright-yellow: #f4ca6c;
+  --terminal-bright-blue: #6aadff;
+  --terminal-bright-magenta: #e4bdf4;
+  --terminal-bright-cyan: #9ae2e9;
+  --terminal-bright-white: #f2f6fa;
   --basalt: #0d1117;     /* app background */
   --scree: #161c26;      /* raised surface (panels, sheets) */
   --scree-2: #1e2633;    /* card surface + row dividers */
@@ -71,6 +87,22 @@
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
     color-scheme: light;
+    --terminal-black: #313d4f;
+    --terminal-red: #b83636;
+    --terminal-green: #257342;
+    --terminal-yellow: #82570c;
+    --terminal-blue: #2559b0;
+    --terminal-magenta: #8741a5;
+    --terminal-cyan: #177582;
+    --terminal-white: #c2ccd8;
+    --terminal-bright-black: #606b79;
+    --terminal-bright-red: #bc3a3a;
+    --terminal-bright-green: #2b7c49;
+    --terminal-bright-yellow: #8c6015;
+    --terminal-bright-blue: #2861bf;
+    --terminal-bright-magenta: #9047ad;
+    --terminal-bright-cyan: #197581;
+    --terminal-bright-white: #f2f6fa;
     --basalt: #eef1f6;
     --scree: #f7f9fc;
     --scree-2: #ffffff;
@@ -93,6 +125,22 @@
 }
 :root[data-theme="light"] {
   color-scheme: light;
+  --terminal-black: #313d4f;
+  --terminal-red: #b83636;
+  --terminal-green: #257342;
+  --terminal-yellow: #82570c;
+  --terminal-blue: #2559b0;
+  --terminal-magenta: #8741a5;
+  --terminal-cyan: #177582;
+  --terminal-white: #c2ccd8;
+  --terminal-bright-black: #606b79;
+  --terminal-bright-red: #bc3a3a;
+  --terminal-bright-green: #2b7c49;
+  --terminal-bright-yellow: #8c6015;
+  --terminal-bright-blue: #2861bf;
+  --terminal-bright-magenta: #9047ad;
+  --terminal-bright-cyan: #197581;
+  --terminal-bright-white: #f2f6fa;
   --basalt: #eef1f6;
   --scree: #f7f9fc;
   --scree-2: #ffffff;
@@ -114,6 +162,22 @@
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
+  --terminal-black: #161c26;
+  --terminal-red: var(--danger);
+  --terminal-green: #63d68b;
+  --terminal-yellow: var(--amber);
+  --terminal-blue: var(--batch);
+  --terminal-magenta: #d8a0ef;
+  --terminal-cyan: #65cfdb;
+  --terminal-white: #c2ccd8;
+  --terminal-bright-black: #48525f;
+  --terminal-bright-red: var(--diff-del);
+  --terminal-bright-green: #8ed6a6;
+  --terminal-bright-yellow: #f4ca6c;
+  --terminal-bright-blue: #6aadff;
+  --terminal-bright-magenta: #e4bdf4;
+  --terminal-bright-cyan: #9ae2e9;
+  --terminal-bright-white: #f2f6fa;
   --basalt: #0d1117;
   --scree: #161c26;
   --scree-2: #1e2633;
@@ -289,69 +353,6 @@ code {
   border-color: var(--fog-dim);
 }
 
-.session-children-kept {
-  list-style: none;
-  margin: 0 0 6px 12px;
-  padding: 0 0 0 8px;
-  border-left: 1px solid var(--stone);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.session-kept-child {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  min-width: 0;
-  padding: 3px 8px;
-  border: 1px solid var(--scree);
-  border-radius: 6px;
-  background: var(--scree);
-  color: var(--chalk);
-  font: inherit;
-  font-size: 0.8rem;
-  text-align: left;
-  cursor: pointer;
-}
-
-.session-kept-child.active {
-  border-color: var(--selected-border);
-  background: var(--selected-bg);
-}
-
-.session-kept-glyph {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  flex-shrink: 0;
-  color: var(--lichen);
-  font-weight: 700;
-}
-
-.session-kept-glyph.waiting {
-  color: var(--amber);
-}
-
-.session-kept-spin {
-  width: 9px;
-  height: 9px;
-  border: 2px solid currentColor;
-  border-right-color: transparent;
-  border-radius: 50%;
-  animation: blerg-spin 1s linear infinite;
-}
-
-.session-kept-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 @media (pointer: coarse), (max-width: 600px) {
   /* The glyph stays small; an invisible 44 px hit area surrounds it. */
   .session-children-toggle::after {
@@ -362,15 +363,6 @@ code {
     width: 44px;
     height: 28px;
     transform: translate(-50%, -50%);
-  }
-  .session-kept-child {
-    min-height: 44px;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .session-kept-spin {
-    animation: none;
   }
 }
 

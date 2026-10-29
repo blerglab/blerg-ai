@@ -45,14 +45,14 @@ export default function BoardFileDraft({ proposal, onSaved, onCancel }: { propos
         {board && !boards.boards.some(b => b.id === board) && <option value={board}>Previously selected board (unverified)</option>}
         {boards.state === 'ready' && boards.configured && boards.boards.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
       </select></label>
-      {!verified && <div role="status">{boards.state === 'loading' ? 'Checking board access…' : 'Choose an available board before saving.'}{' '}{boards.state === 'failed' && <button type="button" onClick={boards.retry}>Retry boards</button>}</div>}
+      {!verified && <div role="status">{boards.state === 'loading' ? 'Checking board access…' : 'Choose an available board before saving.'}{' '}{boards.state === 'failed' && <button type="button" className="btn small" onClick={boards.retry}>Retry boards</button>}</div>}
       <label>Ticket title<input value={title} maxLength={200} onChange={e => setTitle(e.target.value)} style={control} /></label>
       <label>Reproduction and details<textarea value={body} rows={8} maxLength={65536} onChange={e => setBody(e.target.value)} style={control} /></label>
       <label>Ticket type<input value={type} maxLength={64} onChange={e => setType(e.target.value)} style={control} /></label>
       <label>Target repositories (optional)<input value={repos} onChange={e => setRepos(e.target.value)} style={control} /></label>
       <small>Comma-separated repositories on the target board. The originating repository stays unchanged in the ticket's origin.</small>
       <label><input type="checkbox" checked={sensitive} onChange={e => setSensitive(e.target.checked)} /> Restrict reproduction details to board admins</label>
-      <div><button type="button" disabled={!verified || !expected || !title.trim()} onClick={() => void save()}>{busy ? 'Saving…' : 'Save draft'}</button>{' '}<button type="button" onClick={onCancel}>Cancel editing</button></div>
+      <div><button type="button" className="btn primary" disabled={!verified || !expected || !title.trim()} onClick={() => void save()}>{busy ? 'Saving…' : 'Save draft'}</button>{' '}<button type="button" className="btn" onClick={onCancel}>Cancel editing</button></div>
     </fieldset>
     {error && <div role="alert">{error}</div>}
   </div>

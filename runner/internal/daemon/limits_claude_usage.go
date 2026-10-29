@@ -22,7 +22,7 @@ import (
 // Claude's usage limits, read the way the CLI's own usage view reads them:
 // GET https://api.anthropic.com/api/oauth/usage with the CLI's OAuth sign-in
 // (Authorization: Bearer <accessToken>, anthropic-beta: oauth-2025-04-20). The
-// answer holds, among much else, five_hour and seven_day, each
+// answer holds, among much else, five_hour, seven_day and model weekly windows, each
 // {"utilization": 0–100, "resets_at": RFC 3339}, and extra_usage, the monthly spend limit of a work
 // or enterprise account (for which five_hour and seven_day are null); only those are decoded, and
 // only shares and reset times are kept of them (see claudeUsageWindows).
@@ -274,9 +274,12 @@ type claudeExtraUsage struct {
 // own and a field in a shape this code does not know is left out: one odd field never costs the
 // others (see lenient).
 type claudeUsageAnswer struct {
-	FiveHour *claudeUsageWindow
-	SevenDay *claudeUsageWindow
-	Extra    *claudeExtraUsage
+	FiveHour       *claudeUsageWindow
+	SevenDay       *claudeUsageWindow
+	SevenDayOpus   *claudeUsageWindow
+	SevenDaySonnet *claudeUsageWindow
+	SevenDayFable  *claudeUsageWindow
+	Extra          *claudeExtraUsage
 }
 
 // lenient decodes raw as a T, or returns nil when it is absent, null or not shaped like a T.
@@ -295,6 +298,9 @@ func (a *claudeUsageAnswer) UnmarshalJSON(b []byte) error {
 	}
 	a.FiveHour = lenient[claudeUsageWindow](m["five_hour"])
 	a.SevenDay = lenient[claudeUsageWindow](m["seven_day"])
+	a.SevenDayOpus = lenient[claudeUsageWindow](m["seven_day_opus"])
+	a.SevenDaySonnet = lenient[claudeUsageWindow](m["seven_day_sonnet"])
+	a.SevenDayFable = lenient[claudeUsageWindow](m["seven_day_fable"])
 	a.Extra = lenient[claudeExtraUsage](m["extra_usage"])
 	return nil
 }
@@ -365,7 +371,7 @@ func (s *claudeUsageSource) fetch(ctx context.Context, token string) (status int
 }
 
 // claudeUsageWindows maps the answer to the meter's windows: five_hour → "5h", seven_day → "7d",
-// the share used floored to a whole percent as the CLI shows it, the reset in UTC. A window with no
+// model-specific seven_day_* → "7d_*", the share used floored to a whole percent as the CLI shows it, the reset in UTC. A window with no
 // utilization is left out; an unreadable reset is left zero.
 //
 // A monthly spend limit (extra_usage enabled with a limit above zero) is "month": the share used,
@@ -378,7 +384,7 @@ func claudeUsageWindows(a claudeUsageAnswer) []protocol.UsageWindow {
 	for _, w := range []struct {
 		id  string
 		win *claudeUsageWindow
-	}{{"5h", a.FiveHour}, {"7d", a.SevenDay}} {
+	}{{"5h", a.FiveHour}, {"7d", a.SevenDay}, {"7d_opus", a.SevenDayOpus}, {"7d_sonnet", a.SevenDaySonnet}, {"7d_fable", a.SevenDayFable}} {
 		if w.win == nil || w.win.Utilization == nil {
 			continue
 		}

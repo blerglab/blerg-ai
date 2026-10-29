@@ -1,14 +1,17 @@
 import { useProposalExpiryWarnings } from './hooks/useProposalExpiryWarnings'
 import { useProposalInbox } from './hooks/useProposalInbox'
 import { enableNotifications } from './lib/push'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import SessionList from './components/SessionList'
+import CommandPaletteProvider, { PaletteButton } from './components/CommandPalette'
+import RunnerCommands from './components/RunnerCommands'
 import UpdateBanner from './components/UpdateBanner'
 import SignInBanner from './components/SignInBanner'
 import { useSignInEpoch } from './signIn'
 import SessionsHome from './components/SessionsHome'
 import SessionDetail from './components/SessionDetail'
+import DesktopScopeBoundary from './components/DesktopScopeBoundary'
 import LaunchSheet from './components/LaunchSheet'
 import ClusterStatus from './components/ClusterStatus'
 import Insights from './components/Insights'
@@ -21,6 +24,7 @@ import TicketDetail from './components/TicketDetail'
 import ArchiveView from './components/ArchiveView'
 import ToastContainer from './components/ToastContainer'
 import ThemeToggle from './components/ThemeToggle'
+import { useCompactFoldersSync } from './lib/compactFolders'
 import { useCodeColoursSync } from './lib/codeColours'
 import { useIsMobile } from './hooks/useIsMobile'
 import SettingsDialog from './components/SettingsDialog'
@@ -97,7 +101,7 @@ export function BrandHeader() {
         Runner
       </span>
     </a>
-      <ThemeToggle />
+      <div className="icon-btn-group"><PaletteButton /><ThemeToggle /></div>
     </div>
   )
 }
@@ -263,7 +267,9 @@ export function TabBar({ clusterConfigured = false }: { clusterConfigured?: bool
 }
 
 function Layout() {
+  const location = useLocation()
   const [launchOpen, setLaunchOpen] = useLaunchSheetOpen()
+  const openLaunch = useCallback(() => setLaunchOpen(true), [setLaunchOpen])
   const isMobile = useIsMobile()
   // Keeps the Proposals nav badge fresh wherever the person is.
   useProposalCountPoll()
@@ -311,7 +317,7 @@ function Layout() {
           ? <SessionList onNewSession={() => setLaunchOpen(true)} proposalInbox={proposalInbox} />
           : <SessionsHome onNewSession={() => setLaunchOpen(true)} />}
       />
-      <Route path="/sessions/:id" element={<SessionDetail />} />
+      <Route path="/sessions/:id" element={<DesktopScopeBoundary><SessionDetail /></DesktopScopeBoundary>} />
       <Route path="/boards" element={<BoardsList />} />
       <Route path="/boards/:id" element={<BoardView />} />
       <Route path="/boards/:id/ticket/:ticketId" element={<TicketDetail />} />
@@ -333,6 +339,7 @@ function Layout() {
           paddingBottom: '60px',
         }}
       >
+        <RunnerCommands key={location.pathname} onNewSession={openLaunch} />
         <SignInBanner />
         <UpdateBanner />
         <AppHeader />
@@ -356,6 +363,7 @@ function Layout() {
         overflow: 'hidden',
       }}
     >
+      <RunnerCommands key={location.pathname} onNewSession={openLaunch} />
       <SignInBanner />
       <UpdateBanner />
       <AppHeader />
@@ -374,6 +382,7 @@ function Layout() {
 
 function App() {
   useCodeColoursSync()
+  useCompactFoldersSync()
   useEffect(() => {
     startActivityTracking()
   }, [])
@@ -392,7 +401,7 @@ function App() {
 
   return (
     <BrowserRouter>
-      <Layout />
+      <CommandPaletteProvider><Layout /></CommandPaletteProvider>
     </BrowserRouter>
   )
 }

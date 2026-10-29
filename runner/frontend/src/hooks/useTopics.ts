@@ -9,7 +9,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranscriptStore, type AgentEvent } from '@blerglab/chat'
 import { apiFetch } from '../apiFetch'
+import { onMessage } from '../ws'
+import type { MessageAnswered } from '../types'
 import { isTrigger, type TopicsReply } from '../lib/topics'
+import { sessionView } from '../lib/sessionView'
 
 export const MIN_GAP_MS = 5000
 
@@ -40,22 +43,34 @@ interface Flight {
   timer: ReturnType<typeof setTimeout> | null
   etag: string
   reply: TopicsReply | null
+  /** Aborts the read still out when the flight ends (the session changed or the panel went). */
+  aborter: AbortController
 }
 
 /** An older server: its app page (a 200 that is not JSON), or an API-only ingress's plain 404/405.
  *  Any other reply that is not JSON (a proxy's 502 during a restart, a 401) is an ordinary error. */
 const isNoRoute = (status: number) => status === 200 || status === 404 || status === 405
 
+/** The last History read for a session, kept in the explorer and panel cache. */
+interface CachedTopics { etag: string; reply: TopicsReply }
+
 export function useTopics(sessionId: string, active: boolean, filesKey: string): TopicsView {
-  const [shown, setShown] = useState<{ sessionId: string; view: TopicsView }>({ sessionId, view: LOADING })
+  // The last list read for this session (the explorer and panel cache) shows at once, and is asked
+  // for again with its ETag when the tab is on screen.
+  const [shown, setShown] = useState<{ sessionId: string; view: TopicsView }>(() => {
+    const cached = sessionView<CachedTopics>(sessionId, 'topics').cached
+    return { sessionId, view: cached ? { status: 'ready', reply: cached.reply } : LOADING }
+  })
   const flight = useRef<Flight | null>(null)
 
   // Declared first: the effects below find this session's flight in place.
   useEffect(() => {
-    const f: Flight = { sessionId, alive: true, active: false, inFlight: false, trailing: false, lastStart: -Infinity, timer: null, etag: '', reply: null }
+    const cached = sessionView<CachedTopics>(sessionId, 'topics').cached
+    const f: Flight = { sessionId, alive: true, active: false, inFlight: false, trailing: false, lastStart: -Infinity, timer: null, etag: cached?.etag ?? '', reply: cached?.reply ?? null, aborter: new AbortController() }
     flight.current = f
     return () => {
       f.alive = false
+      f.aborter.abort()
       if (f.timer) clearTimeout(f.timer)
       f.timer = null
     }
@@ -77,7 +92,8 @@ export function useTopics(sessionId: string, active: boolean, filesKey: string):
     const show = (view: TopicsView) => { if (f.alive) setShown({ sessionId: f.sessionId, view }) }
     f.inFlight = true
     f.lastStart = Date.now()
-    apiFetch(`/api/sessions/${encodeURIComponent(f.sessionId)}/topics`, { headers: f.etag ? { 'If-None-Match': f.etag } : {} })
+    const cache = sessionView<CachedTopics>(f.sessionId, 'topics')
+    apiFetch(`/api/sessions/${encodeURIComponent(f.sessionId)}/topics`, { headers: f.etag ? { 'If-None-Match': f.etag } : {}, signal: f.aborter.signal })
       .then(async res => {
         if (!f.alive) return
         if (res.status === 304) {
@@ -97,6 +113,7 @@ export function useTopics(sessionId: string, active: boolean, filesKey: string):
         if (!f.alive) return
         f.etag = res.headers.get('ETag') ?? ''
         f.reply = reply
+        cache.keep({ etag: f.etag, reply })
         show({ status: 'ready', reply })
       })
       .catch(() => show({ status: 'error', reply: f.reply }))
@@ -108,6 +125,15 @@ export function useTopics(sessionId: string, active: boolean, filesKey: string):
         }
       })
   }, [])
+
+  // Closing an ask without an answer changes the messages table, not the transcript.
+  // It still changes History, so follow the same socket notification the chat receives.
+  useEffect(() => {
+    if (!active) return
+    return onMessage<MessageAnswered>('message_answered', msg => {
+      if (msg.message.session_id === sessionId && msg.message.kind === 'ask') read()
+    })
+  }, [active, sessionId, read])
 
   // A number, so an event that is not a trigger does not render this hook's component again.
   const triggers = useTranscriptStore(s => (active ? countTriggers(s.sessions[sessionId]?.events ?? NO_EVENTS) : 0))

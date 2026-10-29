@@ -1,3 +1,4 @@
+import { Activity } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import Transcript, { type TranscriptProps } from './Transcript'
@@ -84,6 +85,22 @@ describe('Transcript follows new output', () => {
     into.mockClear()
     rerender(<Transcript {...props({ events: range(1, 4), pin: 1 })} />)
     expect(into).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['send', 'session'])('resumes following for a real %s change while Activity is hidden', change => {
+    const initial = props({ events: range(1, 3) })
+    const view = (p: TranscriptProps, hidden = false) => <Activity mode={hidden ? 'hidden' : 'visible'}><Transcript {...p} /></Activity>
+    const { container, rerender } = render(view(initial))
+    const tl = timelineOf(container)
+    scrollTo(tl, 900)
+    scrollTo(tl, 500)
+    rerender(view(initial, true))
+    const changed = change === 'send' ? { ...initial, pin: 1 } : { ...initial, sessionId: 'second' }
+    rerender(view(changed, true))
+    into.mockClear()
+    rerender(view(changed))
+    expect(into).toHaveBeenCalled()
+    expect(tl.scrollTop).toBe(900)
   })
 
   it('a shrink that moves the view (the browser, not the reader) does not stop following', () => {

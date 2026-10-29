@@ -89,12 +89,12 @@ type Service struct {
 	allow pluginspec.Allowlist
 }
 
-// NewService wires a Service; allow is BLERG_CORE_PLUGIN_MARKETPLACES, already parsed.
+// NewService wires a Service; allow seeds the durable policy on first use.
 func NewService(st db.Store, allow pluginspec.Allowlist) *Service {
 	return &Service{st: st, allow: allow}
 }
 
-// Allowlist returns the operator allow-list, for display.
+// Allowlist returns the initial environment policy; use Policy for current authority.
 func (s *Service) Allowlist() pluginspec.Allowlist { return s.allow }
 
 // List returns accountID's plugins for engine in the user's order (never nil).
@@ -123,6 +123,9 @@ func (s *Service) List(ctx context.Context, accountID, engine string) ([]Entry, 
 // Validate applies every write-time rule to a whole list: cap, shape, allow-list, duplicates.
 // Nothing is stored unless the entire list passes.
 func (s *Service) Validate(engine string, entries []Entry) error {
+	return validate(engine, entries, s.allow)
+}
+func validate(engine string, entries []Entry, allow pluginspec.Allowlist) error {
 	eng, ok := Lookup(engine)
 	if !ok {
 		return ErrUnknownEngine
@@ -135,7 +138,7 @@ func (s *Service) Validate(engine string, entries []Entry) error {
 		if err := eng.Validate(e); err != nil {
 			return &ValidationError{err.Error()}
 		}
-		if !eng.MarketplaceAllowed(s.allow, e.Marketplace) {
+		if !eng.MarketplaceAllowed(allow, e.Marketplace) {
 			return &ValidationError{"marketplace not allowed by this install: " + e.Marketplace}
 		}
 		key := Entry{Marketplace: strings.ToLower(e.Marketplace), Plugin: e.Plugin}
@@ -149,7 +152,10 @@ func (s *Service) Validate(engine string, entries []Entry) error {
 
 // Replace validates entries and atomically makes them accountID's whole list for engine.
 func (s *Service) Replace(ctx context.Context, accountID, engine string, entries []Entry) error {
-	if err := s.Validate(engine, entries); err != nil {
+	if err := validate(engine, entries, unrestrictedAllowlist()); err != nil {
+		return err
+	}
+	if _, err := s.Policy(ctx); err != nil {
 		return err
 	}
 	tx, err := s.st.Pool().Begin(ctx)
@@ -157,8 +163,35 @@ func (s *Service) Replace(ctx context.Context, accountID, engine string, entries
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	policy, err := readPolicy(ctx, tx, true)
+	if err != nil {
+		return err
+	}
 	if err := lockList(ctx, tx, accountID, engine); err != nil {
 		return err
+	}
+	previous, err := tx.Query(ctx, `SELECT marketplace_source,plugin_name FROM user_plugins WHERE account_id=$1 AND engine=$2`, accountID, engine)
+	if err != nil {
+		return err
+	}
+	retained := map[Entry]bool{}
+	for previous.Next() {
+		var e Entry
+		if err := previous.Scan(&e.Marketplace, &e.Plugin); err != nil {
+			previous.Close()
+			return err
+		}
+		retained[Entry{Marketplace: strings.ToLower(e.Marketplace), Plugin: e.Plugin}] = true
+	}
+	previous.Close()
+	if err := previous.Err(); err != nil {
+		return err
+	}
+	allow := policy.Allowlist()
+	for _, e := range entries {
+		if !allow.Allows(e.Marketplace) && !retained[Entry{Marketplace: strings.ToLower(e.Marketplace), Plugin: e.Plugin}] {
+			return &ValidationError{"marketplace not allowed by this install: " + e.Marketplace}
+		}
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM user_plugins WHERE account_id = $1 AND engine = $2`, accountID, engine); err != nil {
 		return err
@@ -189,7 +222,10 @@ func lockList(ctx context.Context, tx pgx.Tx, accountID, engine string) error {
 // second pool connection. This predicate matches HumanSessionLive; unlike its
 // read probe it uses clock_timestamp so lock waits cannot freeze expiry time.
 func (s *Service) AddApproved(ctx context.Context, accountID, sessionID, engine string, entry Entry) error {
-	if err := s.Validate(engine, []Entry{entry}); err != nil {
+	if err := validate(engine, []Entry{entry}, unrestrictedAllowlist()); err != nil {
+		return err
+	}
+	if _, err := s.Policy(ctx); err != nil {
 		return err
 	}
 	tx, err := s.st.Pool().Begin(ctx)
@@ -197,6 +233,13 @@ func (s *Service) AddApproved(ctx context.Context, accountID, sessionID, engine 
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	policy, err := readPolicy(ctx, tx, true)
+	if err != nil {
+		return err
+	}
+	if err := validate(engine, []Entry{entry}, policy.Allowlist()); err != nil {
+		return err
+	}
 	if err := lockList(ctx, tx, accountID, engine); err != nil {
 		return err
 	}
@@ -259,3 +302,5 @@ func (s *Service) AddApproved(ctx context.Context, accountID, sessionID, engine 
 	}
 	return commitApproved()
 }
+
+func unrestrictedAllowlist() pluginspec.Allowlist { a, _ := pluginspec.ParseAllowlist("*"); return a }

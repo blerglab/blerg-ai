@@ -467,6 +467,7 @@ func (a *API) SetMCPGateway(handle *MCPGatewayHandle, gatewayURL, coreURL, coreI
 		cfg.Hasher = handle.Gateway
 		cfg.gateway = handle.Gateway
 		handle.Gateway.SetRefresher(a.hub)
+		handle.Gateway.SetBoardObserver(a)        // the session's own card moves keep its plan (plansync.go)
 		a.installSessionGrantSink(handle.Gateway) // session permissions approve covered proposals (session_permissions.go)
 		if handle.Gateway.BoardConfigured() {
 			cfg.Board = handle.Gateway

@@ -1,0 +1,1878 @@
+[
+  {
+    "id": "readme-0-flowchart",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\n\nA[Hard] -->|Text| B(Round)\nB --> C{Decision}\nC -->|One| D[Result 1]\nC -->|Two| E[Result 2]",
+    "labels": [
+      "Hard",
+      "Result 2"
+    ],
+    "origin": "mermaid/README.md, fenced example 1"
+  },
+  {
+    "id": "readme-1-sequenceDiagram",
+    "diagram": "sequence",
+    "source": "sequenceDiagram\nAlice->>John: Hello John, how are you?\nloop HealthCheck\n    John->>John: Fight against hypochondria\nend\nNote right of John: Rational thoughts!\nJohn-->>Alice: Great!\nJohn->>Bob: How about you?\nBob-->>John: Jolly good!",
+    "labels": [
+      "Rational thoughts!"
+    ],
+    "origin": "mermaid/README.md, fenced example 2"
+  },
+  {
+    "id": "readme-2-gantt",
+    "diagram": "gantt",
+    "source": "gantt\n    section Section\n    Completed :done,    des1, 2014-01-06,2014-01-08\n    Active        :active,  des2, 2014-01-07, 3d\n    Parallel 1   :         des3, after des1, 1d\n    Parallel 2   :         des4, after des1, 1d\n    Parallel 3   :         des5, after des3, 1d\n    Parallel 4   :         des6, after des4, 1d",
+    "labels": [
+      "Completed"
+    ],
+    "origin": "mermaid/README.md, fenced example 3"
+  },
+  {
+    "id": "readme-3-classDiagram",
+    "diagram": "classDiagram",
+    "source": "classDiagram\nClass01 <|-- AveryLongClass : Cool\n<<Interface>> Class01\nClass09 --> C2 : Where am I?\nClass09 --* C3\nClass09 --|> Class07\nClass07 : equals()\nClass07 : Object[] elementData\nClass01 : size()\nClass01 : int chimp\nClass01 : int gorilla\nclass Class10 {\n  <<service>>\n  int id\n  size()\n}",
+    "labels": [
+      "Class01",
+      "size"
+    ],
+    "origin": "mermaid/README.md, fenced example 4"
+  },
+  {
+    "id": "readme-4-stateDiagram-v2",
+    "diagram": "stateDiagram",
+    "source": "stateDiagram-v2\n[*] --> Still\nStill --> [*]\nStill --> Moving\nMoving --> Still\nMoving --> Crash\nCrash --> [*]",
+    "labels": [
+      "Still"
+    ],
+    "origin": "mermaid/README.md, fenced example 5"
+  },
+  {
+    "id": "readme-5-pie",
+    "diagram": "pie",
+    "source": "pie\n\"Dogs\" : 386\n\"Cats\" : 85.9\n\"Rats\" : 15",
+    "labels": [
+      "Dogs"
+    ],
+    "origin": "mermaid/README.md, fenced example 6"
+  },
+  {
+    "id": "readme-6-gitGraph",
+    "diagram": "gitGraph",
+    "source": "gitGraph\n  commit\n  commit\n  branch develop\n  checkout develop\n  commit\n  commit\n  checkout main\n  merge develop\n  commit\n  commit",
+    "labels": [],
+    "origin": "mermaid/README.md, fenced example 7"
+  },
+  {
+    "id": "readme-7-gantt",
+    "diagram": "gantt",
+    "source": "gantt\n    title Git Issues - days since last update\n    dateFormat  X\n    axisFormat %s\n\n    section Issue19062\n    71   : 0, 71\n    section Issue19401\n    36   : 0, 36\n    section Issue193\n    34   : 0, 34\n    section Issue7441\n    9    : 0, 9\n    section Issue1300\n    5    : 0, 5",
+    "labels": [
+      "Issue19062"
+    ],
+    "origin": "mermaid/README.md, fenced example 8"
+  },
+  {
+    "id": "readme-8-journey",
+    "diagram": "journey",
+    "source": "journey\n    title My working day\n    section Go to work\n      Make tea: 5: Me\n      Go upstairs: 3: Me\n      Do work: 1: Me, Cat\n    section Go home\n      Go downstairs: 5: Me\n      Sit down: 3: Me",
+    "labels": [
+      "Make tea"
+    ],
+    "origin": "mermaid/README.md, fenced example 9"
+  },
+  {
+    "id": "er-basic",
+    "diagram": "er",
+    "source": "erDiagram\n CUSTOMER ||--o{ ORDER : places\n CUSTOMER {\n  int id PK\n  string name\n }\n ORDER {\n  int id PK\n  int customer_id FK\n }",
+    "labels": [
+      "CUSTOMER",
+      "ORDER"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "quadrantChart-basic",
+    "diagram": "quadrantChart",
+    "source": "quadrantChart\n title Planning\n x-axis Low effort --> High effort\n y-axis Low impact --> High impact\n quadrant-1 Prioritize\n quadrant-2 Explore\n quadrant-3 Revisit\n quadrant-4 Delegate\n Task A: [0.3, 0.6]\n Task B: [0.7, 0.2]",
+    "labels": [
+      "Planning",
+      "Task A"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "xychart-basic",
+    "diagram": "xychart",
+    "source": "xychart-beta\n title \"Output\"\n x-axis [Jan, Feb, Mar]\n y-axis \"Units\" 0 --> 100\n bar [20, 70, 40]\n line [30, 60, 50]",
+    "labels": [
+      "Output",
+      "Jan"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "requirement-basic",
+    "diagram": "requirement",
+    "source": "requirementDiagram\n requirement storage {\n id: 1\n text: Store records\n risk: low\n verifymethod: test\n }\n element worker {\n type: service\n }\n worker - satisfies -> storage",
+    "labels": [
+      "storage",
+      "worker"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "timeline-basic",
+    "diagram": "timeline",
+    "source": "timeline\n title Product history\n section Prototype\n 2020 : Plan : Build\n section Release\n 2021 : Ship\n 2022 : Improve",
+    "labels": [
+      "Product history",
+      "Ship"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "mindmap-basic",
+    "diagram": "mindmap",
+    "source": "mindmap\n root((Planning))\n  Goals\n   Quality\n   Speed\n  Tools\n   Tests",
+    "labels": [
+      "Planning",
+      "Quality"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "kanban-basic",
+    "diagram": "kanban",
+    "source": "kanban\n todo[To do]\n  task1[Write tests]\n  task2[Review changes]\n done[Done]\n  task3[Plan corpus]",
+    "labels": [
+      "Write tests",
+      "Done"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "sankey-basic",
+    "diagram": "sankey",
+    "source": "sankey-beta\nInput,Process,10\nProcess,Output,7\nProcess,Waste,3",
+    "labels": [
+      "Input",
+      "Output"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "packet-basic",
+    "diagram": "packet",
+    "source": "packet-beta\n0-7: \"Header\"\n8-15: \"Flags\"\n16-31: \"Payload\"",
+    "labels": [
+      "Header",
+      "Payload"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "radar-basic",
+    "diagram": "radar",
+    "source": "radar-beta\n title Skills\n axis speed[\"Speed\"], quality[\"Quality\"], cost[\"Cost\"]\n curve a[\"Team A\"]{80, 90, 60}\n curve b[\"Team B\"]{70, 85, 75}\n max 100\n min 0",
+    "labels": [
+      "Skills",
+      "Team A"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "block-basic",
+    "diagram": "block",
+    "source": "block-beta\n columns 3\n a[\"Start\"] b[\"Work\"] c[\"Done\"]\n a --> b\n b --> c",
+    "labels": [
+      "Start",
+      "Done"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "c4-basic",
+    "diagram": "c4",
+    "source": "C4Context\n title Service overview\n Person(reader, \"Reader\", \"Reads reports\")\n System_Boundary(b, \"Platform\") {\n System(app, \"Reports\", \"Generates reports\")\n SystemDb(db, \"Store\", \"Records\")\n }\n Rel(reader, app, \"Uses\")\n Rel(app, db, \"Reads\")",
+    "labels": [
+      "Reader",
+      "Reports",
+      "Platform"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "architecture-basic",
+    "diagram": "architecture",
+    "source": "architecture-beta\n group cloud(cloud)[Platform]\n service db(database)[Store] in cloud\n service api(server)[API] in cloud\n db:R -- L:api",
+    "labels": [
+      "Platform",
+      "Store",
+      "API"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "treeView-basic",
+    "diagram": "treeView",
+    "source": "treeView-beta\nroot\n  src\n    app.ts\n  README.md",
+    "labels": [
+      "root",
+      "app.ts"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "ishikawa-basic",
+    "diagram": "ishikawa",
+    "source": "ishikawa-beta\nSlow builds\n  Tools\n    Compiler\n  Process\n    Reviews",
+    "labels": [
+      "Slow builds",
+      "Compiler"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "venn-basic",
+    "diagram": "venn",
+    "source": "venn-beta\n title Groups\n set A[Readers]: 12\n set B[Writers]: 10\n union A,B[Both]: 4",
+    "labels": [
+      "Readers",
+      "Writers"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "treemap-basic",
+    "diagram": "treemap",
+    "source": "treemap-beta\n\"Workspace\"\n \"Code\"\n  \"App\": 40\n  \"Tests\": 30\n \"Docs\": 20",
+    "labels": [
+      "Workspace",
+      "Tests"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "usecase-basic",
+    "diagram": "usecase",
+    "source": "usecase-beta\n actor Reader\n read(Read reports)\n Reader --> read",
+    "labels": [
+      "Reader",
+      "Read reports"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "wardley-basic",
+    "diagram": "wardley",
+    "source": "wardley-beta\n title Service map\n anchor Reader [0.9, 0.1]\n component Reports [0.6, 0.4]\n Reader -> Reports",
+    "labels": [
+      "Reader",
+      "Reports"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "cynefin-basic",
+    "diagram": "cynefin",
+    "source": "cynefin-beta\n title Decisions\n complex\n  \"Explore\"\n complicated\n  \"Analyze\"\n clear\n  \"Follow\"\n chaotic\n  \"Act\"",
+    "labels": [
+      "Decisions",
+      "Explore"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "railroad-basic",
+    "diagram": "railroad",
+    "source": "railroad-beta\n root = sequence(terminal(\"start\"), optional(nonterminal(\"item\")), zeroOrMore(choice(terminal(\"a\"), terminal(\"b\"))));\n item = terminal(\"value\");",
+    "labels": [
+      "root",
+      "start"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "railroadEbnf-basic",
+    "diagram": "railroadEbnf",
+    "source": "railroad-ebnf-beta\nroot = \"start\", [ item ], { \"a\" | \"b\" };\nitem = \"value\";",
+    "labels": [
+      "root",
+      "start"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "railroadAbnf-basic",
+    "diagram": "railroadAbnf",
+    "source": "railroad-abnf-beta\nroot = \"start\" [item] *(\"a\" / \"b\");\nitem = \"value\";",
+    "labels": [
+      "root",
+      "start"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "railroadPeg-basic",
+    "diagram": "railroadPeg",
+    "source": "railroad-peg-beta\nroot <- \"start\" item? (\"a\" / \"b\")*;\nitem <- \"value\";",
+    "labels": [
+      "root",
+      "start"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "agentflow-basic",
+    "diagram": "agentflow",
+    "source": "agentflow-beta\n planner[Planner] --> search[Search]",
+    "labels": [
+      "Planner",
+      "Search"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "swimlane-basic",
+    "diagram": "swimlane",
+    "source": "swimlane-beta\n subgraph Team\n A[Plan] --> B[Build]\n end",
+    "labels": [
+      "Plan",
+      "Build"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "eventmodeling-basic",
+    "diagram": "eventmodeling",
+    "source": "eventmodeling\n entity Order\n tf 1 cmd Order ->> 0\n tf 2 evt Order ->> 1",
+    "labels": [
+      "Order"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "info-basic",
+    "diagram": "info",
+    "source": "info",
+    "labels": [],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "flowchart-elk-basic",
+    "diagram": "flowchart-elk",
+    "source": "flowchart-elk LR\n A[Start] --> B[Done]",
+    "labels": [
+      "Start",
+      "Done"
+    ],
+    "origin": "Installed Mermaid 12.2.0 source-map grammar and renderer"
+  },
+  {
+    "id": "flow-direction-TD",
+    "diagram": "flowchart-v2",
+    "source": "flowchart TD\n A[Start] --> B[Finish]",
+    "labels": [
+      "Start",
+      "Finish"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "flow-direction-TB",
+    "diagram": "flowchart-v2",
+    "source": "flowchart TB\n A[Start] --> B[Finish]",
+    "labels": [
+      "Start",
+      "Finish"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "flow-direction-BT",
+    "diagram": "flowchart-v2",
+    "source": "flowchart BT\n A[Start] --> B[Finish]",
+    "labels": [
+      "Start",
+      "Finish"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "flow-direction-LR",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\n A[Start] --> B[Finish]",
+    "labels": [
+      "Start",
+      "Finish"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "flow-direction-RL",
+    "diagram": "flowchart-v2",
+    "source": "flowchart RL\n A[Start] --> B[Finish]",
+    "labels": [
+      "Start",
+      "Finish"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "flow-subgraphs",
+    "diagram": "flowchart-v2",
+    "source": "flowchart TB\n subgraph outer[Platform]\n direction LR\n subgraph inner[Workers]\n A[Queue] --> B[Worker]\n end\n C[Store]\n end\n B --> C",
+    "labels": [
+      "Platform",
+      "Workers",
+      "Store"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "flow-shapes",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\n A([Start]) --> B{Choose}\n B --> C[(Store)]\n C --> D[[Process]]\n D --> E>Result]",
+    "labels": [
+      "Start",
+      "Choose",
+      "Store",
+      "Result"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "flow-new-shapes",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\n A@{ shape: hex, label: \"image\" } --> B@{ shape: doc, label: \"Report\" }",
+    "labels": [
+      "image",
+      "Report"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "flow-edges",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\n A -->|normal| B\n B -.->|dotted| C\n C ==>|thick| D\n A --- D\n D <--> E",
+    "labels": [
+      "normal",
+      "dotted",
+      "thick"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "flow-classes-colors",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\n A[image]:::blue --> B[Done]\n classDef blue fill:#e0f2fe,stroke:#123456,color:#172554,stroke-width:2px\n classDef warm fill:#fef3c7,stroke:#92400e\n class B warm\n style B opacity:0.8\n linkStyle 0 stroke:#b91c1c,stroke-width:3px",
+    "labels": [
+      "image",
+      "Done"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "colors": [
+      "#e0f2fe",
+      "#fef3c7",
+      "#b91c1c"
+    ]
+  },
+  {
+    "id": "flow-markdown",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\n A[\"`**Bold** and *italic*`\"] --> B[\"`Many\nlines`\"]",
+    "labels": [
+      "Bold",
+      "italic",
+      "Many",
+      "lines"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "flow-br-entities",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\n A[\"First<br/>Second\"] --> B[\"Amp #38; quote #quot;\"]",
+    "labels": [
+      "First",
+      "Second",
+      "Amp"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "flow-image-words",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\n A[image] --> B[vm-image-controller] --> C[style] --> D[icon] --> E[click here]",
+    "labels": [
+      "image",
+      "vm-image-controller",
+      "style",
+      "click here"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "flow-unicode",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\n A[\"Résumé café Ω 東京 🚀\"] --> B[\"مرحبا שלום\"]",
+    "labels": [
+      "Résumé",
+      "東京",
+      "🚀",
+      "مرحبا"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "sequence-fragments",
+    "diagram": "sequence",
+    "source": "sequenceDiagram\n autonumber\n actor Reader\n participant API as Report API\n Reader->>+API: Request\n alt Cached\n API-->>Reader: Ready\n else New\n loop Retry\n API->>API: Build\n end\n end\n Note over Reader,API: Status<br/>visible\n API-->>-Reader: Done",
+    "labels": [
+      "Reader",
+      "Report API",
+      "Cached",
+      "Retry",
+      "visible"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "sequence-parallel",
+    "diagram": "sequence",
+    "source": "sequenceDiagram\n participant A\n participant B\n par First\n A->>B: Work\n and Second\n B-->>A: Result\n end\n opt Audit\n Note right of A: Saved\n end\n critical Update\n A->>B: Commit\n option Retry\n B-->>A: Busy\n end",
+    "labels": [
+      "First",
+      "Second",
+      "Saved",
+      "Update"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "sequence-boxes",
+    "diagram": "sequence",
+    "source": "sequenceDiagram\n box rgb(220,230,240) Clients\n actor Reader\n participant UI\n end\n participant API\n Reader->>UI: Open\n rect rgb(240,240,240)\n UI->>API: Fetch\n API-->>UI: Result\n end",
+    "labels": [
+      "Clients",
+      "Reader",
+      "Fetch"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "class-namespace",
+    "diagram": "classDiagram",
+    "source": "classDiagram\n direction LR\n namespace Domain {\n class Record {\n +String id\n +save() bool\n }\n class Repository\n }\n Record \"1\" --> \"many\" Repository : uses\n note for Record \"A stored record\"",
+    "labels": [
+      "Domain",
+      "Record",
+      "Repository",
+      "stored"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "class-generics-style",
+    "diagram": "classDiagram",
+    "source": "classDiagram\n class Storage~T~ {\n <<interface>>\n +List~T~ items\n +find() T\n }\n class Disk\n Storage <|.. Disk\n style Disk fill:#e0f2fe,stroke:#123456\n classDef warm fill:#fef3c7\n class Disk warm",
+    "labels": [
+      "Storage",
+      "interface",
+      "Disk"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "colors": [
+      "#e0f2fe"
+    ]
+  },
+  {
+    "id": "state-composite",
+    "diagram": "stateDiagram",
+    "source": "stateDiagram-v2\n direction LR\n [*] --> Active\n state Active {\n [*] --> Waiting\n Waiting --> Working : start\n Working --> [*]\n }\n Active --> [*]\n note right of Active : Processing",
+    "labels": [
+      "Active",
+      "Waiting",
+      "Processing"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "state-choice-fork",
+    "diagram": "stateDiagram",
+    "source": "stateDiagram-v2\n state choose <<choice>>\n state split <<fork>>\n state joiner <<join>>\n [*] --> choose\n choose --> split : yes\n split --> Left\n split --> Right\n Left --> joiner\n Right --> joiner\n joiner --> [*]\n classDef blue fill:#e0f2fe;stroke:#123456\n class Left,Right blue",
+    "labels": [
+      "yes",
+      "Left",
+      "Right"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "colors": [
+      "#e0f2fe"
+    ]
+  },
+  {
+    "id": "state-concurrent",
+    "diagram": "stateDiagram",
+    "source": "stateDiagram-v2\n state Parallel {\n [*] --> First\n --\n [*] --> Second\n }",
+    "labels": [
+      "Parallel",
+      "First",
+      "Second"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "er-directions",
+    "diagram": "er",
+    "source": "erDiagram LR\n AUTHOR ||--|{ BOOK : writes\n BOOK }o..o{ TAG : has\n BOOK {\n int id PK \"Identifier\"\n string title UK\n }",
+    "labels": [
+      "AUTHOR",
+      "BOOK",
+      "TAG",
+      "Identifier"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "gantt-features",
+    "diagram": "gantt",
+    "source": "gantt\n title Release plan\n dateFormat YYYY-MM-DD\n axisFormat %m-%d\n todayMarker off\n excludes weekends\n section Design\n Plan :done, a, 2025-01-06, 2d\n Build :crit, active, b, after a, 3d\n Ship :milestone, after b, 0d",
+    "labels": [
+      "Release plan",
+      "Plan",
+      "Build",
+      "Ship"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "pie-values",
+    "diagram": "pie",
+    "source": "pie showData\n title Allocation\n \"Code\" : 12.5\n \"Docs\" : 3\n \"Tests\" : 8",
+    "labels": [
+      "Allocation",
+      "Code",
+      "12.5"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "journey-scores",
+    "diagram": "journey",
+    "source": "journey\n title Review\n section Draft\n Write: 5: Author\n Read: 3: Reviewer, Author\n section Finish\n Approve: 1: Reviewer",
+    "labels": [
+      "Review",
+      "Author",
+      "Reviewer",
+      "Approve"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "git-merge-tags",
+    "diagram": "gitGraph",
+    "source": "gitGraph LR:\n commit id: \"first\" tag: \"v1\"\n branch feature\n commit id: \"work\" type: HIGHLIGHT\n checkout main\n commit id: \"fix\" type: REVERSE\n merge feature id: \"merge\" tag: \"v2\"",
+    "labels": [
+      "first",
+      "work",
+      "v2"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "git-cherry-pick",
+    "diagram": "gitGraph",
+    "source": "gitGraph TB:\n commit id: \"base\"\n branch feature\n commit id: \"pick\"\n checkout main\n cherry-pick id: \"pick\"",
+    "labels": [
+      "base",
+      "pick"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "mindmap-shapes",
+    "diagram": "mindmap",
+    "source": "mindmap\n root[Root]\n  a(Round)\n   b((Circle))\n  c{{Hexagon}}\n   d))Cloud((",
+    "labels": [
+      "Root",
+      "Round",
+      "Circle",
+      "Hexagon",
+      "Cloud"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "timeline-long-events",
+    "diagram": "timeline",
+    "source": "timeline\n title Release notes\n section Build\n January : Plan architecture : Write tests\n February : Review corpus : Publish release",
+    "labels": [
+      "Release notes",
+      "Plan architecture",
+      "Publish release"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "quadrant-classes",
+    "diagram": "quadrantChart",
+    "source": "quadrantChart\n x-axis Small --> Large\n y-axis Low --> High\n classDef urgent color:#ff0000,radius:8\n First:::urgent: [0.2, 0.8]\n Second: [0.7, 0.3]",
+    "labels": [
+      "First",
+      "Second"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "sankey-csv",
+    "diagram": "sankey",
+    "source": "sankey-beta\n\"Source, one\",Middle,12.5\nMiddle,\"Output, two\",12.5",
+    "labels": [
+      "Source, one",
+      "Output, two"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "xy-horizontal",
+    "diagram": "xychart",
+    "source": "xychart-beta horizontal\n title \"Throughput\"\n x-axis [One, Two, Three]\n y-axis 0 --> 20\n bar [4, 15, 9]",
+    "labels": [
+      "Throughput",
+      "One",
+      "Three"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "block-nested",
+    "diagram": "block",
+    "source": "block-beta\n columns 2\n block:group:2\n columns 2\n a[\"Reader\"] b[\"Writer\"]\n end\n space c[\"Store\"]\n a --> c\n style c fill:#e0f2fe,stroke:#123456",
+    "labels": [
+      "Reader",
+      "Writer",
+      "Store"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "colors": [
+      "#e0f2fe"
+    ]
+  },
+  {
+    "id": "c4-container",
+    "diagram": "c4",
+    "source": "C4Container\n Person(reader, \"Reader\")\n Container_Boundary(b, \"Platform\") {\n Container(api, \"API\", \"Go\", \"Reports\")\n ContainerDb(db, \"Records\", \"SQL\", \"Storage\")\n }\n Rel(reader, api, \"Uses\")\n Rel(api, db, \"Reads\")",
+    "labels": [
+      "Reader",
+      "API",
+      "Records"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "c4-component",
+    "diagram": "c4",
+    "source": "C4Component\n Container_Boundary(b, \"API\") {\n Component(auth, \"Authorizer\", \"Go\", \"Checks access\")\n Component(report, \"Reporter\", \"Go\", \"Builds reports\")\n }\n Rel(auth, report, \"Allows\")",
+    "labels": [
+      "Authorizer",
+      "Reporter"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "c4-dynamic",
+    "diagram": "c4",
+    "source": "C4Dynamic\n Person(reader, \"Reader\")\n Container(api, \"API\", \"Go\")\n Rel(reader, api, \"Request\")",
+    "labels": [
+      "Reader",
+      "Request"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "c4-deployment",
+    "diagram": "c4",
+    "source": "C4Deployment\n Deployment_Node(host, \"Host\", \"Linux\") {\n Container(api, \"API\", \"Go\", \"Reports\")\n }",
+    "labels": [
+      "Host",
+      "API"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "architecture-junction",
+    "diagram": "architecture",
+    "source": "architecture-beta\n service source(server)[Source]\n junction center\n service left(database)[Left]\n service right(disk)[Right]\n source:B -- T:center\n center:L -- R:left\n center:R -- L:right",
+    "labels": [
+      "Source",
+      "Left",
+      "Right"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "packet-sizes",
+    "diagram": "packet",
+    "source": "packet\n +8: \"Version\"\n +8: \"Length\"\n +16: \"Checksum\"\n +32: \"Body\"",
+    "labels": [
+      "Version",
+      "Checksum",
+      "Body"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "kanban-metadata",
+    "diagram": "kanban",
+    "source": "kanban\n backlog[Backlog]\n  a[Draft]@{ assigned: \"Writer\", priority: \"High\" }\n progress[In progress]\n  b[Review]",
+    "labels": [
+      "Draft",
+      "Review",
+      "Writer"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "radar-options",
+    "diagram": "radar",
+    "source": "radar-beta\n axis a[\"A\"], b[\"B\"], c[\"C\"]\n curve one[\"One\"]{10, 20, 30}\n showLegend true\n graticule polygon\n ticks 3\n max 30",
+    "labels": [
+      "A",
+      "B",
+      "One"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "tree-box-drawing",
+    "diagram": "treeView",
+    "source": "treeView-beta\nproject\n├── src\n│   └── app.ts\n└── README.md",
+    "labels": [
+      "project",
+      "app.ts"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "ishikawa-branches",
+    "diagram": "ishikawa",
+    "source": "ishikawa\nQuality\n People\n  Training\n   Practice\n Tools\n  Automation\n Process\n  Feedback",
+    "labels": [
+      "Quality",
+      "Practice",
+      "Feedback"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "venn-intersections",
+    "diagram": "venn",
+    "source": "venn-beta\n set A[Alpha]: 10\n set B[Beta]: 10\n set C[Gamma]: 10\n union A,B[Shared]: 3\n union A,B,C[All]: 1",
+    "labels": [
+      "Alpha",
+      "Beta",
+      "Gamma"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "treemap-nested",
+    "diagram": "treemap",
+    "source": "treemap-beta\n\"Root\"\n \"Source\"\n  \"UI\": 30\n  \"Engine\": 50\n \"Tests\"\n  \"Unit\": 10\n  \"Browser\": 20",
+    "labels": [
+      "Root",
+      "UI",
+      "Browser"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "usecase-system",
+    "diagram": "usecase",
+    "source": "usecase-beta\n actor Reader\n systemBoundary Reports\n read(Read report)\n save(Save report)\n end\n Reader --> read\n read ..> : include save",
+    "labels": [
+      "Reader",
+      "Read report",
+      "Save report"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "wardley-notes",
+    "diagram": "wardley",
+    "source": "wardley-beta\n title Evolution\n anchor User [0.95, 0.2]\n component App [0.65, 0.4]\n component Store [0.3, 0.7]\n User -> App\n App -> Store\n evolve App 0.8\n note \"Improve delivery\" [0.8, 0.6]",
+    "labels": [
+      "Evolution",
+      "App",
+      "Improve delivery"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "cynefin-transitions",
+    "diagram": "cynefin",
+    "source": "cynefin-beta\n complex\n \"Probe\"\n complicated\n \"Analyze\"\n complex --> complicated: \"Learn\"",
+    "labels": [
+      "Probe",
+      "Analyze",
+      "Learn"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "agentflow-styles",
+    "diagram": "agentflow",
+    "source": "agentflow-beta\n plan[Plan] --> act[Act] --> done[Done]\n classDef blue fill:#e0f2fe,stroke:#123456\n class act blue",
+    "labels": [
+      "Plan",
+      "Act",
+      "Done"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "colors": [
+      "#e0f2fe"
+    ]
+  },
+  {
+    "id": "swimlane-directions",
+    "diagram": "swimlane",
+    "source": "swimlane-beta LR\n subgraph Design\n A[Plan]\n end\n subgraph Build\n B[Code]\n end\n A --> B",
+    "labels": [
+      "Design",
+      "Build",
+      "Plan",
+      "Code"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "flow-120-nodes",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\nN0[\"Stage 0 image\"] --> N1[\"Stage 1 image\"]\nN1[\"Stage 1 image\"] --> N2[\"Stage 2 image\"]\nN2[\"Stage 2 image\"] --> N3[\"Stage 3 image\"]\nN3[\"Stage 3 image\"] --> N4[\"Stage 4 image\"]\nN4[\"Stage 4 image\"] --> N5[\"Stage 5 image\"]\nN5[\"Stage 5 image\"] --> N6[\"Stage 6 image\"]\nN6[\"Stage 6 image\"] --> N7[\"Stage 7 image\"]\nN7[\"Stage 7 image\"] --> N8[\"Stage 8 image\"]\nN8[\"Stage 8 image\"] --> N9[\"Stage 9 image\"]\nN9[\"Stage 9 image\"] --> N10[\"Stage 10 image\"]\nN10[\"Stage 10 image\"] --> N11[\"Stage 11 image\"]\nN11[\"Stage 11 image\"] --> N12[\"Stage 12 image\"]\nN12[\"Stage 12 image\"] --> N13[\"Stage 13 image\"]\nN13[\"Stage 13 image\"] --> N14[\"Stage 14 image\"]\nN14[\"Stage 14 image\"] --> N15[\"Stage 15 image\"]\nN15[\"Stage 15 image\"] --> N16[\"Stage 16 image\"]\nN16[\"Stage 16 image\"] --> N17[\"Stage 17 image\"]\nN17[\"Stage 17 image\"] --> N18[\"Stage 18 image\"]\nN18[\"Stage 18 image\"] --> N19[\"Stage 19 image\"]\nN19[\"Stage 19 image\"] --> N20[\"Stage 20 image\"]\nN20[\"Stage 20 image\"] --> N21[\"Stage 21 image\"]\nN21[\"Stage 21 image\"] --> N22[\"Stage 22 image\"]\nN22[\"Stage 22 image\"] --> N23[\"Stage 23 image\"]\nN23[\"Stage 23 image\"] --> N24[\"Stage 24 image\"]\nN24[\"Stage 24 image\"] --> N25[\"Stage 25 image\"]\nN25[\"Stage 25 image\"] --> N26[\"Stage 26 image\"]\nN26[\"Stage 26 image\"] --> N27[\"Stage 27 image\"]\nN27[\"Stage 27 image\"] --> N28[\"Stage 28 image\"]\nN28[\"Stage 28 image\"] --> N29[\"Stage 29 image\"]\nN29[\"Stage 29 image\"] --> N30[\"Stage 30 image\"]\nN30[\"Stage 30 image\"] --> N31[\"Stage 31 image\"]\nN31[\"Stage 31 image\"] --> N32[\"Stage 32 image\"]\nN32[\"Stage 32 image\"] --> N33[\"Stage 33 image\"]\nN33[\"Stage 33 image\"] --> N34[\"Stage 34 image\"]\nN34[\"Stage 34 image\"] --> N35[\"Stage 35 image\"]\nN35[\"Stage 35 image\"] --> N36[\"Stage 36 image\"]\nN36[\"Stage 36 image\"] --> N37[\"Stage 37 image\"]\nN37[\"Stage 37 image\"] --> N38[\"Stage 38 image\"]\nN38[\"Stage 38 image\"] --> N39[\"Stage 39 image\"]\nN39[\"Stage 39 image\"] --> N40[\"Stage 40 image\"]\nN40[\"Stage 40 image\"] --> N41[\"Stage 41 image\"]\nN41[\"Stage 41 image\"] --> N42[\"Stage 42 image\"]\nN42[\"Stage 42 image\"] --> N43[\"Stage 43 image\"]\nN43[\"Stage 43 image\"] --> N44[\"Stage 44 image\"]\nN44[\"Stage 44 image\"] --> N45[\"Stage 45 image\"]\nN45[\"Stage 45 image\"] --> N46[\"Stage 46 image\"]\nN46[\"Stage 46 image\"] --> N47[\"Stage 47 image\"]\nN47[\"Stage 47 image\"] --> N48[\"Stage 48 image\"]\nN48[\"Stage 48 image\"] --> N49[\"Stage 49 image\"]\nN49[\"Stage 49 image\"] --> N50[\"Stage 50 image\"]\nN50[\"Stage 50 image\"] --> N51[\"Stage 51 image\"]\nN51[\"Stage 51 image\"] --> N52[\"Stage 52 image\"]\nN52[\"Stage 52 image\"] --> N53[\"Stage 53 image\"]\nN53[\"Stage 53 image\"] --> N54[\"Stage 54 image\"]\nN54[\"Stage 54 image\"] --> N55[\"Stage 55 image\"]\nN55[\"Stage 55 image\"] --> N56[\"Stage 56 image\"]\nN56[\"Stage 56 image\"] --> N57[\"Stage 57 image\"]\nN57[\"Stage 57 image\"] --> N58[\"Stage 58 image\"]\nN58[\"Stage 58 image\"] --> N59[\"Stage 59 image\"]\nN59[\"Stage 59 image\"] --> N60[\"Stage 60 image\"]\nN60[\"Stage 60 image\"] --> N61[\"Stage 61 image\"]\nN61[\"Stage 61 image\"] --> N62[\"Stage 62 image\"]\nN62[\"Stage 62 image\"] --> N63[\"Stage 63 image\"]\nN63[\"Stage 63 image\"] --> N64[\"Stage 64 image\"]\nN64[\"Stage 64 image\"] --> N65[\"Stage 65 image\"]\nN65[\"Stage 65 image\"] --> N66[\"Stage 66 image\"]\nN66[\"Stage 66 image\"] --> N67[\"Stage 67 image\"]\nN67[\"Stage 67 image\"] --> N68[\"Stage 68 image\"]\nN68[\"Stage 68 image\"] --> N69[\"Stage 69 image\"]\nN69[\"Stage 69 image\"] --> N70[\"Stage 70 image\"]\nN70[\"Stage 70 image\"] --> N71[\"Stage 71 image\"]\nN71[\"Stage 71 image\"] --> N72[\"Stage 72 image\"]\nN72[\"Stage 72 image\"] --> N73[\"Stage 73 image\"]\nN73[\"Stage 73 image\"] --> N74[\"Stage 74 image\"]\nN74[\"Stage 74 image\"] --> N75[\"Stage 75 image\"]\nN75[\"Stage 75 image\"] --> N76[\"Stage 76 image\"]\nN76[\"Stage 76 image\"] --> N77[\"Stage 77 image\"]\nN77[\"Stage 77 image\"] --> N78[\"Stage 78 image\"]\nN78[\"Stage 78 image\"] --> N79[\"Stage 79 image\"]\nN79[\"Stage 79 image\"] --> N80[\"Stage 80 image\"]\nN80[\"Stage 80 image\"] --> N81[\"Stage 81 image\"]\nN81[\"Stage 81 image\"] --> N82[\"Stage 82 image\"]\nN82[\"Stage 82 image\"] --> N83[\"Stage 83 image\"]\nN83[\"Stage 83 image\"] --> N84[\"Stage 84 image\"]\nN84[\"Stage 84 image\"] --> N85[\"Stage 85 image\"]\nN85[\"Stage 85 image\"] --> N86[\"Stage 86 image\"]\nN86[\"Stage 86 image\"] --> N87[\"Stage 87 image\"]\nN87[\"Stage 87 image\"] --> N88[\"Stage 88 image\"]\nN88[\"Stage 88 image\"] --> N89[\"Stage 89 image\"]\nN89[\"Stage 89 image\"] --> N90[\"Stage 90 image\"]\nN90[\"Stage 90 image\"] --> N91[\"Stage 91 image\"]\nN91[\"Stage 91 image\"] --> N92[\"Stage 92 image\"]\nN92[\"Stage 92 image\"] --> N93[\"Stage 93 image\"]\nN93[\"Stage 93 image\"] --> N94[\"Stage 94 image\"]\nN94[\"Stage 94 image\"] --> N95[\"Stage 95 image\"]\nN95[\"Stage 95 image\"] --> N96[\"Stage 96 image\"]\nN96[\"Stage 96 image\"] --> N97[\"Stage 97 image\"]\nN97[\"Stage 97 image\"] --> N98[\"Stage 98 image\"]\nN98[\"Stage 98 image\"] --> N99[\"Stage 99 image\"]\nN99[\"Stage 99 image\"] --> N100[\"Stage 100 image\"]\nN100[\"Stage 100 image\"] --> N101[\"Stage 101 image\"]\nN101[\"Stage 101 image\"] --> N102[\"Stage 102 image\"]\nN102[\"Stage 102 image\"] --> N103[\"Stage 103 image\"]\nN103[\"Stage 103 image\"] --> N104[\"Stage 104 image\"]\nN104[\"Stage 104 image\"] --> N105[\"Stage 105 image\"]\nN105[\"Stage 105 image\"] --> N106[\"Stage 106 image\"]\nN106[\"Stage 106 image\"] --> N107[\"Stage 107 image\"]\nN107[\"Stage 107 image\"] --> N108[\"Stage 108 image\"]\nN108[\"Stage 108 image\"] --> N109[\"Stage 109 image\"]\nN109[\"Stage 109 image\"] --> N110[\"Stage 110 image\"]\nN110[\"Stage 110 image\"] --> N111[\"Stage 111 image\"]\nN111[\"Stage 111 image\"] --> N112[\"Stage 112 image\"]\nN112[\"Stage 112 image\"] --> N113[\"Stage 113 image\"]\nN113[\"Stage 113 image\"] --> N114[\"Stage 114 image\"]\nN114[\"Stage 114 image\"] --> N115[\"Stage 115 image\"]\nN115[\"Stage 115 image\"] --> N116[\"Stage 116 image\"]\nN116[\"Stage 116 image\"] --> N117[\"Stage 117 image\"]\nN117[\"Stage 117 image\"] --> N118[\"Stage 118 image\"]\nN118[\"Stage 118 image\"] --> N119[\"Stage 119 image\"]",
+    "labels": [
+      "Stage 0 image",
+      "Stage 119 image"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "flow-long-labels",
+    "diagram": "flowchart-v2",
+    "source": "flowchart TD\nN0[\"Stage 0 readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label \"] --> N1\nN1[\"Stage 1 readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label \"] --> N2\nN2[\"Stage 2 readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label \"] --> N3\nN3[\"Stage 3 readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label \"] --> N4\nN4[\"Stage 4 readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label \"] --> N5\nN5[\"Stage 5 readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label \"] --> N6\nN6[\"Stage 6 readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label \"] --> N7\nN7[\"Stage 7 readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label readable label \"]",
+    "labels": [
+      "Stage 0",
+      "Stage 7"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "sequence-many-messages",
+    "diagram": "sequence",
+    "source": "sequenceDiagram\n participant A\n participant B\nA->>B: Message 0\nA->>B: Message 1\nA->>B: Message 2\nA->>B: Message 3\nA->>B: Message 4\nA->>B: Message 5\nA->>B: Message 6\nA->>B: Message 7\nA->>B: Message 8\nA->>B: Message 9\nA->>B: Message 10\nA->>B: Message 11\nA->>B: Message 12\nA->>B: Message 13\nA->>B: Message 14\nA->>B: Message 15\nA->>B: Message 16\nA->>B: Message 17\nA->>B: Message 18\nA->>B: Message 19\nA->>B: Message 20\nA->>B: Message 21\nA->>B: Message 22\nA->>B: Message 23\nA->>B: Message 24\nA->>B: Message 25\nA->>B: Message 26\nA->>B: Message 27\nA->>B: Message 28\nA->>B: Message 29\nA->>B: Message 30\nA->>B: Message 31\nA->>B: Message 32\nA->>B: Message 33\nA->>B: Message 34\nA->>B: Message 35\nA->>B: Message 36\nA->>B: Message 37\nA->>B: Message 38\nA->>B: Message 39\nA->>B: Message 40\nA->>B: Message 41\nA->>B: Message 42\nA->>B: Message 43\nA->>B: Message 44\nA->>B: Message 45\nA->>B: Message 46\nA->>B: Message 47\nA->>B: Message 48\nA->>B: Message 49\nA->>B: Message 50\nA->>B: Message 51\nA->>B: Message 52\nA->>B: Message 53\nA->>B: Message 54\nA->>B: Message 55\nA->>B: Message 56\nA->>B: Message 57\nA->>B: Message 58\nA->>B: Message 59",
+    "labels": [
+      "Message 0",
+      "Message 59"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "flowchart-v2-frontmatter-comments",
+    "diagram": "flowchart-v2",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nflowchart LR\n\nA[Hard] -->|Text| B(Round)\nB --> C{Decision}\nC -->|One| D[Result 1]\nC -->|Two| E[Result 2]",
+    "labels": [
+      "Hard",
+      "Result 2"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "sequence-frontmatter-comments",
+    "diagram": "sequence",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nsequenceDiagram\nAlice->>John: Hello John, how are you?\nloop HealthCheck\n    John->>John: Fight against hypochondria\nend\nNote right of John: Rational thoughts!\nJohn-->>Alice: Great!\nJohn->>Bob: How about you?\nBob-->>John: Jolly good!",
+    "labels": [
+      "Rational thoughts!"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "gantt-frontmatter-comments",
+    "diagram": "gantt",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\ngantt\n    section Section\n    Completed :done,    des1, 2014-01-06,2014-01-08\n    Active        :active,  des2, 2014-01-07, 3d\n    Parallel 1   :         des3, after des1, 1d\n    Parallel 2   :         des4, after des1, 1d\n    Parallel 3   :         des5, after des3, 1d\n    Parallel 4   :         des6, after des4, 1d",
+    "labels": [
+      "Completed"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "classDiagram-frontmatter-comments",
+    "diagram": "classDiagram",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nclassDiagram\nClass01 <|-- AveryLongClass : Cool\n<<Interface>> Class01\nClass09 --> C2 : Where am I?\nClass09 --* C3\nClass09 --|> Class07\nClass07 : equals()\nClass07 : Object[] elementData\nClass01 : size()\nClass01 : int chimp\nClass01 : int gorilla\nclass Class10 {\n  <<service>>\n  int id\n  size()\n}",
+    "labels": [
+      "Class01",
+      "size"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "stateDiagram-frontmatter-comments",
+    "diagram": "stateDiagram",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nstateDiagram-v2\n[*] --> Still\nStill --> [*]\nStill --> Moving\nMoving --> Still\nMoving --> Crash\nCrash --> [*]",
+    "labels": [
+      "Still"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "pie-frontmatter-comments",
+    "diagram": "pie",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\npie\n\"Dogs\" : 386\n\"Cats\" : 85.9\n\"Rats\" : 15",
+    "labels": [
+      "Dogs"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "gitGraph-frontmatter-comments",
+    "diagram": "gitGraph",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\ngitGraph\n  commit\n  commit\n  branch develop\n  checkout develop\n  commit\n  commit\n  checkout main\n  merge develop\n  commit\n  commit",
+    "labels": [],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "journey-frontmatter-comments",
+    "diagram": "journey",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\njourney\n    title My working day\n    section Go to work\n      Make tea: 5: Me\n      Go upstairs: 3: Me\n      Do work: 1: Me, Cat\n    section Go home\n      Go downstairs: 5: Me\n      Sit down: 3: Me",
+    "labels": [
+      "Make tea"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "er-frontmatter-comments",
+    "diagram": "er",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nerDiagram\n CUSTOMER ||--o{ ORDER : places\n CUSTOMER {\n  int id PK\n  string name\n }\n ORDER {\n  int id PK\n  int customer_id FK\n }",
+    "labels": [
+      "CUSTOMER",
+      "ORDER"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "quadrantChart-frontmatter-comments",
+    "diagram": "quadrantChart",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nquadrantChart\n title Planning\n x-axis Low effort --> High effort\n y-axis Low impact --> High impact\n quadrant-1 Prioritize\n quadrant-2 Explore\n quadrant-3 Revisit\n quadrant-4 Delegate\n Task A: [0.3, 0.6]\n Task B: [0.7, 0.2]",
+    "labels": [
+      "Planning",
+      "Task A"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "xychart-frontmatter-comments",
+    "diagram": "xychart",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nxychart-beta\n title \"Output\"\n x-axis [Jan, Feb, Mar]\n y-axis \"Units\" 0 --> 100\n bar [20, 70, 40]\n line [30, 60, 50]",
+    "labels": [
+      "Output",
+      "Jan"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "requirement-frontmatter-comments",
+    "diagram": "requirement",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nrequirementDiagram\n requirement storage {\n id: 1\n text: Store records\n risk: low\n verifymethod: test\n }\n element worker {\n type: service\n }\n worker - satisfies -> storage",
+    "labels": [
+      "storage",
+      "worker"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "timeline-frontmatter-comments",
+    "diagram": "timeline",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\ntimeline\n title Product history\n section Prototype\n 2020 : Plan : Build\n section Release\n 2021 : Ship\n 2022 : Improve",
+    "labels": [
+      "Product history",
+      "Ship"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "mindmap-frontmatter-comments",
+    "diagram": "mindmap",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nmindmap\n root((Planning))\n  Goals\n   Quality\n   Speed\n  Tools\n   Tests",
+    "labels": [
+      "Planning",
+      "Quality"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "kanban-frontmatter-comments",
+    "diagram": "kanban",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nkanban\n todo[To do]\n  task1[Write tests]\n  task2[Review changes]\n done[Done]\n  task3[Plan corpus]",
+    "labels": [
+      "Write tests",
+      "Done"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "sankey-frontmatter-comments",
+    "diagram": "sankey",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nsankey-beta\nInput,Process,10\nProcess,Output,7\nProcess,Waste,3",
+    "labels": [
+      "Input",
+      "Output"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "packet-frontmatter-comments",
+    "diagram": "packet",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\npacket-beta\n0-7: \"Header\"\n8-15: \"Flags\"\n16-31: \"Payload\"",
+    "labels": [
+      "Header",
+      "Payload"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "radar-frontmatter-comments",
+    "diagram": "radar",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nradar-beta\n title Skills\n axis speed[\"Speed\"], quality[\"Quality\"], cost[\"Cost\"]\n curve a[\"Team A\"]{80, 90, 60}\n curve b[\"Team B\"]{70, 85, 75}\n max 100\n min 0",
+    "labels": [
+      "Skills",
+      "Team A"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "block-frontmatter-comments",
+    "diagram": "block",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nblock-beta\n columns 3\n a[\"Start\"] b[\"Work\"] c[\"Done\"]\n a --> b\n b --> c",
+    "labels": [
+      "Start",
+      "Done"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "c4-frontmatter-comments",
+    "diagram": "c4",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nC4Context\n title Service overview\n Person(reader, \"Reader\", \"Reads reports\")\n System_Boundary(b, \"Platform\") {\n System(app, \"Reports\", \"Generates reports\")\n SystemDb(db, \"Store\", \"Records\")\n }\n Rel(reader, app, \"Uses\")\n Rel(app, db, \"Reads\")",
+    "labels": [
+      "Reader",
+      "Reports",
+      "Platform"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "architecture-frontmatter-comments",
+    "diagram": "architecture",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\narchitecture-beta\n group cloud(cloud)[Platform]\n service db(database)[Store] in cloud\n service api(server)[API] in cloud\n db:R -- L:api",
+    "labels": [
+      "Platform",
+      "Store",
+      "API"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "treeView-frontmatter-comments",
+    "diagram": "treeView",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\ntreeView-beta\nroot\n  src\n    app.ts\n  README.md",
+    "labels": [
+      "root",
+      "app.ts"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "ishikawa-frontmatter-comments",
+    "diagram": "ishikawa",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nishikawa-beta\nSlow builds\n  Tools\n    Compiler\n  Process\n    Reviews",
+    "labels": [
+      "Slow builds",
+      "Compiler"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "venn-frontmatter-comments",
+    "diagram": "venn",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nvenn-beta\n title Groups\n set A[Readers]: 12\n set B[Writers]: 10\n union A,B[Both]: 4",
+    "labels": [
+      "Readers",
+      "Writers"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "treemap-frontmatter-comments",
+    "diagram": "treemap",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\ntreemap-beta\n\"Workspace\"\n \"Code\"\n  \"App\": 40\n  \"Tests\": 30\n \"Docs\": 20",
+    "labels": [
+      "Workspace",
+      "Tests"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "usecase-frontmatter-comments",
+    "diagram": "usecase",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nusecase-beta\n actor Reader\n read(Read reports)\n Reader --> read",
+    "labels": [
+      "Reader",
+      "Read reports"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "wardley-frontmatter-comments",
+    "diagram": "wardley",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nwardley-beta\n title Service map\n anchor Reader [0.9, 0.1]\n component Reports [0.6, 0.4]\n Reader -> Reports",
+    "labels": [
+      "Reader",
+      "Reports"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "cynefin-frontmatter-comments",
+    "diagram": "cynefin",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\ncynefin-beta\n title Decisions\n complex\n  \"Explore\"\n complicated\n  \"Analyze\"\n clear\n  \"Follow\"\n chaotic\n  \"Act\"",
+    "labels": [
+      "Decisions",
+      "Explore"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "railroad-frontmatter-comments",
+    "diagram": "railroad",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nrailroad-beta\n root = sequence(terminal(\"start\"), optional(nonterminal(\"item\")), zeroOrMore(choice(terminal(\"a\"), terminal(\"b\"))));\n item = terminal(\"value\");",
+    "labels": [
+      "root",
+      "start"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "railroadEbnf-frontmatter-comments",
+    "diagram": "railroadEbnf",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nrailroad-ebnf-beta\nroot = \"start\", [ item ], { \"a\" | \"b\" };\nitem = \"value\";",
+    "labels": [
+      "root",
+      "start"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "railroadAbnf-frontmatter-comments",
+    "diagram": "railroadAbnf",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nrailroad-abnf-beta\nroot = \"start\" [item] *(\"a\" / \"b\");\nitem = \"value\";",
+    "labels": [
+      "root",
+      "start"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "railroadPeg-frontmatter-comments",
+    "diagram": "railroadPeg",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nrailroad-peg-beta\nroot <- \"start\" item? (\"a\" / \"b\")*;\nitem <- \"value\";",
+    "labels": [
+      "root",
+      "start"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "agentflow-frontmatter-comments",
+    "diagram": "agentflow",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nagentflow-beta\n planner[Planner] --> search[Search]",
+    "labels": [
+      "Planner",
+      "Search"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "swimlane-frontmatter-comments",
+    "diagram": "swimlane",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nswimlane-beta\n subgraph Team\n A[Plan] --> B[Build]\n end",
+    "labels": [
+      "Plan",
+      "Build"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "eventmodeling-frontmatter-comments",
+    "diagram": "eventmodeling",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\neventmodeling\n entity Order\n tf 1 cmd Order ->> 0\n tf 2 evt Order ->> 1",
+    "labels": [
+      "Order"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "flowchart-elk-frontmatter-comments",
+    "diagram": "flowchart-elk",
+    "source": "---\ntitle: \"Generic diagram\"\n---\n%% image style click https://example.invalid are comment text\nflowchart-elk LR\n A[Start] --> B[Done]",
+    "labels": [
+      "Start",
+      "Done"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "policy-html-label",
+    "diagram": "policy",
+    "source": "flowchart LR\n A[\"<b>Bold</b>\"]",
+    "labels": [],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "refusal": "HTML"
+  },
+  {
+    "id": "policy-markdown-link",
+    "diagram": "policy",
+    "source": "flowchart LR\n A[\"[Docs](https://example.invalid)\"]",
+    "labels": [],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "refusal": "a URL"
+  },
+  {
+    "id": "policy-click-link",
+    "diagram": "policy",
+    "source": "flowchart LR\n A --> B\n click A href \"https://example.invalid\"",
+    "labels": [],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "refusal": "a click action"
+  },
+  {
+    "id": "policy-mindmap-icon",
+    "diagram": "policy",
+    "source": "mindmap\n root\n  child\n  ::icon(fa fa-book)",
+    "labels": [],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "refusal": "an icon"
+  },
+  {
+    "id": "policy-flow-icon",
+    "diagram": "policy",
+    "source": "flowchart LR\n A@{ icon: \"fa:user\" }",
+    "labels": [],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "refusal": "the @{…} key \"icon\""
+  },
+  {
+    "id": "policy-image-shape",
+    "diagram": "policy",
+    "source": "flowchart LR\n A@{ img: \"/image.png\" }",
+    "labels": [],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "refusal": "the @{…} key \"img\""
+  },
+  {
+    "id": "policy-init-directive",
+    "diagram": "policy",
+    "source": "%%{init: {\"theme\":\"dark\"}}%%\nflowchart LR\n A --> B",
+    "labels": [],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "refusal": "a configuration directive"
+  },
+  {
+    "id": "policy-config-frontmatter",
+    "diagram": "policy",
+    "source": "---\nconfig:\n theme: dark\n---\nflowchart LR\n A --> B",
+    "labels": [],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "refusal": "front matter other than a title"
+  },
+  {
+    "id": "policy-sequence-links",
+    "diagram": "policy",
+    "source": "sequenceDiagram\n participant A\n link A: Docs @ https://example.invalid",
+    "labels": [],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "refusal": "a link"
+  },
+  {
+    "id": "policy-style-function",
+    "diagram": "policy",
+    "source": "flowchart LR\n A[Start]\n style A fill:url(/private)",
+    "labels": [],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "refusal": "url()"
+  },
+  {
+    "id": "policy-math-label",
+    "diagram": "policy",
+    "source": "flowchart LR\n A[\"$$x^2$$\"]",
+    "labels": [],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "refusal": "math ($$)"
+  },
+  {
+    "id": "policy-too-large",
+    "diagram": "policy",
+    "source": "flowchart LR\n A[\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"]",
+    "labels": [],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "refusal": "the diagram is too large"
+  },
+  {
+    "id": "invalid-syntax",
+    "diagram": "invalid",
+    "source": "flowchart LR\n A --> --> B",
+    "labels": [],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "error": "Parse error"
+  },
+  {
+    "id": "theme-light",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\n A[Themed] --> B[Readable]",
+    "labels": [
+      "Themed",
+      "Readable"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "theme": "light"
+  },
+  {
+    "id": "theme-dark",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\n A[Themed] --> B[Readable]",
+    "labels": [
+      "Themed",
+      "Readable"
+    ],
+    "origin": "Generic feature variation of installed Mermaid 12.2.0 grammar",
+    "theme": "dark"
+  },
+  {
+    "id": "upstream-sankey-cycle",
+    "diagram": "sankey",
+    "source": "sankey-beta\nA,B,1\nB,A,1",
+    "labels": [],
+    "origin": "Installed d3-sankey layout requires an acyclic graph",
+    "upstream": {
+      "reason": "Mermaid 12.2.0 uses d3-sankey, which cannot lay out circular flows. Use an acyclic sankey graph.",
+      "error": "circular link"
+    }
+  },
+  {
+    "id": "eventmodeling-data",
+    "diagram": "eventmodeling",
+    "source": "eventmodeling\n entity Order\n tf 1 cmd Order ->> 0 `text` {Create a generic order }\n tf 2 evt Order ->> 1 `text` {Order created }",
+    "labels": [
+      "Order",
+      "Create a generic order",
+      "Order created"
+    ],
+    "origin": "Installed eventmodeling grammar: inline text and note data"
+  },
+  {
+    "id": "eventmodeling-long-label",
+    "diagram": "eventmodeling",
+    "source": "eventmodeling\n entity GenericOrderProcessingService\n tf 1 cmd GenericOrderProcessingService ->> 0 `text` {Read and validate every generic order record before processing }\n tf 2 evt GenericOrderProcessingService ->> 1",
+    "labels": [
+      "GenericOrderProcessingService",
+      "Read and validate every generic order record before processing"
+    ],
+    "origin": "Generic long-label variation of installed eventmodeling grammar"
+  },
+  {
+    "id": "flow-semicolon-styles",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR; A[Start] --> B[Done]; classDef blue fill:lightblue; class A blue; style B fill:gold; linkStyle 0 stroke:red",
+    "labels": [
+      "Start",
+      "Done"
+    ],
+    "origin": "Generic syntax and boundary variation of installed Mermaid 12.2.0 grammar",
+    "colors": [
+      "lightblue",
+      "gold",
+      "red"
+    ]
+  },
+  {
+    "id": "flow-multiline-metadata",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\n A@{\n shape: hex\n label: \"Review image\"\n } --> B[Done]",
+    "labels": [
+      "Review image",
+      "Done"
+    ],
+    "origin": "Generic syntax and boundary variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "flow-edge-animation",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\n A[Start] e1@--> B[Done]\n e1@{ animate: true }",
+    "labels": [
+      "Start",
+      "Done"
+    ],
+    "origin": "Generic syntax and boundary variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "flow-named-colors",
+    "diagram": "flowchart-v2",
+    "source": "graph TB\n A[Start] --> B[Done]\n classDef blue fill:lightblue,stroke:navy,color:black\n class A blue\n style B fill:#ffcc00,stroke-width:2px,stroke-dasharray:5 3\n linkStyle default stroke:purple",
+    "labels": [
+      "Start",
+      "Done"
+    ],
+    "origin": "Generic syntax and boundary variation of installed Mermaid 12.2.0 grammar",
+    "colors": [
+      "lightblue",
+      "#ffcc00",
+      "purple"
+    ]
+  },
+  {
+    "id": "flow-escaped-punctuation",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\n A[\"Parentheses (one), brackets [two], colon: #quot;quoted#quot;\"] --> B[\"100% complete & ready\"]",
+    "labels": [
+      "Parentheses",
+      "quoted",
+      "100%",
+      "ready"
+    ],
+    "origin": "Generic syntax and boundary variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "class-v2-alias",
+    "diagram": "classDiagram",
+    "source": "classDiagram-v2\n A <|-- B\n A : +run()",
+    "labels": [
+      "A",
+      "B",
+      "run"
+    ],
+    "origin": "Generic syntax and boundary variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "state-legacy-alias",
+    "diagram": "stateDiagram",
+    "source": "stateDiagram\n [*] --> Waiting\n Waiting --> Done\n Done --> [*]",
+    "labels": [
+      "Waiting",
+      "Done"
+    ],
+    "origin": "Generic syntax and boundary variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "sequence-unicode",
+    "diagram": "sequence",
+    "source": "sequenceDiagram\n participant Reader as Lecteur 🚀\n participant Store as 記録\n Reader->>Store: Café résumé Ω\n Note over Store: Data image ready",
+    "labels": [
+      "Lecteur",
+      "🚀",
+      "記録",
+      "Café",
+      "image"
+    ],
+    "origin": "Generic syntax and boundary variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "pie-unicode",
+    "diagram": "pie",
+    "source": "pie\n title Résumé\n \"東京\" : 4\n \"Café 🚀\" : 6",
+    "labels": [
+      "Résumé",
+      "東京",
+      "🚀"
+    ],
+    "origin": "Generic syntax and boundary variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "block-stable",
+    "diagram": "block",
+    "source": "block\n columns 2\n a[\"One\"] b[\"Two\"]\n a --> b",
+    "labels": [
+      "One",
+      "Two"
+    ],
+    "origin": "Generic syntax and boundary variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "sankey-stable",
+    "diagram": "sankey",
+    "source": "sankey\nInput,Output,8",
+    "labels": [
+      "Input",
+      "Output"
+    ],
+    "origin": "Generic syntax and boundary variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "er-many-relations",
+    "diagram": "er",
+    "source": "erDiagram\n A ||--o{ B : owns\n B }|..|{ C : uses\n C }o--|| D : references",
+    "labels": [
+      "A",
+      "B",
+      "C",
+      "D"
+    ],
+    "origin": "Generic syntax and boundary variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "recovery-after-invalid",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\n Fresh --> Ready",
+    "labels": [
+      "Fresh",
+      "Ready"
+    ],
+    "origin": "Generic syntax and boundary variation of installed Mermaid 12.2.0 grammar"
+  },
+  {
+    "id": "policy-501-links",
+    "diagram": "policy",
+    "source": "flowchart LR\nA0 --> A1\nA1 --> A2\nA2 --> A3\nA3 --> A4\nA4 --> A5\nA5 --> A6\nA6 --> A7\nA7 --> A8\nA8 --> A9\nA9 --> A10\nA10 --> A11\nA11 --> A12\nA12 --> A13\nA13 --> A14\nA14 --> A15\nA15 --> A16\nA16 --> A17\nA17 --> A18\nA18 --> A19\nA19 --> A20\nA20 --> A21\nA21 --> A22\nA22 --> A23\nA23 --> A24\nA24 --> A25\nA25 --> A26\nA26 --> A27\nA27 --> A28\nA28 --> A29\nA29 --> A30\nA30 --> A31\nA31 --> A32\nA32 --> A33\nA33 --> A34\nA34 --> A35\nA35 --> A36\nA36 --> A37\nA37 --> A38\nA38 --> A39\nA39 --> A40\nA40 --> A41\nA41 --> A42\nA42 --> A43\nA43 --> A44\nA44 --> A45\nA45 --> A46\nA46 --> A47\nA47 --> A48\nA48 --> A49\nA49 --> A50\nA50 --> A51\nA51 --> A52\nA52 --> A53\nA53 --> A54\nA54 --> A55\nA55 --> A56\nA56 --> A57\nA57 --> A58\nA58 --> A59\nA59 --> A60\nA60 --> A61\nA61 --> A62\nA62 --> A63\nA63 --> A64\nA64 --> A65\nA65 --> A66\nA66 --> A67\nA67 --> A68\nA68 --> A69\nA69 --> A70\nA70 --> A71\nA71 --> A72\nA72 --> A73\nA73 --> A74\nA74 --> A75\nA75 --> A76\nA76 --> A77\nA77 --> A78\nA78 --> A79\nA79 --> A80\nA80 --> A81\nA81 --> A82\nA82 --> A83\nA83 --> A84\nA84 --> A85\nA85 --> A86\nA86 --> A87\nA87 --> A88\nA88 --> A89\nA89 --> A90\nA90 --> A91\nA91 --> A92\nA92 --> A93\nA93 --> A94\nA94 --> A95\nA95 --> A96\nA96 --> A97\nA97 --> A98\nA98 --> A99\nA99 --> A100\nA100 --> A101\nA101 --> A102\nA102 --> A103\nA103 --> A104\nA104 --> A105\nA105 --> A106\nA106 --> A107\nA107 --> A108\nA108 --> A109\nA109 --> A110\nA110 --> A111\nA111 --> A112\nA112 --> A113\nA113 --> A114\nA114 --> A115\nA115 --> A116\nA116 --> A117\nA117 --> A118\nA118 --> A119\nA119 --> A120\nA120 --> A121\nA121 --> A122\nA122 --> A123\nA123 --> A124\nA124 --> A125\nA125 --> A126\nA126 --> A127\nA127 --> A128\nA128 --> A129\nA129 --> A130\nA130 --> A131\nA131 --> A132\nA132 --> A133\nA133 --> A134\nA134 --> A135\nA135 --> A136\nA136 --> A137\nA137 --> A138\nA138 --> A139\nA139 --> A140\nA140 --> A141\nA141 --> A142\nA142 --> A143\nA143 --> A144\nA144 --> A145\nA145 --> A146\nA146 --> A147\nA147 --> A148\nA148 --> A149\nA149 --> A150\nA150 --> A151\nA151 --> A152\nA152 --> A153\nA153 --> A154\nA154 --> A155\nA155 --> A156\nA156 --> A157\nA157 --> A158\nA158 --> A159\nA159 --> A160\nA160 --> A161\nA161 --> A162\nA162 --> A163\nA163 --> A164\nA164 --> A165\nA165 --> A166\nA166 --> A167\nA167 --> A168\nA168 --> A169\nA169 --> A170\nA170 --> A171\nA171 --> A172\nA172 --> A173\nA173 --> A174\nA174 --> A175\nA175 --> A176\nA176 --> A177\nA177 --> A178\nA178 --> A179\nA179 --> A180\nA180 --> A181\nA181 --> A182\nA182 --> A183\nA183 --> A184\nA184 --> A185\nA185 --> A186\nA186 --> A187\nA187 --> A188\nA188 --> A189\nA189 --> A190\nA190 --> A191\nA191 --> A192\nA192 --> A193\nA193 --> A194\nA194 --> A195\nA195 --> A196\nA196 --> A197\nA197 --> A198\nA198 --> A199\nA199 --> A200\nA200 --> A201\nA201 --> A202\nA202 --> A203\nA203 --> A204\nA204 --> A205\nA205 --> A206\nA206 --> A207\nA207 --> A208\nA208 --> A209\nA209 --> A210\nA210 --> A211\nA211 --> A212\nA212 --> A213\nA213 --> A214\nA214 --> A215\nA215 --> A216\nA216 --> A217\nA217 --> A218\nA218 --> A219\nA219 --> A220\nA220 --> A221\nA221 --> A222\nA222 --> A223\nA223 --> A224\nA224 --> A225\nA225 --> A226\nA226 --> A227\nA227 --> A228\nA228 --> A229\nA229 --> A230\nA230 --> A231\nA231 --> A232\nA232 --> A233\nA233 --> A234\nA234 --> A235\nA235 --> A236\nA236 --> A237\nA237 --> A238\nA238 --> A239\nA239 --> A240\nA240 --> A241\nA241 --> A242\nA242 --> A243\nA243 --> A244\nA244 --> A245\nA245 --> A246\nA246 --> A247\nA247 --> A248\nA248 --> A249\nA249 --> A250\nA250 --> A251\nA251 --> A252\nA252 --> A253\nA253 --> A254\nA254 --> A255\nA255 --> A256\nA256 --> A257\nA257 --> A258\nA258 --> A259\nA259 --> A260\nA260 --> A261\nA261 --> A262\nA262 --> A263\nA263 --> A264\nA264 --> A265\nA265 --> A266\nA266 --> A267\nA267 --> A268\nA268 --> A269\nA269 --> A270\nA270 --> A271\nA271 --> A272\nA272 --> A273\nA273 --> A274\nA274 --> A275\nA275 --> A276\nA276 --> A277\nA277 --> A278\nA278 --> A279\nA279 --> A280\nA280 --> A281\nA281 --> A282\nA282 --> A283\nA283 --> A284\nA284 --> A285\nA285 --> A286\nA286 --> A287\nA287 --> A288\nA288 --> A289\nA289 --> A290\nA290 --> A291\nA291 --> A292\nA292 --> A293\nA293 --> A294\nA294 --> A295\nA295 --> A296\nA296 --> A297\nA297 --> A298\nA298 --> A299\nA299 --> A300\nA300 --> A301\nA301 --> A302\nA302 --> A303\nA303 --> A304\nA304 --> A305\nA305 --> A306\nA306 --> A307\nA307 --> A308\nA308 --> A309\nA309 --> A310\nA310 --> A311\nA311 --> A312\nA312 --> A313\nA313 --> A314\nA314 --> A315\nA315 --> A316\nA316 --> A317\nA317 --> A318\nA318 --> A319\nA319 --> A320\nA320 --> A321\nA321 --> A322\nA322 --> A323\nA323 --> A324\nA324 --> A325\nA325 --> A326\nA326 --> A327\nA327 --> A328\nA328 --> A329\nA329 --> A330\nA330 --> A331\nA331 --> A332\nA332 --> A333\nA333 --> A334\nA334 --> A335\nA335 --> A336\nA336 --> A337\nA337 --> A338\nA338 --> A339\nA339 --> A340\nA340 --> A341\nA341 --> A342\nA342 --> A343\nA343 --> A344\nA344 --> A345\nA345 --> A346\nA346 --> A347\nA347 --> A348\nA348 --> A349\nA349 --> A350\nA350 --> A351\nA351 --> A352\nA352 --> A353\nA353 --> A354\nA354 --> A355\nA355 --> A356\nA356 --> A357\nA357 --> A358\nA358 --> A359\nA359 --> A360\nA360 --> A361\nA361 --> A362\nA362 --> A363\nA363 --> A364\nA364 --> A365\nA365 --> A366\nA366 --> A367\nA367 --> A368\nA368 --> A369\nA369 --> A370\nA370 --> A371\nA371 --> A372\nA372 --> A373\nA373 --> A374\nA374 --> A375\nA375 --> A376\nA376 --> A377\nA377 --> A378\nA378 --> A379\nA379 --> A380\nA380 --> A381\nA381 --> A382\nA382 --> A383\nA383 --> A384\nA384 --> A385\nA385 --> A386\nA386 --> A387\nA387 --> A388\nA388 --> A389\nA389 --> A390\nA390 --> A391\nA391 --> A392\nA392 --> A393\nA393 --> A394\nA394 --> A395\nA395 --> A396\nA396 --> A397\nA397 --> A398\nA398 --> A399\nA399 --> A400\nA400 --> A401\nA401 --> A402\nA402 --> A403\nA403 --> A404\nA404 --> A405\nA405 --> A406\nA406 --> A407\nA407 --> A408\nA408 --> A409\nA409 --> A410\nA410 --> A411\nA411 --> A412\nA412 --> A413\nA413 --> A414\nA414 --> A415\nA415 --> A416\nA416 --> A417\nA417 --> A418\nA418 --> A419\nA419 --> A420\nA420 --> A421\nA421 --> A422\nA422 --> A423\nA423 --> A424\nA424 --> A425\nA425 --> A426\nA426 --> A427\nA427 --> A428\nA428 --> A429\nA429 --> A430\nA430 --> A431\nA431 --> A432\nA432 --> A433\nA433 --> A434\nA434 --> A435\nA435 --> A436\nA436 --> A437\nA437 --> A438\nA438 --> A439\nA439 --> A440\nA440 --> A441\nA441 --> A442\nA442 --> A443\nA443 --> A444\nA444 --> A445\nA445 --> A446\nA446 --> A447\nA447 --> A448\nA448 --> A449\nA449 --> A450\nA450 --> A451\nA451 --> A452\nA452 --> A453\nA453 --> A454\nA454 --> A455\nA455 --> A456\nA456 --> A457\nA457 --> A458\nA458 --> A459\nA459 --> A460\nA460 --> A461\nA461 --> A462\nA462 --> A463\nA463 --> A464\nA464 --> A465\nA465 --> A466\nA466 --> A467\nA467 --> A468\nA468 --> A469\nA469 --> A470\nA470 --> A471\nA471 --> A472\nA472 --> A473\nA473 --> A474\nA474 --> A475\nA475 --> A476\nA476 --> A477\nA477 --> A478\nA478 --> A479\nA479 --> A480\nA480 --> A481\nA481 --> A482\nA482 --> A483\nA483 --> A484\nA484 --> A485\nA485 --> A486\nA486 --> A487\nA487 --> A488\nA488 --> A489\nA489 --> A490\nA490 --> A491\nA491 --> A492\nA492 --> A493\nA493 --> A494\nA494 --> A495\nA495 --> A496\nA496 --> A497\nA497 --> A498\nA498 --> A499\nA499 --> A500\nA500 --> A501",
+    "labels": [],
+    "origin": "Generic syntax and boundary variation of installed Mermaid 12.2.0 grammar",
+    "refusal": "more than 500 links"
+  },
+  {
+    "id": "eventmodeling-notes-upstream",
+    "diagram": "eventmodeling",
+    "source": "eventmodeling\n entity Order\n tf 1 cmd Order ->> 0\n tf 2 evt Order ->> 1\n note 2 `text` {\nReady for review\n}\n",
+    "labels": [
+      "Order"
+    ],
+    "origin": "Installed eventmodeling grammar accepts notes, but its renderer iterates boxes and relations only",
+    "upstreamMissing": {
+      "reason": "Mermaid 12.2.0 parses note entities but does not draw them. Check the raw bundle output so a future upstream fix forces review.",
+      "label": "Ready for review"
+    }
+  },
+  {
+    "id": "upstream-flow-hex-semicolon",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR; A[Start] --> B[Done]; classDef blue fill:#e0f2fe; class A blue; style B fill:#fef3c7; linkStyle 0 stroke:#b91c1c",
+    "labels": [],
+    "origin": "Installed Mermaid entity preprocessor consumes #hex; in a style statement",
+    "upstream": {
+      "reason": "Mermaid 12.2.0 mistakes a classDef hexadecimal color immediately followed by a semicolon for an entity. Put a space before the semicolon or use a named color.",
+      "error": "UNICODE_TEXT"
+    }
+  },
+  {
+    "id": "upstream-eventmodeling-quoted-data",
+    "diagram": "eventmodeling",
+    "source": "eventmodeling\n entity Order\n tf 1 cmd Order ->> 0 `text` \"Create a generic order\"\n tf 2 evt Order ->> 1",
+    "labels": [
+      "Order"
+    ],
+    "origin": "Installed grammar accepts quoted inline data, but eventmodeling calculateTextProps slices it using brace offsets",
+    "upstreamMissing": {
+      "reason": "Mermaid 12.2.0 accepts quoted inline data but its renderer assumes brace-delimited data and loses the quoted contents. Use braces around inline data.",
+      "label": "Create a generic order"
+    }
+  },
+  {
+    "id": "state-refuse-class-property",
+    "diagram": "stateDiagram",
+    "source": "stateDiagram-v2\n[*] --> A\nclassDef blue fill:red;class:foo;position:fixed\nclass A blue",
+    "labels": [],
+    "origin": "Card #169 I1 regression: state CSS consumes the complete line",
+    "refusal": "style property \"class\""
+  },
+  {
+    "id": "state-refuse-class-word-function",
+    "diagram": "stateDiagram",
+    "source": "stateDiagram-v2\n[*] --> A\nclassDef blue fill:red;class foo;fill:var(--evil)\nclass A blue",
+    "labels": [],
+    "origin": "Card #169 I1 regression: state CSS consumes the complete line",
+    "refusal": "style property \"class foo\""
+  },
+  {
+    "id": "state-refuse-class-word-escape",
+    "diagram": "stateDiagram",
+    "source": "stateDiagram-v2\n[*] --> A\nclassDef blue fill:red;class foo;stroke:u\\72l(/private)\nclass A blue",
+    "labels": [],
+    "origin": "Card #169 I1 regression: state CSS consumes the complete line",
+    "refusal": "style property \"class foo\""
+  },
+  {
+    "id": "state-refuse-after-class",
+    "diagram": "stateDiagram",
+    "source": "stateDiagram-v2\n[*] --> A\nclass A blue\nclassDef blue fill:red;position:fixed\nclass A blue",
+    "labels": [],
+    "origin": "Card #169 I1 regression: state CSS consumes the complete line",
+    "refusal": "style property \"position\""
+  },
+  {
+    "id": "eventmodeling-encoded-markup",
+    "diagram": "eventmodeling",
+    "source": "eventmodeling\n entity Order\n tf 1 cmd Order ->> 0 `text` {Use &lt;b&gt;literal&lt;/b&gt; and &lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; safely }",
+    "labels": [
+      "Order",
+      "Use <b>literal</b> and <script>alert(\"x\")</script> safely"
+    ],
+    "exactLabels": [
+      "Command/Read Model",
+      "Order Use <b>literal</b> and <script>alert(\"x\")</script> safely"
+    ],
+    "origin": "Card #169 M1 regression: encoded hostile labels through bundled event-modeling renderer"
+  },
+  {
+    "id": "eventmodeling-html-recovery",
+    "diagram": "eventmodeling",
+    "source": "eventmodeling\n entity Order\n tf 1 cmd Order ->> 0 `text` {Amp &amp; &quot;quotes&quot; &apos;single&apos; &copy; &nbsp; space<br/>next &amp;lt;b&amp;gt;double&amp;lt;/b&amp;gt; }",
+    "labels": [
+      "Order",
+      "Amp & \"quotes\" 'single' © space next &lt;b&gt;double&lt;/b&gt;"
+    ],
+    "exactLabels": [
+      "Command/Read Model",
+      "Order Amp & \"quotes\" 'single' © space next &lt;b&gt;double&lt;/b&gt;"
+    ],
+    "origin": "Card #169 M1 regression: encoded hostile labels through bundled event-modeling renderer"
+  },
+  {
+    "id": "eventmodeling-long-hostile-text",
+    "diagram": "eventmodeling",
+    "source": "eventmodeling\n entity Order\n tf 1 cmd Order ->> 0 `text` {Keep #60;script#62;inert#60;/script#62; &amp; all words Keep #60;script#62;inert#60;/script#62; &amp; all words Keep #60;script#62;inert#60;/script#62; &amp; all words Keep #60;script#62;inert#60;/script#62; &amp; all words Keep #60;script#62;inert#60;/script#62; &amp; all words Keep #60;script#62;inert#60;/script#62; &amp; all words Keep #60;script#62;inert#60;/script#62; &amp; all words Keep #60;script#62;inert#60;/script#62; &amp; all words Keep #60;script#62;inert#60;/script#62; &amp; all words Keep #60;script#62;inert#60;/script#62; &amp; all words Keep #60;script#62;inert#60;/script#62; &amp; all words Keep #60;script#62;inert#60;/script#62; &amp; all words final sentinel }",
+    "labels": [
+      "Order",
+      "Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words final sentinel"
+    ],
+    "exactLabels": [
+      "Command/Read Model",
+      "Order Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words Keep <script>inert</script> & all words final sentinel"
+    ],
+    "origin": "Card #169 M1 regression: encoded hostile labels through bundled event-modeling renderer"
+  },
+  {
+    "id": "flow-inline-class-unicode-id",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\né-->B\nclassDef red fill:red; class é red",
+    "labels": [
+      "é",
+      "B"
+    ],
+    "origin": "Bundled flow.jison CLASS SPACE idString SPACE idString; M2 compatibility regression"
+  },
+  {
+    "id": "flow-inline-class-multiple-classes",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\nA-->B\nclassDef red fill:red; class A red,blue",
+    "labels": [
+      "A",
+      "B"
+    ],
+    "origin": "Bundled flow.jison CLASS SPACE idString SPACE idString; M2 compatibility regression"
+  },
+  {
+    "id": "flow-inline-class-unicode-lists",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\né-->节点\nclassDef red fill:red; class é,节点 red,blue",
+    "labels": [
+      "é",
+      "节点"
+    ],
+    "origin": "Bundled flow.jison CLASS SPACE idString SPACE idString; M2 compatibility regression"
+  },
+  {
+    "id": "flow-inline-class-unicode-class",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\nA-->B\nclassDef red fill:red; class A 色",
+    "labels": [
+      "A",
+      "B"
+    ],
+    "origin": "Bundled flow.jison CLASS SPACE idString SPACE idString; M2 compatibility regression"
+  },
+  {
+    "id": "flow-inline-class-punctuation-id",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\nA/B-->B\nclassDef red fill:red; class A/B red",
+    "labels": [
+      "A/B",
+      "B"
+    ],
+    "origin": "Bundled flow.jison CLASS SPACE idString SPACE idString; M2 compatibility regression"
+  },
+  {
+    "id": "flow-inline-class-dotted-class",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\nA-->B\nclassDef red fill:red; class A red.blue",
+    "labels": [
+      "A",
+      "B"
+    ],
+    "origin": "Bundled flow.jison CLASS SPACE idString SPACE idString; M2 compatibility regression"
+  },
+  {
+    "id": "flow-inline-class-colon-tokens",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\nA:B-->B\nclassDef red fill:red; class A:B red:blue",
+    "labels": [
+      "A:B",
+      "B"
+    ],
+    "origin": "Bundled flow.jison CLASS SPACE idString SPACE idString; M2 compatibility regression"
+  },
+  {
+    "id": "flow-inline-class-amp-star-tokens",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\nA&B-->C\nclassDef red fill:red; class A&B red*",
+    "labels": [
+      "A&B",
+      "C"
+    ],
+    "origin": "Bundled flow.jison CLASS SPACE idString SPACE idString; M2 compatibility regression"
+  },
+  {
+    "id": "flow-inline-class-numeric-lists",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\n123-->B\nclassDef red fill:red; class 123 456,789",
+    "labels": [
+      "123",
+      "B"
+    ],
+    "origin": "Bundled flow.jison CLASS SPACE idString SPACE idString; M2 compatibility regression"
+  },
+  {
+    "id": "refuse-flow-inline-class-unicode-id-style",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\nA-->B\nclassDef red fill:red; class é red; style B position:fixed",
+    "labels": [],
+    "refusal": "line 3: the style property \"position\" not allowed",
+    "origin": "M2 regression: validate style declarations after complete class assignments"
+  },
+  {
+    "id": "refuse-flow-inline-class-multiple-classes-style",
+    "diagram": "flowchart-v2",
+    "source": "flowchart LR\nA-->B\nclassDef red fill:red; class A red,blue; style B position:fixed",
+    "labels": [],
+    "refusal": "line 3: the style property \"position\" not allowed",
+    "origin": "M2 regression: validate style declarations after complete class assignments"
+  },
+  {
+    "id": "flow-inline-class-grammar-tokens",
+    "diagram": "flowchart-v2",
+    "source": "graph LR\nA#1-->B\nclassDef red fill:red; class A#1 default,v-1; style B fill:gold; linkStyle 0 stroke:green",
+    "labels": [
+      "A#1",
+      "B"
+    ],
+    "colors": [
+      "gold",
+      "green"
+    ],
+    "origin": "Bundled flow.jison BRKT, DEFAULT, DOWN, MINUS tokens and later safe style statements; M2 regression"
+  }
+]

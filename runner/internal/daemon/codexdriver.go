@@ -17,6 +17,7 @@ import (
 )
 
 type codexDriver struct {
+	startCommand      func(*exec.Cmd) error
 	CredentialSource  EngineCredentialSource
 	managedCredential codexCredentialState
 	workDir           string
@@ -25,9 +26,13 @@ type codexDriver struct {
 	env     []string // sanitised env every `codex` turn starts from
 	// prefix routes each turn into the session's sandbox container; empty
 	// means the turn runs on the host (see sandbox.go's sandboxExec).
-	prefix     sandboxExec
-	queue      chan queuedMsg
-	retryInput *queuedMsg // explicitly rejected steer, retained ahead of later input across app restart
+	prefix         sandboxExec
+	queue          chan queuedMsg
+	pendingPlugins []func(context.Context)
+	pluginWake     chan struct{}
+	restartPlugins []func(context.Context)
+	pluginAttempt  *codexPluginAttempt
+	retryInput     *queuedMsg // explicitly rejected steer, retained ahead of later input across app restart
 
 	rejectedSteerWait time.Duration // zero uses the production completion wait
 
@@ -86,7 +91,7 @@ func newCodexDriver(o AgentDriverOpts) *codexDriver {
 	}
 	return &codexDriver{
 		CredentialSource: o.CredentialSource, workDir: o.WorkDir, engineModel: newEngineModel(o), emitter: o.Emitter, env: env,
-		queue: make(chan queuedMsg, 64), markerNonce: nonce,
+		queue: make(chan queuedMsg, 64), markerNonce: nonce, pluginWake: make(chan struct{}, 1),
 	}
 }
 
@@ -187,6 +192,14 @@ func (d *codexDriver) Run(ctx context.Context) {
 	for ctx.Err() == nil {
 		start := time.Now()
 		d.runApp(ctx)
+		if d.rollbackSessionPlugins(ctx) {
+			failures = 0
+			continue
+		}
+		if d.applySessionPlugins(ctx) {
+			failures = 0
+			continue
+		}
 		if ctx.Err() != nil {
 			return
 		}
@@ -290,3 +303,5 @@ func (d *codexDriver) addAdoptionWork(line string) {
 func (d *codexDriver) codexToolsRestricted() bool {
 	return d.RestrictedRuntime != nil && d.RestrictedRuntime.Restricted
 }
+
+func (d *codexDriver) useCommandBoundary(f func(*exec.Cmd) error) { d.startCommand = f }

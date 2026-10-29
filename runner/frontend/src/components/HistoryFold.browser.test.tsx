@@ -96,7 +96,7 @@ for (const [width, height] of [[390, 760], [3840, 2000]] as const) {
       expect(items).toHaveLength(27)
       inside(panel, items)
       // The opened topic: one line per kind, every chip inside the panel.
-      await userEvent.click(within(panel).getByTestId('reel-head'))
+      if (within(panel).getByTestId('reel-head').getAttribute('aria-expanded') === 'false') await userEvent.click(within(panel).getByTestId('reel-head'))
       const summary = within(panel).getByTestId('reel-summary')
       expect(Array.from(summary.children).map(c => c.getAttribute('data-testid'))).toEqual(['reel-sum-messages', 'reel-sum-agents', 'reel-sum-files', 'reel-sum-commits'])
       inside(panel, summary.querySelectorAll('.reel-chip, .stroke-time'))

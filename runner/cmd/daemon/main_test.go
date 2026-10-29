@@ -176,3 +176,24 @@ func TestClaudeUsageSetting(t *testing.T) {
 		}
 	}
 }
+
+// Removed receipt commands must reject attempts to certify a session call, without
+// provisioning, connecting, locking records or writing state.
+func TestUpdateReceiptCommandsRejected(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("BLERG_RUNNER_DAEMON_STATE_DIR", state)
+	t.Setenv("BLERG_RUNNER_SESSION_ID", "untrusted-claim")
+	for _, args := range [][]string{{"note-update", "previous-binary"}, {"note-update-failed"}, {"protected-check"}, {"protected-supervisor", "state"}, {"protected-update", "state", "binary"}, {"protected-setup"}} {
+		var out, errOut bytes.Buffer
+		if code := runCommand(args, &out, &errOut); code != 2 {
+			t.Fatalf("%v: exit %d, want unknown command: %s", args, code, errOut.String())
+		}
+	}
+	entries, err := os.ReadDir(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("unattributed receipt command wrote daemon state: %v", entries)
+	}
+}

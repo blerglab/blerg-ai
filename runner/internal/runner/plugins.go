@@ -25,16 +25,19 @@ func ParsePluginsEnv(raw string) ([]pluginspec.Entry, error) {
 }
 
 // InstallPlugins installs entries into the Claude Code under cfg.Home. The allow-list is
-// BLERG_RUNNER_PLUGIN_MARKETPLACES as the server passed it into the pod (default: the
-// official marketplace only).
+// the shared live workshop policy. Missing authority denies installation.
 func InstallPlugins(ctx context.Context, cfg Config, entries []pluginspec.Entry) PluginResult {
-	allow, _ := pluginspec.ParseAllowlist(os.Getenv("BLERG_RUNNER_PLUGIN_MARKETPLACES"))
+	var allow pluginspec.Allowlist
+	if cfg.pluginAllow != nil {
+		allow = cfg.pluginAllow()
+	}
 	return pluginsinstall.Install(ctx, pluginsinstall.Options{
-		Bin:       "claude",
-		Env:       pluginsinstall.ChildEnv(cfg.Home),
-		Allow:     allow,
-		Secrets:   []string{cfg.GitToken, cfg.APIKey, cfg.DaemonToken, os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")},
-		LogPrefix: "runner: plugins",
+		Bin:          "claude",
+		StartCommand: cfg.StartCommand,
+		Env:          pluginsinstall.ChildEnv(cfg.Home),
+		Allow:        allow,
+		Secrets:      []string{cfg.GitToken, cfg.APIKey, cfg.DaemonToken, os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")},
+		LogPrefix:    "runner: plugins",
 	}, entries)
 }
 
@@ -55,8 +58,12 @@ func reportWorkspaceReady(ctx context.Context, cfg Config, stages *stageReporter
 	// A restricted session runs unattended on untrusted text with a narrowed
 	// tool list: no plugin (code, hooks, MCP servers of its own) is installed
 	// into it, whatever the operator's always-on list says.
-	if len(cfg.Plugins) == 0 || cfg.skipsUserConfig() || (cfg.Engine != "" && cfg.Engine != pluginspec.EngineClaude) {
+	if len(cfg.Plugins) == 0 || cfg.skipsUserConfig() {
 		stages.report(done(protocol.StageClone), engineActive)
+		return
+	}
+	if cfg.Engine != "" && cfg.Engine != pluginspec.EngineClaude {
+		stages.report(done(protocol.StageClone), protocol.StartStage{ID: protocol.StagePlugins, Label: "Installing plugins", State: protocol.StageStateWarning, Detail: "This runtime cannot install Codex plugins. Use an unrestricted desktop session."}, engineActive)
 		return
 	}
 	start := active(protocol.StagePlugins, fmt.Sprintf("Installing %d plugin(s)", len(cfg.Plugins)))

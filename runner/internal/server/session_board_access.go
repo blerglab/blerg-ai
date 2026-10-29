@@ -463,7 +463,7 @@ func (a *API) sessionBoardCaller() sessionBoardCaller {
 // blerg_board_list, lists only that credential's board.
 var boardArgTools = map[string]bool{
 	"blerg_board_get": true, "blerg_board_schema": true, "blerg_column_list": true,
-	"blerg_card_search": true, "blerg_card_create": true,
+	"blerg_card_search": true, "blerg_card_create": true, "blerg_column_create": true,
 }
 
 // boardToolRequest is the body of POST /api/sessions/{id}/board-tools.
@@ -576,6 +576,12 @@ func (a *API) runSessionBoardTool(ctx context.Context, row *db.SessionRow, req b
 	if !ok || proof.AccountID == "" || row.SpawningAccountID == nil || *row.SpawningAccountID != proof.AccountID {
 		return fail(http.StatusForbidden, "this board access has no sign-in to act with; ask the person to set it again in Permissions")
 	}
+	if mcpgw.IsBoardColumnTool(req.Tool) && !mcpgw.PersonBehind(proof) {
+		// Column management acts for a person: a launch made with an agent token has none behind it.
+		log.Printf("board tools: session=%s board=%s tool=%s level=%s outcome=refused (no person)", row.ID, boardID, req.Tool, lv.Level)
+		return fail(http.StatusForbidden, "managing this board's columns needs Full access the person gave in the session's Permissions (Boards); "+
+			"ask them to set this board to Full there")
+	}
 	argsRaw, _ := json.Marshal(args)
 	res, err := caller.CallBoard(ctx, mcpgw.BoardCall{Proof: proof, BoardID: boardID, SessionRef: row.ID, Tool: req.Tool,
 		Arguments: argsRaw, ReadOnly: need == db.BoardLevelRead})
@@ -591,6 +597,7 @@ func (a *API) runSessionBoardTool(ctx context.Context, row *db.SessionRow, req b
 		return fail(status, mcpgw.UpstreamMessage(err))
 	}
 	log.Printf("board tools: session=%s board=%s tool=%s level=%s outcome=ok", row.ID, boardID, req.Tool, lv.Level)
+	a.planBoardToolDone(ctx, row.ID, boardID, req.Tool, res) // a move keeps the session's plan (plansync.go)
 	return http.StatusOK, res
 }
 
@@ -694,7 +701,8 @@ func boardSessionToolDefinition() any {
 	return map[string]any{"name": "blerg_board", "description": "Read or change cards on a board your person gave this session access to in its Permissions. " +
 		"Call {\"tool\":\"access\"} first: it lists the boards and their level. Level read: blerg_board_get, blerg_board_list, blerg_board_schema, " +
 		"blerg_column_list, blerg_card_search, blerg_card_get. Level full adds blerg_card_create, blerg_card_update, blerg_card_move, blerg_card_comment, " +
-		"blerg_card_link. arguments are that board tool's own arguments. The person can change levels while you work: if a board tool you need is not " +
+		"blerg_card_link, and manages columns: blerg_column_create, blerg_column_update (rename, is_terminal), blerg_column_move, blerg_column_delete " +
+		"(an empty column, or with move_cards_to for its cards). arguments are that board tool's own arguments. The person can change levels while you work: if a board tool you need is not " +
 		"listed or a call is refused, call this tool with {\"tool\":\"access\"} before telling the person you lack permission, and use it for anything the " +
 		"level allows. Without access, use blerg_ticket_file to propose a card; it asks the person.",
 		"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"tool"}, "properties": map[string]any{
@@ -706,6 +714,7 @@ func (a *API) RegisterSessionBoardRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/sessions/{id}/board-access", a.HandleSetBoardAccess)
 	mux.HandleFunc("GET /api/sessions/{id}/board-access", a.HandleSessionBoardAccess)
 	mux.HandleFunc("POST /api/sessions/{id}/board-tools", a.HandleSessionBoardTool)
+	mux.HandleFunc("GET /api/board-cards/{board}/search", a.HandlePaletteCards)
 	mux.HandleFunc("GET /api/board-cards/{board}/{number}", a.HandleGetLiveBoardCard)
 	mux.HandleFunc("POST /api/board-cards/{board}/{number}/move", a.HandleMoveLiveBoardCard)
 	mux.HandleFunc("GET /api/sessions/{id}/board-card-url", a.HandleSessionBoardCardURL)

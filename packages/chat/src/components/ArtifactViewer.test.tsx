@@ -498,12 +498,14 @@ describe('ArtifactViewer: highlighted code and json', () => {
     expect(code.querySelector('.hljs-number')?.textContent).toBe('1')
   })
 
-  it('leaves a file of no known language as plain text', async () => {
+  it('leaves a file of no known language uncolored, as numbered prose with the wrap toggle (#265)', async () => {
     serve('just words')
     show(art({ name: 'notes.txt' }))
     const pre = await screen.findByTestId('artifact-text')
-    expect(pre.querySelector('span')).toBeNull()
-    expect(document.querySelector('.code-viewer-gutter')).toBeNull()
+    expect(pre.querySelector('[class*="hljs"]')).toBeNull()
+    expect(pre.textContent).toBe('just words')
+    expect(pre.closest('[data-wrap]')).toHaveAttribute('data-wrap', 'on')
+    expect(await screen.findByRole('button', { name: 'Wrap' })).toHaveAttribute('aria-pressed', 'true')
   })
 
   it('colors only the head of a big file and keeps every character', async () => {

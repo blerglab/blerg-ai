@@ -19,7 +19,7 @@ import (
 type boardFilingUpstream interface {
 	SnapshotURL() string
 	Prepare(context.Context, mcpgw.Proof, string, boardfiling.Draft) (boardfiling.Draft, error)
-	Search(context.Context, mcpgw.Proof, string, string) (json.RawMessage, error)
+	Search(context.Context, mcpgw.Proof, string, string, string) (json.RawMessage, error)
 	Create(context.Context, mcpgw.Proof, string, string, boardfiling.Draft) (json.RawMessage, error)
 }
 type httpBoardFiling struct {
@@ -119,32 +119,49 @@ func (c *httpBoardFiling) Prepare(ctx context.Context, proof mcpgw.Proof, board 
 	}
 	return draft, nil
 }
-func (c *httpBoardFiling) Search(ctx context.Context, proof mcpgw.Proof, board, q string) (json.RawMessage, error) {
-	raw, err := c.read(ctx, proof, board, "/api/boards/"+board+"/cards/search?q="+url.QueryEscape(q)+"&limit=100")
+func (c *httpBoardFiling) Search(ctx context.Context, proof mcpgw.Proof, board, q, cursor string) (json.RawMessage, error) {
+	raw, err := c.read(ctx, proof, board, "/api/boards/"+board+"/cards/search?q="+url.QueryEscape(q)+"&limit=100&page=true&cursor="+url.QueryEscape(cursor))
 	if err != nil {
 		return nil, err
 	}
 	// Discovery returns only public duplicate summaries; never card bodies or other metadata.
-	var cards []struct {
+	type summary struct {
+		Reference string `json:"reference,omitempty"`
 		ID        string `json:"id"`
+		BoardID   string `json:"board_id"`
+		Number    int    `json:"number"`
 		Key       string `json:"key"`
 		Title     string `json:"title"`
 		Type      string `json:"type"`
 		Sensitive bool   `json:"sensitive"`
 	}
-	if json.Unmarshal(raw, &cards) != nil || len(cards) > 100 {
+	var page struct {
+		Cards      []summary `json:"cards"`
+		NextCursor string    `json:"next_cursor"`
+	}
+	truncated := false
+	if len(raw) > 0 && raw[0] == '[' {
+		// Compatibility with an older Board; it cannot supply a continuation cursor.
+		if json.Unmarshal(raw, &page.Cards) != nil {
+			return nil, apiErrorf(503, "Board returned invalid search results.")
+		}
+		truncated = len(page.Cards) == 100
+	} else if json.Unmarshal(raw, &page) != nil {
+		return nil, apiErrorf(503, "Board returned invalid search results.")
+	}
+	truncated = truncated || page.NextCursor != ""
+	cards := page.Cards
+	if len(cards) > 100 || len(page.NextCursor) > 4096 {
 		return nil, apiErrorf(503, "Board returned invalid search results.")
 	}
 	if cards == nil {
-		cards = make([]struct {
-			ID        string `json:"id"`
-			Key       string `json:"key"`
-			Title     string `json:"title"`
-			Type      string `json:"type"`
-			Sensitive bool   `json:"sensitive"`
-		}, 0)
+		cards = []summary{}
 	}
-	return json.Marshal(map[string]any{"cards": cards, "truncated": len(cards) == 100})
+	for i := range cards {
+		// Bind references to the selected board, regardless of upstream metadata.
+		cards[i].BoardID = board
+	}
+	return json.Marshal(map[string]any{"cards": cards, "truncated": truncated, "next_cursor": page.NextCursor})
 }
 func (c *httpBoardFiling) Create(ctx context.Context, proof mcpgw.Proof, intent, board string, draft boardfiling.Draft) (json.RawMessage, error) {
 	if proof.AccountID == "" || proof.SessionID == "" || proof.TokenID != "" {

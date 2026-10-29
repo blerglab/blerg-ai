@@ -207,7 +207,7 @@ const count = (n: number) => n.toLocaleString('en-US')
 const plural = (n: number, one: string, many: string) => `${count(n)} ${n === 1 ? one : many}`
 
 function Report({ d }: { d: SessionInsightsResponse }) {
-  const isAgent = d.kind === 'agent'
+  const isAgent = d.kind !== 'tmux'
   return (
     <>
       <KpiTiles d={d} isAgent={isAgent} />

@@ -6,6 +6,9 @@ import { CODE_COLOURS_KEY, fetchCodeColours, getCodeColours, saveCodeColours, se
 
 const apiFetch = vi.hoisted(() => vi.fn())
 vi.mock('./DelegationRulesSection', () => ({ default: () => null }))
+vi.mock('./EngineStatusSection', () => ({ default: () => null }))
+vi.mock('./ShellLimitsSection', () => ({ default: () => null }))
+vi.mock('./UsageNoticeSettings', () => ({ default: () => null }))
 vi.mock('../apiFetch', () => ({ apiFetch }))
 
 const preview = () => screen.getByTestId('cc-preview')

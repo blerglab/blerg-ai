@@ -10,8 +10,9 @@ async function openFiles() {
   await waitFor(() => expect([...document.querySelectorAll('[role=tab]')].some(t => t.textContent === 'Files')).toBe(true))
   await userEvent.click([...document.querySelectorAll<HTMLElement>('[role=tab]')].find(t => t.textContent === 'Files')!)
 }
+// .log, not .txt: these are about unwrapped code, and a diff of prose files wraps by default (#265).
 
-const patch = Array.from({length: 90}, (_, file) => `diff --git a/src/file-${file}.txt b/src/file-${file}.txt\n--- a/src/file-${file}.txt\n+++ b/src/file-${file}.txt\n@@ -1,1 +1,${file ? 1 : 180} @@\n-old\n${Array.from({length: file ? 1 : 180}, (_, line) => `+line-${line}-${'x'.repeat(300)}`).join('\n')}\n`).join('')
+const patch = Array.from({length: 90}, (_, file) => `diff --git a/src/file-${file}.log b/src/file-${file}.log\n--- a/src/file-${file}.log\n+++ b/src/file-${file}.log\n@@ -1,1 +1,${file ? 1 : 180} @@\n-old\n${Array.from({length: file ? 1 : 180}, (_, line) => `+line-${line}-${'x'.repeat(300)}`).join('\n')}\n`).join('')
 const files: TransportFiles = {list: async () => [], raw: async () => new Blob([patch]), download: async () => {}, remove: async () => {}, upload: async () => { throw new Error('unused') }}
 const context: ChatContextValue = {sessionId: 'layout-fixture', files: null, view: vi.fn(), latestVersion: () => undefined, byName: () => undefined, reviewFor: async () => null, submitFeedback: async () => true}
 

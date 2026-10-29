@@ -59,12 +59,12 @@ func handleSessionPluginsResult(ctx context.Context, h *Hub, pool *pgxpool.Pool,
 	case "queued":
 		return
 	case "applied":
-		message = "Plugin applied; the next turn resumes with the updated plugin snapshot."
+		message = "Plugin change applied; the next turn resumes with the updated plugin snapshot."
 	case "failed":
-		message = "The plugin could not be applied. The previous plugin snapshot was retained."
+		message = "The plugin change failed. Your session is continuing with its previous plugins."
 	case "unsupported":
 		state = "failed"
-		message = "This runtime cannot apply plugins to a running session."
+		message = "This runtime loads plugins when a session starts. Save as always on to add it for your next session."
 	default:
 		return
 	}

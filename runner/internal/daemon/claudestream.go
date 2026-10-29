@@ -97,17 +97,20 @@ type ccProc struct {
 	started   time.Time
 
 	// guarded by the driver's sm
-	sawInit, sawResult bool
-	inTurn             bool // a turn has begun (init) and not yet ended (result)
-	stdinClosed        bool
-	intentionalClose   bool
-	killedByDriver     bool
-	dying              bool // being killed: no new message may be written to it
-	lastNoise          string
-	rootUsage          claudeRootUsage
-	mcpInit            mcpProbe
-	mcpWait            map[string]chan ccMCPReply
-	interruptID        string
+	sawInit, sawResult  bool
+	inTurn              bool // a turn has begun (init) and not yet ended (result)
+	stdinClosed         bool
+	intentionalClose    bool
+	killedByDriver      bool
+	dying               bool // being killed: no new message may be written to it
+	lastNoise           string
+	rootUsage           claudeRootUsage
+	mcpInit             mcpProbe
+	mcpWait             map[string]chan ccMCPReply
+	interruptID         string
+	interrupts          map[string]time.Time // pending ACK deadlines, bounded by ccMaxPending
+	interruptPending    bool                 // Stop of a written turn awaiting init, including fallback-only
+	interruptAckPending bool                 // acknowledged cancellation of a written turn awaiting init
 }
 
 type steerState struct {
@@ -446,7 +449,7 @@ func (d *claudeCodeDriver) startProc(ctx context.Context) (*ccProc, error) {
 		return nil, err
 	}
 	cmd.Stderr = cmd.Stdout // interleaved, as in the per-turn engine
-	if err := cmd.Start(); err != nil {
+	if err := startEngineCommand(cmd, d.startCommand); err != nil {
 		_ = stdin.Close()
 		return nil, err
 	}
@@ -531,7 +534,7 @@ func (d *claudeCodeDriver) killProc(p *ccProc) {
 		_ = d.prefix.killPID(p.pidFile)
 	}
 	if p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
+		_ = cancelEngineCommand(p.cmd, d.startCommand != nil)
 	}
 }
 
@@ -561,6 +564,11 @@ func (d *claudeCodeDriver) onLine(p *ccProc, line []byte) {
 		if ev.Subtype == "init" {
 			d.onInit(p, &ev, line)
 		} else {
+			if ev.Subtype == "compact_boundary" {
+				d.sm.Lock()
+				p.rootUsage.compacted(ev.CompactMetadata.PreTokens)
+				d.sm.Unlock()
+			}
 			d.onSystem(&ev, line)
 		}
 	case "assistant":
@@ -604,6 +612,12 @@ func (d *claudeCodeDriver) onInit(p *ccProc, ev *ccLine, line []byte) {
 	d.sm.Lock()
 	p.sawInit, p.inTurn = true, true
 	d.steer.turnSeq++ // a turn is starting: timers armed for an earlier one are stale
+	if p.interruptAckPending {
+		d.armInterruptResultLocked(p)
+	} else if p.interruptPending {
+		d.armInterruptKillLocked(p)
+	}
+	p.interruptPending, p.interruptAckPending = false, false
 	d.apiErr = ""
 	d.stopTimerLocked(&d.steer.settleTimer)
 	d.sm.Unlock()
@@ -737,8 +751,10 @@ func (d *claudeCodeDriver) onResult(p *ccProc, ev *ccLine) {
 	d.steer.turnSeq++
 	turn, gen := d.steer.turnSeq, p.gen
 	p.sawResult, p.inTurn = true, false
+	p.interruptPending, p.interruptAckPending = false, false
 	noise := p.lastNoise
 	partition := p.rootUsage.partition(ev.ccUsage())
+	turnContext := p.rootUsage.contextUsage(ev)
 	p.rootUsage = claudeRootUsage{}
 	settle := len(d.steer.awaiting) > 0
 	closeNow := false
@@ -769,7 +785,7 @@ func (d *claudeCodeDriver) onResult(p *ccProc, ev *ccLine) {
 	default:
 		d.takeAPIError()
 	}
-	d.emit("turn_done", agent.TurnDonePayload{StopReason: stop, Model: p.model, Usage: ev.ccUsage(), UsageByModel: partition})
+	d.emit("turn_done", agent.TurnDonePayload{StopReason: stop, Model: p.model, Usage: ev.ccUsage(), UsageByModel: partition, Context: turnContext})
 	if !settle {
 		d.syncStatus("turn_done")
 	}
@@ -790,10 +806,36 @@ func (d *claudeCodeDriver) onControlResponse(p *ccProc, line []byte) {
 	}
 	d.sm.Lock()
 	defer d.sm.Unlock()
-	if d.steer.proc != p || d.steer.killTimer == nil || reply.Response.Subtype != "success" || reply.Response.RequestID == "" || reply.Response.RequestID != p.interruptID {
+	if d.steer.closed || d.steer.proc != p || reply.Response.RequestID == "" {
 		return
 	}
+	deadline, pending := p.interrupts[reply.Response.RequestID]
+	if !pending || (reply.Response.Subtype != "success" && reply.Response.Subtype != "error") {
+		return
+	}
+	delete(p.interrupts, reply.Response.RequestID)
+	if reply.Response.Subtype == "error" || !time.Now().Before(deadline) {
+		return // terminal failures and abandoned requests no longer consume the budget
+	}
+	// A preceding result may have cleared the request's optimistic flag and timer before
+	// this ACK arrived. The matching ACK identifies the turn the CLI is actually cutting.
 	d.stopTimerLocked(&d.steer.killTimer)
+	if !p.inTurn {
+		// deliverOne has already marked a written message running, but init has not
+		// arrived. Its turn sequence (and acknowledged-result timer) starts at init.
+		p.interruptAckPending = len(d.steer.awaiting) > 0
+		if !p.interruptAckPending {
+			p.interruptPending = false
+			d.steer.interruptUntil = time.Time{}
+		}
+		return
+	}
+	d.armInterruptResultLocked(p)
+}
+
+func (d *claudeCodeDriver) armInterruptResultLocked(p *ccProc) {
+	d.stopTimerLocked(&d.steer.killTimer)
+	d.steer.interruptUntil = time.Now().Add(ccInterruptResultAfter)
 	turn, gen := d.steer.turnSeq, p.gen
 	d.steer.killTimer = time.AfterFunc(ccInterruptResultAfter, func() { d.interruptTimeout(gen, turn) })
 }
@@ -816,6 +858,8 @@ func (d *claudeCodeDriver) settleFired(gen, turn int) {
 		d.steer.settled = d.steer.settled[n:]
 	}
 	d.steer.running = false
+	p.interruptPending, p.interruptAckPending = false, false
+	d.steer.interruptUntil = time.Time{}
 	closeNow := d.idleLocked(p)
 	d.sm.Unlock()
 	for _, a := range left {
@@ -844,23 +888,44 @@ func (d *claudeCodeDriver) Interrupt() {
 		d.sm.Unlock()
 		return
 	}
-	id := ccUUID()
-	line, _ := json.Marshal(map[string]any{
-		"type": "control_request", "request_id": id,
-		"request": map[string]any{"subtype": "interrupt"},
-	})
-	select {
-	case p.writeCh <- append(line, '\n'):
-	default:
-		d.sm.Unlock()
-		return
+	now := time.Now()
+	for id, deadline := range p.interrupts {
+		if !now.Before(deadline) {
+			delete(p.interrupts, id)
+		}
 	}
-	p.interruptID = id
+	if len(p.interrupts) < ccMaxPending {
+		id := ccUUID()
+		line, _ := json.Marshal(map[string]any{
+			"type": "control_request", "request_id": id,
+			"request": map[string]any{"subtype": "interrupt"},
+		})
+		select {
+		case p.writeCh <- append(line, '\n'):
+		default:
+			d.sm.Unlock()
+			return
+		}
+		p.interruptID = id
+		if p.interrupts == nil {
+			p.interrupts = make(map[string]time.Time)
+		}
+		// Results may precede their ACKs, so keep requests across turn boundaries,
+		// but abandon them after the same bounded wait as an acknowledged result.
+		p.interrupts[id] = now.Add(ccInterruptResultAfter)
+	}
+	// Saturation must not disable Stop: retain outstanding ACK identities and use
+	// the kill fallback until an entry completes or expires.
+	p.interruptPending = !p.inTurn && len(d.steer.awaiting) > 0
+	d.armInterruptKillLocked(p)
+	d.sm.Unlock()
+}
+
+func (d *claudeCodeDriver) armInterruptKillLocked(p *ccProc) {
 	d.steer.interruptUntil = time.Now().Add(ccInterruptFlagTTL)
 	turn, gen := d.steer.turnSeq, p.gen
 	d.stopTimerLocked(&d.steer.killTimer)
 	d.steer.killTimer = time.AfterFunc(ccInterruptKillAfter, func() { d.interruptTimeout(gen, turn) })
-	d.sm.Unlock()
 }
 
 // interruptTimeout: the interrupt did not end the turn in time. Kill the process; the next message starts a
@@ -887,11 +952,13 @@ func (d *claudeCodeDriver) interruptTimeout(gen, turn int) {
 	d.steer.interruptUntil = time.Time{}
 	d.steer.turnSeq++
 	d.stopTimerLocked(&d.steer.settleTimer)
+	compacted := p.rootUsage.compactionOnly()
+	p.rootUsage = claudeRootUsage{}
 	d.sm.Unlock()
 
 	d.killProc(p)
 	if wasInTurn {
-		d.emit("turn_done", agent.TurnDonePayload{StopReason: "interrupted", Model: p.model})
+		d.emit("turn_done", agent.TurnDonePayload{StopReason: "interrupted", Model: p.model, Context: compacted})
 	}
 	d.syncStatus("turn_done")
 	d.signal()
@@ -1150,7 +1217,10 @@ func (d *claudeCodeDriver) procExited(ctx context.Context, p *ccProc, werr error
 			}
 			d.emit("error", agent.ErrorPayload{Message: msg, Retryable: true})
 			if wasInTurn { // a turn was under way (not merely a message that never got consumed)
-				d.emit("turn_done", agent.TurnDonePayload{StopReason: "error", Model: p.model})
+				d.sm.Lock()
+				compacted := p.rootUsage.compactionOnly()
+				d.sm.Unlock()
+				d.emit("turn_done", agent.TurnDonePayload{StopReason: "error", Model: p.model, Context: compacted})
 			}
 		}
 		for _, a := range fail {

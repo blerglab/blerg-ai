@@ -6,7 +6,7 @@ package server
 // (HandlePostAssist): it still starts a Terminal session until card #103 moves it to an agent
 // session in 0.5.0.
 
-const terminalDeprecationMessage = "Terminal sessions are deprecated and will be removed in 0.5.0"
+const terminalDeprecationMessage = "Terminal sessions were removed in 0.5.0: start an agent session"
 
 // kindRequiredMessage answers a start that names no kind: it used to mean a Terminal session.
 const kindRequiredMessage = `kind "agent" is required`

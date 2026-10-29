@@ -114,11 +114,21 @@ type rootMessageUsage struct {
 type claudeRootUsage struct {
 	messages map[string]rootMessageUsage
 	overflow bool
+	// The context meter (agent.ContextUsage): the latest main-agent call's prompt and its model,
+	// and whether the CLI compacted the conversation since the turn began.
+	context agent.ContextUsage
+	model   string
 }
 
 func (u *claudeRootUsage) observe(ev *ccLine) {
 	if ev.ParentToolUseID != "" || ev.Message.ID == "" || len(ev.Message.ID) > 256 || ev.Message.Model == "" || !validRootUsage(ev.Message.Usage.usage()) {
 		return
+	}
+	// The prompt the model read on this call is the conversation's size (Claude Code's own
+	// reading): what was not cached, what was read from the cache and what was written to it.
+	if t := ev.Message.Usage; t.InputTokens+t.CacheReadInputTokens+t.CacheCreationInputTokens > 0 {
+		u.context.Tokens = t.InputTokens + t.CacheReadInputTokens + t.CacheCreationInputTokens
+		u.model = ev.Message.Model
 	}
 	if u.messages == nil {
 		u.messages = map[string]rootMessageUsage{}
@@ -151,4 +161,34 @@ func (u *claudeRootUsage) partition(total agent.Usage) map[string]agent.Usage {
 		parts[m.model] = addNativeUsage(parts[m.model], m.usage)
 	}
 	return reconcileRootUsage(total, parts)
+}
+
+// compacted records the CLI's compaction (its compact_boundary line): the reading before it no
+// longer describes the conversation; the next call's does.
+func (u *claudeRootUsage) compacted(preTokens int) {
+	u.context.Tokens = 0
+	u.context.Compacted = true
+	if preTokens > 0 && preTokens <= rootUsageCountCap {
+		u.context.CompactedFrom = preTokens
+	}
+}
+
+// compactionOnly is what a turn that ended without a result line says about its context: that the
+// CLI compacted, when it did (the reading before is gone; without a result line no window is known
+// for a count). Nil otherwise: the previous turn's reading still holds.
+func (u *claudeRootUsage) compactionOnly() *agent.ContextUsage {
+	if !u.context.Compacted {
+		return nil
+	}
+	return &agent.ContextUsage{Compacted: true, CompactedFrom: u.context.CompactedFrom}
+}
+
+// contextUsage is the turn's context reading for its turn_done, with the window the result line
+// reports for the model the reading came from. Nil when the turn said nothing about it.
+func (u *claudeRootUsage) contextUsage(result *ccLine) *agent.ContextUsage {
+	c := u.context
+	if c.Tokens > 0 {
+		c.Window = result.contextWindow(u.model)
+	}
+	return c.Reported()
 }

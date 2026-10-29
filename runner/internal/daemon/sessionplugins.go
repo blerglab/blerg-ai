@@ -9,8 +9,37 @@ import (
 	"unicode"
 
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
+	"github.com/blerglab/blerg-ai/runner/internal/pluginsinstall"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
+
+// Native engines that must initialize a replacement delay their terminal
+// result until that replacement proves it can load the conversation.
+type sessionPluginLoader interface {
+	stageSessionPlugins(apply func(), complete func(bool) bool)
+}
+
+// Each native driver owns its idle gate and snapshot format. Authorization and
+// durable selection stay shared so live loading cannot widen plugin permissions.
+type sessionPluginDriver interface {
+	queuePluginUpdate(func(context.Context)) bool
+	sessionPluginProblem() string
+	prepareSessionPlugins(context.Context, *pluginWorkshop, string, []pluginspec.Entry, bool) (func(), pluginsinstall.Result)
+}
+
+func (d *claudeCodeDriver) sessionPluginProblem() string {
+	if len(d.prefix) > 0 {
+		return "This runtime loads plugins when a session starts — added for your next session."
+	}
+	if d.restrict {
+		return "Restricted sessions cannot load plugins."
+	}
+	return ""
+}
+func (d *claudeCodeDriver) prepareSessionPlugins(ctx context.Context, w *pluginWorkshop, id string, entries []pluginspec.Entry, _ bool) (func(), pluginsinstall.Result) {
+	dirs, res := w.prepare(ctx, id, entries)
+	return func() { d.pluginDirs = dirs }, res
+}
 
 // queuePluginUpdate is deliberately not Interrupt/markStale: applying a plugin
 // must neither cut off a foreground turn nor stop its owned background work.
@@ -120,20 +149,14 @@ func (h *AgentHost) ApplySessionPlugins(msg protocol.ApplySessionPlugins) {
 		h.pluginResult(previous)
 		return
 	}
-	d, ok := sess.loop.(*claudeCodeDriver)
+	d, ok := sess.loop.(sessionPluginDriver)
 	switch {
-	case sess.engine != "" && sess.engine != "claude":
+	case !ok || sess.sandboxed:
 		result.State = "unsupported"
-		result.Error = "this engine supports plugin changes for new sessions only"
-	case !ok:
+		result.Error = "This engine or runtime loads plugins when a session starts — added for your next session."
+	case d.sessionPluginProblem() != "":
 		result.State = "unsupported"
-		result.Error = "live plugins require the Claude Code engine"
-	case sess.sandboxed || len(d.prefix) > 0:
-		result.State = "unsupported"
-		result.Error = "live plugins are not supported in Docker or cluster sessions"
-	case d.restrict:
-		result.State = "unsupported"
-		result.Error = "restricted sessions cannot load plugins"
+		result.Error = d.sessionPluginProblem()
 	case h.cfg.Plugins == nil:
 		result.State = "unsupported"
 		result.Error = "this daemon has no plugin workshop"
@@ -143,15 +166,19 @@ func (h *AgentHost) ApplySessionPlugins(msg protocol.ApplySessionPlugins) {
 		h.pluginResult(result)
 		return
 	}
-	if len(msg.Plugins) > pluginspec.MaxEntries {
+	if len(msg.Plugins)+len(msg.Remove) > pluginspec.MaxEntries {
 		h.mu.Unlock()
 		fail("too many plugins")
 		return
 	}
+	engine := sess.engine
+	if engine == "" {
+		engine = pluginspec.EngineClaude
+	}
 	seen := map[string]bool{}
-	for _, entry := range msg.Plugins {
+	for i, entry := range append(append([]pluginspec.Entry(nil), msg.Plugins...), msg.Remove...) {
 		key := strings.ToLower(entry.Marketplace) + "/" + entry.Plugin
-		if pluginspec.ValidateClaude(entry) != nil || !h.cfg.Plugins.allow.Allows(entry.Marketplace) || seen[key] {
+		if pluginspec.Validate(engine, entry) != nil || (i < len(msg.Plugins) && !h.cfg.Plugins.currentAllow().Allows(entry.Marketplace)) || seen[key] {
 			h.mu.Unlock()
 			fail("plugin is invalid, duplicated, or outside the operator allowlist")
 			return
@@ -164,6 +191,7 @@ func (h *AgentHost) ApplySessionPlugins(msg protocol.ApplySessionPlugins) {
 		return
 	}
 	entries := append([]pluginspec.Entry(nil), msg.Plugins...)
+	remove := append([]pluginspec.Entry(nil), msg.Remove...)
 	result.State = "queued"
 	if sess.pluginRequests == nil {
 		sess.pluginRequests = map[string]protocol.SessionPluginsResult{}
@@ -176,7 +204,7 @@ func (h *AgentHost) ApplySessionPlugins(msg protocol.ApplySessionPlugins) {
 		case <-ctx.Done():
 			return
 		}
-		h.applySessionPluginUpdate(ctx, msg.SessionID, sess, d, msg.RequestID, entries)
+		h.applySessionPluginUpdate(ctx, msg.SessionID, sess, d, msg.RequestID, entries, remove)
 	})
 	if !accepted {
 		delete(sess.pluginRequests, msg.RequestID)
@@ -190,11 +218,20 @@ func (h *AgentHost) ApplySessionPlugins(msg protocol.ApplySessionPlugins) {
 	close(ready)
 }
 
-func (h *AgentHost) applySessionPluginUpdate(ctx context.Context, id string, sess *agentSession, d *claudeCodeDriver, request string, entries []pluginspec.Entry) {
+func (h *AgentHost) applySessionPluginUpdate(ctx context.Context, id string, sess *agentSession, d sessionPluginDriver, request string, entries []pluginspec.Entry, remove []pluginspec.Entry) {
 	result := protocol.SessionPluginsResult{RequestID: request, SessionID: id, State: "failed"}
 	h.mu.Lock()
 	combined := append([]pluginspec.Entry(nil), sess.pluginSpecs...)
 	h.mu.Unlock()
+	for _, removal := range remove {
+		kept := combined[:0]
+		for _, loaded := range combined {
+			if !strings.EqualFold(loaded.Marketplace, removal.Marketplace) || loaded.Plugin != removal.Plugin {
+				kept = append(kept, loaded)
+			}
+		}
+		combined = kept
+	}
 	for _, addition := range entries {
 		found := false
 		for _, loaded := range combined {
@@ -216,28 +253,43 @@ func (h *AgentHost) applySessionPluginUpdate(ctx context.Context, id string, ses
 		h.pluginResult(result)
 		return
 	}
+	removalOnly := len(entries) == 0 && len(remove) > 0
 	entries = combined
 	generation := id + "-" + ccUUID()
-	dirs, res := h.cfg.Plugins.prepare(ctx, generation, entries)
+	apply, res := d.prepareSessionPlugins(ctx, h.cfg.Plugins, generation, entries, removalOnly)
 	if ctx.Err() != nil || len(res.Failed) > 0 || len(res.Skipped) > 0 || res.Installed != len(entries) {
 		h.cfg.Plugins.release(generation)
+		h.cfg.Plugins.releaseCodex(generation)
 		result.Error = "plugin installation failed; the session keeps its previous plugins"
 	} else {
 		h.mu.Lock()
 		live := h.sessions[id] == sess && ctx.Err() == nil
 		if live {
-			result.State = "applied"
-			result.Plugins = entries
-			if err := sess.record.setPluginSelection(entries, result); err != nil {
+			if loader, ok := d.(sessionPluginLoader); ok {
+				result.State = "queued"
+				if err := sess.record.setPluginSelection(sess.pluginSpecs, result); err == nil {
+					loader.stageSessionPlugins(apply, func(loaded bool) bool {
+						return h.completeSessionPluginLoad(ctx, id, sess, request, generation, entries, loaded)
+					})
+					h.mu.Unlock()
+					return
+				}
 				result.State = "failed"
-				result.Plugins = nil
 				result.Error = "could not persist the session plugin selection"
 			} else {
-				d.pluginDirs = dirs
-				sess.pluginSpecs = entries
-				sess.pluginGenerations = append(sess.pluginGenerations, generation)
 				result.State = "applied"
 				result.Plugins = entries
+				if err := sess.record.setPluginSelection(entries, result); err != nil {
+					result.State = "failed"
+					result.Plugins = nil
+					result.Error = "could not persist the session plugin selection"
+				} else {
+					apply()
+					sess.pluginSpecs = entries
+					sess.pluginGenerations = append(sess.pluginGenerations, generation)
+					result.State = "applied"
+					result.Plugins = entries
+				}
 			}
 		} else {
 			result.Error = "session ended before plugins could be applied"
@@ -245,6 +297,7 @@ func (h *AgentHost) applySessionPluginUpdate(ctx context.Context, id string, ses
 		h.mu.Unlock()
 		if result.State != "applied" {
 			h.cfg.Plugins.release(generation)
+			h.cfg.Plugins.releaseCodex(generation)
 		}
 	}
 	h.mu.Lock()
@@ -254,6 +307,34 @@ func (h *AgentHost) applySessionPluginUpdate(ctx context.Context, id string, ses
 	}
 	h.mu.Unlock()
 	h.pluginResult(result)
+}
+
+// The callback runs only after initialization/resume, or after the failed
+// replacement has been reaped and the driver restored its previous settings.
+func (h *AgentHost) completeSessionPluginLoad(ctx context.Context, id string, sess *agentSession, request, generation string, entries []pluginspec.Entry, loaded bool) bool {
+	result := protocol.SessionPluginsResult{RequestID: request, SessionID: id, State: "failed", Error: "The plugin change failed. Your session is continuing with its previous plugins."}
+	h.mu.Lock()
+	if loaded && ctx.Err() == nil && h.sessions[id] == sess {
+		result.State, result.Error, result.Plugins = "applied", "", entries
+		if err := sess.record.setPluginSelection(entries, result); err != nil {
+			result.State, result.Plugins = "failed", nil
+			result.Error = "could not persist the session plugin selection; the session keeps its previous plugins"
+		} else {
+			sess.pluginSpecs = entries
+			sess.pluginGenerations = append(sess.pluginGenerations, generation)
+		}
+	}
+	sess.pluginRequests[request] = result
+	if result.State != "applied" {
+		_ = sess.record.setPluginSelection(sess.pluginSpecs, result)
+	}
+	h.mu.Unlock()
+	if result.State != "applied" {
+		h.cfg.Plugins.release(generation)
+		h.cfg.Plugins.releaseCodex(generation)
+	}
+	h.pluginResult(result)
+	return result.State == "applied"
 }
 
 // Unlike best-effort telemetry writes, a failed selection write must keep the

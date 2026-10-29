@@ -97,6 +97,13 @@ func (h *Hub) requestReposRoot(ctx context.Context, dc *DaemonConn, root string)
 // when the daemon's read pump exits, so a send racing that close is
 // recovered from and reported as not sent.
 func (h *Hub) trySendToDaemon(dc *DaemonConn, data []byte) (sent bool) {
+	if h.planInput != nil {
+		var finish func(bool)
+		data, finish = h.planInput(dc, data)
+		if finish != nil {
+			defer func() { finish(sent) }()
+		}
+	}
 	// Check and enqueue atomically with connection replacement. The send is
 	// nonblocking; no database or network I/O runs under the hub lock.
 	h.mu.RLock()
@@ -185,12 +192,17 @@ func applyReposRoot(ctx context.Context, dbPool *pgxpool.Pool, dc *DaemonConn, r
 // sticks even when that request already gave up.
 func handleReposRootResult(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, dc *DaemonConn, res protocol.ReposRootResult) {
 	if res.OK {
+		previousRoot := dc.CurrentReposRoot()
 		applyReposRoot(ctx, dbPool, dc, res.ReposRoot)
 		repos := res.CheckedOutRepos
 		if repos == nil {
 			repos = []string{}
 		}
 		dc.SetCheckedOutRepos(repos)
+		if previousRoot != dc.CurrentReposRoot() {
+			h.abandonWorkspaceDiscoveryRequests(dc)
+			h.broadcastOwnedDesktop(dc, func() any { return map[string]string{"type": "desktop_sources_changed", "desktop_id": dc.ID} }) //nolint:contextcheck // bounded owner-only source invalidation outlives this request
+		}
 		// The old root's remotes describe folders that are no longer
 		// listed; the new ones arrive in the heartbeat the daemon sends
 		// right after this answer.
@@ -214,7 +226,8 @@ type putReposRootResponse struct {
 // it; 422 {error} with the daemon's reason when it refused (nothing
 // changed); 404 when no such daemon is connected; 504 when it did not answer.
 func (a *API) HandlePutDaemonReposRoot(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.authBrowser(w, r); !ok {
+	principal, ok := a.authBrowser(w, r)
+	if !ok {
 		return
 	}
 	daemonID := r.PathValue("id")
@@ -227,7 +240,7 @@ func (a *API) HandlePutDaemonReposRoot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, problem)
 		return
 	}
-	dc := a.hub.GetHostDaemon(daemonID)
+	dc := a.hub.ownedHostDaemon(r.Context(), principal.Sub, daemonID)
 	// A cluster session pod connects as its own per-session "daemon"; it is
 	// not a workstation anyone configures (GET /api/daemons hides it too).
 	if dc == nil {

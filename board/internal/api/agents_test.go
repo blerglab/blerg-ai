@@ -112,6 +112,7 @@ func TestBoardManifestOperations(t *testing.T) {
 		"list_columns":                  {"GET /api/boards/{id}/columns", "card.read"},
 		"create_column":                 {"POST /api/boards/{id}/columns", "column.write"},
 		"move_column":                   {"POST /api/columns/{id}/move", "column.write"},
+		"list_cards":                    {"GET /api/boards/{id}/cards", "card.read"},
 		"search_cards":                  {"GET /api/boards/{id}/cards/search", "card.read"},
 		"create_card":                   {"POST /api/boards/{id}/cards", "card.write"},
 		"get_card":                      {"GET /api/cards/{id}", "card.read"},

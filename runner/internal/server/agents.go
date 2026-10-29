@@ -83,9 +83,11 @@ var runnerOperations = []agentsmanifest.Operation{
 	{Name: "file_download", Method: "GET", Path: "/api/runner/sessions/{id}/artifacts/{aid}/download", Cap: coreAuthRunnerCap, Idempotent: true,
 		Summary: "One file's bytes as an attachment."},
 	{Name: "file_delete", Method: "DELETE", Path: "/api/runner/sessions/{id}/artifacts/{aid}", Cap: coreAuthRunnerCap, Idempotent: true,
-		Summary: "Delete one of the session's files, whichever origin it came from."},
+		Summary: "Delete one of the session's files: the owner or an administrator any file, a person their own attachment."},
 	{Name: "upload", Method: "POST", Path: "/api/runner/sessions/{id}/uploads", Cap: coreAuthRunnerCap,
 		Summary: "Attach a person's file to the session (raw body, X-Artifact-Name header), for the agent to fetch."},
+	{Name: "storage_increase", Method: "POST", Path: "/api/runner/sessions/{id}/storage", Cap: coreAuthRunnerCap,
+		Summary: "An administrator raises the session's attachment total by one step, up to the install maximum."},
 	{Name: "me", Method: "GET", Path: "/api/runner/me", Cap: coreAuthRunnerCap, Idempotent: true,
 		Summary: "What the calling credential is: kind, subject, audience, capabilities, expiry."},
 }
@@ -184,6 +186,7 @@ func (a *API) HandleRunnerMe(w http.ResponseWriter, r *http.Request) {
 func RegisterRunnerContractRoutes(mux *http.ServeMux, a *API) {
 	// Documented browser integration primitive; its own handler refuses every non-human credential.
 	a.RegisterWorkspaceFileRoutes(mux)
+	a.RegisterDesktopRoutes(mux)
 	// Discovery: public, no auth (see HandleAgents).
 	mux.HandleFunc("GET /agents", a.HandleAgents)
 	mux.HandleFunc("GET /openapi.json", handleOpenAPI)
@@ -215,6 +218,7 @@ func RegisterRunnerContractRoutes(mux *http.ServeMux, a *API) {
 	mux.HandleFunc("GET /api/runner/sessions/{id}/artifacts/{aid}/download", a.HandleRunnerFileDownload)
 	mux.HandleFunc("DELETE /api/runner/sessions/{id}/artifacts/{aid}", a.HandleRunnerFileDelete)
 	mux.HandleFunc("POST /api/runner/sessions/{id}/uploads", a.HandleRunnerUpload)
+	mux.HandleFunc("POST /api/runner/sessions/{id}/storage", a.HandleRunnerIncreaseStorage)
 	// The UI package the manifest advertises (packages.go): public, like /agents.
 	mux.HandleFunc("GET /packages/{$}", handlePackagesIndex)
 	mux.HandleFunc("GET /packages/{file}", handlePackageFile)

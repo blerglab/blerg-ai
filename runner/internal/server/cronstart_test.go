@@ -17,6 +17,7 @@ import (
 
 	"github.com/blerglab/blerg-ai/runner/internal/cron"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/idempotency"
 	"github.com/blerglab/blerg-ai/runner/internal/mcpgw"
 )
 
@@ -401,7 +402,7 @@ func TestCronStartCluster(t *testing.T) {
 	}
 
 	// The idempotency key is the run's, in the cron's own (token independent) scope.
-	key, err := db.GetIdempotencyKey(ctx, cf.pool, "cron:"+c.ID, run.IdempotencyKey())
+	key, err := db.GetIdempotencyKey(ctx, cf.pool, idempotency.Scope("cron", c.ID), run.IdempotencyKey())
 	if err != nil || key == nil || key.SessionID != sid {
 		t.Errorf("idempotency row = %+v, %v", key, err)
 	}
@@ -505,6 +506,7 @@ func TestCronStartPinnedDaemon(t *testing.T) {
 	dc2.SetMCPGateway(true)
 	dc2.SetRestrictTools(true)
 	dc2.SetSandboxAvailable(true)
+	fixtureOwnDesktop(t, cf.pool, dc2, mcpAcct)
 	cf.hub.Register(dc2)
 
 	// Pinned to the fixture's (higher id) daemon: it, and only it, gets the spawn.
@@ -806,7 +808,7 @@ func TestCronStartNeverUsesTheOperatorCredential(t *testing.T) {
 		if jobs != 0 || secrets != 0 {
 			t.Errorf("%d Jobs and %d Secrets created", jobs, secrets)
 		}
-		if k, _ := db.GetIdempotencyKey(ctx, cf.pool, "cron:"+c.ID, run.IdempotencyKey()); k != nil {
+		if k, _ := db.GetIdempotencyKey(ctx, cf.pool, idempotency.Scope("cron", c.ID), run.IdempotencyKey()); k != nil {
 			t.Error("the idempotency key of a failed start was left behind")
 		}
 		if n := cf.count("session_mcp_grants"); n != 0 {

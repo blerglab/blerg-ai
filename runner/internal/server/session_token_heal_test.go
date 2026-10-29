@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/desktopauth"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/mcpgw"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
@@ -175,6 +176,8 @@ func assertTokenDelivered(t *testing.T, api *API, dc *DaemonConn, pool *pgxpool.
 func TestDaemonHelloHealsARunningSessionWithADeadToken(t *testing.T) {
 	api, hub, dc, pool := spawnTokenFixture(t)
 	ctx := context.Background()
+	ownedToken := "bdt_" + strings.Repeat("a", 64)
+	desktopFakeCore(t, api, map[string]desktopauth.Binding{ownedToken: *dc.DesktopBinding})
 
 	sessionID, msg := spawnViaREST(t, api, dc, "app")
 	if err := db.UpdateSessionStatus(ctx, pool, sessionID, "running", nil); err != nil {
@@ -197,7 +200,7 @@ func TestDaemonHelloHealsARunningSessionWithADeadToken(t *testing.T) {
 		}
 		defer conn.Close()
 		if err := conn.WriteJSON(protocol.DaemonHello{
-			Type: "daemon_hello", Name: dc.Name, Token: spawnTokenDaemonTok, ProtocolVersion: "1",
+			Type: "daemon_hello", Name: dc.Name, Token: ownedToken, DesktopID: dc.ID, ProtocolVersion: "1",
 			ActiveSessions: []string{sessionID, stoppedID}, SessionTokenFile: true,
 		}); err != nil {
 			t.Fatal(err)
@@ -290,7 +293,10 @@ func dialDaemonHello(t *testing.T, srvURL string, hello protocol.DaemonHello) *w
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	hello.Type, hello.Token, hello.ProtocolVersion = "daemon_hello", spawnTokenDaemonTok, "1"
+	hello.Type, hello.ProtocolVersion = "daemon_hello", "1"
+	if hello.Token == "" {
+		hello.Token = spawnTokenDaemonTok
+	}
 	if err := conn.WriteJSON(hello); err != nil {
 		t.Fatal(err)
 	}
@@ -425,6 +431,8 @@ func TestNoHealForADaemonWithoutTheCapability(t *testing.T) {
 func TestSessionTokenResultFailureRevokesForARetry(t *testing.T) {
 	api, hub, dc, pool := spawnTokenFixture(t)
 	ctx := context.Background()
+	ownedToken := "bdt_" + strings.Repeat("a", 64)
+	desktopFakeCore(t, api, map[string]desktopauth.Binding{ownedToken: *dc.DesktopBinding})
 	sessionID, _ := spawnViaREST(t, api, dc, "app")
 	if err := db.UpdateSessionStatus(ctx, pool, sessionID, "running", nil); err != nil {
 		t.Fatal(err)
@@ -433,7 +441,7 @@ func TestSessionTokenResultFailureRevokesForARetry(t *testing.T) {
 
 	srv := httptest.NewServer(hub.ServeDaemon(spawnTokenDaemonTok, pool))
 	defer srv.Close()
-	conn := dialDaemonHello(t, srv.URL, protocol.DaemonHello{Name: dc.Name, SessionTokenFile: true, ActiveSessions: []string{sessionID}})
+	conn := dialDaemonHello(t, srv.URL, protocol.DaemonHello{Name: dc.Name, Token: ownedToken, DesktopID: dc.ID, SessionTokenFile: true, ActiveSessions: []string{sessionID}})
 	tokens := tokenReader(t, conn)
 	got := collectTokens(tokens, 500*time.Millisecond)
 	if len(got) != 1 || liveTokens(t, pool, sessionID) != 1 {

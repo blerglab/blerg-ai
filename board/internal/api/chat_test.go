@@ -348,3 +348,53 @@ func TestChatProxyReadsThePersonsPreferences(t *testing.T) {
 		t.Fatalf("service = %d %s (runner calls %d -> %d)", resp.StatusCode, body, n, len(fake.seen()))
 	}
 }
+
+// #231 review, finding 1: the board reaches the runner with its shared key, which has no account,
+// so a file deleted from the board's chat was always refused. The board now names the signed-in
+// person it has let change the session (and whether they are an administrator) on the file
+// routes, and the runner decides for them. A principal that is not a person names nobody.
+func TestChatProxyFileRoutesNameThePersonForTheRunner(t *testing.T) {
+	call, _, rsID, fake := chatFixture(t)
+	base := "/api/chat/sessions/" + rsID
+	last := func() rawCall {
+		seen := fake.seen()
+		return seen[len(seen)-1]
+	}
+	for _, rt := range []struct{ method, path string }{
+		{"GET", base + "/artifacts"},
+		{"DELETE", base + "/artifacts/a9"},
+		{"POST", base + "/storage"},
+	} {
+		resp := call(rt.method, rt.path, memberToken(t), nil)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s %s = %d", rt.method, rt.path, resp.StatusCode)
+		}
+		if c := last(); c.Headers["X-Blerg-Acting-Account"] != "test-human" || c.Headers["X-Blerg-Acting-Admin"] != "" {
+			t.Errorf("member %s %s: runner saw %+v", rt.method, rt.path, c.Headers)
+		}
+		resp = call(rt.method, rt.path, adminToken(t), nil)
+		_ = resp.Body.Close()
+		if c := last(); c.Headers["X-Blerg-Acting-Account"] != "test-human" || c.Headers["X-Blerg-Acting-Admin"] != "1" {
+			t.Errorf("admin %s %s: runner saw %+v", rt.method, rt.path, c.Headers)
+		}
+	}
+	// (A browser cannot name anyone itself: the proxy forwards only the headers it builds;
+	// packages/chat/proxy/go's TestFileRoutesNameTheActingPerson proves it.)
+	// A service principal with card.write names nobody: the runner then refuses the delete.
+	before := len(fake.seen())
+	svc := testCoreToken(t, "service", []string{"card.read", "card.write"})
+	resp := call("DELETE", base+"/artifacts/a9", svc, nil)
+	_ = resp.Body.Close()
+	if seen := fake.seen(); len(seen) == before+1 {
+		if _, named := seen[len(seen)-1].Headers["X-Blerg-Acting-Account"]; named {
+			t.Fatal("a service principal was named as a person")
+		}
+	}
+	// Raising storage is a person's act.
+	resp = call("POST", base+"/storage", svc, nil)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("service storage raise = %d", resp.StatusCode)
+	}
+}

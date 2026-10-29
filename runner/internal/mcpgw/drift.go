@@ -381,9 +381,14 @@ func (g *Gateway) reconcileListing(ctx context.Context, gr *db.MCPGrant, st *gra
 	listed = map[string]string{}
 	if gr.Builtin != "" {
 		// The session's board level (0.4.4), read now: a lowered level lists fewer tools.
-		level := g.boardGrantLevel(ctx, gr)
+		level, person := g.boardGrantAccess(ctx, gr)
 		for _, t := range tools {
-			if entry, ok := gr.Tools[t.Name]; ok && g.effectiveMode(entry, true) != "off" && toolPinOK(gr, entry, t.Name, t.Hash) && BoardLevelAllows(level, t.Name) {
+			entry, ok := gr.Tools[t.Name]
+			if boardColumnToolSet[t.Name] {
+				// Offered by the level and a person behind the access, not by a grant row.
+				ok, entry = person != nil, db.MCPGrantTool{Mode: ModeAllow}
+			}
+			if ok && g.effectiveMode(entry, true) != "off" && toolPinOK(gr, entry, t.Name, t.Hash) && BoardLevelAllows(level, t.Name) {
 				serve = append(serve, t)
 			}
 		}

@@ -56,6 +56,22 @@ function memoryStorage(): Storage {
 const realNow = launchClock.now
 
 describe('launchCache', () => {
+  it('rejects an in-flight account or ownership-generation response', async () => {
+    token = jwt('acct-a'); clearLaunchCache()
+    let finish!: (response: Response) => void
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(resolve => { finish = resolve })))
+    const pending = fetchDaemons()
+    token = jwt('acct-b')
+    finish(new Response(JSON.stringify([{ id: 'desktop-a', repos_root: '/private-a' }]), { status: 200 }))
+    await expect(pending).rejects.toThrow('signed out')
+    expect(readLaunchCache().daemons).toBeUndefined()
+    const stale = fetchDaemons()
+    clearLaunchCache()
+    finish(new Response(JSON.stringify([{ id: 'desktop-b' }]), { status: 200 }))
+    await expect(stale).rejects.toThrow('signed out')
+    expect(readLaunchCache().daemons).toBeUndefined()
+  })
+
   let storage: Storage
 
   beforeEach(() => {
@@ -67,6 +83,23 @@ describe('launchCache', () => {
   afterEach(() => {
     launchClock.now = realNow
     vi.unstubAllGlobals()
+  })
+
+  it('keys desktop models by revision/generation and rejects older inventory replies', async () => {
+    let generation = 'first'
+    let finishRepos!: (response: Response) => void
+    vi.stubGlobal('fetch', vi.fn((url: string) => url === '/api/daemons'
+      ? Promise.resolve(new Response(JSON.stringify([{ id: 'desktop', ownership_revision: 1, connection_generation: generation }]), { status: 200 }))
+      : new Promise<Response>(resolve => { finishRepos = resolve })))
+    await fetchDaemons()
+    launchModelsCache.put('hermes', 'desktop', { models: [{ id: 'private-old-model' }], source: 'daemon' } as never)
+    const pending = fetchRepos()
+    generation = 'second'
+    await fetchDaemons()
+    expect(launchModelsCache.get('hermes', 'desktop')).toBeUndefined()
+    finishRepos(new Response(JSON.stringify({ repos: [{ name: 'old-private-repository' }] }), { status: 200 }))
+    await expect(pending).rejects.toThrow('signed out')
+    expect(readLaunchCache().repos).toBeUndefined()
   })
 
   it('keeps each part with the time it arrived, in this tab only (sessionStorage), never localStorage', async () => {

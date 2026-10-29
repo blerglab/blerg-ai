@@ -3,22 +3,29 @@
 // hunk headers, both sides' line numbers, long unchanged context folded, and each file's code
 // coloured by its extension with the person's code colours. The patch is untrusted text: it is
 // parsed (model/patch.ts) and drawn by React as text and token spans, never as markup.
-import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { ReferenceText } from './RefLinks'
+import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { langFromName, type CodeLang } from '../model/codeLang'
 import { HIGHLIGHT_MAX_CHARS, highlightSync, splitTokenLines, useHighlighterReady, type Token } from '../model/highlight'
 import { foldContext, parsePatch, splitRows, patchSummaryText, type PatchFile, type PatchLine, type PatchCommit } from '../model/patch'
 import { createDiffAnchor, diffAnchorContains, type DiffPoint } from '../model/diffSelection'
 import type { Anchor, ReviewRequest } from '../model/review'
+import { useLineWrap, wrapKindOf } from '../model/lineWrap'
+import { WrapToggle } from './ViewerToolbar'
 import './diff.css'
 
 /** Lines of one file drawn before "Show more" (and how many more each click adds). */
 export const DIFF_FILE_LINES = 5000
 /** Files are drawn open until this many lines are on the page; the rest start closed. */
 export const DIFF_OPEN_LINES = 10000
+/** A commit file preview renders this many lines before an explicit full-file request. */
+const COMMIT_FILE_LINES = 400
+const COMMIT_OPEN_FILES = 5
 /** Side by side needs at least this much width. */
 const SPLIT_MIN_WIDTH = 900
 
 type Mode = 'unified' | 'split'
+const NO_REQUESTS: ReviewRequest[] = []
 
 function useWide(): boolean {
   const query = `(min-width: ${SPLIT_MIN_WIDTH}px)`
@@ -104,11 +111,11 @@ interface SelectionPaint {
   renderDraft?: (anchor: Anchor) => ReactNode
 }
 
-function FileBlock({ file, index, mode, ready, startOpen, bare = false, selected, requests = [], focusedId, onPick, onComment, renderThread, draftAnchor, renderDraft }: {
-  file: PatchFile; index: number; mode: Mode; ready: boolean; startOpen: boolean; bare?: boolean
+const FileBlock = memo(function FileBlock({ file, index, mode, ready, startOpen, lineLimit = DIFF_FILE_LINES, fullFile = false, bare = false, selected, requests = [], focusedId, onPick, onComment, renderThread, draftAnchor, renderDraft }: {
+  file: PatchFile; index: number; mode: Mode; ready: boolean; startOpen: boolean; lineLimit?: number; fullFile?: boolean; bare?: boolean
 } & SelectionPaint) {
   const [open, setOpen] = useState(startOpen)
-  const [limit, setLimit] = useState(DIFF_FILE_LINES)
+  const [limit, setLimit] = useState(lineLimit)
   const [unfolded, setUnfolded] = useState<ReadonlySet<string>>(() => new Set())
   const focused = requests.find(request => request.id === focusedId && request.range.fileIndex === index + 1)
   const fileDraft = draftAnchor?.diff?.fileIndex === index + 1 ? draftAnchor : null
@@ -118,9 +125,14 @@ function FileBlock({ file, index, mode, ready, startOpen, bare = false, selected
   const hl = useMemo(() => {
     const m = new Map<PatchLine, Token[]>()
     if (!revealed) return m
-    for (const h of file.hunks) for (const [k, v] of hunkTokens(lang, h.lines, ready)) m.set(k, v)
+    let remaining = fullFile ? limit : Number.POSITIVE_INFINITY
+    for (const h of file.hunks) {
+      if (--remaining <= 0) break
+      for (const [k, v] of hunkTokens(lang, fullFile ? h.lines.slice(0, remaining) : h.lines, ready)) m.set(k, v)
+      remaining -= h.lines.length
+    }
     return m
-  }, [file, lang, ready, revealed])
+  }, [file, lang, ready, revealed, limit, fullFile])
   const total = lineCount(file)
   const cols = mode === 'split' ? 4 : 3
 
@@ -165,7 +177,7 @@ function FileBlock({ file, index, mode, ready, startOpen, bare = false, selected
   }
   const commentable = onComment ? ' diff-code-commentable' : ''
 
-  let budget = limit
+  let budget = revealed ? limit : 0
   const body: ReactNode[] = []
   const renderedThreads = new Set<string>()
   let renderedDraft = false
@@ -271,7 +283,7 @@ function FileBlock({ file, index, mode, ready, startOpen, bare = false, selected
       appendRows(lines, hi, key)
     }
   }
-  const shown = limit - budget
+  const shown = revealed ? limit - budget : 0
   if (focused && focusedLines.size < focused.range.end - focused.range.start + 1) {
     const range = focused.range
     const hunk = file.hunks[range.hunk - 1]
@@ -290,7 +302,7 @@ function FileBlock({ file, index, mode, ready, startOpen, bare = false, selected
   return (
     <section className={`diff-file${bare ? ' diff-file-bare' : ''}`} id={bare ? undefined : `diff-file-${index}`} data-testid="diff-file">
       {!bare && <header className="diff-file-head">
-        <button type="button" className="diff-file-toggle" aria-expanded={revealed} onClick={() => setOpen(o => !o)}>
+        <button type="button" className="diff-file-toggle" aria-label={`${revealed ? 'Collapse' : 'Expand'} ${fileTitle(file)}`} aria-expanded={revealed} onClick={() => setOpen(o => !o)}>
           <span aria-hidden="true">{revealed ? '▾' : '▸'}</span>
         </button>
         <span className={`diff-status diff-status-${file.status}`} title={STATUS_WORD[file.status]}>{STATUS_LABEL[file.status]}</span>
@@ -317,21 +329,23 @@ function FileBlock({ file, index, mode, ready, startOpen, bare = false, selected
           {shown < total && (
             <p className="diff-more">
               Showing {shown} of {total} lines.{' '}
-              <button type="button" className="artifact-link" onClick={() => setLimit(n => n + DIFF_FILE_LINES)}>Show more</button>
+              <button type="button" className="artifact-link" onClick={() => setLimit(n => fullFile ? total : n + lineLimit)}>{fullFile ? 'Show full file' : 'Show more'}</button>
             </p>
           )}
         </div>
       )}
     </section>
   )
-}
+})
 
 function CommitHead({ commit, index, target }: { commit: PatchCommit; index: number; target: boolean }) {
+  const messageBody = commit.lines.filter(l => /^ {4}/.test(l)).slice(1).map(l => l.slice(4)).join('\n').trim()
   const rest = commit.lines.filter(l => l.trim() !== '' && !/^ {4}/.test(l))
   return (
     <div className={`diff-commit${target ? ' target' : ''}`} id={`diff-commit-${index}`} data-testid="diff-commit">
       <span className="diff-commit-sha" title={commit.sha}>{commit.sha.slice(0, 7)}</span>
-      <span className="diff-commit-subject">{commit.subject || '(no message)'}</span>
+      <span className="diff-commit-subject"><ReferenceText text={commit.subject || '(no message)'} /></span>
+      {messageBody && <span className="diff-commit-meta"><ReferenceText text={messageBody} /></span>}
       {rest.length > 0 && <span className="diff-commit-meta">{rest.join(' · ')}</span>}
     </div>
   )
@@ -345,7 +359,9 @@ export function InlineDiff({ file }: { file: PatchFile }) {
 }
 
 /** `commit`: a sha (or the start of one) to open at: its section is scrolled to and marked. */
-export default function DiffView({ text, commit, selection, onSelection, requests = [], focusedId, onComment, renderThread, renderDraft, draftAnchor }: {
+export default function DiffView({ text, commit, selection, onSelection, requests = NO_REQUESTS, focusedId, onComment, renderThread, renderDraft, draftAnchor, collapseLarge = false }: {
+  /** Commit previews start large patches closed and cap each opened body. */
+  collapseLarge?: boolean
   text: string; commit?: string | null
   selection?: Anchor | null
   onSelection?: (anchor: Anchor | null) => void
@@ -412,6 +428,11 @@ export default function DiffView({ text, commit, selection, onSelection, request
   const [mode, setMode] = useState<Mode>('unified')
   const [copied, setCopied] = useState(false)
   const effective: Mode = wide ? mode : 'unified'
+  // Line wrap (#265) follows the files' kind; a review always wraps, so its threads fit beside the code.
+  const wrapKind = useMemo(() => wrapKindOf(patch.files.map(f => f.path)), [patch])
+  const [wrapOn] = useLineWrap(wrapKind)
+  const reviewing = !!(onSelection || onComment)
+  const wrapped = reviewing || wrapOn
   const anyLang = useMemo(() => patch.files.some(f => langFromName(f.path) !== null), [patch])
   const ready = useHighlighterReady(anyLang)
   const mainRef = useRef<HTMLDivElement | null>(null)
@@ -456,16 +477,17 @@ export default function DiffView({ text, commit, selection, onSelection, request
     else if (box.bottom > view.bottom) nav.scrollTop += box.bottom - view.bottom
   }, [patch, currentIndex])
   const canCopy = typeof navigator !== 'undefined' && !!navigator.clipboard
-  // Files start open until DIFF_OPEN_LINES lines are on the page; the rest start closed.
+  // Large commit previews start closed. Published patches retain their existing open budget.
   const opens = useMemo(() => {
     const out: boolean[] = []
+    const large = collapseLarge && (patch.files.length > COMMIT_OPEN_FILES || patch.adds + patch.dels > COMMIT_FILE_LINES)
     let onPage = 0
     for (const f of patch.files) {
-      out.push(onPage < DIFF_OPEN_LINES)
+      out.push(!large && onPage < DIFF_OPEN_LINES)
       if (onPage < DIFF_OPEN_LINES) onPage += lineCount(f)
     }
     return out
-  }, [patch])
+  }, [patch, collapseLarge])
 
   useEffect(() => {
     if (target < 0) return
@@ -474,7 +496,9 @@ export default function DiffView({ text, commit, selection, onSelection, request
   }, [target])
 
   if (patch.files.length === 0) {
-    return <pre className="artifact-text" data-testid="artifact-text">{text}</pre>
+    return patch.commits.length
+      ? <div className="diff-view">{patch.commits.map((c, i) => <CommitHead key={c.sha} commit={c} index={i} target={i === target} />)}</div>
+      : <pre className="artifact-text" data-testid="artifact-text">{text}</pre>
   }
 
   const paths = new Set(patch.files.map(f => f.path))
@@ -486,7 +510,7 @@ export default function DiffView({ text, commit, selection, onSelection, request
   }
 
   return (
-    <div className="diff-view" data-testid="diff-view">
+    <div className={`diff-view ${wrapped ? 'is-wrapped' : 'is-unwrapped'}`} data-testid="diff-view">
       <div className="diff-toolbar">
         <span className="diff-summary" data-testid="diff-summary">
           {patchSummaryText({ files: paths.size, adds: patch.adds, dels: patch.dels })}
@@ -498,6 +522,7 @@ export default function DiffView({ text, commit, selection, onSelection, request
             <button type="button" className="artifact-btn" aria-pressed={effective === 'split'} onClick={() => setMode('split')}>Side by side</button>
           </span>
         )}
+        {!reviewing && <WrapToggle kind={wrapKind} text />}
         {phone && patch.files.length > 1 && (
           <select className="diff-file-picker" aria-label="Files" title={patchSummaryText({ files: paths.size, adds: patch.adds, dels: patch.dels })} data-testid="diff-file-picker" value={currentIndex} onChange={e => jump(Number(e.target.value))}>
             {patch.files.map((f, i) => <option key={i} value={i}>{`${f.path} (+${f.adds} −${f.dels})`}</option>)}
@@ -545,7 +570,7 @@ export default function DiffView({ text, commit, selection, onSelection, request
             return (
               <Fragment key={i}>
                 {startsCommit && <CommitHead commit={patch.commits[f.commit as number]} index={f.commit as number} target={f.commit === target} />}
-                <FileBlock file={f} index={i} mode={effective} ready={ready} startOpen={opens[i]}
+                <FileBlock file={f} index={i} mode={effective} ready={ready} startOpen={opens[i]} lineLimit={collapseLarge ? COMMIT_FILE_LINES : DIFF_FILE_LINES} fullFile={collapseLarge}
                   selected={selected} requests={requestRanges} focusedId={focusedId} onPick={onSelection ? pick : undefined}
                   onComment={onComment ? comment : undefined} renderThread={renderThread} renderDraft={renderDraft} draftAnchor={validDraft} />
               </Fragment>

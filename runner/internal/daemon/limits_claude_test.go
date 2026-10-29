@@ -16,17 +16,17 @@ func TestClaudeRateLimitReset(t *testing.T) {
 		want time.Time // zero: no reset
 	}{
 		{"Claude AI usage limit reached|1792170000", time.Unix(1792170000, 0)},
-		{"5-hour limit reached ∙ resets 3pm", time.Date(2026, 10, 16, 15, 0, 0, 0, time.UTC)},
-		{"You've hit your limit · resets 3pm (America/Los_Angeles)", time.Date(2026, 10, 16, 15, 0, 0, 0, la)},
-		{"Session limit reached ∙ resets 1:05pm", time.Date(2026, 10, 17, 13, 5, 0, 0, time.UTC)},
-		{"limit reached, resets 14:00", time.Date(2026, 10, 16, 14, 0, 0, 0, time.UTC)},
-		{"Weekly limit reached ∙ resets Oct 20, 3pm", time.Date(2026, 10, 20, 15, 0, 0, 0, time.UTC)},
-		{"Weekly limit reached ∙ resets Oct 22 at 9am", time.Date(2026, 10, 22, 9, 0, 0, 0, time.UTC)},
+		{"5-hour limit reached ∙ resets 3pm", time.Date(2026, 10, 16, 15, 1, 0, 0, time.UTC)},
+		{"You've hit your limit · resets 3pm (America/Los_Angeles)", time.Date(2026, 10, 16, 15, 1, 0, 0, la)},
+		{"Session limit reached ∙ resets 1:05pm", time.Date(2026, 10, 16, 13, 6, 0, 0, time.UTC)},
+		{"limit reached, resets 14:00", time.Date(2026, 10, 16, 14, 1, 0, 0, time.UTC)},
+		{"Weekly limit reached ∙ resets Oct 20, 3pm", time.Date(2026, 10, 20, 15, 1, 0, 0, time.UTC)},
+		{"Weekly limit reached ∙ resets Oct 22 at 9am", time.Date(2026, 10, 22, 9, 1, 0, 0, time.UTC)},
 		{"Weekly limit reached ∙ resets Jan 2 at 9am", time.Time{}}, // further than any window
 		{"API Error: Rate limit reached", time.Time{}},
 		{"Claude AI usage limit reached|1700000000", time.Time{}}, // in the past
 		{"resets 25pm", time.Time{}},
-		{"resets 3pm (Not/AZone)", time.Date(2026, 10, 16, 15, 0, 0, 0, time.UTC)},
+		{"resets 3pm (Not/AZone)", time.Date(2026, 10, 16, 15, 1, 0, 0, time.UTC)},
 	} {
 		got, ok := claudeRateLimitReset(c.text, now)
 		if c.want.IsZero() {
@@ -40,7 +40,7 @@ func TestClaudeRateLimitReset(t *testing.T) {
 		}
 	}
 	// Across the new year.
-	if got, ok := claudeRateLimitReset("resets Jan 2, 9am", time.Date(2026, 12, 30, 8, 0, 0, 0, time.UTC)); !ok || !got.Equal(time.Date(2027, 1, 2, 9, 0, 0, 0, time.UTC)) {
+	if got, ok := claudeRateLimitReset("resets Jan 2, 9am", time.Date(2026, 12, 30, 8, 0, 0, 0, time.UTC)); !ok || !got.Equal(time.Date(2027, 1, 2, 9, 1, 0, 0, time.UTC)) {
 		t.Errorf("across the new year: %v (%v)", got, ok)
 	}
 }

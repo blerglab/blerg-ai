@@ -30,6 +30,11 @@ export interface SessionTranscript {
   // hasMore). A live event can be held past the gap still to replay, so a resume starts here
   // rather than at lastSeq (see resumeSeq). Absent when no forward replay is under way.
   replayCursor?: number
+  // How far the transcript held is complete: every seq up to it was replayed (a replay_done covers
+  // every seq up to its last_seq) or held in order since. A live event past a hole does not move it,
+  // so a later visit resumes from here and the hole is replayed (#281). Absent on a transcript a host
+  // built itself: resumeSeq then uses lastSeq, as before.
+  contigSeq?: number
   // client clock − server clock (ms), from the last replay's server_time.
   // Event ts values are server time; subtract this from Date.now() to get
   // "server now" so elapsed times don't inherit the browser's clock skew.
@@ -62,8 +67,32 @@ const empty = (): SessionTranscript => ({
   hasMore: false,
   hasOlder: false,
   firstSeq: 0,
+  contigSeq: 0,
   clockOffset: 0,
 })
+
+/** The watermark moved over the events held in order after it (`events` sorted by seq, seq-less
+ *  last). Found by bisection, then walked only as far as the held seqs run on without a hole, so a
+ *  live event appended past a hole costs nothing, and one that fills it walks the run it joins. */
+function advanceContig(contig: number | undefined, events: readonly AgentEvent[], newest?: number): number | undefined {
+  if (contig == null) return contig
+  // A single event that is not the next seq cannot move it.
+  if (newest !== undefined && newest !== contig + 1) return contig
+  let lo = 0, hi = events.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    const seq = events[mid].seq
+    if (seq != null && seq <= contig) lo = mid + 1
+    else hi = mid
+  }
+  let at = contig
+  for (let i = lo; i < events.length; i++) {
+    const seq = events[i].seq
+    if (seq == null || seq !== at + 1) break
+    at = seq
+  }
+  return at
+}
 
 function offsetFrom(serverTime: string | undefined, fallback: number): number {
   const t = serverTime ? Date.parse(serverTime) : NaN
@@ -151,6 +180,7 @@ export const useTranscriptStore = create<TranscriptState>((set) => ({
             thinking: nextThinking(cur.thinking ?? false, ev),
             answering: nextAnswering(cur.answering ?? false, ev),
             lastSeq: Math.max(cur.lastSeq, ev.seq ?? 0),
+            contigSeq: advanceContig(cur.contigSeq, events, ev.seq ?? -1),
           },
         },
       }
@@ -191,7 +221,7 @@ export const useTranscriptStore = create<TranscriptState>((set) => ({
         events = [...cur.events, ...fresh].sort(bySeq)
         handOn(cur.events, events, ids)
       }
-      return { sessions: { ...state.sessions, [sessionId]: { ...cur, events, streaming, reasoning, thinking, answering, lastSeq } } }
+      return { sessions: { ...state.sessions, [sessionId]: { ...cur, events, streaming, reasoning, thinking, answering, lastSeq, contigSeq: fresh.length > 0 ? advanceContig(cur.contigSeq, events) : cur.contigSeq } } }
     }),
 
   appendStreaming: (sessionId, delta) =>
@@ -217,6 +247,8 @@ export const useTranscriptStore = create<TranscriptState>((set) => ({
               firstSeq: first > 0 && (cur.firstSeq === 0 || first < cur.firstSeq) ? first : cur.firstSeq,
               clockOffset: offsetFrom(done.serverTime, cur.clockOffset),
               lastSeq: Math.max(cur.lastSeq, done.lastSeq),
+              // The tail covers every seq up to its last_seq.
+              contigSeq: cur.contigSeq == null ? undefined : advanceContig(Math.max(cur.contigSeq, done.lastSeq), cur.events),
             },
           },
         }
@@ -231,6 +263,8 @@ export const useTranscriptStore = create<TranscriptState>((set) => ({
             replayCursor: done.hasMore ? done.lastSeq : undefined,
             clockOffset: offsetFrom(done.serverTime, cur.clockOffset),
             lastSeq: Math.max(cur.lastSeq, done.lastSeq),
+            // A forward page covers every seq up to its last_seq.
+            contigSeq: cur.contigSeq == null ? undefined : advanceContig(Math.max(cur.contigSeq, done.lastSeq), cur.events),
           },
         },
       }
@@ -293,5 +327,9 @@ export const emptyTranscript = empty()
  *  is unfinished, where that replay reached (a live event held past the gap must not skip it). */
 export function resumeSeq(t: SessionTranscript | undefined): number {
   if (!t) return 0
-  return t.hasMore && t.replayCursor != null ? Math.min(t.replayCursor, t.lastSeq) : t.lastSeq
+  const reached = t.hasMore && t.replayCursor != null ? Math.min(t.replayCursor, t.lastSeq) : t.lastSeq
+  // A hole a live event left (seq 3 missing behind a held 4): resume before it, so it is replayed.
+  // A zero watermark counts too: an empty tail can finish before the first event, and a live seq 2
+  // with seq 1 missed must resume from 0.
+  return t.contigSeq != null ? Math.min(reached, t.contigSeq) : reached
 }

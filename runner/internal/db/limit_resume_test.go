@@ -3,6 +3,8 @@ package db_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -225,5 +227,104 @@ func TestLimitResumeLockWaitBlocksBriefly(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// This fixture UUID has zero jitter, so only the grace prevents an early claim.
+func TestLimitResumeGracePreventsEarlyClaim(t *testing.T) {
+	p := endTestPool(t)
+	ctx := context.Background()
+	id := "00000000-0000-4000-8000-000000000004"
+	endTestSession(t, p, id, "idle")
+	check := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := p.Exec(ctx, `UPDATE sessions SET kind='agent' WHERE id=$1`, id)
+	check(err)
+	check(db.SetLimitResume(ctx, p, id, true, "auth"))
+	check(db.TrackLimitResumeTurn(ctx, p, id, "turn", "chat", time.Now().Add(-time.Hour), 1))
+	reset := time.Now().Add(-10 * time.Second)
+	check(db.RecordLimitRefusal(ctx, p, id, "claude", "turn", &reset, 2, time.Now()))
+	due, err := db.ListDueLimitResumes(ctx, p)
+	check(err)
+	if len(due) > 0 {
+		t.Error("listed before reset grace elapsed")
+	}
+	claimed, err := db.ClaimLimitResumeAttempt(ctx, p, id, "early")
+	check(err)
+	if claimed {
+		t.Fatal("claimed before reset grace elapsed")
+	}
+}
+
+func TestLimitResumeStaggerAndSQLAgreement(t *testing.T) {
+	p := endTestPool(t)
+	ctx := context.Background()
+	reset := time.Now().Add(-75 * time.Second).UTC()
+	delays := map[time.Duration]bool{}
+	for i := 0; i < 12; i++ {
+		id := fmt.Sprintf("00000000-0000-4000-8000-%012d", i)
+		due := db.LimitResumeDueAt(id, reset)
+		delay := due.Sub(reset) - time.Minute
+		if delay < 0 || delay > 30*time.Second {
+			t.Fatalf("stagger out of bounds: %v", delay)
+		}
+		delays[delay] = true
+		endTestSession(t, p, id, "idle")
+		check := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		_, err := p.Exec(ctx, `UPDATE sessions SET kind='agent' WHERE id=$1`, id)
+		check(err)
+		check(db.SetLimitResume(ctx, p, id, true, "auth"))
+		check(db.TrackLimitResumeTurn(ctx, p, id, "turn", "chat", time.Now().Add(-time.Hour), 1))
+		check(db.RecordLimitRefusal(ctx, p, id, "claude", "turn", &reset, 2, time.Now()))
+		ids, err := db.ListDueLimitResumes(ctx, p)
+		check(err)
+		listed := slices.Contains(ids, id)
+		// Stay clear of the boundary so DB query latency cannot affect the assertion.
+		if delay > 20*time.Second && listed {
+			t.Error("listed before stagger elapsed")
+		}
+		if delay < 10*time.Second && !listed {
+			t.Error("not listed after stagger elapsed")
+		}
+		claimed, err := db.ClaimLimitResumeAttempt(ctx, p, id, "attempt")
+		check(err)
+		if claimed != listed {
+			t.Fatal("selection and atomic claim disagree")
+		}
+	}
+	if len(delays) < 2 {
+		t.Fatal("sessions sharing an account have no random staggering")
+	}
+}
+
+func TestUnknownLimitResumeRetainsSleepingHost(t *testing.T) {
+	p := endTestPool(t)
+	ctx := context.Background()
+	id := "00000000-0000-4000-8000-0000000000d5"
+	endTestSession(t, p, id, "error")
+	check := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := p.Exec(ctx, `UPDATE sessions SET kind='agent',daemon_lost_at=now()-interval '1 hour' WHERE id=$1`, id)
+	check(err)
+	check(db.SetLimitResume(ctx, p, id, true, "auth"))
+	check(db.TrackLimitResumeTurn(ctx, p, id, "turn", "chat", time.Now(), 1))
+	check(db.RecordLimitRefusal(ctx, p, id, "claude", "turn", nil, 2, time.Now()))
+	ended, err := db.FinishLostDaemonSession(ctx, p, id, "host gone", time.Now())
+	check(err)
+	if ended {
+		t.Fatal("unknown reset lost its session before meter could be polled")
 	}
 }

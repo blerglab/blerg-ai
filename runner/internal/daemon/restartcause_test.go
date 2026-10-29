@@ -136,8 +136,7 @@ func TestAdoptAfterAPlannedRestartSaysNothingYouRanCausedIt(t *testing.T) {
 			t.Errorf("the engine was told %q after a planned restart: %s", never, argv)
 		}
 	}
-	if users := userTexts(sender); len(users) != 1 || !strings.Contains(users[0], "Nothing you ran caused it.") ||
-		!strings.HasSuffix(users[0], adoptContinuePrompt) {
+	if users := userTexts(sender); len(users) != 1 || users[0] != "system:[system] ↻ Host restarted · continued" {
 		t.Errorf("the person sees what the agent was told: %v", users)
 	}
 }

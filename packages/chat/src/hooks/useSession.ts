@@ -254,7 +254,11 @@ export function useSession(transport: Transport, sessionId: string, opts: UseSes
     olderInFlight.current = false
     // Resume from where the transcript held is complete: the last seq, or where an unfinished
     // forward replay had reached.
-    const lastSeq = resumeSeq(useTranscriptStore.getState().sessions[sessionId])
+    const kept = useTranscriptStore.getState().sessions[sessionId]
+    const lastSeq = resumeSeq(kept)
+    // A first visit loads the newest events (a tail); a transcript held already, even one complete
+    // only up to 0 (a hole before its first event), replays forward from where it is complete.
+    const firstVisit = !kept || (kept.lastSeq === 0 && kept.events.length === 0)
     // While the replay is coming in, the statuses it passes through are not the session's status
     // (a session idle for hours was running, waiting and idle again on its way here): only the
     // last is kept, and applied once when the replay is done. After that, each status is applied as it comes.
@@ -267,7 +271,7 @@ export function useSession(transport: Transport, sessionId: string, opts: UseSes
       replaying = false
       if (held !== null) { applyStatus(held); held = null }
     }
-    const unsubscribe = transport.subscribe(sessionId, { afterSeq: lastSeq, tail: lastSeq === 0 }, {
+    const unsubscribe = transport.subscribe(sessionId, { afterSeq: lastSeq, tail: firstVisit }, {
       onEvent: ev => { if (ev.session_id === sessionId) ingest(ev) },
       onEvents: evs => ingestMany(sessionId, evs),
       onReset: () => {
@@ -304,7 +308,7 @@ export function useSession(transport: Transport, sessionId: string, opts: UseSes
       },
     })
     // A visit after the first: one older page, as after the tail (the rest when the view asks).
-    if (lastSeq > 0) void pumpOlder()
+    if (!firstVisit) void pumpOlder()
     return () => {
       alive.current = false
       release()

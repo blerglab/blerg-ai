@@ -17,10 +17,17 @@ export function formatBuild(b: BuildInfo | null | undefined): { main: string; co
   const main = release ? `v${release}` : version || (b ? "" : "…");
   const suffix = commit && commit !== release && commit !== main ? commit : "";
   const parts = [release && `release ${release}`, commit && `commit ${commit}`, version && `build ${version}`].filter(Boolean);
-  // Only an https://github.com/ link to a plain X.Y.Z is ever shown.
+  // Match the exact public release tag and compare against this component's release.
   const latest = b?.latestVersion?.trim().replace(/^v/, "") ?? "";
-  const href = b?.latestUrl?.trim() ?? "";
-  const update = /^\d+\.\d+\.\d+$/.test(latest) && href.startsWith("https://github.com/")
+  const href = b?.latestUrl ?? "";
+  const stable = /^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$/;
+  const running = release.replace(/^v/, "");
+  const candidate = latest.split(".").map(Number);
+  const current = running.split(".").map(Number);
+  const different = candidate.findIndex((n, i) => n !== current[i]);
+  const newer = stable.test(latest) && stable.test(running) && different >= 0 && candidate[different] > current[different];
+  const prefix = "https://github.com/blerglab/blerg-ai/releases/tag/";
+  const update = newer && (href === prefix + latest || href === prefix + "v" + latest)
     ? { label: `v${latest} available`, href, title: "A newer Blerg release is available" }
     : null;
   return { main, commit: suffix, title: parts.join(" · "), update };

@@ -46,7 +46,7 @@ export function nextThinking(open: boolean, ev: AgentEvent): boolean {
     case 'status_changed':
       return payloadOf(ev).status === 'running' ? open : false
     case 'user_message':
-      return payloadOf(ev).source === 'system' ? open : false
+      return payloadOf(ev).source === 'system' || payloadOf(ev).source === 'usage_limit' ? open : false
   }
   return open
 }
@@ -100,7 +100,7 @@ export function modelRetry(events: AgentEvent[], running: boolean): ModelRetry |
         if (payloadOf(ev).status !== 'running') return null
         break
       case 'user_message':
-        if (payloadOf(ev).source !== 'system') return null
+        if (payloadOf(ev).source !== 'system' && payloadOf(ev).source !== 'usage_limit') return null
         break
     }
   }

@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useTranscriptStore, type AgentEvent } from '@blerglab/chat'
-import { useChildrenSignal } from './useChildrenSignal'
+import { subscribeChildren } from './useChildrenSignal'
 import { apiFetch } from '../apiFetch'
 import { LIVE_FOLD_KINDS, foldLive, isLiveTrigger, type LiveReply, type LiveView } from '../lib/liveState'
 
@@ -91,6 +91,24 @@ function useMinute(): number {
   return now
 }
 
+// A child refresh changes the panel, but a freshly parsed copy of the parent's unchanged
+// checklist/hold must not invalidate the memoized chat. Keep only those shared chat inputs.
+// Only content-equal inputs share references, so advancing this memo during a discarded render is safe.
+function liveViewSelector() {
+  let previous: { sessionId: string; view: LiveView } | null = null
+  return (sessionId: string, next: LiveView): LiveView => {
+    const prior = previous?.sessionId === sessionId ? previous.view : null
+    if (prior?.checklist && next.checklist && JSON.stringify(prior.checklist.items) === JSON.stringify(next.checklist.items)) {
+      next = { ...next, checklist: { ...next.checklist, items: prior.checklist.items } }
+    }
+    if (prior?.mcpHold && next.mcpHold && prior.mcpHold.since === next.mcpHold.since && prior.mcpHold.until === next.mcpHold.until) {
+      next = { ...next, mcpHold: prior.mcpHold }
+    }
+    previous = { sessionId, view: next }
+    return next
+  }
+}
+
 export function useLiveStateServer(sessionId: string, enabled: boolean, refresh: unknown): LiveServerState {
   const [shown, setShown] = useState<{ sessionId: string; s: Shown }>({ sessionId, s: NOT_READ })
   const flight = useRef<Flight | null>(null)
@@ -126,7 +144,10 @@ export function useLiveStateServer(sessionId: string, enabled: boolean, refresh:
       f.timer ??= setTimeout(() => { f.timer = null; run() }, wait)
       return
     }
-    const show = (s: Shown) => { if (f.alive) setShown({ sessionId: f.sessionId, s }) }
+    const show = (s: Shown) => {
+      if (f.alive) setShown(previous => previous.sessionId === f.sessionId && previous.s.status === 'ready' && s.status === 'ready' && previous.s.held === s.held
+        ? previous : { sessionId: f.sessionId, s })
+    }
     f.inFlight = true
     f.lastStart = Date.now()
     apiFetch(`/api/sessions/${encodeURIComponent(f.sessionId)}/live`, { headers: f.etag ? { 'If-None-Match': f.etag } : {} })
@@ -180,10 +201,10 @@ export function useLiveStateServer(sessionId: string, enabled: boolean, refresh:
   }, [])
 
   // Numbers and flags, so an event that is not a trigger does not render the page again.
-  const childrenChanged = useChildrenSignal(sessionId)
   const triggers = useTranscriptStore(s => (enabled ? countTriggers(s.sessions[sessionId]?.events ?? NO_EVENTS) : 0))
   const replayDone = useTranscriptStore(s => !!s.sessions[sessionId]?.replayDone)
-  useEffect(() => { if (enabled) read() }, [enabled, sessionId, triggers, replayDone, refresh, childrenChanged, read])
+  useEffect(() => { if (enabled) read() }, [enabled, sessionId, triggers, replayDone, refresh, read])
+  useEffect(() => enabled ? subscribeChildren(sessionId, read) : undefined, [enabled, sessionId, read])
   useEffect(() => {
     if (!enabled) return
     const onVisible = () => { if (document.visibilityState === 'visible') read() }
@@ -204,7 +225,8 @@ export function useLiveStateServer(sessionId: string, enabled: boolean, refresh:
   // of the agent does not render the page again.
   const tail = useTranscriptStore(useShallow(s => (held ? foldable(s.sessions[sessionId]?.events ?? NO_EVENTS, through) : NO_EVENTS)))
   const minute = useMinute()
-  const view = useMemo(() => (held ? foldLive(held.reply, tail, minute - held.offset) : null), [held, tail, minute])
+  const selectView = useMemo(liveViewSelector, [])
+  const view = useMemo(() => (held ? selectView(sessionId, foldLive(held.reply, tail, minute - held.offset)) : null), [selectView, sessionId, held, tail, minute])
 
   if (cur.status === 'ready' && view) return { status: 'ready', view, reply: cur.held.reply, clockOffset: cur.held.offset }
   if (cur.status === 'error') return { status: 'error', view, reply: held?.reply ?? null, clockOffset: held?.offset ?? 0, message: cur.message }

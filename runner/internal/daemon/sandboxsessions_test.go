@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,6 +36,13 @@ func TestSandboxSessionRunsInItsOwnClone(t *testing.T) {
 	initChildRepo(t, repo)
 
 	const id = "sandbox-session-1"
+	oldContext := currentDockerContext
+	currentDockerContext = func() string { return "explorer-fixture" }
+	t.Cleanup(func() { currentDockerContext = oldContext })
+	t.Setenv("FAKE_EXPLORER_ROOT", filepath.Join(sandboxCloneRoot(), id))
+	t.Setenv("FAKE_EXPLORER_TEST_BINARY", os.Args[0])
+	t.Setenv("FAKE_DOCKER_INSPECT_OUTPUT", fmt.Sprintf(`[{"Id":%q,"Config":{"Labels":{"blerg.runner.owner":%q,"blerg.runner.docker-context":"explorer-fixture"}},"State":{"Running":true}}]`, strings.Repeat("a", 64), sandboxOwner()))
+
 	host.Spawn(protocol.SpawnSession{
 		Type: "spawn_session", SessionID: id, Repo: "proj", Kind: "agent",
 		Sandbox: true, InitialPrompt: "hello",
@@ -67,6 +75,26 @@ func TestSandboxSessionRunsInItsOwnClone(t *testing.T) {
 		t.Fatalf("the clone holds other branches: %q", got)
 	}
 
+	// A chat reference names the clone mounted at /workspace, never the original checkout.
+	workspaceFixture(t, clone, "README.md", "# Clone README")
+	for i, path := range []string{"README.md", "/workspace/README.md", filepath.Join(clone, "README.md"), filepath.Join(repo, "README.md")} {
+		request := fmt.Sprintf("readme-%d", i)
+		host.ReadWorkspaceFile(protocol.ReadWorkspaceFile{RequestID: request, SessionID: id, Path: path})
+		got := waitWorkspaceResult(t, sender, request)
+		if i < 3 && (!got.OK || got.Path != "README.md") {
+			t.Fatalf("clone reference %q: %+v", path, got)
+		}
+		if i > 0 && i < 3 && got.RequestedPath != filepath.Clean(path) {
+			t.Fatalf("absolute reference lost request binding: %+v", got)
+		}
+		if i == 3 && (got.OK || got.ErrorCode != "forbidden") {
+			t.Fatalf("original checkout read: %+v", got)
+		}
+	}
+
+	if calls := dockerCalls(t, logPath); !strings.Contains(calls, "/usr/local/bin/blerg-workspace-explorer") {
+		t.Fatal("viewer never entered runtime helper")
+	}
 	// The session commits in its clone, as its engine would inside the container.
 	childCommit(t, clone, "work.txt")
 	host.Kill(id)
@@ -450,7 +478,12 @@ func TestReadCloneHead(t *testing.T) {
 // test can start a sandbox: the mount check accepts nothing else.
 func sandboxTestClone(t *testing.T, sessionID string) string {
 	t.Helper()
-	if state := os.Getenv(DaemonStateDirEnv); state == "" || !strings.HasPrefix(state, os.TempDir()) {
+	// Go's test scratch directories honor GOTMPDIR, which can differ from TMPDIR.
+	tempRoot := os.Getenv("GOTMPDIR")
+	if tempRoot == "" {
+		tempRoot = os.TempDir()
+	}
+	if state := os.Getenv(DaemonStateDirEnv); state == "" || !strings.HasPrefix(state, filepath.Clean(tempRoot)+string(filepath.Separator)) {
 		t.Setenv(DaemonStateDirEnv, t.TempDir())
 	}
 	repo := filepath.Join(t.TempDir(), "proj")

@@ -70,7 +70,7 @@ func (s *blockedWorkspaceResultSender) Send(message any) error {
 func TestWorkspaceWorkerBoundIncludesBlockedResultSend(t *testing.T) {
 	host, _, _ := adversarialWorkspaceHost(t)
 	waitUntil(t, "earlier workspace workers stopped", func() bool { return len(workspaceFileReads) == 0 })
-	sender := &blockedWorkspaceResultSender{entered: make(chan protocol.WorkspaceFileResult, 4), release: make(chan struct{}), done: make(chan struct{}, 2)}
+	sender := &blockedWorkspaceResultSender{entered: make(chan protocol.WorkspaceFileResult, 32), release: make(chan struct{}), done: make(chan struct{}, 32)}
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(sender.release) }) }
 	t.Cleanup(func() {
@@ -103,10 +103,17 @@ func TestWorkspaceWorkerBoundIncludesBlockedResultSend(t *testing.T) {
 	if time.Since(start) > time.Second {
 		t.Fatal("saturation blocked the daemon command path")
 	}
-	select {
-	case got := <-sender.entered:
-		t.Fatalf("more than two large results in flight: %+v", got)
-	case <-time.After(10 * time.Millisecond):
+	// Refused reads are answered "busy" at once (#267); none of them reads the file.
+	deadline := time.After(10 * time.Millisecond)
+	for done := false; !done; {
+		select {
+		case got := <-sender.entered:
+			if got.OK || got.ErrorCode != "busy" || got.ContentB64 != "" {
+				t.Fatalf("more than two large results in flight: %+v", got)
+			}
+		case <-deadline:
+			done = true
+		}
 	}
 	unblock()
 }

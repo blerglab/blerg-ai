@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blerglab/blerg-ai/runner/internal/codexauth"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
 )
 
@@ -263,6 +264,20 @@ func TestClusterModelProvidersHaveRegisteredRules(t *testing.T) {
 	for engine, p := range clusterModelProviders {
 		if !models.HasEngineRules(engine) || p.probe == nil || p.safeError == nil {
 			t.Fatalf("incomplete cluster catalog provider %q", engine)
+		}
+	}
+}
+
+func TestClusterCatalogReconnectSignalDistinguishesProviderFailure(t *testing.T) {
+	for _, tc := range []struct {
+		err       error
+		reconnect bool
+	}{{ErrClusterCodexCatalogAuth, true}, {codexauth.ErrDedicatedLogin, true}, {ErrClusterCodexCatalog, false}} {
+		a := cacheTestAPI()
+		a.clusterModels.probe = func(context.Context, string, string, coreProof) (models.List, error) { return models.List{}, tc.err }
+		list := awaitCatalog(t, a, "fixture-account")
+		if list.Reconnect != tc.reconnect {
+			t.Fatal("catalog gave incorrect reconnect action")
 		}
 	}
 }

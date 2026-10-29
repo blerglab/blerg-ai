@@ -15,16 +15,17 @@
 //     external diff, a submodule's diff, the credential helper, askpass), recurses into submodules,
 //     reads a file it names (the diff order file, the mailmap, the attributes file) or checks a
 //     signature;
-//   - its own process group, killed whole on timeout or cancel and again once git is done, so no
+//   - its own process group, killed whole before reaping on timeout, cancel or completion, so no
 //     helper outlives the call;
-//   - with MemoryLimit, an address-space limit (Linux), so a reader something still makes read
-//     without end fails fast.
+//   - with MemoryLimit, an address-space limit on Linux or a process-group RSS supervisor on
+//     macOS, so a reader something still makes read without end fails fast.
 package hostgit
 
 import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -32,12 +33,13 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
 
-// MemoryLimitKB bounds a git process's address space under Options.MemoryLimit (Linux). Pack
-// windows are kept well under it (memoryConfig).
+// MemoryLimitKB is the default memory budget under Options.MemoryLimit: address space on Linux,
+// observed process-group RSS on macOS. Pack windows are kept well under it (Config).
 const MemoryLimitKB = 1 << 20
 
 // limitScript runs git under `ulimit -v`. It is a constant: the limit, git's path and its
@@ -49,9 +51,15 @@ var protocols = []string{"ext", "fd", "file", "git", "http", "https", "ssh", "te
 
 // Options are what a call site needs beyond the hardening every call gets.
 type Options struct {
+	// Diagnostic is an optional private timing sink. It receives no argv or environment.
+	// It may be called by the RSS goroutine; callers must support concurrent calls.
+	Diagnostic func(stage string, elapsed time.Duration, err error)
 	// Dir is git's working directory. With ExtraFiles it may name an inherited descriptor
 	// (/proc/self/fd/N): a pinned directory.
-	Dir        string
+	Dir string
+	// DirFile pins cwd on Darwin, where chdir through /dev/fd/N is unsupported.
+	// Run owns its thread-local launch; Linux continues to use Dir.
+	DirFile    *os.File
 	ExtraFiles []*os.File
 	// SafeDirectory is the one directory safe.directory names ("" for none).
 	SafeDirectory string
@@ -84,13 +92,17 @@ type Options struct {
 	// workspace or sandbox clone). Its optional binary indexes are not parsed: no commit-graph,
 	// multi-pack index or bitmaps, no sparse walk, no filter served (UntrustedConfig).
 	Untrusted bool
-	// MemoryLimit runs git under an address-space limit (Linux): MemoryLimitKB, or LimitKB when
-	// set, with small pack windows.
+	// MemoryLimit bounds address space on Linux and observed process-group RSS on macOS:
+	// MemoryLimitKB, or LimitKB when set, with small pack windows. On macOS use Run/Output,
+	// which own the resident-memory supervisor and join it before returning.
 	MemoryLimit bool
 	LimitKB     int
 	// Timeout bounds the call (0: only ctx).
 	Timeout time.Duration
-	// Stdout and Stderr receive git's output (nil: discarded).
+	// Input is bounded, in-memory stdin; arbitrary blocking readers are not accepted.
+	Input []byte
+	// Stdout and Stderr receive git's output (nil: discarded). Custom writers must
+	// implement ContextWriter; known nonblocking buffers and *os.File are also accepted.
 	Stdout, Stderr io.Writer
 }
 
@@ -216,53 +228,81 @@ func Environ(o Options, git string) []string {
 	return append(env, o.Env...)
 }
 
-// ErrNoGit: git is not installed (not on the daemon's PATH).
+// ErrNoGit: Git is absent or Darwin's developer executable cannot be trusted.
 var ErrNoGit = errors.New("git is not available on this machine")
 
-// Binary is the git the daemon runs: looked up on the daemon's own PATH, each call (git can be
-// installed or upgraded under a running daemon).
+var testBinary atomic.Pointer[string]
+
+// SetBinaryForTest installs a process-local fixture executable. There is no
+// environment/configuration override; production must never call this seam.
+// Tests must serialize changes and restore only after joining their Git calls.
+func SetBinaryForTest(path string) func() {
+	previous := testBinary.Swap(&path)
+	return func() { testBinary.Store(previous) }
+}
+
+// Initialize resolves Darwin Git before request budgets begin. It is a no-op
+// elsewhere, preserving Linux's per-call PATH lookup.
+func Initialize() error { return platformInitializeGit() }
+
+// Binary uses cached, validated developer Git on Darwin; elsewhere it retains
+// per-call PATH lookup so installed Git can change while the daemon runs.
 func Binary() (string, error) {
-	path, err := exec.LookPath("git")
-	if err != nil {
-		return "", ErrNoGit
+	if path := testBinary.Load(); path != nil {
+		return *path, nil
 	}
-	if abs, err := filepath.Abs(path); err == nil {
-		path = abs
-	}
-	return path, nil
+	return platformGitBinary()
 }
 
 // Command is the hardened git command for args, not started: for a caller that runs it itself
-// (it must call Wait and then KillGroup). Prefer Run.
+// (it must kill the group before reaping and must never Wait concurrently with KillGroup).
+// Prefer Run, which owns that ordering. Bounded Darwin commands require Run/Output;
+// a raw exec.Cmd cannot own the memory supervisor or descriptor-cwd launch, so Command refuses
+// either combination on Darwin.
 func Command(o Options, args ...string) (*exec.Cmd, error) {
+	if runtime.GOOS == "darwin" && (o.MemoryLimit || o.DirFile != nil) {
+		return nil, &memoryRefusal{fmt.Errorf("%w: supervised Darwin commands require Run or Output", ErrMemoryMonitor)}
+	}
+	return commandForPlatform(o, runtime.GOOS, args...)
+}
+func commandForPlatform(o Options, platform string, args ...string) (*exec.Cmd, error) {
 	git, err := Binary()
 	if err != nil {
 		return nil, err
 	}
 	argv := append(Config(o), args...)
 	name := git
-	if o.MemoryLimit && runtime.GOOS == "linux" {
-		limit := MemoryLimitKB
-		if o.LimitKB > 0 {
-			limit = o.LimitKB
-		}
+	if o.MemoryLimit && platform == "linux" {
+		limit := memoryLimitKB(o)
 		argv = append([]string{"-c", limitScript, "blerg-git", strconv.Itoa(limit), git}, argv...)
 		name = "/bin/sh"
 	}
 	cmd := exec.Command(name, argv...) //nolint:gosec,noctx // G204: the git binary (or a constant sh script exec'ing it) with argv built by the call site; no shell parses any value. noctx: Run bounds it and kills the process group itself.
 	cmd.Dir = o.Dir
+	if platform == "darwin" && o.DirFile != nil {
+		cmd.Dir = "" // platformStartCommand sets cwd from the held directory on a private thread.
+	}
 	cmd.ExtraFiles = o.ExtraFiles
 	cmd.Env = Environ(o, git)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if o.Input != nil {
+		cmd.Stdin = bytes.NewReader(o.Input)
+	}
 	cmd.Stdout = o.Stdout
 	cmd.Stderr = o.Stderr
 	return cmd, nil
 }
 
-// KillGroup kills a started command's whole process group (git and any helper it started).
+// KillGroup kills a started, unreaped command's process group. The caller must
+// exclusively own reaping: never call concurrently with Wait. Run owns this ordering.
+// Completed commands are ignored; no numeric group signal is safe after reap.
 func KillGroup(cmd *exec.Cmd) {
-	if cmd != nil && cmd.Process != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	killGroup(cmd, syscall.Kill)
+}
+
+func killGroup(cmd *exec.Cmd, kill func(int, syscall.Signal) error) {
+	if cmd != nil && cmd.Process != nil && cmd.ProcessState == nil {
+		_ = kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 }
 
@@ -292,33 +332,124 @@ func run(stop <-chan struct{}, o Options, args ...string) error {
 		defer timer.Stop()
 		timeout = timer.C
 	}
-	cmd, err := Command(o, args...)
+	preparing := time.Now()
+	recordDiagnostic(o, "command begin", preparing, nil)
+	cmd, err := commandForPlatform(o, runtime.GOOS, args...)
+	recordDiagnostic(o, "command prepared", preparing, err)
 	if err != nil {
 		return err
 	}
-	if err := cmd.Start(); err != nil {
+	return runCommand(stop, timeout, o, cmd, platformMemoryWatch)
+}
+
+func runCommand(stop <-chan struct{}, timeout <-chan time.Time, o Options, cmd *exec.Cmd, watch func(Options, *exec.Cmd) *memoryWatch) error {
+	output := newCommandOutput()
+	defer output.cancel()
+	if err := output.prepare(cmd); err != nil {
 		return err
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	started := time.Now()
+	recordDiagnostic(o, "start begin", started, nil)
+	err := platformStartCommand(o, cmd)
+	recordDiagnostic(o, "start", started, err)
+	if err != nil {
+		return err
+	}
+	// No Wait may run until cleanup has stopped using the numeric process group.
+	exited := make(chan error, 1)
+	go func() { exited <- platformObserveExit(cmd.Process.Pid) }()
+	waiting := time.Now()
+	recordDiagnostic(o, "wait begin", waiting, nil)
+	var refused <-chan error
+	monitor := watch(o, cmd)
+	if monitor != nil {
+		refused = monitor.refused
+	}
 	finished := false
+	var result error
 	select {
-	case err = <-done:
+	case result = <-exited:
 		finished = true
+		recordDiagnostic(o, "wait selected", waiting, result)
+	case result = <-refused:
 	case <-stop:
+		result = errStopped
 	case <-timeout:
+		result = errStopped
 	}
 	if !finished {
-		KillGroup(cmd)
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second): // an output reader that never lets go
-		}
-		KillGroup(cmd)
-		return errStopped
+		recordDiagnostic(o, "wait interrupted", waiting, result)
+		output.cancel()
 	}
+	joining := time.Now()
+	recordDiagnostic(o, "group kill begin", joining, result)
 	KillGroup(cmd)
+	if monitor != nil {
+		sampling := time.Now()
+		recordDiagnostic(o, "RSS join begin", sampling, nil)
+		monitor.stop()
+		recordDiagnostic(o, "RSS joined", sampling, nil)
+		// Preserve a refusal that raced with leader exit; the publisher is now joined.
+		select {
+		case result = <-refused:
+		default:
+		}
+	}
+	if !finished {
+		<-exited
+	} // Join the non-reaping observer as well.
+	// A cancellation racing exit still cancels any context-aware output writer.
+	select {
+	case <-stop:
+		if result == nil {
+			result = errStopped
+		}
+	default:
+	}
+	select {
+	case <-timeout:
+		if result == nil {
+			result = errStopped
+		}
+	default:
+	}
+	if result != nil {
+		output.cancel()
+	}
+	recordDiagnostic(o, "reap begin", joining, result)
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	// Group signaling and RSS observation are finished forever. Wait owns the
+	// reap and output copies; cancellation must join them, without a timer escape.
+	select {
+	case err = <-done:
+	case <-stop:
+		if result == nil {
+			result = errStopped
+		}
+		output.cancel()
+		err = <-done
+	case <-timeout:
+		if result == nil {
+			result = errStopped
+		}
+		output.cancel()
+		err = <-done
+	}
+	recordDiagnostic(o, "process joined", joining, err)
+	if !finished {
+		recordDiagnostic(o, "killed process joined", joining, result)
+	}
+	if result != nil {
+		return result
+	}
 	return err
+}
+
+func recordDiagnostic(o Options, stage string, started time.Time, err error) {
+	if o.Diagnostic != nil {
+		o.Diagnostic(stage, time.Since(started), err)
+	}
 }
 
 // Output runs git and returns its trimmed stdout; on failure the error carries stderr's first
@@ -352,11 +483,15 @@ func output(stop <-chan struct{}, o Options, args ...string) (string, error) {
 }
 
 type capped struct {
-	buf bytes.Buffer
-	max int
+	buf      bytes.Buffer
+	max      int
+	overflow bool
 }
 
 func (w *capped) Write(p []byte) (int, error) {
+	if len(p) > w.max-w.buf.Len() {
+		w.overflow = true
+	}
 	if room := w.max - w.buf.Len(); room > 0 {
 		if len(p) > room {
 			w.buf.Write(p[:room])

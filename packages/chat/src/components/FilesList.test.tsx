@@ -20,10 +20,15 @@ const names = () => screen.getAllByTestId('artifact-name').map(n => n.textConten
 beforeEach(() => localStorage.clear())
 
 describe('FilesList rows', () => {
+  it('detects the language from the name even when the viewer is plain text', () => {
+    setup([file(0, { name: 'main.go', view: 'text' })])
+    expect(screen.getByTestId('artifact-row').querySelector('svg')).toHaveAttribute('data-file-icon', 'go')
+  })
+
   it('draws a row with a glyph, the name, and size · version · time · you', () => {
     setup([file(0, { name: 'brief.pdf', view: 'pdf', size: 2048, version: 3, latest_version: 3, origin: 'user' })])
     const row = screen.getByTestId('artifact-row')
-    expect(row.querySelector('svg.artifact-glyph title')).toHaveTextContent('PDF')
+    expect(row.querySelector('svg[data-file-icon=pdf] title')).toHaveTextContent('PDF')
     expect(within(row).getByRole('button', { name: 'View brief.pdf' })).toHaveAttribute('title', 'brief.pdf')
     const meta = row.querySelector('.artifact-row-meta')!
     expect(meta).toHaveTextContent(/^2\.0 KB · v3 · .+ · you$/)

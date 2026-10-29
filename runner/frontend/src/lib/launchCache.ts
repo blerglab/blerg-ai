@@ -14,6 +14,7 @@
 // account, so another account in the same tab never sees it. A 401 (signed
 // out) drops it. MCP tool listings are deliberately NOT here: a session's tool
 // pins must come from a listing taken in the sheet that launches it.
+import type { WorkspaceCapabilities } from './workspaceCapabilities'
 import { apiFetch } from '../apiFetch'
 import { getAccessToken } from '../authClient'
 import { tokenExpired } from '../claims'
@@ -39,6 +40,11 @@ export interface RepoInfo {
 }
 
 export interface DaemonApiInfo {
+  ownership_revision?: number
+  connection_generation?: string
+  discovery_version?: number
+  workspace_capabilities?: WorkspaceCapabilities
+
   id: string
   name: string
   mode: string
@@ -72,6 +78,7 @@ export interface DaemonApiInfo {
 }
 
 export interface ClusterStatusApi {
+  workspace_capabilities?: WorkspaceCapabilities
   configured: boolean
   /** BLERG_RUNNER_SANDBOX_CLUSTER_CHILDREN: "once" (a sandboxed desktop session asks for each
    *  cluster child) or "any" (it may have them preapproved). Absent means "once". */
@@ -138,13 +145,14 @@ interface Stored {
   data: LaunchCacheData
 }
 
+let cacheGeneration = 0
 let mem: Stored | null = null
 const inflight = new Map<string, Promise<unknown>>()
 
 // The signed-in account, read (unverified) from the access token's sub — only
 // to keep one account's cached lists from another's in this tab; the server
 // still decides what each request may see. '' when there is no token.
-function currentAccount(): string {
+export function currentAccount(): string {
   const token = getAccessToken()
   if (!token) return ''
   try {
@@ -202,6 +210,8 @@ export function isFresh(part: Stamped<unknown> | undefined, now = launchClock.no
 
 // clearLaunchCache forgets everything (signed out; and between tests).
 export function clearLaunchCache() {
+  cacheGeneration++
+  reposGen++
   mem = null
   inflight.clear()
   try {
@@ -212,11 +222,20 @@ export function clearLaunchCache() {
 }
 
 // One request per part at a time: a prefetch and the sheet opening share it.
-function once<T>(key: string, run: () => Promise<T>): Promise<T> {
-  const running = inflight.get(key) as Promise<T> | undefined
+function once<T>(key: string, run: (saveResult: typeof save) => Promise<T>): Promise<T> {
+  const account = currentAccount()
+  let generation = cacheGeneration
+  const scopedKey = `${account}:${generation}:${key}`
+  const running = inflight.get(scopedKey) as Promise<T> | undefined
   if (running) return running
-  const p = run().finally(() => inflight.delete(key))
-  inflight.set(key, p)
+  const check = () => {
+    if (account !== currentAccount() || generation !== cacheGeneration) throw new SignedOut()
+  }
+  const guardedSave: typeof save = update => { check(); save(update); generation = cacheGeneration }
+  const p = run(guardedSave).then(value => { check(); return value }).finally(() => {
+    if (inflight.get(scopedKey) === p) inflight.delete(scopedKey)
+  })
+  inflight.set(scopedKey, p)
   return p
 }
 
@@ -249,7 +268,7 @@ export async function reposPartFrom(res: Response): Promise<ReposPart> {
 // The repository list, asked conditionally: with a kept list the request
 // names its ETag, and a 304 keeps that list (now as fresh as a full answer).
 export function fetchRepos(): Promise<ReposPart> {
-  return once('repos', async () => {
+  return once('repos', async (save) => {
     const gen = reposGen
     const kept = readLaunchCache().repos?.value
     const res = await apiFetch('/api/repos', kept?.etag ? { headers: { 'If-None-Match': kept.etag } } : undefined)
@@ -263,16 +282,22 @@ export function fetchRepos(): Promise<ReposPart> {
 }
 
 export function fetchDaemons(): Promise<DaemonApiInfo[]> {
-  return once('daemons', async () => {
+  return once('daemons', async (save) => {
     const data = await getJSON('/api/daemons')
     const value = Array.isArray(data) ? (data as DaemonApiInfo[]) : []
-    save(d => ({ ...d, daemons: { value, at: launchClock.now() } }))
+    save(d => {
+      if (d.daemons && daemonScope(d.daemons.value) !== daemonScope(value)) {
+        cacheGeneration++; reposGen++; inflight.clear()
+        return { ...empty(), daemons: { value, at: launchClock.now() } }
+      }
+      return { ...d, daemons: { value, at: launchClock.now() } }
+    })
     return value
   })
 }
 
 export function fetchCluster(): Promise<ClusterStatusApi> {
-  return once('cluster', async () => {
+  return once('cluster', async (save) => {
     const value = ((await getJSON('/api/cluster/status')) ?? { configured: false }) as ClusterStatusApi
     save(d => ({ ...d, cluster: { value, at: launchClock.now() } }))
     return value
@@ -282,7 +307,7 @@ export function fetchCluster(): Promise<ClusterStatusApi> {
 // Personal credentials are advisory: a failure here never fails the sheet,
 // it resolves to null ("unknown") instead.
 export function fetchCreds(): Promise<MyCredentialsApi | null> {
-  return once('creds', async () => {
+  return once('creds', async (save) => {
     let value: MyCredentialsApi | null = null
     try {
       const c = (await getJSON('/api/me/credentials')) as MyCredentialsApi
@@ -294,7 +319,7 @@ export function fetchCreds(): Promise<MyCredentialsApi | null> {
     }
     save(d => ({ ...d, creds: { value, at: launchClock.now() } }))
     return value
-  })
+  }).catch(err => { if (err instanceof SignedOut) return null; throw err })
 }
 
 async function errorText(res: Response): Promise<string> {
@@ -310,7 +335,7 @@ async function errorText(res: Response): Promise<string> {
 // default tool modes carry tool hashes, and those (like every tool listing)
 // are never kept: a session's pins come from a listing taken in the sheet.
 export function fetchMcpConnections(): Promise<McpConnectionInfo[]> {
-  return once('mcpConnections', async () => {
+  return once('mcpConnections', async (save) => {
     const res = await apiFetch('/api/mcp/connections')
     checkSignedIn(res)
     if (!res.ok) throw new Error(await errorText(res))
@@ -330,14 +355,22 @@ export const launchMcpConnections = {
   load: fetchMcpConnections,
 }
 
+function daemonScope(daemons: DaemonApiInfo[]): string {
+  return daemons.map(d => `${d.id}:${d.ownership_revision ?? ''}:${d.connection_generation ?? ''}`).sort().join('|')
+}
+function modelDesktopScope(daemonId?: string): string {
+  const daemons = readLaunchCache().daemons?.value ?? []
+  return daemonScope(daemonId ? daemons.filter(d => d.id === daemonId) : daemons)
+}
+
 function modelsKey(engine: string, daemonId?: string, runtime?: ModelRuntime): string {
-  return `${engineKey(engine)}\n${daemonId ?? ''}${runtime ? `\n${runtime}` : ''}`
+  return `${engineKey(engine)}\n${daemonId ?? ''}${runtime ? `\n${runtime}` : ''}${modelDesktopScope(daemonId) ? `\n${modelDesktopScope(daemonId)}` : ''}`
 }
 
 // The sheet's model lists, per engine and daemon: useEngineModels shows the
 // cached one at once and puts each answer back.
 export const launchModelsCache: ModelListCache = {
-  identity: currentAccount,
+  identity: () => `${currentAccount()}:${cacheGeneration}:${modelDesktopScope()}`,
   get: (engine: string, daemonId?: string, runtime?: ModelRuntime): FetchedModelList | undefined =>
     readLaunchCache().modelsByKey[modelsKey(engine, daemonId, runtime)]?.value,
   put: (engine: string, daemonId: string | undefined, value: FetchedModelList, runtime?: ModelRuntime) =>

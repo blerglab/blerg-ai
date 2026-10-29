@@ -10,8 +10,14 @@
 #   install.sh install     build the daemon binary, install + start the service
 #                          (over a running daemon with agent work in progress it
 #                          lists that work and asks first; --yes skips the question)
+#                          --enroll CODE adds this machine as a new desktop of the
+#                          person who made CODE (Settings → Account → Your desktops
+#                          → Add a desktop); the code is used once, never printed
 #   install.sh uninstall   stop and remove the service (binary is left in place)
 #   install.sh status      show whether it's running and its connection state
+#   install.sh refresh-path
+#                          read your login shell's PATH again, write it into the
+#                          installed service and restart it (no rebuild)
 #   install.sh preflight   check only (used by blerg-up.sh before doing anything
 #                           else); tries to self-heal a missing systemd --user
 #                           session via sudo. Exit codes: 0 fine, 3 needs a
@@ -40,13 +46,31 @@ cd "$(dirname "${BASH_SOURCE[0]}")"            # install/desktop/daemon
 
 usage() {
   cat <<EOF
-Usage: $0 {install [--yes]|uninstall|status|preflight}
+Usage: $0 {install [--yes] [--wsl-startup] [--enroll CODE]|refresh-path [--yes]|import-credential FILE|uninstall|status|preflight|wsl-startup {enable|disable|status}}
 
   install     build the daemon binary, install and start the service. A
               reinstall over a running daemon that has agent work in
               progress lists it and asks first; --yes reinstalls anyway.
               With no terminal to ask, it stops with exit code 5. A daemon
-              token the server refuses stops it with exit code 6
+              token the server refuses stops it with exit code 6.
+              --wsl-startup opts in to Windows sign-in startup (WSL2).
+              --enroll CODE adds this machine as one of your desktops, with
+              a one-time code from Settings → Account → Your desktops → Add a
+              desktop. Set BLERG_RUNNER_SERVER_URL for a remote server; no
+              install/desktop/.env is needed (one is created).
+  refresh-path
+              read your login shell's PATH again and give it to the
+              installed service, then restart it (no rebuild). Use it after
+              installing an engine CLI (Codex, Claude Code, Hermes, OpenClaw)
+              in a folder the daemon did not search. The app's Re-detect PATH
+              does the same without a restart. --yes skips the question
+              about agent work in progress.
+  import-credential FILE
+              import a private person-issued credential, then run install.
+  wsl-startup {enable|disable|status}
+              manage Windows sign-in startup without restarting the daemon.
+              enable creates a Windows logon task that keeps this distro
+              running while signed in (including on battery), with retries
   uninstall   stop and remove the service (the binary is left in place)
   status      show whether it is running, and its connection to the server
   preflight   check only (used by blerg-up.sh); tries to start a missing
@@ -58,7 +82,7 @@ EOF
 
 CMD="${1:-}"
 case "$CMD" in
-  install|uninstall|status|preflight) ;;
+  install|uninstall|status|preflight|wsl-startup|import-credential|refresh-path) ;;
   -h|--help|help) usage; exit 0 ;;
   *)
     [ -n "$CMD" ] && echo "install.sh: unknown subcommand: $CMD" >&2
@@ -67,16 +91,42 @@ case "$CMD" in
     exit 1 ;;
 esac
 shift
+if [ "$CMD" = import-credential ]; then
+  [ "$#" -eq 1 ] || { usage >&2; exit 1; }
+  python3 "$PWD/enroll.py" --import "$1" "${BLERG_RUNNER_DAEMON_STATE_DIR:-$HOME/.blerg-runner-daemon}"
+  exit $?
+fi
 ASSUME_YES=0
-for arg in "$@"; do
-  case "$arg" in
-    --yes|-y) [ "$CMD" = install ] && ASSUME_YES=1 && continue ;;
+WSL_STARTUP=0
+STARTUP_ACTION=""
+if [ "$CMD" = wsl-startup ]; then
+  STARTUP_ACTION="${1:-}"
+  case "$STARTUP_ACTION" in
+    enable|disable|status) shift ;;
+    *) usage >&2; exit 1 ;;
   esac
+fi
+# ENROLL_CODE: a one-time desktop enrollment code (--enroll). Never echoed or logged, and it
+# reaches enroll.py on stdin, not on a command line.
+ENROLL_CODE=""
+while [ "$#" -gt 0 ]; do
+  arg="$1"; shift
+  case "$arg" in
+    --yes|-y) { [ "$CMD" = install ] || [ "$CMD" = refresh-path ]; } && ASSUME_YES=1 && continue ;;
+    --wsl-startup) [ "$CMD" = install ] && WSL_STARTUP=1 && continue ;;
+    --enroll) [ "$CMD" = install ] && [ "$#" -gt 0 ] && ENROLL_CODE="$1" && shift && continue ;;
+    --enroll=*) [ "$CMD" = install ] && ENROLL_CODE="${arg#--enroll=}" && continue ;;
+  esac
+  case "$arg" in --enroll*) arg="--enroll" ;; esac  # never echo a code
   echo "install.sh: unknown option: $arg" >&2
   echo >&2
   usage >&2
   exit 1
 done
+if [ -n "$ENROLL_CODE" ] && ! [[ "$ENROLL_CODE" =~ ^bec_[0-9a-f]{40}$ ]]; then
+  echo "install.sh: that enrollment code is not complete. Copy the whole command again from Settings → Account → Your desktops." >&2
+  exit 1
+fi
 
 if [ "$(id -u)" -eq 0 ]; then
   # This script always runs as you; it escalates only two specific commands
@@ -131,7 +181,7 @@ tighten_existing_secrets() {
   [ -f "$HOME/Library/LaunchAgents/dev.blerg.runner-daemon.plist" ] && chmod 600 "$HOME/Library/LaunchAgents/dev.blerg.runner-daemon.plist" 2>/dev/null || true
   true
 }
-tighten_existing_secrets
+[ "$CMD" = wsl-startup ] || tighten_existing_secrets
 
 env_val() {
   # Strips one pair of surrounding quotes, if present — systemd already does
@@ -147,6 +197,20 @@ env_val() {
   esac
   printf '%s' "$v"
 }
+
+# A new desktop added with --enroll needs no desktop stack here: start a private .env for its
+# settings, and keep the server it was pointed at so a later reinstall dials the same one.
+if [ "$CMD" = install ] && [ -n "$ENROLL_CODE" ]; then
+  if [ ! -f "$ENV_FILE" ]; then
+    : > "$ENV_FILE"
+    blerg_step "Created $ENV_FILE for this desktop's settings."
+  fi
+  for k in BLERG_RUNNER_SERVER_URL BLERG_RUNNER_REPOS_ROOT BLERG_RUNNER_DAEMON_NAME; do
+    if [ -n "${!k:-}" ] && [ -z "$(env_val "$k")" ]; then
+      echo "$k=${!k}" >> "$ENV_FILE"
+    fi
+  done
+fi
 
 go_arch() {
   case "$(uname -m)" in
@@ -209,11 +273,12 @@ EOF
   fi
   mkdir -p "$BIN_DIR"
   blerg_step "Building blerg-runner-daemon ($(go_os)/$(go_arch))..."
+  local build_commit; build_commit="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo dev)"
   # GOWORK=off: the repo-root go.work only lists ./contracts and ./core, which
   # puts any build under the repo tree into workspace mode and rejects
   # ./runner as a non-member module.
   if HOST_GO="$(find_host_go)"; then
-    ( cd "$RUNNER_DIR" && GOOS="$(go_os)" GOARCH="$(go_arch)" GOWORK=off "$HOST_GO" build -o "$NEW_BIN_PATH" ./cmd/daemon )
+    ( cd "$RUNNER_DIR" && GOOS="$(go_os)" GOARCH="$(go_arch)" GOWORK=off "$HOST_GO" build -ldflags "-X main.commit=$build_commit" -o "$NEW_BIN_PATH" ./cmd/daemon )
   elif command -v docker >/dev/null 2>&1; then
     # No suitable host go — build inside a matching container instead. Only
     # the BUILD is containerized; the resulting binary runs directly on the
@@ -228,28 +293,64 @@ EOF
       -v "$HOME/.cache/blerg-go":/gopath \
       -v "$HOME/.cache/blerg-gocache":/gocache \
       -v "$REPO_ROOT":/src -w /src/runner \
-      golang:1.26.9@sha256:37cfcca63222ec499bec5e8ad7aad52dbf7529db36d5812b8eae2f0621aa92d6 go build -o "/src/bin/blerg-runner-daemon.new" ./cmd/daemon
+      golang:1.26.9@sha256:37cfcca63222ec499bec5e8ad7aad52dbf7529db36d5812b8eae2f0621aa92d6 go build -ldflags "-X main.commit=$build_commit" -o "/src/bin/blerg-runner-daemon.new" ./cmd/daemon
   else
     blerg_fail "Need either go >= $GO_MIN_VERSION or docker on PATH to build the daemon."
     exit 1
   fi
 }
 
+# The host daemon may be Mach-O. Its trusted Git/quota helper is always a
+# Linux executable in Docker Desktop's VM; install the matching protocol image.
+build_workspace_worker_image_if_missing() {
+  local protocol
+  protocol="$(docker image inspect --format '{{index .Config.Labels "org.blerg.workspace-worker-protocol"}}' blerg-workspace-worker:latest 2>/dev/null || true)"
+  [ "$protocol" = 3 ] && return 0
+  blerg_step "Building the contained workspace worker image..."
+  if docker build -f "$RUNNER_DIR/Dockerfile.workspace-worker" -t blerg-workspace-worker:latest "$REPO_ROOT"; then
+    return 0
+  fi
+  blerg_fail "Workspace worker image build failed; the daemon was not installed. Re-run after fixing the build."
+  return 1
+}
+
 build_sandbox_image_if_missing() {
   # "Local sandbox" is the default runtime for terminal sessions (see
   # DAEMON.md). No docker on PATH is a structural absence, not a failure —
   # blerg-up.sh's own preflight already hard-stops on that earlier, so
-  # skip quietly here. But a build that's ATTEMPTED and doesn't finish
+  # skip quietly here. But a first build that's ATTEMPTED and doesn't finish
   # (network blip, disk space, Ctrl-C) stops the whole install rather than
   # going on to start a daemon whose default runtime silently doesn't work —
   # a half-working install is worse than an install that refuses to start.
+  #
+  # The image carries trusted helpers built from this checkout (the shell
+  # supervisor, the workspace explorer), so an update must refresh it, not
+  # only a first install: the image is labeled with the commit it was built
+  # from and rebuilt when that differs. Docker's layer cache keeps an update
+  # quick (the helpers are the last layers). A failed update keeps the
+  # existing image and says so; sandbox shells then run the previous helper.
   command -v docker >/dev/null 2>&1 || return 0
-  docker image inspect blerg-runner-sandbox:latest >/dev/null 2>&1 && return 0
+  local want have
+  want="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+  if docker image inspect blerg-runner-sandbox:latest >/dev/null 2>&1; then
+    have="$(docker image inspect --format '{{index .Config.Labels "org.blerg.build-commit"}}' blerg-runner-sandbox:latest 2>/dev/null || true)"
+    if [ -n "$want" ] && [ "$have" != "$want" ]; then
+      blerg_step "Updating the local-sandbox session image to this build..."
+      if ! docker build -f "$RUNNER_DIR/sandbox/Dockerfile" --build-arg UID="$(id -u)" --label "org.blerg.build-commit=$want" -t blerg-runner-sandbox:latest "$RUNNER_DIR/.."; then
+        blerg_fail "The sandbox image update didn't finish; keeping the existing image. Sandbox shells use its older helpers until the next install succeeds."
+      fi
+    fi
+    build_workspace_worker_image_if_missing || return 1
+    return 0
+  fi
   blerg_step "Building the local-sandbox session image (one-time, a minute or two)..."
   # Deliberately not silenced: this pulls a base image, apt-get's a dev
   # toolchain, and npm-installs the claude CLI — real progress output here
   # beats a silent multi-minute pause that looks hung.
-  docker build --build-arg UID="$(id -u)" -t blerg-runner-sandbox:latest "$RUNNER_DIR/sandbox" && return 0
+  if docker build -f "$RUNNER_DIR/sandbox/Dockerfile" --build-arg UID="$(id -u)" ${want:+--label "org.blerg.build-commit=$want"} -t blerg-runner-sandbox:latest "$RUNNER_DIR/.."; then
+    build_workspace_worker_image_if_missing || return 1
+    return 0
+  fi
 
   blerg_box "sandbox image build didn't finish" <<EOF
 'Local sandbox' is the default runtime for terminal sessions, so the
@@ -259,7 +360,7 @@ otherwise the first session launch would fail on a broken default.
 Fix whatever stopped it (network, disk space, or you canceled it),
 then re-run. Or build it by hand first to see the full error:
 
-  docker build --build-arg UID=$(id -u) -t blerg-runner-sandbox:latest $RUNNER_DIR/sandbox
+  docker build -f $RUNNER_DIR/sandbox/Dockerfile --build-arg UID=$(id -u) -t blerg-runner-sandbox:latest $RUNNER_DIR/..
 EOF
   exit 1
 }
@@ -287,6 +388,19 @@ put_binary_in_place() {
       exit "$EXIT_WORK_RUNNING"
     fi
   fi
+  if personal_desktop_install; then
+    local enrollment_rc=0
+    ( enroll_desktop ) || enrollment_rc=$?
+    if [ "$enrollment_rc" -ne 0 ]; then
+      rm -f "$NEW_BIN_PATH"
+      exit "$enrollment_rc"
+    fi
+    # Service rendering reads the file; it never embeds this personal bearer.
+    DAEMON_TOKEN=""
+  fi
+  if [ "$1" = 1 ]; then
+    BLERG_RUNNER_DAEMON_STATE_DIR="$(daemon_state_dir)" "$NEW_BIN_PATH" prepare-update || true
+  fi
   mv -f "$NEW_BIN_PATH" "$BIN_PATH"
 }
 
@@ -294,10 +408,16 @@ put_binary_in_place() {
 # leave it a marker in its state directory saying the restart is planned and
 # why (RESTART_REASON). The next daemon reads and removes it
 # (runner/internal/daemon/restartcause.go) and tells the agent sessions the
-# restart cut off that nothing they ran caused it; without it they are told
+# restart cut off why it happened; without it they are told
 # the daemon stopped unexpectedly. Nothing when no daemon was running. Never
 # fatal: a marker that cannot be written only changes those words.
-daemon_state_dir() { printf '%s' "${BLERG_RUNNER_DAEMON_STATE_DIR:-$HOME/.blerg-runner-daemon}"; }
+daemon_state_dir() { local configured; configured="${BLERG_RUNNER_DAEMON_STATE_DIR:-$(env_val BLERG_RUNNER_DAEMON_STATE_DIR)}"; printf '%s' "${configured:-$HOME/.blerg-runner-daemon}"; }
+# Bind the original live tool call before a long build or a detached launch can
+# outlive it. The running daemon observes the helper's actual process ancestry.
+if [ "$CMD" = install ] && [ -x "$BIN_PATH" ]; then
+  BLERG_RUNNER_DAEMON_STATE_DIR="$(daemon_state_dir)" "$BIN_PATH" begin-update >/dev/null 2>&1 || true
+fi
+
 note_planned_restart() {
   [ -n "$RESTART_REASON" ] || return 0
   local dir
@@ -347,7 +467,39 @@ url_display() {
 # exists (a sick user bus can block a systemctl call for many seconds).
 with_timeout() {
   local secs="$1"; shift
-  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; else "$@"; fi
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"
+  elif command -v perl >/dev/null 2>&1; then perl -e 'alarm shift; exec @ARGV or exit 127' "$secs" "$@"  # stock macOS
+  else "$@"; fi
+}
+
+# run_bounded SECS OUT CMD...: CMD with stdin closed and stdout in the file OUT,
+# stopped after SECS. It needs no timeout(1), which stock macOS lacks, and the
+# output goes to a file rather than a pipe. CMD runs in a process group of its
+# own (bash job control, the same on Linux and macOS), and when CMD ends or is
+# stopped the whole group is killed: nothing a profile started in the
+# foreground or background outlives the capture. Returns CMD's status, or 124
+# when it was stopped.
+run_bounded() {
+  local secs="$1" out="$2"; shift 2
+  (
+    set -m  # each background job gets its own process group (pgid = its pid)
+    "$@" </dev/null >"$out" 2>/dev/null &
+    pid=$!
+    ticks=0 rc=0
+    while kill -0 "$pid" 2>/dev/null; do
+      if [ "$ticks" -ge $((secs * 10)) ]; then
+        kill -TERM -- "-$pid" 2>/dev/null || true
+        sleep 0.2
+        rc=124
+        break
+      fi
+      sleep 0.1
+      ticks=$((ticks + 1))
+    done
+    kill -KILL -- "-$pid" 2>/dev/null || true
+    if [ "$rc" = 0 ]; then wait "$pid" || rc=$?; else wait "$pid" 2>/dev/null || true; fi
+    exit "$rc"
+  ) 2>/dev/null
 }
 
 # url_is_loopback URL: the URL's host is this machine, so a proxy from the
@@ -378,9 +530,11 @@ token_refused_box() { # what was refused, where the token comes from, how to fix
   blerg_box "daemon token refused" <<EOF
 $1
 
-The daemon token is BLERG_RUNNER_DAEMON_TOKEN in $ENV_FILE.
-It must be the same as the server's BLERG_RUNNER_DAEMON_TOKEN. Put the
-server's token there, then run ./daemon/install.sh install again.
+Open Settings → Account → Your desktops and select Enroll for this desktop,
+or Add a desktop and run the command it shows here (install --enroll CODE).
+An operator can also give you a person-issued credential file for
+./daemon/install.sh import-credential /path/to/credential.json, then run
+./daemon/install.sh install. The credential stays in private daemon state.
 See DAEMON.md, "The server refused the daemon token".
 EOF
 }
@@ -393,7 +547,7 @@ EOF
 check_daemon_token() {
   local base url out code ctype err shown
   base="$(daemon_http_base)"
-  url="$base/api/daemon/whoami"
+  url="$base/api/daemon/whoami?name=$(python3 -c 'import os,socket,sys,urllib.parse; print(urllib.parse.quote(os.environ.get("BLERG_RUNNER_DAEMON_NAME") or sys.argv[1] or socket.gethostname().lower(), safe=""))' "$(env_val BLERG_RUNNER_DAEMON_NAME)")"
   shown="$(url_display "$base")"
   if ! command -v curl >/dev/null 2>&1; then
     blerg_step "Couldn't check the daemon token with the server first (curl isn't installed); going on."
@@ -540,11 +694,14 @@ require_env_file() {
 }
 
 render_placeholders() {
+  local service_token="$DAEMON_TOKEN"
+  # Person credentials are loaded only from the private state file.
+  case "$service_token" in bdt_*) service_token="" ;; esac
   # Reads a template on stdin, writes the substituted result to stdout.
   # '#' delimiter because values here are paths/URLs, never '#'.
   sed -e "s#__BIN_PATH__#$BIN_PATH#g" \
       -e "s#__SERVER_URL__#$SERVER_URL#g" \
-      -e "s#__DAEMON_TOKEN__#$DAEMON_TOKEN#g" \
+      -e "s#__DAEMON_TOKEN__#$service_token#g" \
       -e "s#__REPOS_ROOT__#$REPOS_ROOT#g" \
       -e "s#__LOG_DIR__#$LOG_DIR#g"
 }
@@ -554,7 +711,7 @@ render_placeholders() {
 # putting one in install/desktop/.env and re-running `install.sh install`
 # (or blerg-up.sh) bakes it into the unit/plist. The daemon itself never
 # reads .env — only its service environment.
-OPTIONAL_DAEMON_ENV="BLERG_RUNNER_PROVISION_CLAUDE_MD BLERG_RUNNER_ALLOW_HOST_CREDENTIAL_CLONE BLERG_RUNNER_CLAUDE_USAGE"
+OPTIONAL_DAEMON_ENV="BLERG_RUNNER_DAEMON_STATE_DIR BLERG_RUNNER_DAEMON_NAME BLERG_RUNNER_PROVISION_CLAUDE_MD BLERG_RUNNER_ALLOW_HOST_CREDENTIAL_CLONE BLERG_RUNNER_CLAUDE_USAGE"
 daemon_extra_env() {
   local k v
   if [ -n "${OAUTH_TOKEN:-}" ]; then printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$OAUTH_TOKEN"; fi
@@ -582,6 +739,94 @@ replace_marker_line() {
 # sed, not ${s//&/&amp;}: bash 5.2's patsub_replacement makes & in that
 # replacement mean "the match", while macOS's bash 3.2 treats it literally.
 xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+
+# --- The service's PATH --------------------------------------------------------
+# A service starts with the service manager's minimal PATH, so an engine CLI
+# installed with nvm, a custom npm prefix or Homebrew is invisible to the
+# daemon even after you log in to it. install and refresh-path give the service
+# your login shell's PATH instead, merged with the usual defaults: only
+# absolute folders made of plain path characters (no quotes, spaces, %, $ or
+# ..), each once, at most 64. A PATH holds folder names, never secrets.
+
+# login_shell: your login shell ($SHELL, else your passwd entry), else /bin/sh.
+login_shell() {
+  local s="${SHELL:-}"
+  if [ -z "$s" ] || [ ! -x "$s" ]; then
+    s=""
+    if [ "$OS" = Darwin ] && command -v dscl >/dev/null 2>&1; then
+      s="$(dscl . -read "/Users/$(id -un)" UserShell 2>/dev/null | sed -n 's/^UserShell: //p')"
+    elif command -v getent >/dev/null 2>&1; then
+      s="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f7)"
+    fi
+    [ -n "$s" ] && [ -x "$s" ] || s=/bin/sh
+  fi
+  printf '%s' "$s"
+}
+
+# login_shell_path: the PATH your login shell sets up, or nothing. An
+# interactive login shell first (nvm usually loads from the rc file), then a
+# plain one; each is cut off after 10s, reads nothing, and starts with only
+# HOME, USER, LOGNAME, SHELL and TERM=dumb: never this script's tokens.
+LOGIN_PATH_MARK=__BLERG_LOGIN_PATH__
+login_shell_path() {
+  local shell flags out tmp secs="${BLERG_LOGIN_SHELL_TIMEOUT:-10}"
+  case "$secs" in ''|*[!0-9]*) secs=10 ;; esac
+  shell="$(login_shell)"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/blerg-login-path.XXXXXX")" || return 1
+  for flags in -ilc -lc; do
+    run_bounded "$secs" "$tmp" env -i HOME="$HOME" USER="$(id -un)" LOGNAME="$(id -un)" SHELL="$shell" TERM=dumb \
+      PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin \
+      "$shell" "$flags" "printf '\\n$LOGIN_PATH_MARK%s$LOGIN_PATH_MARK\\n' \"\$PATH\"" || true
+    out="$(sed -n "s/.*$LOGIN_PATH_MARK\(.*\)$LOGIN_PATH_MARK.*/\1/p" "$tmp" | tail -1)"
+    if [ -n "$out" ]; then rm -f "$tmp"; printf '%s' "$out"; return 0; fi
+  done
+  rm -f "$tmp"
+  return 1
+}
+
+# merge_service_path PATH...: the colon lists, in order, as one clean PATH.
+merge_service_path() {
+  printf '%s\n' "$@" | tr ':' '\n' | awk '
+    { sub(/\/+$/, "") }
+    /^\/[A-Za-z0-9\/._+@,~-]*$/ && $0 !~ /\/\.\.(\/|$)/ && $0 !~ /\/\// && !seen[$0]++ && n < 64 { out = out (n++ ? ":" : "") $0 }
+    END { print out }'
+}
+
+# compute_service_path: the PATH the service gets, into SERVICE_PATH, and where
+# it came from into SERVICE_PATH_SOURCE (for the message). Not in a subshell.
+SERVICE_PATH=""
+SERVICE_PATH_SOURCE=""
+compute_service_path() {
+  local captured defaults="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  [ "$OS" = Darwin ] && defaults="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  if captured="$(login_shell_path)"; then
+    SERVICE_PATH_SOURCE="your login shell ($(basename "$(login_shell)"))"
+  else
+    captured=""
+    SERVICE_PATH_SOURCE="the defaults (your login shell's PATH could not be read)"
+  fi
+  SERVICE_PATH="$(merge_service_path "$captured" "$defaults")"
+  [ -z "$captured" ] || save_login_path "$SERVICE_PATH"
+}
+
+# save_login_path PATH: one precedence for the two ways a PATH is captured. The
+# daemon puts the PATH saved in its state folder (login-path.json, written by
+# the app's Re-detect PATH) ahead of its service PATH at every start, so the
+# installer rewrites that file with what it just captured: the latest capture
+# wins, whether it came from the app or from install / refresh-path. When the
+# login shell could not be read, the file is left as it was.
+save_login_path() {
+  local dir file json
+  dir="$(daemon_state_dir)"
+  file="$dir/login-path.json"
+  json="$(printf '%s' "$1" | awk -F: '{ for (i = 1; i <= NF; i++) printf "%s\"%s\"", (i > 1 ? "," : ""), $i }')"
+  if mkdir -p "$dir" 2>/dev/null && chmod 700 "$dir" 2>/dev/null &&
+     printf '{"path":[%s]}\n' "$json" > "$file.tmp" 2>/dev/null && chmod 600 "$file.tmp" && mv -f "$file.tmp" "$file"; then
+    return 0
+  fi
+  rm -f "$file.tmp" 2>/dev/null || true
+  blerg_step "Warning: couldn't save the PATH in $dir; a PATH saved earlier from the app may still go first."
+}
 
 claude_already_logged_in() {
   # Linux only: `claude` stores its login at ~/.claude/.credentials.json. This
@@ -655,6 +900,21 @@ remember_skip_claude_token_prompt() {
   blerg_step "Won't ask again (saved BLERG_SKIP_CLAUDE_TOKEN_PROMPT=1 to .env; delete that line to be asked)."
 }
 
+# Enrollment may fence a legacy socket. Wait until the existing active-work
+# confirmation has allowed replacement, before changing its persisted owner.
+personal_desktop_install() {
+  [ -n "$ENROLL_CODE" ] || [ -n "$(env_val BLERG_CORE_INTERNAL_KEY)" ] || [ -f "$(daemon_state_dir)/desktop-credential.json" ] || [[ "$(env_val BLERG_RUNNER_DAEMON_TOKEN)" = bdt_* ]]
+}
+enroll_desktop() {
+  if [ -n "$ENROLL_CODE" ]; then
+    printf '%s\n' "$ENROLL_CODE" | python3 "$DESKTOP_DIR/daemon/enroll.py" --redeem "$ENV_FILE" "$(daemon_state_dir)" "$SERVER_URL" || return 7
+  else
+    python3 "$DESKTOP_DIR/daemon/enroll.py" "$ENV_FILE" "$(daemon_state_dir)" "$SERVER_URL" || return 7
+  fi
+  DAEMON_TOKEN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["token"])' "$(daemon_state_dir)/desktop-credential.json")"
+  check_daemon_token
+}
+
 resolve_config() {
   require_env_file
   # The daemon dials the runner SERVER, which is not necessarily the desktop
@@ -666,7 +926,10 @@ resolve_config() {
   SERVER_URL="${BLERG_RUNNER_SERVER_URL:-$(env_val BLERG_RUNNER_SERVER_URL)}"
   [ -n "$SERVER_URL" ] || SERVER_URL="ws://localhost:${PORT_RUNNER:-8083}/ws/daemon"
   DAEMON_TOKEN="$(env_val BLERG_RUNNER_DAEMON_TOKEN)"
-  [ -n "$DAEMON_TOKEN" ] || { blerg_fail "BLERG_RUNNER_DAEMON_TOKEN missing from $ENV_FILE"; exit 1; }
+  if ! personal_desktop_install; then
+    blerg_step "This desktop needs to be enrolled to you. Open Settings → Account → Your desktops → Enroll before 0.6."
+  fi
+
 
   REPOS_ROOT="$(env_val BLERG_RUNNER_REPOS_ROOT)"
   if [ -z "$REPOS_ROOT" ]; then
@@ -762,9 +1025,69 @@ EOF
   fi
 }
 
+# Windows sign-in and distro boot are separate startup layers. Lingering starts
+# the user manager at distro boot; the Windows task boots and keeps WSL alive.
+wsl_startup() {
+  local action="$1" linux_user ps_path encoded
+  if [ "$OS" != Linux ] || ! is_wsl || [ -z "${WSL_DISTRO_NAME:-}" ]; then
+    blerg_fail "Windows sign-in startup requires WSL2. Run this inside the registered distro as its Linux account (WSL_DISTRO_NAME must be set)."
+    return 1
+  fi
+  linux_user="$(id -un)"
+  # These values are later passed through a Windows task command line. Reject
+  # shell/PowerShell metacharacters rather than trusting cross-shell quoting.
+  if [[ ! "$WSL_DISTRO_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9._\ -]*$ ]] ||
+     [[ ! "$linux_user" =~ ^[a-zA-Z_][a-zA-Z0-9_.-]*\$?$ ]]; then
+    blerg_fail "Unsupported distro or Linux account name for Windows startup; use letters, numbers, spaces (distro only), dots, underscores, or hyphens. See DAEMON.md."
+    return 1
+  fi
+  if [ "$action" = enable ]; then
+    if wsl_without_systemd || ! systemctl --user is-enabled --quiet "$SERVICE_NAME.service"; then
+      blerg_fail "Install the enabled systemd daemon first: ./daemon/install.sh install (see DAEMON.md for WSL2 systemd prerequisites)."
+      return 1
+    fi
+    if [ "$(loginctl show-user "$(id -u)" -p Linger --value 2>/dev/null)" != yes ]; then
+      blerg_fail "Distro boot requires lingering: run sudo loginctl enable-linger $linux_user, then retry."
+      return 1
+    fi
+    blerg_step "Opting in: a Windows Task Scheduler logon task will start this distro and keep it running while you are signed in, including on battery. No elevation or Windows password is used."
+  fi
+  if ! command -v powershell.exe >/dev/null 2>&1 || ! command -v wslpath >/dev/null 2>&1; then
+    blerg_fail "Windows interop (powershell.exe and wslpath) is required. Enable WSL interop and Windows PATH, or see DAEMON.md for manual Windows setup."
+    return 1
+  fi
+  ps_path="$(wslpath -w "$DESKTOP_DIR/daemon/wsl-startup.ps1")" || return 1
+  # Transport the path as data: PowerShell recognizes Unicode quote delimiters
+  # too. Encoding an interpolated expression alone would preserve an injection.
+  # The other arguments have already passed the action/name allowlists.
+  ps_path="$(printf '%s' "$ps_path" | base64 -w0)" || return 1
+  encoded="$(printf "& ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('%s'))) -Action '%s' -Distro '%s' -LinuxUser '%s'" \
+    "$ps_path" "$action" "$WSL_DISTRO_NAME" "$linux_user" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)" || return 1
+  if ! powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "$encoded"; then
+    blerg_fail "Windows Task Scheduler startup $action failed. Check Task Scheduler permissions and Windows PowerShell policy; retry ./daemon/install.sh wsl-startup $action. See DAEMON.md."
+    return 1
+  fi
+}
+
+offer_wsl_startup() {
+  is_wsl || return 0
+  local answer=""
+  if [ "$WSL_STARTUP" = 1 ]; then
+    wsl_startup enable
+    return
+  fi
+  blerg_step "WSL does not start this distro after Windows sign-in by itself."
+  blerg_step "Optional: ./daemon/install.sh wsl-startup enable creates a Windows logon task that starts and keeps this distro running while signed in, including on battery."
+  if [ -t 0 ]; then
+    read -r -p "  Enable that Windows sign-in task? [y/N] " answer
+    case "$answer" in y|Y) wsl_startup enable ;; esac
+  fi
+  return 0
+}
+
 install_systemd() {
   resolve_config
-  check_daemon_token
+  if ! personal_desktop_install; then check_daemon_token; fi
   build_binary
   build_sandbox_image_if_missing
   UNIT_DIR="$HOME/.config/systemd/user"
@@ -779,6 +1102,11 @@ install_systemd() {
   done <<EOF
 $(daemon_extra_env)
 EOF
+  local svc_path
+  compute_service_path; svc_path="$SERVICE_PATH"
+  extra_lines="${extra_lines:+$extra_lines
+}Environment=PATH=$svc_path"
+  blerg_step "Service PATH from $SERVICE_PATH_SOURCE (refresh it later with ./daemon/install.sh refresh-path)."
   LOG_DIR=""  # unused by the systemd template; journald captures stdout/stderr
 
   local running=0
@@ -792,14 +1120,21 @@ EOF
   systemctl --user enable "$SERVICE_NAME.service"
   note_planned_restart
   mark_restart
-  systemctl --user restart "$SERVICE_NAME.service"
-  if ! loginctl enable-linger "$USER" 2>/dev/null; then
+  local restart_rc=0
+  systemctl --user restart "$SERVICE_NAME.service" || restart_rc=$?
+  if [ "$restart_rc" -ne 0 ]; then
+    BLERG_RUNNER_DAEMON_STATE_DIR="$(daemon_state_dir)" "$BIN_PATH" cancel-update || true
+    exit "$restart_rc"
+  fi
+  if ! loginctl enable-linger "$(id -un)" 2>/dev/null; then
     # Usually harmless and only a warning: the daemon is running now, it just
     # isn't allowed to outlive your last login session.
-    blerg_step "Warning: couldn't enable 'lingering' for $USER (it needs polkit or root)."
+    blerg_step "Warning: couldn't enable 'lingering' for $(id -un) (it needs polkit or root)."
     blerg_step "  The daemon is running now, but it will stop when you log out of this machine."
-    blerg_step "  To keep it running after logout: sudo loginctl enable-linger $USER"
+    blerg_step "  To start at distro boot and keep it running after logout: sudo loginctl enable-linger $(id -un)"
   fi
+
+  offer_wsl_startup
 
   blerg_ok "Installed and started. Logs: journalctl --user -u $SERVICE_NAME -f"
   wait_for_connection systemd_daemon_pid "journalctl --user -u $SERVICE_NAME -f" || exit "$EXIT_TOKEN_REFUSED"
@@ -834,6 +1169,9 @@ remove_provisioned_links() {
 }
 
 uninstall_systemd() {
+  # Remove only this distro/account's opt-in task, before removing its service.
+  # If Windows is inaccessible, leave the service installed and explain repair.
+  if is_wsl; then wsl_startup disable || return 1; fi
   systemctl --user disable --now "$SERVICE_NAME.service" 2>/dev/null || true
   rm -f "$HOME/.config/systemd/user/$SERVICE_NAME.service"
   systemctl --user daemon-reload
@@ -885,7 +1223,7 @@ status_systemd() {
 
 install_launchd() {
   resolve_config
-  check_daemon_token
+  if ! personal_desktop_install; then check_daemon_token; fi
   build_binary
   build_sandbox_image_if_missing
   LABEL="dev.blerg.runner-daemon"
@@ -903,6 +1241,11 @@ install_launchd() {
   done <<EOF
 $(daemon_extra_env)
 EOF
+  local svc_path
+  compute_service_path; svc_path="$SERVICE_PATH"
+  extra_entries="${extra_entries:+$extra_entries
+}$(plist_path_entry "$svc_path")"
+  blerg_step "Service PATH from $SERVICE_PATH_SOURCE (refresh it later with ./daemon/install.sh refresh-path)."
 
   local running=0
   launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 && running=1
@@ -914,10 +1257,91 @@ EOF
   note_planned_restart
   mark_restart
   launchctl bootout "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
+  local restart_rc=0
+  launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH" || restart_rc=$?
+  if [ "$restart_rc" -ne 0 ]; then
+    BLERG_RUNNER_DAEMON_STATE_DIR="$(daemon_state_dir)" "$BIN_PATH" cancel-update || true
+    exit "$restart_rc"
+  fi
   launchctl enable "gui/$(id -u)/$LABEL"
 
   blerg_ok "Installed and started. Logs: $LOG_DIR/blerg-runner-daemon.log"
+  wait_for_connection launchd_daemon_pid "$LOG_DIR/blerg-runner-daemon.log" || exit "$EXIT_TOKEN_REFUSED"
+}
+
+plist_path_entry() { printf '    <key>PATH</key>\n    <string>%s</string>' "$(xml_escape "$1")"; }
+
+# --- refresh-path ---------------------------------------------------------------
+# Rewrite only the PATH of the installed unit/plist and restart it the same
+# planned way install does (the sessions it interrupts are continued after it).
+# refresh_handoff STEP: the #235 planned-update handoff for refresh-path, the
+# same steps install takes: begin-update binds the agent tool call that runs
+# this command before anything changes, prepare-update right before the
+# restart, cancel-update when the restart fails. The running daemon's binary
+# is the one that answers (refresh-path builds nothing). A daemon older than
+# the handoff refuses the unknown step; that never stops the refresh.
+refresh_handoff() {
+  [ -x "$BIN_PATH" ] || return 0
+  BLERG_RUNNER_DAEMON_STATE_DIR="$(daemon_state_dir)" "$BIN_PATH" "$1" >/dev/null 2>&1 || true
+}
+
+confirm_refresh_restart() {
+  RESTART_REASON=reinstall
+  local rc=0
+  confirm_reinstall_over_work "$BIN_PATH" "$ASSUME_YES" || rc=$?
+  if [ "$rc" -eq 1 ]; then blerg_ok "Not refreshed: the daemon was left running as it was."; exit 0; fi
+  [ "$rc" -eq 0 ] || exit "$EXIT_WORK_RUNNING"
+}
+
+refresh_path_systemd() {
+  local unit="$HOME/.config/systemd/user/$SERVICE_NAME.service" svc_path tmp
+  [ -f "$unit" ] || { blerg_fail "The daemon service is not installed: run ./daemon/install.sh install."; exit 1; }
+  refresh_handoff begin-update
+  confirm_refresh_restart
+  compute_service_path; svc_path="$SERVICE_PATH"
+  tmp="$unit.tmp"
+  awk -v line="Environment=PATH=$svc_path" '
+    /^Environment=PATH=/ { next }
+    { print }
+    /^ExecStart=/ && !done { print line; done = 1 }' "$unit" > "$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$unit"
+  blerg_step "Service PATH from $SERVICE_PATH_SOURCE."
+  systemctl --user daemon-reload
+  note_planned_restart
+  mark_restart
+  refresh_handoff prepare-update
+  local restart_rc=0
+  systemctl --user restart "$SERVICE_NAME.service" || restart_rc=$?
+  if [ "$restart_rc" -ne 0 ]; then refresh_handoff cancel-update; exit "$restart_rc"; fi
+  blerg_ok "PATH refreshed and the daemon restarted."
+  wait_for_connection systemd_daemon_pid "journalctl --user -u $SERVICE_NAME -f" || exit "$EXIT_TOKEN_REFUSED"
+}
+
+refresh_path_launchd() {
+  local label="dev.blerg.runner-daemon" plist svc_path tmp
+  plist="$HOME/Library/LaunchAgents/$label.plist"
+  [ -f "$plist" ] || { blerg_fail "The daemon service is not installed: run ./daemon/install.sh install."; exit 1; }
+  refresh_handoff begin-update
+  confirm_refresh_restart
+  compute_service_path; svc_path="$SERVICE_PATH"
+  tmp="$plist.tmp"
+  BLERG_PATH_ENTRY="$(plist_path_entry "$svc_path")" awk '
+    skip { skip = 0; next }
+    env && $0 ~ /^[[:space:]]*<key>PATH<\/key>[[:space:]]*$/ { skip = 1; next }
+    { print }
+    /<key>EnvironmentVariables<\/key>/ { env = 1; next }
+    env && !done && /^[[:space:]]*<dict>[[:space:]]*$/ { print ENVIRON["BLERG_PATH_ENTRY"]; done = 1; next }
+    env && /<\/dict>/ { env = 0 }' "$plist" > "$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$plist"
+  blerg_step "Service PATH from $SERVICE_PATH_SOURCE."
+  LOG_DIR="$HOME/Library/Logs/blerg"
+  note_planned_restart
+  mark_restart
+  refresh_handoff prepare-update
+  launchctl bootout "gui/$(id -u)" "$plist" 2>/dev/null || true
+  local restart_rc=0
+  launchctl bootstrap "gui/$(id -u)" "$plist" || restart_rc=$?
+  if [ "$restart_rc" -ne 0 ]; then refresh_handoff cancel-update; exit "$restart_rc"; fi
+  launchctl enable "gui/$(id -u)/$label"
+  blerg_ok "PATH refreshed and the daemon restarted."
   wait_for_connection launchd_daemon_pid "$LOG_DIR/blerg-runner-daemon.log" || exit "$EXIT_TOKEN_REFUSED"
 }
 
@@ -974,6 +1398,16 @@ ensure_systemd_user_session() {
   return 1
 }
 
+# Startup management never starts/restarts a user manager or the daemon.
+if [ "$CMD" = wsl-startup ]; then
+  wsl_startup "$STARTUP_ACTION"
+  exit $?
+fi
+if [ "$WSL_STARTUP" = 1 ] && { [ "$OS" != Linux ] || ! is_wsl; }; then
+  blerg_fail "--wsl-startup is only supported inside WSL2."
+  exit 1
+fi
+
 case "$OS" in
   Linux)
     if wsl_without_systemd; then
@@ -1011,6 +1445,7 @@ EOF
     case "$CMD" in
       install) install_systemd ;;
       uninstall) uninstall_systemd ;;
+      refresh-path) refresh_path_systemd ;;
       status) status_systemd ;;
     esac
     ;;
@@ -1018,6 +1453,7 @@ EOF
     [ "$CMD" = "preflight" ] && exit 0
     case "$CMD" in
       install) install_launchd ;;
+      refresh-path) refresh_path_launchd ;;
       uninstall) uninstall_launchd ;;
       status) status_launchd ;;
     esac

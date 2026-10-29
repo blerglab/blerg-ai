@@ -527,6 +527,37 @@ accepted: ChatView's `commitUrl`, `ChecklistItems`'s `commitUrls`, `CommitRef.ur
   `ArtifactViewer`'s `commit`); without one it copies the sha ("Copied"). Nothing links to a forge.
   **± View diff** is a small button with the diff's +/− counts, read once (`loadDiffSummary`).
 
+## Card references (1.19.0)
+
+`KEY-N` references such as `BLG-205` and `AD-6` resolve across boards, including old key aliases.
+The resolver receives either a key or a legacy board ID; return the current canonical key in
+`CardTarget.key` and the immutable board ID in `CardTarget.boardId`. Confirmed chips show that
+canonical key, including when the text used `#N` or `board:<id>#N`. Parentheses and slash-separated
+lists work; code blocks and URLs stay text. Hosts can use `ReferenceScope` and `ReferenceText`
+for the same chips in History and plans. Commit subjects and message bodies use the same resolver.
+
+Write references directly in message prose or a table, without code spans or Markdown links.
+The legacy `board:<board-id>#<number>` form still names a card without ambiguity and is the CLI
+fallback for a board awaiting key confirmation. References in fenced code, inline code and links
+stay literal. Copy the exact form printed by runner's `ticket create|get|list|search` instead of
+linking to external board URLs.
+
+Supply `ChatView.refs.boardCards(boardIdOrKey, numbers)` to resolve explicit references,
+`refs.cards(numbers)` for unqualified `#N` and ascending ranges (up to ten cards),
+and `refs.openCard(target)` to open the host's in-app card dialog. Resolvers must
+check access and return only existing cards. Missing or inaccessible cards remain
+text. Wrap the chat in `HovercardProvider` with the host's card preview source to
+provide hover previews, as the runner does. Resolutions batch by board and number.
+When a reader changes, its references are resolved again and outstanding answers
+from the old reader are discarded. Hosts must call `clearRefStores()` synchronously
+when the authenticated viewer changes, before remounting chat or checklists. This
+forgets cached card and commit references and discards their outstanding answers.
+
+Runner chooses one board from current pins and approved board-creation events;
+if neither exists it uses its only accessible board. Several in-use boards leave
+bare numbers as text, requiring the explicit form. A newly created board is usable
+as soon as its creation event arrives, without reloading the page.
+
 ## Hovercards
 
 New in 0.54.0: `Hover`, `HovercardProvider`, `HOVERCARD`, `hovercardsEnabled`,
@@ -543,6 +574,9 @@ New in 0.54.0: `Hover`, `HovercardProvider`, `HOVERCARD`, `hovercardsEnabled`,
   or a commit (`{kind: 'commit', sessionId, sha, diff?}`: message, author and files, read from the
   published diff that holds it). The chat's checklist commit chips, its pinned ticket rows and the
   Files list use it.
+- **Host card content.** Pass `content={<YourCard />}` to `Hover` to reuse a host
+  application’s full card in the same delayed, positioned popup. Other callers retain
+  the target’s built-in preview.
 - **Behavior.** It opens after `HOVERCARD.openDelayMs` (400 ms) of hover or keyboard focus, stays
   while the pointer moves into it, and closes on leave, Esc or a press of the chip.
 - **Lists (0.64.0).** A card opens beside what its chip sits in, never over the rows that follow:
@@ -630,10 +664,31 @@ Added in 0.15.0; nothing removed. Older builds draw neither.
 Added in 0.16.0; nothing removed. Older builds leave such text as text.
 
 - **`canOpenWorkspaceFiles`** (ChatView): with a transport that has `files.workspaceFile` (the
-  runner's), a relative link or a path in inline code in the agent's text (`README.md`,
+  runner's), a local link or a path in inline code in the agent's text (`README.md`,
   `src/a.go:120`, `docs/a.md#L12`) opens that file from the session's folder in the viewer, at the
   line named, with Copy path, Download and Save a copy to Files. Pass it only for a viewer the route
-  accepts (the runner's session owner).
+  accepts (the runner's session owner). Absolute references are preserved for the daemon to
+  authorize against the launch working directory; chat does not strip `/workspace/`. The returned
+  workspace-relative path is used for links and images inside the opened document (0.90.0).
+
+## File and folder icons
+
+`FileIcon` and the pure `detectFileIcon(name, directory?)` detector are shared by hosts
+and the chat. Pass the actual filename or path, including extensionless names:
+
+```tsx
+import { FileIcon, detectFileIcon } from '@blerglab/chat'
+
+<FileIcon name="Dockerfile.dev" />
+<FileIcon name="docs" directory expanded />
+detectFileIcon('src/main.go') // 'go'
+```
+
+The decorative 16 px SVGs use a bundled Seti subset (see `THIRD_PARTY_NOTICES.md`).
+Their colors adapt to `--chat-fg`; forced-color mode uses the system foreground.
+`label` adds an optional SVG title and `className` allows placement in a host's layout.
+`FileGlyph` and `FolderGlyph` remain compatibility wrappers; use `FileIcon` with the
+real name for language and named-folder detection.
 
 ## Files in the viewer
 
@@ -835,3 +890,68 @@ New in 0.71.0: `ConfirmPopover` and `endSessionText`.
   the pod is removed and work in it that was not pushed is lost; unknown, "The agent stops. Work
   not yet saved may be lost; the conversation is kept." With `terminal` it speaks of a terminal
   session, which has no conversation. `StartProgress`'s `session` takes an optional `runtime` for it.
+
+### Docked viewers
+
+`ViewerHostContext` lets a host keep serializable `HostedView` descriptors for
+artifact, workspace-file and commit tabs. Modal viewer requests delegate to its
+`open` callback and consume the original request once, including in Strict Mode.
+Render `HostedViewers` inside `ChatView`'s providers (the built-in integration does
+this) and supply a DOM `target` in the host value. Its portals retain chat review,
+markup and approval context while the transcript can be hidden. Split hosts can
+supply `targetFor(id)` for a stable container per view, `visible` for the selected
+tab in every group, and `chatTarget` for the whole Chat surface including its
+composer. Moving these containers keeps viewer state and composer drafts mounted.
+The focused tab remains `active`; composer visibility follows whether `visible`
+contains `chat`. Omit these optional fields to retain the single-target behavior.
+Hosts without the
+context keep their existing modal viewers. `embedded` and `headerActions` are
+additive viewer props; standalone consumers can dock a viewer directly.
+
+Full viewer bodies are bounded size containers. Code, raw text and diff scrollers
+reserve at least one-third of the viewer height (minimum six lines) after EOF;
+rendered Markdown gets two lines of bottom padding. This space stays in the
+viewer and follows split resizing without changing the session's scroll size.
+
+### Alternate transcript panes
+
+`ChatSlots.transcript` may wrap the transcript element with a host's file or commit panes.
+Keep those panes in a bounded flex container with `min-height: 0` and `min-width: 0`;
+the composer stays outside the slot. A viewer host hides the composer when Chat
+is hidden in every group. The runner does two things with the transcript:
+
+- When Chat is the selected tab in no visible group, it suspends the transcript with
+  React Activity (`mode="hidden"`), so its effects disconnect while tab and draft state
+  are kept. Showing Chat again in any group reconnects them.
+- When Chat moves to another split group, it moves the mounted Chat surface (transcript
+  and composer) through a stable portal container (`chatTarget`), so the transcript, its
+  scroll position and the composer draft survive the move without remounting.
+
+Composer draft changes are local to the input, so they do not render the transcript or
+visited viewers.
+
+Commit previews with more than five files or 400 changed lines start with file bodies
+collapsed. Opening a file renders up to 400 lines; **Show full file** reveals the rest.
+
+### Durable waiting attachments
+
+Runner transports with `viewerId` save waiting file bytes and unsent completed metadata in
+IndexedDB, scoped to that account and runner. Each stored file is owned by the tab that chose it
+(a random id in memory and sessionStorage, alive while that tab holds a Web Lock): only the owner
+uploads, retries or writes it; other tabs show it read-only (`AttachmentItem.foreign`, never in
+`done`) and take it over atomically once the owner's lock is gone. Owners only update entries that
+still exist, so cleanup in any tab (announced over a BroadcastChannel) cannot be undone. Uploads to
+one session run one at a time, across tabs too.
+The shared Files cleanup dialog preselects old attachments covering the shortfall, among the files
+the person may delete (`ArtifactInfo.can_delete`); published files use a separate quota. Uploads
+resume after deletion, refocus, reconnecting, or a five-second space check. `WaitingSpaceActions`
+is the note shown once under the waiting chips (Free up space…, and Increase storage when
+`FileSpace.can_increase` and `TransportFiles.increaseStorage` allow). Pass `{ended: true}` as
+`useAttachments`' fourth argument once the session has ended. Hosts call
+`resetKeptAttachments()` at sign-out and `forgetSessionAttachments(id)` when a session is
+discarded; records older than seven days are dropped.
+
+Custom `TransportFiles` implementations opt in to persistence with `queueScope(): string`, a
+stable account/server namespace containing no credentials. An empty or absent scope keeps bytes
+in memory. Proxy transports accept `attachmentScope` for the same purpose. Change the scope when
+the signed-in account changes; server authorization remains responsible for file access/deletion.

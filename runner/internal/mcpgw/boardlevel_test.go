@@ -18,12 +18,19 @@ import (
 
 var (
 	wantReadTools = []string{"blerg_board_get", "blerg_board_list", "blerg_board_schema", "blerg_column_list", "blerg_card_search", "blerg_card_get"}
-	wantFullTools = []string{"blerg_card_create", "blerg_card_update", "blerg_card_move", "blerg_card_comment", "blerg_card_link"}
+	wantFullTools = []string{"blerg_card_create", "blerg_card_update", "blerg_card_move", "blerg_card_comment", "blerg_card_link",
+		"blerg_column_create", "blerg_column_update", "blerg_column_move", "blerg_column_delete"}
 )
 
 // levelSession is a real session row owned by acct-1 with the board's gateway grant, as a launch
 // that chose the board gives it.
 func (b *boardHarness) levelSession() grantHandle {
+	b.t.Helper()
+	return b.levelSessionWith(Proof{AccountID: "acct-1", SessionID: "login-1"})
+}
+
+// levelSessionWith is levelSession launched with proof (a token proof: a launch made with an agent token).
+func (b *boardHarness) levelSessionWith(proof Proof) grantHandle {
 	b.t.Helper()
 	ctx := context.Background()
 	var daemon, sid string
@@ -33,7 +40,7 @@ func (b *boardHarness) levelSession() grantHandle {
 	if err := b.pool.QueryRow(ctx, `INSERT INTO sessions (daemon_id, project_path, repo, spawning_account_id) VALUES ($1::uuid, '/p', 'r', 'acct-1') RETURNING id::text`, daemon).Scan(&sid); err != nil {
 		b.t.Fatal(err)
 	}
-	toks, err := CreateGrants(ctx, b.pool, sid, "acct-1", Proof{AccountID: "acct-1", SessionID: "login-1"}, []GrantSpec{BoardGrantSpec(boardTestID, b.up.url())})
+	toks, err := CreateGrants(ctx, b.pool, sid, "acct-1", proof, []GrantSpec{BoardGrantSpec(boardTestID, b.up.url())})
 	if err != nil {
 		b.t.Fatal(err)
 	}
@@ -73,7 +80,7 @@ func TestBoardToolLevelsCoverTheFixedSetExactly(t *testing.T) {
 	if !slices.Equal(all, want) {
 		t.Fatalf("tools %v, want %v", all, want)
 	}
-	for _, n := range []string{"blerg_card_archive", "blerg_board_update", "blerg_column_create", ""} {
+	for _, n := range []string{"blerg_card_archive", "blerg_board_update", "blerg_board_create", ""} {
 		if BoardToolLevel(n) != "" || BoardLevelAllows(db.BoardLevelFull, n) {
 			t.Errorf("%q is callable", n)
 		}
@@ -99,7 +106,8 @@ func TestLaunchBoardGrantServesTheCurrentLevelOnEveryCall(t *testing.T) {
 		sort.Strings(got)
 		return got
 	}
-	all := append([]string(nil), wantBoardTools...)
+	// A person launched it: full includes column management.
+	all := append(append([]string(nil), wantBoardTools...), wantColumnTools...)
 	sort.Strings(all)
 	// No row: the launch board is full, as before 0.4.4.
 	if got := listed(); !slices.Equal(got, all) {
@@ -300,5 +308,128 @@ func TestCallBoardUnrevokedLimitIsSettable(t *testing.T) {
 	b.gw.SetUnrevokedBoardTokenLimit(0)
 	if got := b.gw.unrevokedBoardTokenLimit(); got != maxUnrevokedBoardTokens {
 		t.Fatalf("reset limit %d", got)
+	}
+}
+
+// Column management (0.5.0) follows the level: each column tool works at full and is refused at
+// read and file (and propose), on the launch board's connection a person launched; the board hears
+// which runner session the call came from.
+func TestColumnToolsFollowTheLevel(t *testing.T) {
+	b := newBoardHarness(t, nil)
+	gh := b.levelSession()
+	for _, tool := range wantColumnTools {
+		if r := b.callTool(gh, tool, map[string]any{"column_id": "c1"}); r.errMessage() != "" {
+			t.Fatalf("full (launch): %s refused: %s", tool, r.raw)
+		}
+		b.up.mu.Lock()
+		session := b.up.lastHeaders.Get(BoardSessionHeader)
+		b.up.mu.Unlock()
+		if session != gh.sessionID {
+			t.Fatalf("%s: board heard session %q, want %q", tool, session, gh.sessionID)
+		}
+	}
+	for _, level := range []string{db.BoardLevelRead, db.BoardLevelFile, db.BoardLevelPropose} {
+		b.setLevel(gh.sessionID, level)
+		_, _, before := b.up.snapshot()
+		for _, tool := range wantColumnTools {
+			if r := b.callTool(gh, tool, map[string]any{"column_id": "c1"}); !strings.Contains(r.errMessage(), "needs full access") {
+				t.Fatalf("%s: %s = %s", level, tool, r.raw)
+			}
+		}
+		if _, _, after := b.up.snapshot(); after != before {
+			t.Fatalf("%s: a refused column call reached the board", level)
+		}
+	}
+	b.setLevel(gh.sessionID, db.BoardLevelFull)
+	if r := b.callTool(gh, "blerg_column_delete", map[string]any{"column_id": "c1"}); r.errMessage() != "" {
+		t.Fatalf("full again: delete refused: %s", r.raw)
+	}
+}
+
+// A cron's board connection (an agent token, no person behind it) never offers column management,
+// whatever its level.
+func TestColumnToolsNeedAPersonBehindTheAccess(t *testing.T) {
+	b := newBoardHarness(t, nil)
+	gh := b.grant() // a cron's grant: token proof
+	for _, tool := range wantColumnTools {
+		if slices.Contains(toolNames(b.call(gh, "tools/list", map[string]any{})), tool) {
+			t.Errorf("cron lists %s", tool)
+		}
+		if r := b.callTool(gh, tool, map[string]any{}); r.errMessage() != "unknown tool" {
+			t.Errorf("cron %s: %s", tool, r.raw)
+		}
+	}
+	// CallBoard (the session's board tools) refuses a column tool acting with a token, before any exchange.
+	before := b.ex.exchanges()
+	_, err := b.gw.CallBoard(context.Background(), BoardCall{Proof: Proof{AccountID: "acct-1", TokenID: boardTestCron}, BoardID: boardTestID,
+		SessionRef: "s-1", Tool: "blerg_column_create", Arguments: []byte(`{}`)})
+	if !errors.Is(err, ErrBoardCallInvalid) || b.ex.exchanges() != before {
+		t.Fatalf("token-proof column call: %v (exchanges %d → %d)", err, before, b.ex.exchanges())
+	}
+	res, err := b.gw.CallBoard(context.Background(), BoardCall{Proof: Proof{AccountID: "acct-1", SessionID: "login-1"}, BoardID: boardTestID,
+		SessionRef: "s-1", Tool: "blerg_column_create", Arguments: []byte(`{}`)})
+	if err != nil || !strings.Contains(string(res), "ok:blerg_column_create") {
+		t.Fatalf("person-proof column call: %s %v", res, err)
+	}
+	if b.ex.readOnly[len(b.ex.readOnly)-1] {
+		t.Fatal("a column change was made with a read-only credential")
+	}
+}
+
+// A session launched with an agent token gets column management on its launch board's connection
+// once the person gives the board Full in Permissions: the level and the person's sign-in are read
+// per call, and the change is made with that sign-in, not the launch token.
+func TestGatewayHonoursAPersonsFullAfterATokenLaunch(t *testing.T) {
+	b := newBoardHarness(t, nil)
+	gh := b.levelSessionWith(Proof{AccountID: "acct-1", TokenID: boardTestCron})
+	listed := func() []string { return toolNames(b.call(gh, "tools/list", map[string]any{})) }
+	for _, tool := range wantColumnTools {
+		if slices.Contains(listed(), tool) {
+			t.Fatalf("token launch lists %s", tool)
+		}
+		if r := b.callTool(gh, tool, map[string]any{}); r.errMessage() != "unknown tool" {
+			t.Fatalf("token launch %s: %s", tool, r.raw)
+		}
+	}
+	b.setLevel(gh.sessionID, db.BoardLevelFull)
+	for _, tool := range wantColumnTools {
+		if !slices.Contains(listed(), tool) {
+			t.Fatalf("after Full, %s is not listed", tool)
+		}
+		if r := b.callTool(gh, tool, map[string]any{"column_id": "c1"}); r.errMessage() != "" || !strings.Contains(resultText(r), "ok:"+tool) {
+			t.Fatalf("after Full, %s: %s", tool, r.raw)
+		}
+		b.ex.mu.Lock()
+		last := b.ex.proofs[len(b.ex.proofs)-1]
+		b.ex.mu.Unlock()
+		if last != (Proof{AccountID: "acct-1", SessionID: "login-1"}) {
+			t.Fatalf("%s exchanged with %+v, want the person's sign-in", tool, last)
+		}
+	}
+	// Lowered again: refused at the next call.
+	b.setLevel(gh.sessionID, db.BoardLevelFile)
+	if r := b.callTool(gh, "blerg_column_create", map[string]any{}); !strings.Contains(r.errMessage(), "needs full access") {
+		t.Fatalf("after lowering: %s", r.raw)
+	}
+}
+
+// Listing uses the live permission's sign-in too: once the launch token is gone, a session whose
+// person gave the board Full still lists (and calls) its board tools, column management included.
+func TestGatewayListsWithTheLivePermissionAfterTheLaunchTokenIsGone(t *testing.T) {
+	b := newBoardHarness(t, nil)
+	gh := b.levelSessionWith(Proof{AccountID: "acct-1", TokenID: boardTestCron})
+	b.setLevel(gh.sessionID, db.BoardLevelFull)
+	b.ex.mu.Lock()
+	b.ex.goneToken = boardTestCron
+	b.ex.mu.Unlock()
+	r := b.call(gh, "tools/list", map[string]any{})
+	got := toolNames(r)
+	for _, tool := range append(append([]string(nil), wantBoardTools...), wantColumnTools...) {
+		if !slices.Contains(got, tool) {
+			t.Fatalf("tools/list after the launch token is gone lacks %s: %s", tool, r.raw)
+		}
+	}
+	if r := b.callTool(gh, "blerg_card_get", map[string]any{"card_id": "c1"}); r.errMessage() != "" {
+		t.Fatalf("card read after the launch token is gone: %s", r.raw)
 	}
 }

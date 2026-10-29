@@ -915,7 +915,7 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
         name = request['params']['name']
         args = request['params']['arguments']
         responses = {
-            'blerg_board_get': {k: v for k, v in CLEAR_BOARD.items() if k not in ('columns', 'tickets')},
+            'blerg_board_get': {**{k: v for k, v in CLEAR_BOARD.items() if k not in ('columns', 'tickets')}, 'key': 'BLG', 'key_aliases': ['OLD']},
             'blerg_column_list': CLEAR_BOARD['columns'],
             'blerg_card_search': CLEAR_BOARD['tickets'],
             'blerg_card_get': CLEAR_BOARD['tickets'][0],
@@ -981,12 +981,30 @@ def test_selected_board_gateway_create_and_update(gateway):
     assert server.calls[-1][2]['params']['arguments']['if_match'] == 1
 
 
-@pytest.mark.parametrize('args', [['board', 'show', OTHER_UUID], ['ticket', 'archive', TICKET_UUID], ['column', 'add', '--name', 'Oops']])
+@pytest.mark.parametrize('args', [['board', 'show', OTHER_UUID], ['ticket', 'archive', TICKET_UUID], ['column', 'add', OTHER_UUID, '--name', 'Oops']])
 def test_selected_board_gateway_rejects_cross_board_or_unsupported(gateway, args):
     server, env = gateway
     result = run_cli(args, env)
     assert result.returncode != 0
     assert not server.calls
+
+
+def test_selected_board_gateway_manages_columns(gateway):
+    # The launch board's connection carries column management (Full); the board checks the rest.
+    server, env = gateway
+    result = run_cli(['column', 'add', '--name', '0.5.0 to do', '--terminal'], env)
+    assert result.returncode == 0, result.stderr
+    assert server.calls[-1][2]['params'] == {'name': 'blerg_column_create',
+                                             'arguments': {'board_id': TEST_BOARD_ID, 'name': '0.5.0 to do', 'is_terminal': True}}
+    result = run_cli(['column', 'rename', 'In Progress', '--name', 'Doing'], env)
+    assert result.returncode == 0, result.stderr
+    assert server.calls[-1][2]['params'] == {'name': 'blerg_column_update', 'arguments': {'column_id': COL_UUID, 'name': 'Doing'}}
+    result = run_cli(['column', 'set', COL_UUID, '--no-terminal'], env)
+    assert result.returncode == 0, result.stderr
+    assert server.calls[-1][2]['params'] == {'name': 'blerg_column_update', 'arguments': {'column_id': COL_UUID, 'is_terminal': False}}
+    result = run_cli(['column', 'rm', COL_UUID, '--move-to', OTHER_UUID], env)
+    assert result.returncode == 0, result.stderr
+    assert server.calls[-1][2]['params'] == {'name': 'blerg_column_delete', 'arguments': {'column_id': COL_UUID, 'move_cards_to': OTHER_UUID}}
 
 
 def test_selected_board_gateway_redacts_errors(gateway):
@@ -1097,6 +1115,11 @@ class SessionBoardHandler(http.server.BaseHTTPRequestHandler):
         self.server.calls.append(('GET', self.path, self.headers.get('Authorization'), None))
         if self.path == f'/api/sessions/{SESSION_ID}/board-access':
             self._reply(200, {'configured': True, 'boards': self.server.boards})
+        elif self.path.startswith(f'/api/sessions/{SESSION_ID}/board-search?'):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            cards = self.server.cards or []
+            start = int(q.get('cursor', ['0'])[0])
+            self._reply(200, {'cards': cards[start:start + 100], 'next_cursor': str(start + 100) if len(cards) > start + 100 else ''})
         elif self.path.startswith(f'/api/sessions/{SESSION_ID}/board-card-url?'):
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             self._reply(200, {'url': f"https://board.example.test/boards/{q['board'][0]}/cards/{q['number'][0]}"})
@@ -1121,12 +1144,22 @@ class SessionBoardHandler(http.server.BaseHTTPRequestHandler):
                                         "Ask the person to raise it in the session's Permissions (Boards)"})
             return
         responses = {
-            'blerg_board_get': {k: v for k, v in CLEAR_BOARD.items() if k not in ('columns', 'tickets')},
+            'blerg_board_get': {**{k: v for k, v in CLEAR_BOARD.items() if k not in ('columns', 'tickets')}, 'key': 'BLG', 'key_aliases': ['OLD']},
             'blerg_column_list': CLEAR_BOARD['columns'],
             'blerg_card_search': CLEAR_BOARD['tickets'],
             'blerg_card_get': {**CLEAR_BOARD['tickets'][0], **({'number': self.server.card_number} if self.server.card_number else {})},
             'blerg_card_create': {'card': {'id': TICKET_UUID, 'title': request['arguments'].get('title')}, 'refreshed': False},
         }
+        if self.server.cards is not None:
+            cards = self.server.cards
+            args = request['arguments']
+            if tool == 'blerg_card_search':
+                start = int(args.get('cursor') or '0')
+                size = args.get('limit', 100)
+                responses[tool] = ({'cards': cards[start:start + size], 'next_cursor': str(start + size) if len(cards) > start + size else ''}
+                                   if args.get('page') else cards[:size])
+            elif tool == 'blerg_card_get':
+                responses[tool] = next(c for c in cards if c['id'] == args.get('card_id') or ('number' in args and c.get('number') == args['number']))
         result = responses.get(tool, {'id': TICKET_UUID, 'title': 'Fix the bug'})
         self._reply(200, {'content': [{'type': 'text', 'text': json.dumps(result)}]})
 
@@ -1137,6 +1170,7 @@ def session_board():
     server.calls = []
     server.boards = [{'id': TEST_BOARD_ID, 'name': 'Test Board', 'level': 'read'}]
     server.card_number = None
+    server.cards = None
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     env = {'BLERG_RUNNER_SERVER_HTTP': f'http://127.0.0.1:{server.server_port}', 'BLERG_RUNNER_SESSION_ID': SESSION_ID,
@@ -1170,11 +1204,12 @@ def test_ticket_get_prints_the_card_address_to_pin(session_board):
     server.card_number = 7
     result = run_cli(['ticket', 'get', TICKET_UUID], env)
     assert result.returncode == 0, result.stderr
-    assert f'Card: https://board.example.test/boards/{TEST_BOARD_ID}/cards/7' in result.stdout
+    assert f'Card: board:{TEST_BOARD_ID}#7' in result.stdout
+    assert 'https://board.' not in result.stdout
     pin_line = [line for line in result.stdout.splitlines() if line.startswith('Pin it: ')][0]
     pin = json.loads(shlex.split(pin_line[len('Pin it: echo '):].split(' | ')[0])[0])
     assert pin == {'source': 'blerg-board', 'board_id': TEST_BOARD_ID, 'key': '#7', 'title': 'Fix the bug'}
-    assert ('GET', f'/api/sessions/{SESSION_ID}/board-card-url?board={TEST_BOARD_ID}&number=7', 'Bearer ' + SESSION_TOKEN, None) in server.calls
+    assert not any('board-card-url' in call[1] for call in server.calls)
 
 
 def test_session_board_level_refusal_is_reported(session_board):
@@ -1212,13 +1247,41 @@ def test_session_board_several_boards_need_a_name(session_board):
     assert f'Other  ({OTHER_UUID})  full' in result.stdout and f'Test Board  ({TEST_BOARD_ID})  read' in result.stdout
 
 
-def test_session_board_never_uses_board_columns_or_archive(session_board):
+def test_session_board_never_archives(session_board):
     server, env = session_board
     server.boards = [{'id': TEST_BOARD_ID, 'name': 'Test Board', 'level': 'full'}]
-    for args in (['column', 'add', '--name', 'Oops'], ['ticket', 'archive', TICKET_UUID]):
-        result = run_cli(args, env)
-        assert result.returncode != 0, args
+    result = run_cli(['ticket', 'archive', TICKET_UUID], env)
+    assert result.returncode != 0
     assert not [c for c in server.calls if c[0] == 'POST']
+
+
+COLUMN_COMMANDS = [
+    (['column', 'add', 'Test Board', '--name', '0.5.0 to do', '--after', 'In Progress'],
+     'blerg_column_create', {'board_id': TEST_BOARD_ID, 'name': '0.5.0 to do'}),
+    (['column', 'rename', 'In Progress', '--name', 'Doing'], 'blerg_column_update', {'column_id': COL_UUID, 'name': 'Doing'}),
+    (['column', 'set', 'In Progress', '--terminal'], 'blerg_column_update', {'column_id': COL_UUID, 'is_terminal': True}),
+    (['column', 'move', 'In Progress', '--before', OTHER_UUID], 'blerg_column_move', {'column_id': COL_UUID, 'before_id': OTHER_UUID}),
+    (['column', 'rm', 'In Progress'], 'blerg_column_delete', {'column_id': COL_UUID}),
+    (['column', 'rm', 'In Progress', '--move-to', OTHER_UUID], 'blerg_column_delete', {'column_id': COL_UUID, 'move_cards_to': OTHER_UUID}),
+]
+
+
+@pytest.mark.parametrize('level', ['read', 'file', 'full'])
+@pytest.mark.parametrize('args,tool,arguments', COLUMN_COMMANDS)
+def test_session_board_column_commands_follow_the_level(session_board, level, args, tool, arguments):
+    # Full board access includes column management; below it, the runner refuses with the level.
+    server, env = session_board
+    server.boards = [{'id': TEST_BOARD_ID, 'name': 'Test Board', 'level': level}]
+    result = run_cli(args, env)
+    column_calls = [c[3] for c in server.calls if c[0] == 'POST' and c[3]['tool'].startswith('blerg_column_') and c[3]['tool'] != 'blerg_column_list']
+    if level == 'full':
+        assert result.returncode == 0, result.stderr
+        assert column_calls == [{'board': TEST_BOARD_ID, 'tool': tool, 'arguments': arguments}]
+    else:
+        assert result.returncode != 0
+        assert 'needs full access' in result.stderr and 'Permissions' in result.stderr
+        assert len(column_calls) == 1  # asked once; the runner refused it before the board
+    assert SESSION_TOKEN not in result.stderr
 
 
 def test_session_mcp_passes_board_tool_through(session_board):
@@ -1254,3 +1317,196 @@ def test_session_board_access_shows_a_started_sessions_cap(session_board):
     server.boards = [{'id': TEST_BOARD_ID, 'name': 'Test Board', 'level': 'full'}]
     result = run_cli(['board', 'access'], env)
     assert 'capped' not in result.stdout
+
+@pytest.mark.parametrize('command', ['create', 'get', 'list', 'search'])
+@pytest.mark.parametrize('reference', [None, 'BLG-7'])
+def test_card_commands_print_the_canonical_chip_reference(command, reference, monkeypatch, capsys):
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader('card_reference_cli', SCRIPT)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    cli = importlib.util.module_from_spec(spec)
+    loader.exec_module(cli)
+    card = {'id': TICKET_UUID, 'board_id': TEST_BOARD_ID, 'number': 7, 'title': 'Work', 'priority': 'high'}
+    if reference:
+        card['reference'] = reference
+    monkeypatch.setattr(cli, '_resolve_ticket', lambda _: TICKET_UUID)
+    monkeypatch.setattr(cli, '_board_get', lambda path: {'tickets': [card]} if '/boards/' in path else card)
+    monkeypatch.setattr(cli, '_board_post', lambda *args: card)
+    monkeypatch.setattr(cli, '_filing_request', lambda *args: {'cards': [card]})
+    if command == 'create':
+        cli.cmd_ticket_create(TEST_BOARD_ID, 'Work')
+    elif command == 'get':
+        cli.cmd_ticket_get(TICKET_UUID)
+    elif command == 'list':
+        cli.cmd_ticket_list(TEST_BOARD_ID)
+    else:
+        cli.cmd_ticket_search(TEST_BOARD_ID, 'Work')
+    output = capsys.readouterr().out
+    assert (reference or f'board:{TEST_BOARD_ID}#7') in output
+    assert 'https://' not in output
+
+
+@pytest.mark.parametrize('reference', ['BLG-7', 'OLD-7', '#7', f'board:{TEST_BOARD_ID}#7'])
+def test_resolve_key_and_legacy_references(reference, monkeypatch):
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader('key_input_cli', SCRIPT)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    cli = importlib.util.module_from_spec(spec)
+    loader.exec_module(cli)
+    monkeypatch.setattr(cli, 'BOARD_ID', TEST_BOARD_ID)
+    monkeypatch.setattr(cli, 'BOARD_VIA_SESSION', True)
+    monkeypatch.setattr(cli, '_fetch_board', lambda *_: {'key': 'BLG', 'key_aliases': ['OLD']})
+    calls = []
+    def tool(name, args):
+        calls.append((name, args))
+        return {'key': 'BLG', 'key_aliases': ['OLD']} if name == 'blerg_board_get' else {'id': TICKET_UUID}
+    monkeypatch.setattr(cli, '_gateway_tool', tool)
+    assert cli._resolve_ticket(reference) == TICKET_UUID
+    expected = [('blerg_board_get', {'board_id': TEST_BOARD_ID})] if reference.startswith(('BLG-', 'OLD-')) else []
+    assert calls == expected + [('blerg_card_get', {'board_id': TEST_BOARD_ID, 'number': 7})]
+
+
+@pytest.mark.parametrize('text', ['555-1234', '2026-10', '1AB-7'])
+def test_digit_initial_forms_resolve_as_titles_not_keys(text, monkeypatch):
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader('digit_title_cli', SCRIPT)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    cli = importlib.util.module_from_spec(spec)
+    loader.exec_module(cli)
+    monkeypatch.setattr(cli, 'BOARD_ID', TEST_BOARD_ID)
+    monkeypatch.setattr(cli, 'BOARD_VIA_SESSION', True)
+    monkeypatch.setattr(cli, '_selected_board', lambda *_: TEST_BOARD_ID)
+    def unexpected(*_):
+        pytest.fail('a digit-initial form must not resolve a key or read a card number')
+    monkeypatch.setattr(cli, '_fetch_board', unexpected)
+    monkeypatch.setattr(cli, '_gateway_tool', unexpected)
+    queries = []
+    def cards(**kwargs):
+        queries.append(kwargs)
+        return [{'id': TICKET_UUID, 'title': text}]
+    monkeypatch.setattr(cli, '_gateway_cards', cards)
+    assert cli._resolve_ticket(text) == TICKET_UUID
+    assert queries == [{'query': text}]
+
+
+@pytest.mark.parametrize('command', ['list', 'search'])
+@pytest.mark.parametrize('limit', [None, 101, 100, 10, 205, 300])
+def test_ticket_paging_past_100(session_board, command, limit):
+    server, env = session_board
+    server.cards = [{**CLEAR_BOARD['tickets'][0], 'id': str(uuid.uuid4()), 'number': n,
+                     'title': f'Work {n}', 'tags': ['backend', 'release']} for n in range(1, 206)]
+    args = ['ticket', 'list'] if command == 'list' else ['ticket', 'search', '--board', TEST_BOARD_ID, '--query', 'Work']
+    if limit:
+        args += ['--limit', str(limit)]
+    result = run_cli(args, env)
+    assert result.returncode == 0, result.stderr
+    rows = [line for line in result.stdout.splitlines() if 'Work ' in line]
+    assert len(rows) == min(limit or 205, 205)
+    assert ('capped' in result.stderr) == (limit is not None and limit < 205)
+    assert 'incomplete' not in result.stderr
+    if command == 'list':
+        assert all(line.endswith('[tags: backend, release]') for line in rows)
+
+
+def test_ticket_tag_and_column_filter_across_pages(session_board):
+    server, env = session_board
+    server.cards = [{**CLEAR_BOARD['tickets'][0], 'id': str(uuid.uuid4()), 'number': n,
+                     'title': f'Work {n}', 'tags': ['backend'] if n > 100 else [],
+                     'column_id': COL_UUID if n % 2 else COL_UUID_2} for n in range(1, 206)]
+    result = run_cli(['ticket', 'list', '--tag', 'backend', '--column', 'In Progress', '--limit', '3'], env)
+    assert result.returncode == 0, result.stderr
+    rows = [line for line in result.stdout.splitlines() if 'Work ' in line]
+    assert len(rows) == 3
+    assert all(f'Work {n} ' in rows[i] for i, n in enumerate([101, 103, 105]))
+    assert 'capped' in result.stderr
+
+
+@pytest.mark.parametrize('reference', ['#10', '10', 'BLG-10', 'OLD-10', 'Fix the bug', '  ## Fix the bug  '])
+def test_ticket_get_key_and_markdown_title(session_board, reference):
+    server, env = session_board
+    server.cards = [{**CLEAR_BOARD['tickets'][0], 'number': 10, 'title': '  ## Fix the bug  '}]
+    result = run_cli(['ticket', 'get', reference], env)
+    assert result.returncode == 0, result.stderr
+    assert TICKET_UUID in result.stdout
+
+
+@pytest.fixture
+def ticket_cli():
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader('ticket_paging_cli', SCRIPT)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    cli = importlib.util.module_from_spec(spec)
+    loader.exec_module(cli)
+    return cli
+
+
+def test_title_lookup_stopword_fallback(ticket_cli, monkeypatch):
+    cli = ticket_cli
+    monkeypatch.setattr(cli, 'BOARD_ID', TEST_BOARD_ID)
+    monkeypatch.setattr(cli, 'BOARD_VIA_SESSION', True)
+    calls = []
+    def cards(query=''):
+        calls.append(query)
+        return [] if query else [{'id': TICKET_UUID, 'title': '  ## the and  '}]
+    monkeypatch.setattr(cli, '_gateway_cards', cards)
+    assert cli._resolve_ticket('the and') == TICKET_UUID
+    assert calls == ['the and', '']
+
+
+def test_title_lookup_past_100(session_board):
+    server, env = session_board
+    server.cards = [{**CLEAR_BOARD['tickets'][0], 'id': str(uuid.uuid4()), 'title': f'Work {n}'} for n in range(101)]
+    server.cards.append({**CLEAR_BOARD['tickets'][0], 'title': '## Work target'})
+    result = run_cli(['ticket', 'get', 'Work target'], env)
+    assert result.returncode == 0, result.stderr
+    assert TICKET_UUID in result.stdout
+
+
+def test_normalized_title_ambiguity_is_refused(ticket_cli, monkeypatch, capsys):
+    cli = ticket_cli
+    monkeypatch.setattr(cli, 'BOARD_ID', TEST_BOARD_ID)
+    monkeypatch.setattr(cli, 'BOARD_VIA_SESSION', True)
+    monkeypatch.setattr(cli, '_gateway_cards', lambda **_: [{'id': 'a', 'title': 'Work'}, {'id': 'b', 'title': '## Work'}])
+    with pytest.raises(SystemExit):
+        cli._resolve_ticket('Work')
+    assert 'ambiguous' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('command', ['list', 'search'])
+def test_repeated_cursor_is_refused(ticket_cli, monkeypatch, capsys, command):
+    cli = ticket_cli
+    monkeypatch.setattr(cli, '_board_get', lambda *_: {'tickets': [], 'next_cursor': 'same'})
+    monkeypatch.setattr(cli, '_filing_request', lambda *_: {'cards': [], 'next_cursor': 'same'})
+    with pytest.raises(SystemExit):
+        if command == 'list':
+            cli.cmd_ticket_list(TEST_BOARD_ID)
+        else:
+            cli.cmd_ticket_search(TEST_BOARD_ID, 'Work')
+    assert 'repeated' in capsys.readouterr().err
+
+
+def test_legacy_array_warns_instead_of_claiming_complete(ticket_cli, monkeypatch, capsys):
+    cli = ticket_cli
+    monkeypatch.setattr(cli, '_gateway_tool', lambda *_: [{'id': str(n)} for n in range(100)])
+    assert len(cli._gateway_cards()) == 100
+    assert 'incomplete' in capsys.readouterr().err
+
+
+def test_wrong_board_key_is_refused(session_board):
+    server, env = session_board
+    result = run_cli(['ticket', 'get', 'QA-10'], env)
+    assert result.returncode != 0 and 'key' in result.stderr
+    assert not [c for c in server.calls if c[0] == 'POST' and c[3]['tool'] == 'blerg_card_get']
+
+
+@pytest.mark.parametrize('command', ['list', 'search'])
+@pytest.mark.parametrize('limit', ['0', '-1'])
+def test_ticket_limit_must_be_positive(session_board, command, limit):
+    _, env = session_board
+    args = ['ticket', 'list'] if command == 'list' else ['ticket', 'search', '--board', TEST_BOARD_ID, '--query', 'Work']
+    result = run_cli(args + ['--limit', limit], env)
+    assert result.returncode != 0 and 'positive integer' in result.stderr

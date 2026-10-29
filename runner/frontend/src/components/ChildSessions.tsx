@@ -1,3 +1,5 @@
+import RuntimeIcon from './RuntimeIcon'
+import { useSessionStore } from '../hooks/useSessionStore'
 import { useContext, type ReactNode } from 'react'
 import {ChildDiscardAction} from './ChildDiscard'
 import { useNavigate } from 'react-router-dom'
@@ -8,6 +10,14 @@ import { childIsRunning, childIsWorking, type LiveChildSession } from '../lib/li
 import { formatDuration, formatUSD } from '../lib/insights'
 import RunCard, { RunGlyph, RunStep } from './RunCard'
 import { runTarget } from '../lib/runFacts'
+import { compactTokens, contextMeter, readUsage, usageChip, withContextNote } from '../lib/liveUsage'
+import { ContextGlyph } from './ContextMeter'
+
+function ChildRuntime({ id, runtime }: { id: string; runtime?: string }) {
+  const session = useSessionStore(s => s.sessions.find(session => session.id === id))
+  const machine = useSessionStore(s => s.daemons.find(d => d.id === session?.daemon_id)?.name)
+  return <RuntimeIcon runtime={runtime ?? session?.runtime} machine={machine} />
+}
 
 export function EngineBadge({ engine }: { engine: string }) {
   const id = engine || 'claude'
@@ -27,7 +37,7 @@ export function ChildSessionRow({ child, now, compact = false, parentId, assignm
   const reportedCalls = Number.isSafeInteger(child.tool_calls) && child.tool_calls! >= 0 ? child.tool_calls : null
   return <li className={`rail-item rail-child-item${parentId ? ' has-discard' : ''}`} data-testid="rail-child">
     <button type="button" className="rail-child-button" onClick={() => open ? open(child.id) : navigate(`/sessions/${encodeURIComponent(child.id)}`)}>
-      <span className="rail-item-title"><span title={child.status} aria-label={child.status}>{childIsRunning(child) ? '↳' : child.status === 'error' ? '×' : child.status === 'ended' ? '✓' : child.status === 'disconnected' ? 'Ⅱ' : '■'}</span> <EngineBadge engine={child.engine} /> {child.title || 'Untitled session'}</span>
+      <span className="rail-item-title"><span title={child.status} aria-label={child.status}>{childIsRunning(child) ? '↳' : child.status === 'error' ? '×' : child.status === 'ended' ? '✓' : child.status === 'disconnected' ? 'Ⅱ' : '■'}</span> <ChildRuntime id={child.id} runtime={child.runtime} /> <EngineBadge engine={child.engine} /> {child.title || 'Untitled session'}</span>
       <span className="rail-item-line"><span className="rail-chip">{child.status}</span> {!compact && <>{child.model && <span className="rail-chip" title={child.model}>{modelDisplayName(child.model)}</span>} {child.effort && <span className="rail-chip rail-effort" title="Configured effort">{child.effort}</span>} {Number.isFinite(elapsed) && <span className="rail-clock" title="Session age">{formatDuration(Math.max(0, elapsed) / 1000)}</span>} </>}
         {child.tokens !== null && <span className="rail-chip" title="Reported tokens across model requests; not context size">{tokenLabel(child.tokens)}</span>}
         {child.usage_status === 'pending' && <span className="rail-chip" title="The current turn has not reported usage yet">Usage pending</span>}
@@ -59,12 +69,18 @@ function RunningChildRow({ child, now, parentId, assignment, work, card, onOpen 
   const tooltip = [child.title || 'Untitled session', [child.status, engine, model, child.effort ? `effort: ${child.effort}` : '', calls,
     child.usage_status === 'pending' ? 'usage pending' : '', child.cost_usd !== undefined ? formatUSD(child.cost_usd) : '', child.local ? 'local endpoint' : ''].filter(Boolean).join(' · ')].join('\n')
   const tokens = child.tokens !== null ? tokenLabel(child.tokens) : ''
+  // The token chip, as on the Main row: for whoever may see tokens (the server says "hidden"
+  // otherwise). An older server sends the total without its breakdown.
+  const usage = readUsage(child.usage)
+  const seesTokens = child.usage_status === 'pending' || child.usage_status === 'reported' || child.tokens !== null
+  const meter = usage ? contextMeter(usage.context, engine) : null
+  const chip = !seesTokens ? null : usage || child.tokens === null ? withContextNote(usageChip(usage), usage, meter, engine) : { text: compactTokens(child.tokens), label: tokens }
   // The row's hovercard (card #129); a click on the row still opens the session.
   const hover = runTarget({
     title: child.title || 'Untitled session', kind: 'Child session', engine: child.engine ?? '', model: child.model ?? '',
     state: [child.status, child.asking ? 'asking' : '', child.effort ? `effort: ${child.effort}` : '', calls].filter(Boolean).join(' · '),
     step: child.activity, elapsed: Number.isFinite(elapsed) ? formatDuration(Math.max(0, now - elapsed) / 1000) : undefined,
-    tokens: [tokens, child.cost_usd !== undefined ? formatUSD(child.cost_usd) : ''].filter(Boolean).join(' · ') || undefined, card, startedBy: 'this session',
+    tokens: [tokens, child.cost_usd !== undefined ? formatUSD(child.cost_usd) : '', meter ? meter.label.replace(/\n/g, ' · ') : ''].filter(Boolean).join(' · ') || undefined, card, startedBy: 'this session',
   })
   return (
     <RunCard testId="rail-child" className={`rail-child-item rail-child-run${parentId ? ' has-discard' : ''}`} actionTestId="rail-child-open"
@@ -73,10 +89,12 @@ function RunningChildRow({ child, now, parentId, assignment, work, card, onOpen 
       elapsed={Number.isFinite(elapsed) ? <span className="rail-clock" title="Session age">{formatDuration(Math.max(0, now - elapsed) / 1000)}</span> : undefined}
       step={child.activity ? <><RunStep text={child.activity} testId="child-activity" />{activityElapsed !== null && <span className="rail-clock" title="Current activity elapsed">{formatDuration(activityElapsed)}</span>}</> : undefined}
       glyphs={<>
+        <ChildRuntime id={child.id} runtime={child.runtime} />
         {child.asking && <RunGlyph label="Asking" className="attention">?</RunGlyph>}
         <RunGlyph label={`Engine: ${engine}`}>{ENGINE_SHORT[child.engine || 'claude'] ?? engine.charAt(0)}</RunGlyph>
         {model && <RunGlyph label={`Model: ${model}`}>{model.charAt(0).toUpperCase()}</RunGlyph>}
-        {tokens && <RunGlyph label={tokens} className="tokens">{tokens.replace(/ tokens?$/, '')}</RunGlyph>}
+        {meter && <ContextGlyph meter={meter} testId="rail-child-context" />}
+        {chip && <RunGlyph label={chip.label} testId="rail-child-tokens" className="tokens">{chip.text}</RunGlyph>}
         {assignment}
       </>}
       work={work} hover={hover}

@@ -18,6 +18,10 @@ function reviewOf(body: unknown, sessionId: string, requestId: string): Review {
     offered: body.offered as DelegationChoice[], expires_at: body.expires_at,
   }
   for (const key of ['model', 'effort', 'repo'] as const) if (typeof request[key] === 'string') payload[key] = request[key]
+  if (request.repos !== undefined) {
+    if (!Array.isArray(request.repos) || request.repos.length === 0 || request.repos.length > 20 || !request.repos.every(member => typeof member === 'string' && member.length > 0)) throw new Error('Request unavailable.')
+    payload.repo = request.repos.join(', ')
+  }
   if (typeof request.no_repo === 'boolean') payload.no_repo = request.no_repo
   // The board access the child gets: shown on the card, so the person decides knowing it.
   if (Array.isArray(request.boards)) {

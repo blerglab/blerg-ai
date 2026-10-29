@@ -171,6 +171,8 @@ function Boards() {
   const linked = BOARD_TEMPLATES.some((t) => t.id === search.get("new")) ? search.get("new")! : null;
   const [creating, setCreating] = useState(linked !== null);
   const [name, setName] = useState("");
+  const [suggestion, setSuggestion] = useState("");
+  const [boardKey, setBoardKey] = useState<string | null>(null);
   const [template, setTemplate] = useState(linked ?? "");
   const [repos, setRepos] = useState<string[]>([]);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -195,6 +197,16 @@ function Boards() {
     return () => clearInterval(iv);
   }, []);
 
+  useEffect(() => {
+    if (!creating || boardKey !== null || !name.trim()) return;
+    let active = true;
+    const timer = setTimeout(() => {
+      api<{ key: string }>(`/api/board-key-suggestion?name=${encodeURIComponent(name.trim())}`)
+        .then(r => { if (active) setSuggestion(r.key ?? ""); }).catch(() => { if (active) setSuggestion(""); });
+    }, 150);
+    return () => { active = false; clearTimeout(timer); };
+  }, [creating, name, boardKey]);
+
   const create = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || saving) return;
@@ -204,7 +216,7 @@ function Boards() {
     try {
       const created = await api<{ name?: string; automation_error?: string }>("/api/boards", {
         json: {
-          name: name.trim(), require_repo: false, ...(template ? { template } : {}), ...(repos.length ? { repos } : {}),
+          name: name.trim(), key: boardKey ?? suggestion, require_repo: false, ...(template ? { template } : {}), ...(repos.length ? { repos } : {}),
           ...(offerRunAsMe ? { run_as_me: runAsMe } : {}),
         },
       });
@@ -220,7 +232,7 @@ function Boards() {
       return;
     }
     setSaving(false);
-    setName(""); setTemplate(""); setRepos([]); setRunAsMeChoice(null); setCreating(false); load().catch(() => {});
+    setName(""); setBoardKey(null); setTemplate(""); setRepos([]); setRunAsMeChoice(null); setCreating(false); load().catch(() => {});
   };
 
   if (!boards) return null;
@@ -237,6 +249,10 @@ function Boards() {
         <form className="stack new-board" onSubmit={create} style={{ marginBottom: 16 }}>
           <input type="text" placeholder="board name" value={name} autoFocus
             onChange={(e) => setName(e.target.value)} />
+          <label htmlFor="new-board-key">Board key</label>
+          <input id="new-board-key" value={boardKey ?? suggestion} required pattern="[A-Z][A-Z0-9]{1,4}" minLength={2} maxLength={5}
+            onChange={e => setBoardKey(e.target.value.toUpperCase())} />
+          <p className="settings-description">2–5 uppercase letters or digits, starting with a letter, unique across boards. Cards use this key, like BLG-205.</p>
           <label htmlFor="board-template">Template</label>
           <select id="board-template" value={template} onChange={(e) => setTemplate(e.target.value)}>
             <option value="">None</option>
@@ -283,7 +299,7 @@ function Boards() {
                 {b.gate_enabled && <span className="gate-on" title="Admission gate on: an LLM curator reviews agent writes (dedup + quality) before they land. Hover the 'gated' chip on the board for details." />}
                 <div className="row" style={{ gap: 8 }}>
                   <BoardIcon board={b} />
-                  <h2 style={{ margin: 0 }}>{b.name}</h2>
+                  <h2 style={{ margin: 0 }}>{b.name}{b.key && <span className="mono"> · {b.key}</span>}</h2>
                   {(o?.working ?? 0) > 0 && (
                     <span className="churn" title={`${o!.working} session${o!.working === 1 ? "" : "s"} working right now`} />
                   )}
@@ -388,9 +404,12 @@ function ShellChrome({ children }: { children: React.ReactNode }) {
           </span>
         )}
         {build.main && build.update && (
-          <a className="build-update" href={build.update.href} target="_blank" rel="noopener noreferrer" title={build.update.title}>
-            {build.update.label} ↗
-          </a>
+          <>
+            <a className="build-update" href={build.update.href} target="_blank" rel="noopener noreferrer" title={build.update.title}>
+              {build.update.label} ↗
+            </a>
+            <a className="build-update" href={`${CORE_URL}/upgrade`}>How to upgrade</a>
+          </>
         )}
         <nav>
           <NavLink to="/" end className={({ isActive }) => (isActive ? "active" : "")}>Boards</NavLink>

@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useSessionStore } from '../hooks/useSessionStore'
-import { useToastStore } from '../hooks/useToastStore'
+import ActionError from './ActionError'
 import type { MessageInfo } from '../types'
 import { apiFetch } from '../apiFetch'
 import { Markdown, TimeLabel } from '@blerglab/chat'
@@ -25,7 +25,8 @@ function MessageBubble({ message, hideSessionLabel }: MessageBubbleProps) {
 
   const [answer, setAnswer] = useState('')
   const [sending, setSending] = useState(false)
-  const addToast = useToastStore(s => s.addToast)
+  const replyAnchor = useRef<HTMLButtonElement | null>(null)
+  const [replyError, setReplyError] = useState('')
 
   const isOpen = !session?.archived_at && message.status === 'open'
   const kindColor = KIND_COLORS[message.kind] ?? 'var(--fog-dim)'
@@ -34,6 +35,7 @@ function MessageBubble({ message, hideSessionLabel }: MessageBubbleProps) {
 
   async function handleSend() {
     if (!answer.trim() || sending) return
+    setReplyError('')
     setSending(true)
     try {
       const response = await apiFetch(`/api/messages/${message.id}/reply`, {
@@ -42,12 +44,12 @@ function MessageBubble({ message, hideSessionLabel }: MessageBubbleProps) {
         body: JSON.stringify({ answer }),
       })
       if (!response.ok) {
-        addToast({ title: 'Reply failed', body: `Server returned ${response.status}. Your answer was not saved.` })
+        setReplyError(`Server returned ${response.status}. Your answer was not saved.`)
       } else {
         setAnswer('')
       }
     } catch {
-      addToast({ title: 'Reply failed', body: 'Network error. Your answer was not saved.' })
+      setReplyError('Network error. Your answer was not saved.')
     } finally {
       setSending(false)
     }
@@ -55,6 +57,7 @@ function MessageBubble({ message, hideSessionLabel }: MessageBubbleProps) {
 
   return (
     <div style={{ marginBottom: hasReply ? 4 : 12 }}>
+      {replyError && <ActionError anchor={replyAnchor} title="Reply failed" message={replyError} onRetry={() => { void handleSend() }} onDismiss={() => setReplyError('')} />}
       {/* Incoming bubble (session's message) */}
       <div
         onClick={() => navigate(`/sessions/${message.session_id}`)}
@@ -150,6 +153,7 @@ function MessageBubble({ message, hideSessionLabel }: MessageBubbleProps) {
               }}
             />
             <button
+              ref={replyAnchor}
               onClick={e => { e.stopPropagation(); handleSend() }}
               disabled={sending || !answer.trim()}
               style={{

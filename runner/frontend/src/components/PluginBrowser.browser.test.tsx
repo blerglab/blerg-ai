@@ -92,6 +92,141 @@ describe.each([
     return mode === 'drawer' ? screen.getByRole('dialog', { name: 'Session panel' }) : screen.getByTestId('session-rail')
   }
 
+  it.each(['session', 'always'])('installs a native Codex plugin for %s and displays disabled reasons', async scope => {
+    apiFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith('/capabilities')) return json(CAPS)
+      if (url.endsWith('/plugins/catalog')) return json({ engine: 'codex', marketplaces: [{ name: 'openai-curated', source: 'codex:openai-curated' }, { name: 'blocked', source: 'codex:blocked' }], plugins: [
+        { name: 'native-plugin', marketplace: 'openai-curated' },
+        { name: 'account-blocked', marketplace: 'openai-curated', install_reason: 'Codex does not allow this plugin for your account.' },
+        { name: 'policy-blocked', marketplace: 'blocked' },
+      ] })
+      if (url.endsWith('/plugins') && init?.method === 'POST') return json({ id: 'native', result: { state: 'queued' } }, 202)
+      if (url.endsWith('/plugins')) return json({ ...PLUGINS, engine: 'codex', allowed_marketplaces: ['codex:openai-curated'] })
+      return json({})
+    })
+    await openTab()
+    await userEvent.click(screen.getByRole('button', { name: 'Add plugin or skill' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Add a plugin' })
+    const install = await within(dialog).findByRole('button', { name: 'Install native-plugin' })
+    const select = within(dialog).getByRole('combobox', { name: 'Install for' }) as HTMLSelectElement
+    select.value = scope
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    for (const [name, reason] of [
+      ['account-blocked', 'Codex does not allow this plugin for your account.'],
+      ['policy-blocked', 'This marketplace is not allowed by this install.'],
+    ]) {
+      const button = within(dialog).getByRole('button', { name: `Install ${name}` })
+      expect(button).toBeDisabled()
+      const line = within(button.parentElement!).getByText(reason)
+      expect(line).toBeVisible()
+      expect(box(line).top).toBeGreaterThanOrEqual(box(button).bottom)
+      expect(box(line).right).toBeLessThanOrEqual(box(dialog).right)
+    }
+    expect(install).toBeEnabled()
+    await userEvent.click(install)
+    expect(apiFetch).toHaveBeenCalledWith(expect.stringMatching(/\/plugins$/), expect.objectContaining({ body: JSON.stringify({ marketplace: 'codex:openai-curated', plugin: 'native-plugin', scope }) }))
+    expect(dialog.scrollWidth).toBeLessThanOrEqual(dialog.clientWidth + 1)
+    expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
+  })
+
+  it('keeps revoked managed plugins removable while blocking new installs', async () => {
+    apiFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith('/capabilities')) return json(CAPS)
+      if (url.endsWith('/plugins/catalog')) return json({ engine: 'codex', marketplaces: [{ name: 'revoked', source: 'codex:revoked' }], plugins: [
+        { name: 'retained', marketplace: 'revoked', managed: true, installed: true, enabled: true },
+        { name: 'new-plugin', marketplace: 'revoked' },
+      ] })
+      if (url.endsWith('/plugins') && init?.method === 'POST') return json({ id: 'remove', result: { state: 'queued' } }, 202)
+      if (url.endsWith('/plugins')) return json({ ...PLUGINS, engine: 'codex', allowed_marketplaces: [] })
+      return json({})
+    })
+    await openTab()
+    await userEvent.click(screen.getByRole('button', { name: 'Add plugin or skill' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Add a plugin' })
+    const remove = await within(dialog).findByRole('button', { name: 'Remove retained' })
+    expect(remove).toBeEnabled()
+    expect(within(dialog).getByText('Marketplace no longer allowed. Existing plugins are kept.')).toBeVisible()
+    expect(within(dialog).getByRole('button', { name: 'Install new-plugin' })).toBeDisabled()
+    await userEvent.click(remove)
+    expect(apiFetch).toHaveBeenCalledWith(expect.stringMatching(/\/plugins$/), expect.objectContaining({ body: JSON.stringify({ marketplace: 'codex:revoked', plugin: 'retained', scope: 'session', action: 'remove' }) }))
+    expect(dialog.scrollWidth).toBeLessThanOrEqual(dialog.clientWidth + 1)
+    expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
+  })
+
+  it.each([
+    { code: '', sessionApply: true, scope: 'session' },
+    { code: '', sessionApply: true, scope: 'always' },
+    { code: 'sandboxed', sessionApply: false, scope: 'always' },
+    { code: 'unsupported', sessionApply: true, scope: 'session' },
+  ])('adds native Codex by name for $scope (catalog fallback: $code)', async ({ code, sessionApply, scope }) => {
+    apiFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith('/capabilities')) return json(CAPS)
+      if (url.endsWith('/plugins/catalog')) return code ? json({ code }, 409) : json(CATALOG)
+      if (url.endsWith('/plugins') && init?.method === 'POST') return json({ id: 'native', result: { state: sessionApply ? 'queued' : 'new_sessions' } }, 202)
+      if (url.endsWith('/plugins')) return json({ ...PLUGINS, engine: 'codex', session_apply: sessionApply, allowed_marketplaces: ['codex:openai-curated'] })
+      return json({})
+    })
+    await openTab()
+    await userEvent.click(screen.getByRole('button', { name: 'Add plugin or skill' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Add a plugin' })
+    if (!code) await userEvent.click(await within(dialog).findByRole('button', { name: 'Enter a plugin by name' }))
+    const name = await within(dialog).findByLabelText('Plugin name')
+    await userEvent.type(name, 'helper')
+    const select = within(dialog).getByLabelText('Apply plugin') as HTMLSelectElement
+    select.value = scope
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    const add = within(dialog).getByRole('button', { name: scope === 'session' ? 'Add to session' : 'Save always on' })
+    expect(add).toBeEnabled()
+    await userEvent.click(add)
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith(expect.stringMatching(/\/plugins$/), expect.objectContaining({
+      body: JSON.stringify({ marketplace: 'codex:openai-curated', plugin: 'helper', scope }),
+    })))
+    expect(await within(dialog).findByRole('status')).toHaveTextContent(sessionApply ? 'Queued until' : 'Saved for new sessions')
+    expect(dialog.scrollWidth).toBeLessThanOrEqual(dialog.clientWidth + 1)
+    expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
+  })
+
+  it('explains native source rejection for Claude next to the by-name action', async () => {
+    apiFetch.mockImplementation((url: string) => {
+      if (url.endsWith('/capabilities')) return json(CAPS)
+      if (url.endsWith('/plugins/catalog')) return json({ code: 'unsupported' }, 409)
+      if (url.endsWith('/plugins')) return json({ ...PLUGINS, allowed_marketplaces: ['codex:openai-curated'] })
+      return json({})
+    })
+    await openTab()
+    await userEvent.click(screen.getByRole('button', { name: 'Add plugin or skill' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Add a plugin' })
+    await userEvent.type(await within(dialog).findByLabelText('Plugin name'), 'helper')
+    const add = within(dialog).getByRole('button', { name: 'Add to session' })
+    expect(add).toBeDisabled()
+    expect(add).toHaveAccessibleDescription('This marketplace requires Codex.')
+    const reason = within(dialog).getByText('This marketplace requires Codex.')
+    expect(reason).toBeVisible()
+    expect(box(reason).top).toBeGreaterThanOrEqual(box(add).bottom)
+    expect(box(reason).right).toBeLessThanOrEqual(box(dialog).right)
+    expect(dialog.scrollWidth).toBeLessThanOrEqual(dialog.clientWidth + 1)
+  })
+
+  it('saves an enabled Codex plugin as always on when live loading is unavailable', async () => {
+    apiFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith('/capabilities')) return json(CAPS)
+      if (url.endsWith('/plugins/catalog')) return json({ ...CATALOG, engine: 'codex' })
+      if (url.endsWith('/plugins') && init?.method === 'POST') return json({ id: 'p1', result: { state: 'new_sessions', message: 'This plugin loads when a session starts — added for your next session.' } }, 202)
+      if (url.endsWith('/plugins')) return json({ ...PLUGINS, engine: 'codex', session_apply: false, reason: 'This engine loads plugins when a session starts — added for your next session.' })
+      return json({})
+    })
+    await openTab()
+    await userEvent.click(screen.getByRole('button', { name: 'Add plugin or skill' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Add a plugin' })
+    const install = await within(dialog).findByRole('button', { name: 'Install plugin-03' })
+    expect(install).toBeEnabled()
+    expect(within(dialog).getByRole('option', { name: 'This session only' })).toBeDisabled()
+    await userEvent.click(install)
+    expect(await within(dialog).findByRole('button', { name: 'Start a new session with it' })).toBeVisible()
+    expect(dialog.scrollWidth).toBeLessThanOrEqual(dialog.clientWidth + 1)
+    expect(apiFetch).toHaveBeenCalledWith(expect.stringMatching(/\/plugins$/), expect.objectContaining({ body: JSON.stringify({ marketplace: 'example-org/plugins', plugin: 'plugin-03', scope: 'always' }) }))
+  })
+
   it('"+ Add" opens a browser that uses the space, searches, and installs through the existing path', async () => {
     await openTab()
     await userEvent.click(screen.getByRole('button', { name: 'Add plugin or skill' }))

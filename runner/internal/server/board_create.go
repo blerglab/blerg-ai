@@ -21,7 +21,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -67,8 +66,6 @@ const (
 	msgBoardClock        = "Board could not verify the approval: the servers' clocks may differ by more than 30 seconds, or your sign-in ended. Check the clocks, sign in again if needed, and retry."
 )
 
-var idempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{8,128}$`)
-
 // boardAccessLevels are the levels a proposed board's session may ask for.
 var boardAccessLevels = []string{db.BoardLevelRead, db.BoardLevelFile, db.BoardLevelFull}
 
@@ -91,9 +88,9 @@ func (a *API) HandleProposeBoard(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	key := r.Header.Get("Idempotency-Key")
-	if key != "" && !idempotencyKeyPattern.MatchString(key) {
-		writeError(w, http.StatusBadRequest, "Idempotency-Key is 8 to 128 letters, digits, '_', '.', ':' or '-'.")
+	key, keyErr := requestIdempotencyKey(r, false)
+	if keyErr != nil {
+		writeAPIError(w, keyErr)
 		return
 	}
 	var req struct {
@@ -401,7 +398,12 @@ func (a *API) HandleBoardRepoChoices(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	daemons := a.hub.GetHostDaemons()
+	owner := a.boardDesktopViewer(r)
+	if owner == "" {
+		writeError(w, http.StatusUnauthorized, "signed person proof required")
+		return
+	}
+	daemons := a.hub.ownedHostDaemons(r.Context(), owner)
 	byRepo := map[string]*boardRepoChoice{}
 	for _, d := range daemons {
 		for _, folder := range d.CheckedOutRepos() {

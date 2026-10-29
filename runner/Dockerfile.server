@@ -27,6 +27,7 @@ COPY runner/frontend/package.json ./runner/frontend/
 COPY board/web/package.json ./board/web/
 RUN npm ci
 COPY packages/chat/ ./packages/chat/
+COPY packages/settings/ ./packages/settings/
 COPY runner/frontend/ ./runner/frontend/
 # Build-time override for where blerg-core is served from (see
 # runner/frontend/src/authClient.ts's coreOrigin). Left empty, the derivation

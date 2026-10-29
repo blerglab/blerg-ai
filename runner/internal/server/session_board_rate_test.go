@@ -77,10 +77,12 @@ func TestTenNamedBoardCommandsWithinOneMinute(t *testing.T) {
 	if got := counts["GET /api/sessions/"+fx.sess+"/board-access"]; got != 10 {
 		t.Fatalf("access lookups: %d, want 10", got)
 	}
-	if got := counts["POST /api/sessions/"+fx.sess+"/board-tools"]; got != 60 {
-		t.Fatalf("tool requests: %d, want 60", got)
+	// Each move searches the title, reads the card version, lists columns, and moves.
+	// Column-name resolution must not fetch the board and search all cards again.
+	if got := counts["POST /api/sessions/"+fx.sess+"/board-tools"]; got != 40 {
+		t.Fatalf("tool requests: %d, want 40", got)
 	}
-	if board.count() != 60 {
+	if board.count() != 40 {
 		t.Fatalf("upstream calls: %d", board.count())
 	}
 }

@@ -52,20 +52,20 @@ export default function BoardRunTarget({ board, editable, onChanged }: { board: 
   return <>
     <dt>Where it runs</dt><dd>
       {editable && targets?.can_choose ? <>
-        <select style={{ maxWidth: "100%" }} aria-label="Where this board runs" value={choice} disabled={busy} onChange={e => { setChoice(e.target.value); setHostAck(false); }}>
+        <select className="settings-field" style={{ maxWidth: "100%" }} aria-label="Where this board runs" value={choice} disabled={busy} onChange={e => { setChoice(e.target.value); setHostAck(false); }}>
           <option value="|">Automatic{!board.run_runtime && targets.default_runtime ? ` (${targets.default_runtime === "docker" ? "Local sandbox" : targets.default_runtime === "daemon" ? "This machine" : "Cluster"})` : ""}</option>
           {targets.targets.map(t => <option key={`${t.runtime}|${t.daemon_id || ""}`} value={`${t.runtime}|${t.daemon_id || ""}`} disabled={!!t.unavailable}>{t.label}{t.unavailable ? ` — unavailable: ${t.unavailable}` : ""}</option>)}
         </select>{" "}
-        <button className="btn small" type="button" disabled={busy || (isHost && !hostAck)} onClick={() => void save()}>{busy ? "Saving…" : "Save where it runs"}</button>
-        {isHost && <label className="pop-foot warn" style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-          <input type="checkbox" checked={hostAck} disabled={busy} onChange={e => setHostAck(e.target.checked)} />
+        <button className="settings-action btn small" type="button" disabled={busy || (isHost && !hostAck)} onClick={() => void save()}>{busy ? "Saving…" : "Save where it runs"}</button>
+        {isHost && <label className="settings-field pop-foot warn" style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+          <input className="settings-toggle-control" type="checkbox" checked={hostAck} disabled={busy} onChange={e => setHostAck(e.target.checked)} />
           <span>I understand that this board’s sessions, card runs, and automation will run on {hostName} as the person who runs that desktop, not as me: unattended, without a sandbox, with that person’s files and credentials. Anyone who can write cards on this board can put prompts there.</span>
         </label>}
         {isHost && board.run_runtime === "daemon" && `daemon|${board.run_daemon_id || ""}` === choice && board.run_host_acknowledged_at && <p className="pop-foot">Acknowledged {new Date(board.run_host_acknowledged_at).toLocaleString()}.</p>}
         <p className="pop-foot">Applies to board sessions, card runs, and automation. A single run can override it. On a desktop-only install, Automatic uses that desktop.</p>
         <RepoResolve board={board} repos={targets.unresolved_repos ?? []} desktops={desktopsOf(targets.targets)} onChanged={() => { setAttempt(x => x + 1); onChanged?.(); }} />
       </> : <span>{board.run_runtime ? `${board.run_daemon_id ? `${board.run_daemon_id} · ` : ""}${board.run_runtime}` : "Automatic"}{targets?.reason ? ` — ${targets.reason}` : ""}</span>}
-      {error && <p role="alert">{error} <button type="button" onClick={() => setAttempt(x => x + 1)}>Retry run targets</button></p>}
+      {error && <p role="alert">{error} <button className="settings-action" type="button" onClick={() => setAttempt(x => x + 1)}>Retry run targets</button></p>}
     </dd>
   </>;
 }

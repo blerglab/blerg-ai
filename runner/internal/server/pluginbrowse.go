@@ -232,7 +232,7 @@ func (a *API) extSession(w http.ResponseWriter, r *http.Request, canEngine func(
 		extProblem(w, http.StatusConflict, "sandboxed", "This is not available for sandboxed sessions yet.")
 		return extTarget{}, false
 	}
-	dc := a.hub.FindDaemonForSession(sid)
+	dc := a.hub.ownedHostDaemon(r.Context(), p.Sub, row.DaemonID)
 	if dc == nil || dc.BoundSessionID != "" || dc.ID != row.DaemonID {
 		extProblem(w, http.StatusConflict, "unavailable", "The session's daemon is not connected.")
 		return extTarget{}, false
@@ -284,7 +284,11 @@ func (a *API) catalogFromDaemon(w http.ResponseWriter, r *http.Request, t extTar
 	}
 	markets, plugins, cut := protocol.SanitizePluginCatalog(res.Marketplaces, res.Plugins)
 	w.Header().Set("Cache-Control", "private, no-store")
-	writeJSON(w, http.StatusOK, map[string]any{"engine": t.engine, "marketplaces": markets, "plugins": plugins, "truncated": res.Truncated || cut})
+	if err := a.hub.deliverDesktopSnapshot(r.Context(), t.p.Sub, []*DaemonConn{t.dc}, func() {
+		writeJSON(w, http.StatusOK, map[string]any{"engine": t.engine, "marketplaces": markets, "plugins": plugins, "truncated": res.Truncated || cut})
+	}); err != nil {
+		extFailure(w, err)
+	}
 }
 
 func (a *API) handlePluginCatalog(w http.ResponseWriter, r *http.Request) {
@@ -311,7 +315,7 @@ func (a *API) handleAddMarketplace(w http.ResponseWriter, r *http.Request) {
 		extProblem(w, http.StatusBadRequest, "invalid", "Enter a GitHub owner/repo or an https://github.com/owner/repo URL.")
 		return
 	}
-	if !a.pluginAllow.Allows(source) {
+	if !a.currentPluginAllow().Allows(source) {
 		extProblem(w, http.StatusForbidden, "not_allowed", "This marketplace is not allowed by this install.")
 		return
 	}
@@ -398,5 +402,9 @@ func (a *API) handleMCPSignIn(w http.ResponseWriter, r *http.Request) {
 	if source != "user" {
 		source = ""
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"auth_url": res.AuthURL, "requires_user_action": res.RequiresUserAction, "callback_expected": res.CallbackExpected, "source": source})
+	if err := a.hub.deliverDesktopSnapshot(r.Context(), t.p.Sub, []*DaemonConn{t.dc}, func() {
+		writeJSON(w, http.StatusOK, map[string]any{"auth_url": res.AuthURL, "requires_user_action": res.RequiresUserAction, "callback_expected": res.CallbackExpected, "source": source})
+	}); err != nil {
+		extFailure(w, err)
+	}
 }

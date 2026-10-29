@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:unit": "vitest run --project unit",
-    "test:browser": "vitest run --project browser"
+    "test:browser": "vitest run --project browser && vitest run --project browser-performance",
+    "test:performance": "vitest run --project browser-performance"
   },
   "dependencies": {
     "@blerglab/chat": "*",

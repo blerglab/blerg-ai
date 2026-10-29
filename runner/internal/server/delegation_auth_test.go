@@ -18,6 +18,7 @@ import (
 
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/idempotency"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
@@ -277,7 +278,7 @@ func TestDelegatePrincipalSeesOnlyItsChildren(t *testing.T) {
 	if p.seesAllSessions() {
 		t.Fatal("seesAllSessions() = true for a delegate")
 	}
-	if got := p.startScope(); got != "session_delegate:"+fx.parent {
+	if got := p.startScope(); got != idempotency.Scope(sessionDelegateKind, fx.parent) {
 		t.Fatalf("startScope() = %q", got)
 	}
 	if p.spawningAccountID() != "owner-1" || p.tokenID() != "" || p.proof().valid() {
@@ -319,7 +320,7 @@ func TestStartChildRecordsAttributionAndInheritsPrivacy(t *testing.T) {
 	if apiErr != nil || again.SessionID != resp.SessionID || !again.Replayed {
 		t.Fatalf("replay = %+v %v", again, apiErr)
 	}
-	idem, err := db.GetIdempotencyKey(ctx, fx.pool, "session_delegate:"+fx.parent, "k1")
+	idem, err := db.GetIdempotencyKey(ctx, fx.pool, idempotency.Scope(sessionDelegateKind, fx.parent), "k1")
 	if err != nil || idem == nil || idem.SessionID != resp.SessionID {
 		t.Fatalf("idempotency row = %+v %v", idem, err)
 	}
@@ -413,7 +414,7 @@ func TestDelegatedSpawnSkipsPluginsAndCarriesNoEnv(t *testing.T) {
 		"cluster":              func(r *runnerStartRequest) { r.Runtime = runnerRuntimeCluster },
 		"default runtime":      func(r *runnerStartRequest) { r.Runtime = "" },
 		"no operator fallback": func(r *runnerStartRequest) { r.NoOperatorFallback = true },
-		"idempotency scope":    func(r *runnerStartRequest) { r.IdemScope = "session_delegate:" + fx.parent },
+		"idempotency scope":    func(r *runnerStartRequest) { r.IdemScope = idempotency.Scope(sessionDelegateKind, fx.parent) },
 	} {
 		req := base()
 		mutate(&req)

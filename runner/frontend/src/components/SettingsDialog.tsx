@@ -1,3 +1,4 @@
+import "../../../../packages/settings/settings.css";
 // Settings: what applies across sessions, in a dialog over the current page. Chat: Show thinking, Compact
 // tool calls and Hover previews, which act at once (kept per browser). Code colors: the syntax-color theme for dark mode and
 // for light mode, optional changes to single colors, and a live preview of real chat code blocks (ts, go,
@@ -9,12 +10,16 @@ import {
   CODE_THEMES, CODE_TOKEN_KEYS, CODE_TOKEN_LABELS, CODE_TOKEN_NAMES, Markdown, applyCodeColours, currentCodeMode,
   isHexColour, resolveCodeTokens, setHovercardsEnabled, useBackdropClose, useHovercardsEnabled, type CodeColours, type CodeMode, type CodeTokenKey,
 } from '@blerglab/chat'
+import { saveCompactFolders, useCompactFolders } from '../lib/compactFolders'
 import { saveCodeColours, useCodeColours } from '../lib/codeColours'
 import { useCompact, useThinking } from '../lib/sessionRail'
 import { coreOrigin } from '../authClient'
 import './CapabilitiesPanel.css'
 import './SettingsDialog.css'
 import DelegationRulesSection from './DelegationRulesSection'
+import EngineStatusSection from './EngineStatusSection'
+import ShellLimitsSection from './ShellLimitsSection'
+import UsageNoticeSettings from './UsageNoticeSettings'
 
 const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), summary, [href], [tabindex]:not([tabindex="-1"])'
 
@@ -65,6 +70,9 @@ function toHex(v: string): string {
 export default function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [thinking, setThinking] = useThinking()
   const [compact, setCompact] = useCompact()
+  const compactFolders = useCompactFolders()
+  const [folderError, setFolderError] = useState('')
+  const [savingFolders, setSavingFolders] = useState(false)
   const hovercards = useHovercardsEnabled()
   const saved = useCodeColours()
   const [draft, setDraft] = useState<CodeColours>(saved)
@@ -142,37 +150,59 @@ export default function SettingsDialog({ onClose }: { onClose: () => void }) {
       <div ref={dialogRef} className="caps-dialog cc-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId}
         data-testid="settings" onKeyDown={onKeyDown}>
         <header className="caps-header">
-          <h2 id={titleId}>Settings</h2>
-          <button type="button" className="caps-close" aria-label="Close" onClick={onClose}>✕</button>
+          <h2 className="settings-heading" id={titleId}>Settings</h2>
+          <button type="button" className="settings-action caps-close" aria-label="Close" onClick={onClose}>✕</button>
         </header>
         <div className="caps-body">
           <div className="cc-body">
-            <section className="st-section" aria-labelledby={`${titleId}-chat`}>
-              <h3 id={`${titleId}-chat`} className="st-heading">Chat</h3>
-              <label className="st-check">
-                <input type="checkbox" checked={thinking} onChange={e => setThinking(e.target.checked)} />
+            <section className="settings-section st-section" aria-labelledby={`${titleId}-chat`}>
+              <h3 id={`${titleId}-chat`} className="settings-heading st-heading">Chat</h3>
+              <p className="settings-description">Choose how your session conversations are shown.</p>
+              <label className="settings-field st-check">
+                <input className="settings-toggle-control" type="checkbox" checked={thinking} onChange={e => setThinking(e.target.checked)} />
                 <span>Show thinking</span>
               </label>
               <p className="st-hint">Show the model’s thinking in the transcript.</p>
-              <label className="st-check">
-                <input type="checkbox" checked={compact} onChange={e => setCompact(e.target.checked)} />
+              <label className="settings-field st-check">
+                <input className="settings-toggle-control" type="checkbox" checked={compact} onChange={e => setCompact(e.target.checked)} />
                 <span>Compact tool calls</span>
               </label>
               <p className="st-hint">Fold runs of tool calls into one summary row.</p>
-              <label className="st-check">
-                <input type="checkbox" data-testid="settings-hovercards" checked={hovercards} onChange={e => setHovercardsEnabled(e.target.checked)} />
+              <label className="settings-field st-check">
+                <input className="settings-toggle-control" type="checkbox" data-testid="settings-hovercards" checked={hovercards} onChange={e => setHovercardsEnabled(e.target.checked)} />
                 <span>Hover previews</span>
               </label>
               <p className="st-hint">Preview a ticket, file or commit when the pointer rests on its chip (on a device with a mouse or trackpad).</p>
             </section>
 
+            <section className="settings-section st-section" aria-labelledby={`${titleId}-explorer`}>
+              <h3 id={`${titleId}-explorer`} className="settings-heading st-heading">File explorer</h3>
+              <label className="settings-field st-check">
+                <input className="settings-toggle-control" type="checkbox" checked={compactFolders} disabled={savingFolders} onChange={e => {
+                  setSavingFolders(true)
+                  void saveCompactFolders(e.target.checked).then(error => { setFolderError(error); setSavingFolders(false) })
+                }} />
+                <span>Compact folders</span>
+              </label>
+              <p className="st-hint">Show folders with a single child folder in one row. Saved for your account.</p>
+              {folderError && <p role="alert">{folderError}</p>}
+            </section>
             <DelegationRulesSection />
-            <h3 id={`${titleId}-colors`} className="st-heading">Code colors</h3>
+            <UsageNoticeSettings />
+            <section className="settings-section st-section" aria-labelledby={`${titleId}-desktops`}>
+              <h3 id={`${titleId}-desktops`} className="settings-heading st-heading">Desktops</h3>
+              <p className="settings-description">Your desktops belong to your account: list, rename, enroll, add or remove them in Blerg’s main Settings.</p>
+              <a className="settings-action btn st-desktops-link" href={`${coreOrigin()}/settings#desktops`} target="_blank" rel="noopener noreferrer">Manage your desktops</a>
+            </section>
+            <EngineStatusSection />
+            <ShellLimitsSection />
+            <h3 id={`${titleId}-colors`} className="settings-heading st-heading">Code colors</h3>
+            <p className="settings-description">Choose the colors used for code in dark and light mode.</p>
             <div className="cc-pickers" role="group" aria-labelledby={`${titleId}-colors`}>
               {(['dark', 'light'] as const).map(m => (
-                <label key={m} className="cc-field">
+                <label key={m} className="settings-field cc-field">
                   <span>{m === 'dark' ? 'Dark mode' : 'Light mode'}</span>
-                  <select className="select" value={draft[m]} onChange={e => setTheme(m, e.target.value)} data-testid={`cc-theme-${m}`}>
+                  <select className="settings-field select" value={draft[m]} onChange={e => setTheme(m, e.target.value)} data-testid={`cc-theme-${m}`}>
                     {CODE_THEMES.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                   </select>
                 </label>
@@ -182,7 +212,7 @@ export default function SettingsDialog({ onClose }: { onClose: () => void }) {
             <div className="cc-previewbar" role="group" aria-label="Preview as">
               <span className="cc-previewbar-label">Preview</span>
               {(['dark', 'light'] as const).map(m => (
-                <button key={m} type="button" className={'cc-seg' + (mode === m ? ' on' : '')} aria-pressed={mode === m}
+                <button key={m} type="button" className={'settings-action ' + ('cc-seg' + (mode === m ? ' on' : ''))} aria-pressed={mode === m}
                   onClick={() => setMode(m)}>{m === 'dark' ? 'Dark' : 'Light'}</button>
               ))}
             </div>
@@ -198,10 +228,10 @@ export default function SettingsDialog({ onClose }: { onClose: () => void }) {
                   const custom = overrides[k]
                   return (
                     <li key={k} className="cc-token">
-                      <input type="color" aria-label={`${CODE_TOKEN_LABELS[k]} color`} value={custom ?? resolved[k] ?? toHex(base[k])}
+                      <input className="settings-field" type="color" aria-label={`${CODE_TOKEN_LABELS[k]} color`} value={custom ?? resolved[k] ?? toHex(base[k])}
                         onChange={e => setOverride(k, e.target.value)} />
                       <span className="cc-token-name">{CODE_TOKEN_LABELS[k]}</span>
-                      {custom && <button type="button" className="cc-reset" onClick={() => setOverride(k, null)}>Reset</button>}
+                      {custom && <button type="button" className="settings-action cc-reset" onClick={() => setOverride(k, null)}>Reset</button>}
                     </li>
                   )
                 })}
@@ -215,8 +245,8 @@ export default function SettingsDialog({ onClose }: { onClose: () => void }) {
           </div>
         </div>
         <footer className="cc-footer">
-          <button type="button" className="btn" onClick={onClose}>Done</button>
-          <button type="button" className="btn primary" disabled={!dirty || saving} onClick={() => void save()}>
+          <button type="button" className="settings-action btn" onClick={onClose}>Done</button>
+          <button type="button" className="settings-action btn primary" disabled={!dirty || saving} onClick={() => void save()}>
             {saving ? 'Saving…' : 'Save colors'}
           </button>
         </footer>

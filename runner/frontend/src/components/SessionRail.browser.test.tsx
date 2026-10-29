@@ -27,6 +27,8 @@ import { useTranscriptStore } from '@blerglab/chat'
 import { useSessionStore } from '../hooks/useSessionStore'
 
 const PHONE = { width: 390, height: 700 }
+// The toggle's counts as read: each count's text, its mark included (the subagent robot face, ↳).
+const shownCounts = (toggle: HTMLElement) => [...toggle.querySelectorAll<HTMLElement>('.icon-btn-count')].map(el => el.textContent).join('')
 const DESKTOP = { width: 1280, height: 800 }
 
 const FILES = [
@@ -81,11 +83,12 @@ describe('the session panel on a phone (390 px)', () => {
   it('the toggle fits the header with its count, and the page is no wider than the screen', async () => {
     renderPage()
     const toggle = screen.getByTestId('rail-toggle')
-    // 1 open ask + 1 tool change need you; 2 subagents (A1 at work in a running turn, A2 in the
+    // 1 open ask + 1 tool change need you (not a toggle count); 2 subagents (A1 at work in a running turn, A2 in the
     // background, its task counted once) + 5 background tasks (3 the page holds, 2 that started
-    // before them) run, from the server's live state, and the main agent at work in that turn: 10.
-    await waitFor(() => expect(screen.getByTestId('rail-badge').textContent).toBe('10'))
-    expect(screen.getByTestId('rail-announce').textContent).toBe('Session panel: 2 need you, 8 running')
+    // before them) run inside the session, from the server's live state. Main is not a count.
+    await waitFor(() => expect(shownCounts(toggle)).toBe('🤖7'))
+    expect(screen.getByTestId('rail-announce').textContent).toBe('Session panel: 7 subagents and background tasks')
+    for (const count of toggle.querySelectorAll('.icon-btn-count')) expect(count.getBoundingClientRect().right).toBeLessThanOrEqual(PHONE.width)
     const r = toggle.getBoundingClientRect()
     expect(r.left).toBeGreaterThanOrEqual(0)
     expect(r.right).toBeLessThanOrEqual(PHONE.width)
@@ -165,13 +168,14 @@ describe('the session panel on a phone (390 px)', () => {
     expect(rows).toHaveLength(2)
     await userEvent.click(screen.getByRole('button', { name: /Earlier versions/ }))
     const d = drawer.getBoundingClientRect()
-    for (const el of drawer.querySelectorAll('.artifact-row, .artifact-version-row, .artifact-btn')) {
+    for (const el of drawer.querySelectorAll('.artifact-row:not([hidden]), .artifact-version-row:not([hidden]), .artifact-btn')) {
       const r = el.getBoundingClientRect()
+      if (!r.width) continue // Collapsed version rows retain their buttons in the DOM.
       expect(r.left).toBeGreaterThanOrEqual(d.left)
       expect(r.right).toBeLessThanOrEqual(d.right)
     }
     // The four tabs fit the drawer's width on one line.
-    const tabs = screen.getAllByRole('tab')
+    const tabs = within(drawer).getAllByRole('tab')
     expect(tabs.map(t => t.id.split('-tab-')[1])).toEqual(['live', 'history', 'files', 'capabilities'])
     expect(new Set(tabs.map(t => Math.round(t.getBoundingClientRect().top))).size).toBe(1)
     expect(tabs.at(-1)!.getBoundingClientRect().right).toBeLessThanOrEqual(d.right)
@@ -201,7 +205,13 @@ describe('the session panel on a desktop (1280 px)', () => {
 
     await userEvent.click(screen.getByTestId('rail-toggle'))
     await waitFor(() => expect(rail.getBoundingClientRect().width).toBe(0))
-    expect(screen.getByTestId('agent-chat').getBoundingClientRect().width).toBeGreaterThan(DESKTOP.width - 2)
+    const tools = screen.getByRole('navigation', { name: 'Workspace' }).getBoundingClientRect()
+    const expandedChat = screen.getByTestId('agent-chat').getBoundingClientRect()
+    expect(expandedChat.left).toBe(tools.left)
+    expect(screen.queryByRole('toolbar', { name: 'Session panel tools' })).toBeNull()
+    const panelRail = { width: 0 }
+    expect(panelRail.width).toBe(0)
+    expect(expandedChat.width).toBeGreaterThan(DESKTOP.width - panelRail.width - 2)
     expect(localStorage.getItem(RAIL_PREF_KEY)).toBe('0')
   })
 
@@ -311,4 +321,64 @@ it('does not reopen the Permissions modal by itself after it was closed, across 
   // The card still opens it on purpose.
   await userEvent.click(await screen.findByRole('button',{name:'Change child approvals'}))
   expect(await screen.findByRole('dialog',{name:'Permissions'})).toBeInTheDocument()
+})
+
+// The plan nudge setting (card #158) sits in the panel's Session section and stays inside it, on a
+// phone's drawer and on a 4K screen alike.
+it.each([390, 3840])('shows the plan nudge setting inside the panel at %ipx', async width => {
+  await page.viewport(width, 900)
+  const fallback = apiFetch.getMockImplementation()!
+  apiFetch.mockImplementation((url: string) => url.endsWith('/plan-nudges') ? json({ enabled: true }) : fallback(url))
+  renderPage()
+  if (width < 700) await userEvent.click(screen.getByTestId('rail-toggle'))
+  const section = await screen.findByTestId('rail-session')
+  const box = await within(section).findByRole('checkbox', { name: 'Nudge when the plan drifts' })
+  expect(box).toBeChecked()
+  const label = box.closest('label')!.getBoundingClientRect()
+  const panel = screen.getByTestId('session-rail').getBoundingClientRect()
+  expect(label.left).toBeGreaterThanOrEqual(panel.left)
+  expect(label.right).toBeLessThanOrEqual(panel.right)
+  expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
+})
+
+// Card #233 part 5: the toggle shows the work inside the session (🤖) and the child sessions at work
+// (↳) as two counts, each hidden at zero, from the selector Running now lists with.
+describe('the panel toggle counts work inside and child sessions apart', () => {
+  const child = (id: string, engine: string) => ({ id, title: `Worker ${id}`, engine, model: 'fixture', status: 'running', started_at: new Date().toISOString(), ended_at: null, asking: false, tokens: null })
+  const cases = [
+    ['zero', { subagents: false, tasks: false, children: 0 }, '', 'Session panel'],
+    ['children only', { subagents: false, tasks: false, children: 1 }, '↳1', 'Session panel: 1 child session'],
+    ['both', { subagents: true, tasks: true, children: 4 }, '🤖7↳4', 'Session panel: 7 subagents and background tasks · 4 child sessions'],
+  ] as const
+  for (const width of [390, 3840]) {
+    it.each(cases)(`at ${width} px: %s`, async (_name, o, shown, label) => {
+      await page.viewport(width, width === 390 ? 844 : 2160)
+      localStorage.setItem(RAIL_PREF_KEY, '0')
+      const { live } = seedRichRail()
+      const reply = { ...live, through_seq: 999, asks: [], tool_changes: 0, subagents: o.subagents ? live.subagents : [], tasks: o.tasks ? live.tasks : [],
+        children: Array.from({ length: o.children }, (_, i) => child(`c${i}`, i % 2 ? 'codex' : 'claude')) }
+      apiFetch.mockImplementation((url: string) => json(url.endsWith('/live') ? reply : url.endsWith('/topics') ? reelReply() : {}))
+      useTranscriptStore.setState({ sessions: {} })
+      renderPage()
+      const toggle = screen.getByTestId('rail-toggle')
+      await waitFor(() => expect(toggle).toHaveAccessibleName(label))
+      expect(shownCounts(toggle)).toBe(shown)
+      expect(toggle.querySelectorAll('.icon-btn-count')).toHaveLength(shown ? shown.split(/(?=🤖|↳)/u).length : 0)
+      const r = toggle.getBoundingClientRect()
+      expect(r.right).toBeLessThanOrEqual(width)
+      for (const count of toggle.querySelectorAll('.icon-btn-count')) {
+        const c = count.getBoundingClientRect()
+        expect(c.right).toBeLessThanOrEqual(r.right + 0.5)
+        expect(Math.abs(c.top + c.height / 2 - (r.top + r.height / 2))).toBeLessThan(3)
+      }
+      const shots = import.meta.env.VITE_CHROME_SHOTS_DIR
+      if (shots && _name === 'both') await page.screenshot({ path: `${shots}/panel-toggle-${width}.png` })
+      // Open, Running now lists the same numbers (Main is listed on its own).
+      await userEvent.click(toggle)
+      const running = await screen.findByTestId('rail-running')
+      expect(within(running).queryAllByTestId('rail-subagent').length + within(running).queryAllByTestId('rail-task').length).toBe(o.subagents ? 7 : 0)
+      expect(within(running).queryAllByTestId('rail-child')).toHaveLength(o.children)
+      expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
+    })
+  }
 })

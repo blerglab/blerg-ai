@@ -12,6 +12,7 @@ import { Link } from 'react-router-dom'
 import { Markdown, TicketDetails, TicketModal, TimeLabel, type Ticket } from '@blerglab/chat'
 import { boardCardUrl, useBoardOrigin } from '../lib/boardLink'
 import { boardCardRef, moveLiveBoardCard, useLiveBoardCard, LiveBoardCardError, type LiveBoardCard } from '../lib/liveBoardCard'
+import InitialLoader from './InitialLoader'
 import './BoardCardView.css'
 
 /** The mark of a chip that shows the live card. */
@@ -22,7 +23,7 @@ export function LiveMark() {
 function liveTicket(pinned: Ticket, card: LiveBoardCard | null, url: string): Ticket {
   if (!card) return { ...pinned, ...(url ? { url } : {}) }
   return {
-    source: 'blerg-board', key: `#${card.number}`, board_id: card.board_id, title: card.title || pinned.title,
+    source: 'blerg-board', key: card.reference || `#${card.number}`, board_id: card.board_id, title: card.title || pinned.title,
     ...(card.archived_at ? { status: 'Archived' } : card.column_name ? { status: card.column_name } : {}),
     ...(card.type ? { type: card.type } : {}), ...(card.priority ? { priority: card.priority } : {}),
     ...(card.tags?.length ? { labels: card.tags } : {}), ...(url ? { url } : {}),
@@ -185,7 +186,7 @@ export function PinnedTicketModal({ ticket, sessionId, worker, onClose, onShow }
   if (card) {
     body = (
       <>
-        {live.state === 'failed' && <p className="board-card-error" role="alert">Could not read the card again: {live.error} <button type="button" onClick={live.refresh}>Retry</button></p>}
+        {live.state === 'failed' && <p className="board-card-error" role="alert">Could not read the card again: {live.error} <button type="button" className="btn small" onClick={live.refresh}>Retry</button></p>}
         <LiveCardBody card={card} pinned={ticket} sessionId={sessionId} worker={worker} onShow={onShow} />
       </>
     )
@@ -194,13 +195,13 @@ export function PinnedTicketModal({ ticket, sessionId, worker, onClose, onShow }
       <>
         <p className="board-card-error" role="alert" data-testid="board-card-failed">
           {live.status === 403 ? 'Your sign-in cannot read this card on the board.' : `Could not read the card from the board: ${live.error}`} This is the agent's copy.{' '}
-          <button type="button" onClick={live.refresh}>Retry</button>
+          <button type="button" className="btn small" onClick={live.refresh}>Retry</button>
         </p>
         <TicketDetails ticket={ticket}>{onShow && <button type="button" className="ticket-more" onClick={onShow}>Show in conversation</button>}</TicketDetails>
       </>
     )
   } else {
-    body = <p className="board-card-note" role="status">Reading the card from the board…</p>
+    body = <InitialLoader loading loadKey={`${ref.board}:${ref.number}`} label="board card" shape="facts" />
   }
   return (
     <TicketModal

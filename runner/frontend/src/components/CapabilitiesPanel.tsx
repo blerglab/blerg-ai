@@ -9,6 +9,7 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import type { CapabilityGroup, CapabilityItem } from '../types'
+import PermissionChip from './PermissionChip'
 import { CAPABILITY_GROUPS, asOfLabel, capabilityCount, humanModelName, matchesQuery, middleTruncate, permissionLabel, statusGlyph, statusWord, withLiveMcp, type CapabilitiesReport } from '../lib/capabilities'
 import { builtinModels } from '../lib/engineModels'
 import { ENGINE_LABELS, ENGINE_SHORT } from '../lib/runtimes'
@@ -16,6 +17,7 @@ import { RunGlyph } from './RunCard'
 import type { CapabilitiesPayload } from '../types'
 import { useBackdropClose, type McpLive } from '@blerglab/chat'
 import './CapabilitiesPanel.css'
+import InitialLoader from './InitialLoader'
 import ToolSchemaGuidance from './ToolSchemaGuidance'
 import { toolSchemaGuidanceText } from '../lib/toolSchemaGuidance'
 
@@ -23,6 +25,8 @@ import { toolSchemaGuidanceText } from '../lib/toolSchemaGuidance'
 const COLLAPSE_OVER = 15
 
 interface ViewProps {
+  /** Only the first read without a report; known toolbar actions remain available. */
+  initialLoading?: boolean
   report: CapabilitiesReport | null
   // When set, capabilities can't be reported for this session at all (a
   // terminal session); this says why, instead of the "nothing yet" state.
@@ -108,7 +112,7 @@ export default function CapabilitiesPanel({ onClose, ...view }: Props) {
 }
 
 /** What the session loaded, with the report's facts, a filter and a section per group. */
-export function CapabilitiesView({ report, unavailable, pendingToolChanges, liveMcp, searchRef, toolbarAction, belowToolbar, itemAction }: ViewProps) {
+export function CapabilitiesView({ initialLoading = false, report, unavailable, pendingToolChanges, liveMcp, searchRef, toolbarAction, belowToolbar, itemAction }: ViewProps) {
   const listBase = useId()
   const [query, setQuery] = useState('')
   const snapshot = report?.payload ?? null
@@ -231,7 +235,7 @@ export function CapabilitiesView({ report, unavailable, pendingToolChanges, live
       </div>
     )}
     {belowToolbar}
-    <div className="caps-body">{body}</div>
+    <div className="caps-body"><InitialLoader loading={initialLoading} hasContent={!!payload || !!unavailable} label="capabilities" shape="facts">{body}</InitialLoader></div>
     </>
   )
 }
@@ -274,7 +278,7 @@ function HeaderCard({ payload, ts }: { payload: CapabilitiesPayload; ts: string 
   const engineName = payload.engine_name ?? ENGINE_LABELS[engineKey] ?? payload.engine
   const engineLine = [engineName, payload.version].filter(Boolean).join(' ')
   const model = payload.model ? humanModelName(payload.model, builtinModels(engineKey)) : ''
-  const perm = payload.permission_mode ? permissionLabel(payload.permission_mode) : null
+  const perm = payload.permission_mode ? permissionLabel(payload.permission_mode, payload.engine, payload.sandbox_mode) : null
   const asOf = asOfLabel(ts)
   const t = Date.parse(ts)
   const full = Number.isFinite(t) ? new Date(t).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : ''
@@ -294,8 +298,7 @@ function HeaderCard({ payload, ts }: { payload: CapabilitiesPayload; ts: string 
       <div className="caps-card-line caps-card-facts">
         {payload.cwd && <span className="caps-cwd" data-testid="caps-cwd" title={payload.cwd}>{middleTruncate(payload.cwd)}</span>}
         {perm && (
-          <span className={`rail-chip caps-perm${perm.risky ? ' risky' : ''}`} data-testid="caps-permission"
-            title={`Permission mode: ${payload.permission_mode}${perm.risky ? ' (acts without asking)' : ''}`}>{perm.label}</span>
+          <PermissionChip permission={perm} testId="caps-permission" />
         )}
         <span className="caps-asof">
           {asOf && <time dateTime={ts} title={full} data-testid="caps-asof">{asOf}</time>}

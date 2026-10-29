@@ -17,11 +17,14 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 )
 
-func (fx *topicFx) mark(sid, token string, body any) (int, map[string]any) {
+func (fx *topicFx) mark(sid, token string, body any, key ...string) (int, map[string]any) {
 	raw, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+sid+"/marks", bytes.NewReader(raw))
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if len(key) > 0 {
+		req.Header.Set("Idempotency-Key", key[0])
 	}
 	rec := httptest.NewRecorder()
 	fx.mux.ServeHTTP(rec, req)
@@ -110,8 +113,8 @@ func TestPostMarkWithTheSessionToken(t *testing.T) {
 		t.Errorf("stored = %+v", got)
 	}
 	s := fx.strokes(fx.sess).Strokes
-	// The agent posted it: the agent's line, recorded as the person's ruling.
-	if len(s) != 1 || s[0].Source != "mark" || s[0].Kind != "decision" || s[0].By != "agent" || s[0].RecordedAs != "person" || s[0].Jump == nil || s[0].Jump.EventID != s[0].ID || s[0].Card.Number != 115 {
+	// The agent posted it, preserving the person's ownership of the ruling.
+	if len(s) != 1 || s[0].Source != "mark" || s[0].Kind != "decision" || s[0].By != "person" || s[0].RecordedAs != "person" || s[0].Jump == nil || s[0].Jump.EventID != s[0].ID || s[0].Card.Number != 115 {
 		t.Errorf("strokes = %+v", s)
 	}
 	// Without --by the agent's mark is the agent's own.
@@ -373,6 +376,67 @@ func TestPostMarkDedupCoversChips(t *testing.T) {
 		}
 		if code != http.StatusCreated || b["recorded"] != want {
 			t.Errorf("post %d = %d %v", i, code, b)
+		}
+	}
+}
+
+// Authorization precedes even the first body read, including malformed/oversized requests.
+type countedMarkBody struct{ reads int }
+
+func (b *countedMarkBody) Read([]byte) (int, error) {
+	b.reads++
+	return 0, fmt.Errorf("body must remain unread")
+}
+func TestPostMarkChecksOwnershipBeforeReadingBody(t *testing.T) {
+	fx := newTopicFx(t)
+	body := &countedMarkBody{}
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+fx.sess+"/marks", body)
+	req.Header.Set("Authorization", "Bearer "+fx.token(topicOther, "human"))
+	rec := httptest.NewRecorder()
+	fx.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound || body.reads != 0 {
+		t.Fatalf("status=%d reads=%d; want private 404 with unread body", rec.Code, body.reads)
+	}
+}
+
+func TestPostLiveMarkRetryIsIdempotent(t *testing.T) {
+	fx := newTopicFx(t)
+	post := func(key, text string) (int, marksReply) {
+		req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+fx.sess+"/marks", strings.NewReader(`{"kind":"milestone","text":"`+text+`"}`))
+		req.Header.Set("Authorization", "Bearer "+fx.sessTok)
+		req.Header.Set("Idempotency-Key", key)
+		rec := httptest.NewRecorder()
+		fx.mux.ServeHTTP(rec, req)
+		var reply marksReply
+		_ = json.Unmarshal(rec.Body.Bytes(), &reply)
+		return rec.Code, reply
+	}
+	code, first := post("lost-reply", "Merged")
+	if code != http.StatusCreated || first.Recorded != 1 {
+		t.Fatalf("first=%d %+v", code, first)
+	}
+	code, retry := post("lost-reply", "Merged")
+	if code != http.StatusCreated || retry.Recorded != 0 || retry.Duplicates != 1 || retry.Marks[0].ID != first.Marks[0].ID {
+		t.Fatalf("retry=%d %+v first=%+v", code, retry, first)
+	}
+	if code, _ := post("lost-reply", "Deployed"); code != http.StatusConflict {
+		t.Fatalf("changed request=%d", code)
+	}
+	if code, next := post("new-mark", "Merged"); code != http.StatusCreated || next.Recorded != 1 {
+		t.Fatalf("distinct mark=%d %+v", code, next)
+	}
+	if got := len(fx.markEvents(fx.sess)); got != 2 {
+		t.Fatalf("stored=%d", got)
+	}
+}
+
+func TestPostMarkKeyedImportKeepsContentDeduplication(t *testing.T) {
+	fx := newTopicFx(t)
+	body := map[string]any{"kind": "finding", "text": "Imported", "at": "2026-10-21T12:00:00Z"}
+	for i, key := range []string{"first-import", "second-import"} {
+		code, reply := fx.mark(fx.sess, fx.sessTok, body, key)
+		if code != http.StatusCreated || reply["recorded"] != float64(1-i) {
+			t.Fatalf("%s = %d %v", key, code, reply)
 		}
 	}
 }

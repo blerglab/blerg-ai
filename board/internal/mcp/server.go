@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -82,7 +83,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "tools/list":
 		writeRPC(w, req.ID, map[string]any{"tools": visibleTools(principal)}, nil)
 	case "tools/call":
-		s.handleToolCall(r.Context(), w, req, principal)
+		s.handleToolCall(api.WithRunnerSession(r.Context(), r.Header.Get(api.RunnerSessionHeader)), w, req, principal)
 	default:
 		writeRPC(w, req.ID, nil, &rpcError{Code: -32601, Message: "method not found"})
 	}
@@ -224,6 +225,10 @@ func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, ar
 	if err != nil {
 		return nil, err
 	}
+	args, err = s.resolveKeyArgs(ctx, name, args)
+	if err != nil {
+		return nil, err
+	}
 	if err := s.scopeCheck(ctx, p, name, args); err != nil {
 		return nil, err
 	}
@@ -329,6 +334,7 @@ func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, ar
 			BoardID    string `json:"board_id"`
 			Name       string `json:"name"`
 			IsTerminal bool   `json:"is_terminal"`
+			BeforeID   string `json:"before_id"`
 		}
 		if err := json.Unmarshal(args, &a); err != nil || a.BoardID == "" || a.Name == "" {
 			return nil, fmt.Errorf("board_id and name required")
@@ -336,11 +342,75 @@ func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, ar
 		if err := p.RequireBoard(a.BoardID, "column.write"); err != nil {
 			return nil, err
 		}
-		col, err := db.CreateColumn(ctx, pool, a.BoardID, a.Name, a.IsTerminal)
+		col, err := db.CreateColumnAt(ctx, pool, a.BoardID, a.Name, a.IsTerminal, a.BeforeID, api.ColumnAudit(ctx, p))
 		if err != nil {
 			return nil, err
 		}
+		s.api.Hub.Broadcast(col.BoardID, "board_changed")
 		return toolText(col), nil
+
+	case "blerg_column_update":
+		var a struct {
+			ColumnID   string  `json:"column_id"`
+			Name       *string `json:"name"`
+			IsTerminal *bool   `json:"is_terminal"`
+		}
+		if err := json.Unmarshal(args, &a); err != nil || a.ColumnID == "" {
+			return nil, fmt.Errorf("column_id required")
+		}
+		if a.Name != nil && strings.TrimSpace(*a.Name) == "" {
+			return nil, fmt.Errorf("name cannot be empty")
+		}
+		if a.Name == nil && a.IsTerminal == nil {
+			return nil, fmt.Errorf("give name and/or is_terminal")
+		}
+		before, err := db.GetColumn(ctx, pool, a.ColumnID)
+		if err != nil {
+			return nil, err
+		}
+		if err := p.RequireBoard(before.BoardID, "column.write"); err != nil {
+			return nil, err
+		}
+		col, err := db.UpdateColumn(ctx, pool, a.ColumnID, a.Name, a.IsTerminal, api.ColumnAudit(ctx, p))
+		if err != nil {
+			return nil, err
+		}
+		s.api.Hub.Broadcast(col.BoardID, "board_changed")
+		return toolText(col), nil
+
+	case "blerg_column_delete":
+		var a struct {
+			ColumnID    string `json:"column_id"`
+			MoveCardsTo string `json:"move_cards_to"`
+		}
+		if err := json.Unmarshal(args, &a); err != nil || a.ColumnID == "" {
+			return nil, fmt.Errorf("column_id required")
+		}
+		col, err := db.GetColumn(ctx, pool, a.ColumnID)
+		if err != nil {
+			return nil, err
+		}
+		if err := p.RequireBoard(col.BoardID, "column.write"); err != nil {
+			return nil, err
+		}
+		if a.MoveCardsTo == "" {
+			if err := db.DeleteColumn(ctx, pool, col.ID, api.ColumnAudit(ctx, p)); err != nil {
+				if errors.Is(err, db.ErrColumnHasCards) {
+					return nil, fmt.Errorf("column %q has cards: move them first, or pass move_cards_to with the column they should move to", col.Name)
+				}
+				return nil, err
+			}
+			s.api.Hub.Broadcast(col.BoardID, "board_changed")
+			return toolText(map[string]any{"deleted": col.ID, "name": col.Name, "moved_cards": 0}), nil
+		}
+		moved, denied, err := s.api.DeleteColumnMovingCardsGated(ctx, p, col, a.MoveCardsTo)
+		if err != nil {
+			return nil, err
+		}
+		if denied != nil {
+			return toolError(denied.Body), nil
+		}
+		return toolText(map[string]any{"deleted": col.ID, "name": col.Name, "moved_cards": len(moved)}), nil
 
 	case "blerg_column_move":
 		var a struct {
@@ -357,10 +427,11 @@ func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, ar
 		if err := p.RequireBoard(col.BoardID, "column.write"); err != nil {
 			return nil, err
 		}
-		moved, err := db.MoveColumn(ctx, pool, a.ColumnID, a.BeforeID)
+		moved, err := db.MoveColumn(ctx, pool, a.ColumnID, a.BeforeID, api.ColumnAudit(ctx, p))
 		if err != nil {
 			return nil, err
 		}
+		s.api.Hub.Broadcast(moved.BoardID, "board_changed")
 		return toolText(moved), nil
 
 	case "blerg_card_search":
@@ -369,22 +440,46 @@ func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, ar
 			Query           string            `json:"query"`
 			Type            string            `json:"type"`
 			Tag             string            `json:"tag"`
+			Column          json.RawMessage   `json:"column"`
 			Priority        string            `json:"priority"`
 			Fields          map[string]string `json:"fields"`
 			IncludeArchived bool              `json:"include_archived"`
 			Limit           int               `json:"limit"`
+			Page            bool              `json:"page"`
+			Cursor          string            `json:"cursor"`
 		}
-		if err := json.Unmarshal(args, &a); err != nil || a.BoardID == "" {
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, fmt.Errorf("invalid card search arguments: %w", err)
+		}
+		if a.BoardID == "" {
 			return nil, fmt.Errorf("board_id required")
 		}
 		if err := p.RequireBoard(a.BoardID, "card.read"); err != nil {
 			return nil, err
 		}
-		cards, err := db.SearchCards(ctx, pool, db.SearchParams{
+		var columns []string
+		if len(a.Column) > 0 {
+			if err := json.Unmarshal(a.Column, &columns); err != nil {
+				var column string
+				if err := json.Unmarshal(a.Column, &column); err != nil {
+					return nil, fmt.Errorf("column must be a string or an array of strings")
+				}
+				columns = []string{column}
+			}
+		}
+		params := db.SearchParams{
 			BoardID: a.BoardID, Query: a.Query, Type: a.Type, Tag: a.Tag,
-			Priority: a.Priority, Fields: a.Fields,
+			Priority: a.Priority, Fields: a.Fields, Columns: columns,
 			IncludeArchived: a.IncludeArchived, Limit: a.Limit,
-		})
+		}
+		if a.Page || a.Cursor != "" {
+			page, err := db.SearchCardsPage(ctx, pool, params, a.Cursor)
+			if err != nil {
+				return nil, err
+			}
+			return toolText(page), nil
+		}
+		cards, err := db.SearchCards(ctx, pool, params)
 		if err != nil {
 			return nil, err
 		}
@@ -681,4 +776,48 @@ func (s *Server) cardWithTrail(ctx context.Context, card db.Card) (map[string]an
 	out["columns"] = columns
 	out["trail"] = trail
 	return toolText(out), nil
+}
+
+var keyCardReference = regexp.MustCompile(`^([A-Z][A-Z0-9]{1,4})-([1-9][0-9]{0,6})$`)
+
+// Normalize references before the shared scope check; a key never bypasses board permissions.
+func (s *Server) resolveKeyArgs(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
+	rule, ok := toolScopes[name]
+	if !ok || rule.rule != toolCardRef {
+		return args, nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(args, &fields); err != nil {
+		return nil, err
+	}
+	raw, ok := fields["reference"]
+	if !ok {
+		return args, nil
+	}
+	if _, ok := fields["board_id"]; ok {
+		return nil, fmt.Errorf("%w: reference cannot be combined with board_id", errInvalidArguments)
+	}
+	if _, ok := fields["card_id"]; ok {
+		return nil, fmt.Errorf("%w: reference cannot be combined with card_id", errInvalidArguments)
+	}
+	if _, ok := fields["number"]; ok {
+		return nil, fmt.Errorf("%w: reference cannot be combined with number", errInvalidArguments)
+	}
+	var reference string
+	if json.Unmarshal(raw, &reference) != nil {
+		return nil, fmt.Errorf("%w: invalid reference", errInvalidArguments)
+	}
+	parts := keyCardReference.FindStringSubmatch(reference)
+	if parts == nil {
+		return nil, fmt.Errorf("%w: reference must be KEY-N", errInvalidArguments)
+	}
+	board, err := db.BoardIDForKey(ctx, s.api.Pool, parts[1])
+	if err != nil {
+		return nil, err
+	}
+	number, _ := strconv.Atoi(parts[2])
+	delete(fields, "reference")
+	fields["board_id"], _ = json.Marshal(board)
+	fields["number"], _ = json.Marshal(number)
+	return json.Marshal(fields)
 }

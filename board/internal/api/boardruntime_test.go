@@ -125,13 +125,52 @@ func TestDesktopOnlyBoardWithSeveralDesktops(t *testing.T) {
 			}
 			got := f.started[0]
 			if tc.runnerChoice {
-				if got.DaemonID != "" {
-					t.Fatalf("board chose %q instead of leaving it to the runner", got.DaemonID)
+				if got.DaemonID != "" || got.Runtime != "docker" {
+					t.Fatalf("board chose %q %q instead of leaving the desktop to the runner, in its sandbox", got.Runtime, got.DaemonID)
 				}
 				return
 			}
 			if got.Runtime != "docker" || got.DaemonID != tc.wantDaemon {
 				t.Fatalf("started on %q %q, want %s", got.Runtime, got.DaemonID, tc.wantDaemon)
+			}
+		})
+	}
+}
+
+// A start nobody placed never lands on a desktop's host: a desktop without a sandbox is refused with
+// what to do, and an install whose default runtime is the host still runs board starts in the sandbox.
+func TestUnplacedBoardStartsNeverUseTheHost(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		cluster   bool
+		preferred string
+		runtimes  []string
+		want      string // runtime started, or "" for a refusal
+	}{
+		{"desktop only, host only", false, "", []string{"daemon"}, ""},
+		{"desktop only, host default", false, "daemon", []string{"docker", "daemon"}, "docker"},
+		{"cluster, host default, sandbox desktop", true, "daemon", []string{"docker", "daemon"}, "docker"},
+		{"cluster, host default, host-only desktop", true, "daemon", []string{"daemon"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, driver, board, card, do := runtimeFixture(t, tc.cluster)
+			driver.preferred = tc.preferred
+			driver.targets[0].Runtimes = tc.runtimes
+			for _, path := range []string{"/api/cards/" + card + "/spawn", "/api/boards/" + board + "/sessions"} {
+				r := do("POST", path, map[string]any{"mode": "run"})
+				body := readAll(t, r)
+				if tc.want == "" {
+					if r.StatusCode != http.StatusUnprocessableEntity || !strings.Contains(body, "never runs on a desktop's host") || f.attemptCount() != 0 {
+						t.Fatalf("%s: want a refusal: %d %s", path, r.StatusCode, body)
+					}
+					continue
+				}
+				if r.StatusCode != 202 {
+					t.Fatalf("%s: %d %s", path, r.StatusCode, body)
+				}
+				if got := f.started[len(f.started)-1]; got.Runtime != tc.want || got.DaemonID != "desktop-a" {
+					t.Fatalf("%s: started %q on %q, want %s on desktop-a", path, got.Runtime, got.DaemonID, tc.want)
+				}
 			}
 		})
 	}
@@ -199,7 +238,10 @@ func TestBoardRuntimeIsBoundToAutomationOwner(t *testing.T) {
 	}
 }
 
-func TestDesktopOnlyBoardKeepsConfiguredHostDefault(t *testing.T) {
+// An install whose configured default runtime is the host (BLERG_BOARD_RUNNER_RUNTIME=daemon) does
+// not put an unplaced board start on a desktop's host: it runs in the sandbox (0.5.0). The host is
+// only where the person chose and acknowledged it.
+func TestDesktopOnlyBoardHostDefaultRunsInTheSandbox(t *testing.T) {
 	f, driver, _, card, do := runtimeFixture(t, false)
 	driver.preferred = "daemon"
 	r := do("POST", "/api/cards/"+card+"/spawn", map[string]any{"mode": "run"})
@@ -207,8 +249,8 @@ func TestDesktopOnlyBoardKeepsConfiguredHostDefault(t *testing.T) {
 		t.Fatalf("start: %d %s", r.StatusCode, readAll(t, r))
 	}
 	r.Body.Close()
-	if f.started[0].Runtime != "daemon" {
-		t.Fatal("configured host default was lost")
+	if f.started[0].Runtime != "docker" {
+		t.Fatalf("an unplaced start ran on %q, want the sandbox", f.started[0].Runtime)
 	}
 }
 
@@ -295,5 +337,41 @@ func TestCardHostRunNeedsBoardAcknowledgement(t *testing.T) {
 	r.Body.Close()
 	if r.StatusCode != 422 || f.attemptCount() != before {
 		t.Fatalf("host run on a previous owner's acknowledgement: %d", r.StatusCode)
+	}
+}
+
+// legacyInventoryRunner is an older runner: its discovery lists no targets, and the install sets no
+// default runtime (or the one given).
+type legacyInventoryRunner struct {
+	identityRunner
+	defaultRuntime string
+}
+
+func (f *legacyInventoryRunner) Discover(context.Context, string, string, bool) (runner.LaunchOptions, error) {
+	return runner.LaunchOptions{State: "known", Runtime: "daemon", Engines: []runner.LaunchEngine{}}, nil
+}
+func (f *legacyInventoryRunner) DefaultRuntime() string { return f.defaultRuntime }
+
+// When discovery cannot say where an unplaced start would land, the board never leaves it to the
+// runner (which could pick a desktop's host): no default refuses with what to do, a desktop default
+// goes to the sandbox, and the cluster default is sent as such.
+func TestUnplacedStartWithoutTargetInventoryNeverUsesTheHost(t *testing.T) {
+	for _, tc := range []struct{ defaultRuntime, want string }{{"", ""}, {"daemon", "docker"}, {"cluster", ""}} {
+		t.Run("default "+tc.defaultRuntime, func(t *testing.T) {
+			f, _, board, _, do := runtimeFixture(t, false)
+			srvAPI.SetRunner(api.RunnerConfig{Driver: &legacyInventoryRunner{identityRunner: identityRunner{f}, defaultRuntime: tc.defaultRuntime},
+				PublicURL: "https://board.example.com", AgentURL: "http://board.svc"})
+			r := do("POST", "/api/boards/"+board+"/sessions", map[string]any{})
+			body := readAll(t, r)
+			if tc.defaultRuntime == "" {
+				if r.StatusCode != http.StatusUnprocessableEntity || !strings.Contains(body, "did not say where") || f.attemptCount() != 0 {
+					t.Fatalf("want a refusal: %d %s", r.StatusCode, body)
+				}
+				return
+			}
+			if r.StatusCode != 202 || f.started[0].Runtime != tc.want {
+				t.Fatalf("start: %d %s runtime %q, want %q", r.StatusCode, body, f.started[0].Runtime, tc.want)
+			}
+		})
 	}
 }

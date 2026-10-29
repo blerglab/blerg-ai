@@ -15,6 +15,7 @@ export const chatAliases = [
 
 // https://vite.dev/config/
 export default defineConfig({
+  cacheDir: '.cache/vite',
   plugins: [react()],
   resolve: { alias: chatAliases },
   // Keep license comments (/*! … */, @license) when minifying: Vite drops them by default, and the

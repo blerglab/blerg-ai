@@ -40,9 +40,16 @@ func uploadFromSession(id, title string) uploadOpt {
 }
 
 func (h *artifactsHandler) userUploadSession(w http.ResponseWriter, r *http.Request, sid, account string, opts ...uploadOpt) {
+	// The session's own attachment total: the install default, or what an administrator raised
+	// it to (session_storage.go).
+	limit, _, err := h.api.sessionUploadLimit(r.Context(), sid)
+	if err != nil {
+		writeDatabaseFailure(w, "read the session's storage", "uploads storage", err)
+		return
+	}
 	info := h.store(w, r, sid, artifactIntake{
 		origin: db.OriginUser, uploadedBy: account, noun: "uploaded files",
-		maxFiles: maxUploadsPerSession, maxTotal: maxUploadBytesPerSession,
+		maxFiles: maxUploadsPerSession, maxTotal: limit,
 	})
 	if info == nil {
 		return
@@ -60,25 +67,36 @@ func (h *artifactsHandler) userUploadSession(w http.ResponseWriter, r *http.Requ
 // agentSession authenticates the agent side: its per-session token (or the daemon token) for this very
 // session, exactly like the artifact POST.
 func (h *artifactsHandler) agentSession(w http.ResponseWriter, r *http.Request) (string, bool) {
+	sid, _, ok := h.agentSessionVia(w, r)
+	return sid, ok
+}
+
+// agentSessionVia is agentSession plus which credential it was, for the deletion audit:
+// "session_token" (the session's own token) or "daemon_token".
+func (h *artifactsHandler) agentSessionVia(w http.ResponseWriter, r *http.Request) (string, string, bool) {
 	a := h.api
 	if a.dbPool == nil {
 		writeError(w, http.StatusServiceUnavailable, noDatabaseMsg)
-		return "", false
+		return "", "", false
 	}
 	tokenSession, ok := a.authMessaging(w, r)
 	if !ok {
-		return "", false
+		return "", "", false
 	}
 	sid := r.PathValue("id")
 	if tokenSession != "" && tokenSession != sid {
 		writeError(w, http.StatusForbidden, "forbidden")
-		return "", false
+		return "", "", false
 	}
 	if !validSessionID(sid) {
 		writeError(w, http.StatusNotFound, "not found")
-		return "", false
+		return "", "", false
 	}
-	return sid, true
+	via := "daemon_token"
+	if tokenSession != "" {
+		via = "session_token"
+	}
+	return sid, via, true
 }
 
 func (h *artifactsHandler) attachments(w http.ResponseWriter, r *http.Request) {

@@ -604,9 +604,31 @@ func TestClaudeCommandSandboxed(t *testing.T) {
 // engines_test.go's TestBuildTerminalCommand (one generic builder driven by
 // EngineSpec data instead of a per-engine xCommand function).
 
+// waitManagerLifecycle joins the asynchronous kill worker without blocking the
+// WebSocket pump that its authority RPCs need.
+func waitManagerLifecycle(t *testing.T, m *Manager, id string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		m.mu.Lock()
+		active := m.lifecycleActive[id]
+		m.mu.Unlock()
+		if !active {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("kill worker did not join")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // TestKillSessionDeletesRecord verifies that handleKillSession deletes the
 // recovery record for the killed session.
 func TestKillSessionDeletesRecord(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv(DaemonStateDirEnv, state)
+	private := attachmentFixture(t, state, "sess-k", false)
 	sender := newRecordingSender(8)
 	reposRoot := t.TempDir()
 	cfg := ManagerConfig{
@@ -647,12 +669,14 @@ func TestKillSessionDeletesRecord(t *testing.T) {
 	killMsg := protocol.KillSession{Type: "kill_session", SessionID: "sess-k"}
 	raw, _ := json.Marshal(killMsg)
 	mgr.handleKillSession(raw)
+	waitManagerLifecycle(t, mgr, killMsg.SessionID)
 
 	// The record file must be gone.
 	p := recordPath(reposRoot, "sess-k")
 	if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("expected record to be deleted after kill; os.Stat err = %v", err)
 	}
+	assertAttachmentsGone(t, private)
 }
 
 // TestKillSessionUnknownDeletesRecord verifies that a kill for a session the
@@ -661,6 +685,9 @@ func TestKillSessionDeletesRecord(t *testing.T) {
 // recovery record — otherwise it would resurrect the killed session on the next
 // reconnect.
 func TestKillSessionUnknownDeletesRecord(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv(DaemonStateDirEnv, state)
+	private := attachmentFixture(t, state, "sess-orphan", false)
 	sender := newRecordingSender(8)
 	reposRoot := t.TempDir()
 	cfg := ManagerConfig{
@@ -687,16 +714,21 @@ func TestKillSessionUnknownDeletesRecord(t *testing.T) {
 	killMsg := protocol.KillSession{Type: "kill_session", SessionID: "sess-orphan"}
 	raw, _ := json.Marshal(killMsg)
 	mgr.handleKillSession(raw)
+	waitManagerLifecycle(t, mgr, killMsg.SessionID)
 
 	p := recordPath(reposRoot, "sess-orphan")
 	if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("expected record to be deleted after kill of unmanaged session; os.Stat err = %v", err)
 	}
+	assertAttachmentsGone(t, private)
 }
 
 // TestSessionEndDeletesRecord verifies that streamSession's cleanup deletes the
 // recovery record when a session ends naturally.
 func TestSessionEndDeletesRecord(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv(DaemonStateDirEnv, state)
+	private := attachmentFixture(t, state, "sess-e", false)
 	sender := newRecordingSender(64)
 	reposRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(reposRoot, "myrepo"), 0o755); err != nil {
@@ -753,6 +785,7 @@ loop:
 	if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("expected record to be deleted after session end; os.Stat err = %v", err)
 	}
+	assertAttachmentsGone(t, private)
 }
 
 // clearBlergRunnerVars unsets the given env keys for the duration of the test,

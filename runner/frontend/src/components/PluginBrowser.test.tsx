@@ -6,6 +6,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import PluginBrowser from './PluginBrowser'
+import { DisallowedPlugins } from './SessionPlugins'
+import { useSessionPlugins } from '../hooks/useSessionPlugins'
 import McpSignIn from './McpSignIn'
 import type { SessionPluginSettings } from '../lib/sessionPlugins'
 import { parseCatalog, safeAuthURL, validMarketplaceInput } from '../lib/pluginCatalog'
@@ -98,7 +100,10 @@ describe('the plugin browser', () => {
     const other = screen.getByRole('button', { name: 'Install elsewhere' })
     const on = screen.getByRole('button', { name: 'Install already-on' })
     expect(local).toBeDisabled()
-    expect(local.getAttribute('title')).toContain('not a GitHub marketplace')
+    expect(local).toHaveAccessibleDescription('This local marketplace cannot be installed here.')
+    expect(within(local.parentElement!).getByText('This local marketplace cannot be installed here.')).toBeVisible()
+    expect(within(other.parentElement!).getByText('This marketplace is not allowed by this install.')).toBeVisible()
+    expect(within(on.parentElement!).getByText('Already enabled in this session.')).toBeVisible()
     expect(other).toBeDisabled()
     expect(other.getAttribute('title')).toContain('not allowed')
     expect(on).toBeDisabled()
@@ -109,12 +114,116 @@ describe('the plugin browser', () => {
     expect(states).toEqual(['Installed, not enabled here', 'Enabled in this session'])
   })
 
+  it.each(['session', 'always'])('installs an allowed native Codex marketplace for %s', async scope => {
+    apiFetch.mockImplementation((url: string, init?: RequestInit) => url.endsWith('/catalog')
+      ? reply({ engine: 'codex', marketplaces: [{ name: 'openai-curated', source: 'codex:openai-curated' }], plugins: [{ name: 'selected', marketplace: 'openai-curated' }] })
+      : init?.method === 'POST' ? reply({ id: 'p1', result: { state: 'queued' } }, 202) : reply({}))
+    show(model({ engine: 'codex', allowed_marketplaces: ['codex:openai-curated'] }))
+    const install = await screen.findByRole('button', { name: 'Install selected' })
+    fireEvent.change(screen.getByLabelText('Install for'), { target: { value: scope } })
+    expect(install).toBeEnabled()
+    fireEvent.click(install)
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/api/sessions/s1/plugins', expect.objectContaining({
+      body: JSON.stringify({ marketplace: 'codex:openai-curated', plugin: 'selected', scope }),
+    })))
+  })
+
+  it('shows a native account refusal below its disabled action', async () => {
+    apiFetch.mockImplementation(() => reply({ engine: 'codex', marketplaces: [{ name: 'openai-curated', source: 'codex:openai-curated' }], plugins: [{ name: 'selected', marketplace: 'openai-curated', install_reason: 'Codex does not allow this plugin for your account.' }] }))
+    show(model({ engine: 'codex', any_marketplace: true }))
+    const install = await screen.findByRole('button', { name: 'Install selected' })
+    expect(install).toBeDisabled()
+    expect(install).toHaveAccessibleDescription('Codex does not allow this plugin for your account.')
+    expect(within(install.parentElement!).getByText('Codex does not allow this plugin for your account.')).toBeVisible()
+  })
+
+  it('allows removing a managed plugin while Codex refuses future installs', async () => {
+    apiFetch.mockImplementation(() => reply({ engine: 'codex', marketplaces: [{ name: 'openai-curated', source: 'codex:openai-curated' }], plugins: [{ name: 'selected', marketplace: 'openai-curated', managed: true, enabled: true, install_reason: 'Codex does not allow this plugin for your account.' }] }))
+    show(model({ engine: 'codex', any_marketplace: true }))
+    expect(await screen.findByRole('button', { name: 'Remove selected' })).toBeEnabled()
+    fireEvent.change(screen.getByLabelText('Install for'), { target: { value: 'always' } })
+    expect(screen.getByRole('button', { name: 'Install selected' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Install selected' })).toHaveAccessibleDescription('Codex does not allow this plugin for your account.')
+  })
+
   it('offers only always-on when the session cannot load plugins live', async () => {
     show(model({ session_apply: false, reason: 'This engine loads plugin changes in new sessions.' }))
     await screen.findByTestId('plugin-browser-list')
     expect(screen.getByRole('option', { name: 'This session only' })).toBeDisabled()
     expect(screen.getByLabelText('Install for')).toHaveValue('always')
     expect(screen.getByText('This engine loads plugin changes in new sessions.')).toBeInTheDocument()
+  })
+
+  it('can save an enabled Codex plugin as always on without live support', async () => {
+    show(model({ engine: 'codex', session_apply: false }))
+    await screen.findByTestId('plugin-browser-list')
+    const install = screen.getByRole('button', { name: 'Install already-on' })
+    expect(install).toBeEnabled()
+    fireEvent.click(install)
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/api/sessions/s1/plugins', expect.objectContaining({
+      body: JSON.stringify({ marketplace: 'example-org/plugins', plugin: 'already-on', scope: 'always' }),
+    })))
+  })
+
+  it('removes a managed Codex plugin after its marketplace is revoked', async () => {
+    apiFetch.mockImplementation((url: string, init?: RequestInit) => url.endsWith('/catalog')
+      ? reply({ ...CATALOG, plugins: [{ name: 'selected', marketplace: 'fixture-market', installed: true, enabled: true, managed: true }] })
+      : init?.method === 'POST' ? reply({ id: 'p1', result: { state: 'queued' } }, 202) : reply({}))
+    show(model({ engine: 'codex', allowed_marketplaces: [] }))
+    expect(await screen.findByText('Marketplace no longer allowed. Existing plugins are kept.')).toBeVisible()
+    expect(await screen.findByRole('button', { name: 'Remove selected' })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Remove selected' }))
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/api/sessions/s1/plugins', expect.objectContaining({
+      body: JSON.stringify({ marketplace: 'example-org/plugins', plugin: 'selected', scope: 'session', action: 'remove' }),
+    })))
+  })
+
+  it('refreshes completed add → remove → add without closing, including delayed application', async () => {
+    let enabled = false
+    let pending: { id: string; kind: string; state: string; result: { state: string } } | null = null
+    let request = 0
+    apiFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith('/catalog')) return reply({ ...CATALOG, engine: 'codex', plugins: [{ name: 'selected', marketplace: 'fixture-market', installed: true, enabled, managed: enabled }] })
+      if (init?.method === 'POST') {
+        pending = { id: `p${++request}`, kind: 'plugin_request', state: 'executing', result: { state: 'queued' } }
+        return reply(pending, 202)
+      }
+      return reply({ ...settings, engine: 'codex', plugins: enabled ? [{ marketplace: 'example-org/plugins', plugin: 'selected' }] : [], requests: pending ? [pending] : [] })
+    })
+    let refresh: () => Promise<void> = async () => {}
+    function LiveBrowser() {
+      const m = useSessionPlugins('s1', true)
+      refresh = m.refresh
+      return <PluginBrowser model={m} onClose={() => {}} />
+    }
+    render(<MemoryRouter><LiveBrowser /></MemoryRouter>)
+    for (const action of ['add', 'remove', 'add']) {
+      const label = action === 'add' ? 'Install selected' : 'Remove selected'
+      fireEvent.click(await screen.findByRole('button', { name: label }))
+      await waitFor(() => expect(apiFetch.mock.calls.filter(c => c[1]?.method === 'POST')).toHaveLength(request))
+      // The server accepts while a foreground turn is still active.
+      await screen.findByText('Queued until foreground and background work are idle.')
+      expect(screen.getByRole('button', { name: label })).toBeInTheDocument()
+      enabled = action === 'add'
+      pending = { id: `p${request}`, kind: 'plugin_request', state: 'done', result: { state: 'applied' } }
+      await refresh()
+      await screen.findByRole('button', { name: enabled ? 'Remove selected' : 'Install selected' })
+      expect(apiFetch.mock.calls.filter(c => c[0].endsWith('/catalog')).length).toBeGreaterThan(request)
+    }
+  })
+
+  it('offers the launch sheet after saving a plugin for the next session', async () => {
+    apiFetch.mockImplementation((url: string) => url.endsWith('/catalog') ? reply(CATALOG)
+      : reply({ id: 'p1', result: { state: 'new_sessions', message: 'This plugin loads when a session starts — added for your next session.' } }, 202))
+    const opened = vi.fn()
+    window.addEventListener('blerg:open-launch-sheet', opened)
+    try {
+      const { onClose } = show(model({ engine: 'codex', session_apply: false }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Install release-notes' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Start a new session with it' }))
+      expect(onClose).toHaveBeenCalled()
+      expect(opened).toHaveBeenCalledOnce()
+    } finally { window.removeEventListener('blerg:open-launch-sheet', opened) }
   })
 
   it('falls back to the add form for an engine without a catalog', async () => {
@@ -300,4 +409,19 @@ describe('MCP sign-in rows', () => {
     const { container } = render(<McpSignIn item={{ name: 'ok', status: 'connected', source: 'user' }} ctx={{ sessionId: 's1' }} />)
     expect(container).toBeEmptyDOMElement()
   })
+})
+
+it('flags installed session plugins after their marketplace is disabled without removing them', async () => {
+  show(model({ allowed_marketplaces: [] }));
+  const list = await screen.findByTestId('plugin-browser-list');
+  const row = within(list).getAllByTestId('plugin-browser-row').find(r => r.textContent?.includes('already-on'))!;
+  expect(within(row).getByText('Marketplace no longer allowed. Existing plugins are kept.')).toBeVisible();
+  expect(within(row).getByRole('button', { name: 'Install already-on' })).toBeDisabled();
+  expect(apiFetch.mock.calls.filter(([,init]) => init?.method === 'POST')).toHaveLength(0);
+});
+
+it('flags disallowed saved entries in the session list even without a catalog', () => {
+  render(<DisallowedPlugins model={model({ plugins: [{ marketplace: 'codex:old', plugin: 'retained' }], allowed_marketplaces: [] })} />)
+  expect(screen.getByRole('region', { name: 'Disallowed saved plugins' })).toHaveTextContent('retained: marketplace no longer allowed')
+  expect(apiFetch).not.toHaveBeenCalled()
 })

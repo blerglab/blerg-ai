@@ -43,7 +43,7 @@ func (a *codexApp) requestCapabilities() {
 // Inventory endpoints return much more than display data. Decode only the
 // whitelisted metadata below; never include config, paths, headers or URLs.
 func (a *codexApp) capabilities(model string) {
-	p := protocol.CapabilitiesPayload{ToolSchemaRefresh: protocol.ToolSchemaRefreshNewSession, Engine: "codex", EngineName: "Codex", Model: model, PermissionMode: "never", Note: "Reported by the running Codex app-server. Skill and plugin inventory shows availability; tools appear as they are used."}
+	p := protocol.CapabilitiesPayload{ToolSchemaRefresh: protocol.ToolSchemaRefreshNewSession, Engine: "codex", EngineName: "Codex", Model: model, PermissionMode: "never", SandboxMode: "danger-full-access", Note: "Reported by the running Codex app-server. Skill and plugin inventory shows availability; tools appear as they are used."}
 	if raw, err := a.call("skills/list", map[string]any{"cwds": []string{a.d.runtimeWorkDir()}}); err == nil {
 		var r struct {
 			Data []struct {

@@ -3,7 +3,9 @@
 // HTML sandbox's CSP. The calls that fetch, list or delete a file belong to the transport.
 import type { ArtifactPayload } from '../types'
 
-export type ArtifactInfo = ArtifactPayload & { created_at?: string }
+/** `can_delete`: in a file list, whether the person asking may delete this file (absent from an
+ *  older runner, which decided per session). */
+export type ArtifactInfo = ArtifactPayload & { created_at?: string; can_delete?: boolean }
 
 export function formatSize(n: number): string {
   if (!Number.isFinite(n) || n < 0) return ''

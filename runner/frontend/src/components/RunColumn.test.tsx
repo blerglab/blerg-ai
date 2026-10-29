@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 import RunColumn from './RunColumn'
 import type { RunColumnProps } from './RunColumn'
 import {
@@ -128,7 +128,7 @@ describe('RunColumn', () => {
   // The sandbox card says what the sandbox can touch and where its commits land.
   it('says the Local sandbox works in a clone and where its commits land', () => {
     renderColumn({ clusterConfigured: true })
-    const card = screen.getByTestId('runtime-docker')
+    const card = screen.getByTestId('runtime-docker').parentElement!
     expect(card).toHaveTextContent('working in a clone of your repo: never your checkout or its .git')
     expect(card).toHaveTextContent('Its commits land on the branch wip/<session-id> in your repo')
   })
@@ -138,6 +138,14 @@ describe('RunColumn', () => {
     expect(screen.getByTestId('runtime-docker')).toHaveAttribute('aria-checked', 'true')
     fireEvent.click(screen.getByTestId('runtime-daemon'))
     expect(props.onRuntimeChange).toHaveBeenCalledWith('daemon')
+  })
+
+  it.each(['claude', 'codex', 'hermes'])('uses the shared permission vocabulary for a %s agent launch', engine => {
+    renderColumn({ kind: 'agent', engine })
+    const chip = within(screen.getByTestId('agent-permissions-note')).getByText('No prompts')
+    expect(chip.className).toContain('risky')
+    expect(chip).toHaveAttribute('aria-description', chip.getAttribute('title'))
+    if (engine === 'codex') expect(chip.getAttribute('title')).toContain('Codex: approval never, sandbox danger-full-access')
   })
 
   it('shows the agent note instead of the permissions toggle for agent kind', () => {
@@ -256,9 +264,10 @@ describe('RunColumn', () => {
     )
   })
 
-  it('collapses nothing — there is no details element in the column', () => {
+  it('keeps runtime choices visible and puts sandbox details behind a toggle', () => {
     renderColumn({ clusterConfigured: true })
-    expect(document.querySelector('details')).toBeNull()
+    expect(screen.getByTestId('runtime-docker')).toBeVisible()
+    expect(document.querySelector('details')).not.toHaveAttribute('open')
   })
 })
 
@@ -297,4 +306,9 @@ describe('discovered engine choices', () => {
     expect(screen.queryByTestId('engine-claude')).toBeNull()
     expect(screen.getByText(/No engines available/)).toBeInTheDocument()
   })
+})
+
+it('links directly to managed login when a cluster credential needs renewal', () => {
+  renderColumn({ engine: 'codex', runtime: 'cluster', clusterConfigured: true, modelsError: 'Dedicated login required', modelsReconnect: true })
+  expect(screen.getByRole('link', { name: 'Reconnect in Settings' })).toHaveAttribute('href', expect.stringMatching(/\/settings#managed-connections$/))
 })

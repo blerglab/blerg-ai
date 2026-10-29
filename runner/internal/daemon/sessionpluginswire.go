@@ -1,12 +1,10 @@
 package daemon
 
 import (
-	"encoding/json"
 	"errors"
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
-	"github.com/gorilla/websocket"
 )
 
 // SendSessionPluginsResult never waits behind another writer or pins the driver
@@ -24,21 +22,10 @@ func (c *WSClient) sendSessionPluginsResult(result protocol.SessionPluginsResult
 		return errors.New("plugin result transport is disconnected")
 	}
 	if !c.writeMu.TryLock() {
-		_ = conn.Close()
 		return errors.New("plugin result transport is busy")
 	}
-	defer c.writeMu.Unlock()
-	raw, err := json.Marshal(result)
-	if err != nil {
-		return err
-	}
-	if err = conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
-		_ = conn.Close()
-		return err
-	}
-	defer func() { _ = conn.SetWriteDeadline(time.Time{}) }()
-	if err = conn.WriteMessage(websocket.TextMessage, raw); err != nil {
-		_ = conn.Close()
-	}
-	return err
+	c.writeMu.Unlock()
+	// Retain the plugin API's immediate busy refusal, but deliver through the
+	// same connection scheduler rather than holding a second socket writer.
+	return c.sendBoundedReplyTo(result, timeout, 20*time.Millisecond, time.Time{}, conn)
 }

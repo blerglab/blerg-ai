@@ -150,12 +150,21 @@ func TestPostChecklistCredentialsEndedAndCap(t *testing.T) {
 	if code, _ := fx.postWork("checklist", fx.sess, fx.sessTok, `{"op":"set","items":["`+strings.Repeat("a", 70<<10)+`"]}`); code != http.StatusRequestEntityTooLarge {
 		t.Errorf("huge body: %d", code)
 	}
-	if _, err := fx.pool.Exec(context.Background(), `INSERT INTO agent_events (session_id, seq, client_event_id, kind, payload)
-		SELECT $1, 1000 + g, gen_random_uuid(), 'checklist', '{"items":[],"op":"clear"}' FROM generate_series(1, 499) g`, fx.sess); err != nil {
+	// No lifetime cap: 600 old events do not stop a long-running session.
+	if _, err := fx.pool.Exec(context.Background(), `INSERT INTO agent_events (session_id, seq, client_event_id, kind, payload, ts)
+		SELECT $1, 1000 + g, gen_random_uuid(), 'checklist', '{"items":[],"op":"clear"}', now() - interval '2 hours' FROM generate_series(1, 600) g`, fx.sess); err != nil {
 		t.Fatal(err)
 	}
-	if code, body := fx.postWork("checklist", fx.sess, fx.sessTok, set); code != http.StatusTooManyRequests {
-		t.Errorf("past the cap: %d %v", code, body)
+	if code, body := fx.postWork("checklist", fx.sess, fx.sessTok, set); code != http.StatusCreated {
+		t.Errorf("after 600 old events: %d %v", code, body)
+	}
+	// A loop is stopped: a full minute's worth of recent events refuses the next one.
+	if _, err := fx.pool.Exec(context.Background(), `INSERT INTO agent_events (session_id, seq, client_event_id, kind, payload)
+		SELECT $1, 5000 + g, gen_random_uuid(), 'checklist', '{"items":[],"op":"clear"}' FROM generate_series(1, 60) g`, fx.sess); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := fx.postWork("checklist", fx.sess, fx.sessTok, set); code != http.StatusTooManyRequests || !strings.Contains(fmt.Sprint(body["error"]), "last minute") {
+		t.Errorf("past the rate: %d %v", code, body)
 	}
 }
 

@@ -157,17 +157,19 @@ class BeforeDomUpdate extends Component<{ when: string; on: () => void }> {
 }
 
 // The working line with its clock. It ticks on its own, so the second-by-second clock re-renders
-// this line and not the timeline. since: server time the turn began (null: unknown, shows 0 s).
-function TurnClock({ since, clockOffset, waitingOn, background, activity, reasoning }: {
+// this line and not the timeline (nor ChatView, which shows the compact one in its toolbar).
+// since: server time the turn began (null: unknown, shows 0 s).
+export function TurnClock({ since, clockOffset, waitingOn, background, activity, reasoning, compact }: {
   since: number | null
   clockOffset: number
   waitingOn: WaitingOn | null
   background?: BackgroundLine | null
   reasoning?: Reasoning | null
   activity?: string | null
+  compact?: boolean
 }) {
   const now = useTicker(true) - clockOffset
-  return <WorkingIndicator since={since ?? now} now={now} waitingOn={waitingOn} background={background} activity={activity} reasoning={reasoning} />
+  return <WorkingIndicator since={since ?? now} now={now} waitingOn={waitingOn} background={background} activity={activity} reasoning={reasoning} compact={compact} />
 }
 
 /** The background tasks running, for the working line: how many, the description of the only one,
@@ -256,9 +258,28 @@ export function dayBreaksOf(stamps: Array<[string, number | null]>): Map<string,
   return out
 }
 
+/** Where the reader was in a transcript: following its end, or reading, with the first row drawn
+ *  (the window's start) and the scroll offset from the top of the content. New output below never
+ *  moves what is above, so the offset keeps the same place on return (#281). */
+export type TranscriptScroll = { follow: true } | {
+  follow: false
+  first: string
+  top: number
+  /** The first row that starts in view (its index among the timeline's children) and how far below
+   *  the view's top it starts: put back by the row, so a layout that differs on return (another
+   *  width, late sizes) still shows the same row at the same place. */
+  row?: number
+  offset?: number
+}
+
 export interface TranscriptProps {
   /** The window goes back to the newest rows when this changes. */
   sessionId?: string
+  /** Where the reader was when they last left this session: put back before the first paint. A
+   *  place whose rows are no longer held falls back to the end. */
+  scrollFrom?: TranscriptScroll | null
+  /** Told where the reader is as the transcript goes away (or is hidden). */
+  onScrollLeave?: (scroll: TranscriptScroll) => void
   events: AgentEvent[]
   streaming: string
   compact: boolean
@@ -308,8 +329,8 @@ export interface TranscriptProps {
   pin: number
 }
 
-// Memoised: ChatView re-renders on every keystroke in the composer and every tick of its clock, and
-// none of that reaches the timeline unless one of these props changed (ChatView keeps them stable).
+// Memoized: clock ticks and host updates reach the timeline only when its props change.
+// Composer draft updates are isolated below ChatView.
 const Transcript = memo(function Transcript(p: TranscriptProps) {
   const { streaming, compact, cards, messageFooter, describeUserMessage, liveIds } = p
   // Hidden thinking is not a row at all: it is taken out of the events here, so the timeline, the
@@ -447,7 +468,9 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
   // rows drawn at once (up to WINDOW more), in the same render that takes the loading line away: the
   // content above the reader only grows, so their place can always be kept (a line taken away with
   // nothing yet above it, at the very top, could not be made up for until the rows were revealed).
-  const [win, setWin] = useState<{ session: string; anchor: string | null; top: boolean }>({ session: winKey, anchor: null, top: false })
+  // A reader's place kept from their last visit (#281): the window starts at the row it started at.
+  const [reading] = useState(() => (p.scrollFrom && !p.scrollFrom.follow ? p.scrollFrom : null))
+  const [win, setWin] = useState<{ session: string; anchor: string | null; top: boolean }>({ session: winKey, anchor: reading?.first ?? null, top: false })
   const anchor = win.session === winKey && !loadingHistory ? win.anchor : null
   const pinned = anchor !== null ? rowIndex.at.get(anchor) : undefined
   const start = pinned === undefined
@@ -473,7 +496,7 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
   // inside the newest card (on a phone that card is often taller than the screen, so "near the
   // bottom" would still be following and every event would pull the view away from what they read);
   // it resumes only at the very end (within AT_END_PX) or when they send something (pin).
-  const stick = useRef(true)
+  const stick = useRef(!reading)
   // The reader's last scroll position, to tell an upward scroll from a downward one.
   const lastTop = useRef(0)
   // Set (to when) just before every scroll we make ourselves (following, the pill, keeping the
@@ -497,13 +520,14 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
   const pillKey = `${sessionId}\n${pin}`
   const [unseenAt, setUnseenAt] = useState<string | null>(null)
   const unseen = unseenAt === pillKey
+  // Activity reconnects layout effects on reveal. Only a different session or a new send
+  // resumes following; retained refs keep a reader's choice across hide/reveal cycles.
+  const followed = useRef({ sessionId, pin })
   useLayoutEffect(() => {
-    if (pin > 0) stick.current = true
-  }, [pin])
-  // Another session opens at its end.
-  useLayoutEffect(() => {
-    stick.current = true
-  }, [sessionId])
+    const previous = followed.current
+    if (sessionId !== previous.sessionId || (pin > 0 && pin !== previous.pin)) stick.current = true
+    followed.current = { sessionId, pin }
+  }, [sessionId, pin])
 
   const toEnd = useCallback(() => {
     markOurs(programmatic)
@@ -565,6 +589,67 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
     restore()
     capture()
   }, [restore, capture])
+
+  // A reader's place from their last visit, put back before the first paint (once: a hidden view
+  // revealed later keeps the place it has). Rows no longer held: back to following the end.
+  const placed = useRef(false)
+  // While a kept place is being put back, the scroll events its layout causes (the browser clamping
+  // the view as the content reflows) are not the reader's: they neither resume nor stop following.
+  const placing = useRef(false)
+  // The first row that starts in view, as the reader last scrolled (for scrollFrom's row).
+  const seenRow = useRef<{ row?: number; offset?: number }>({})
+  const firstDrawn = useRef<string | null>(null)
+  const leave = useRef(p.onScrollLeave)
+  const onScrollLeave = p.onScrollLeave
+  useLayoutEffect(() => { firstDrawn.current = wanted; leave.current = onScrollLeave })
+  useLayoutEffect(() => {
+    if (placed.current || loadingHistory) return
+    placed.current = true
+    const root = timelineRef.current
+    if (!reading || !root) return
+    if (rowIndex.at.get(reading.first) === undefined) { stick.current = true; toEnd(); return }
+    const row = reading.row != null ? root.children[reading.row] : undefined
+    const put = () => {
+      markOurs(programmatic)
+      const target = row?.isConnected ? viewTop(root, row) + root.scrollTop - (reading.offset ?? 0) : reading.top
+      root.scrollTop = target
+      lastTop.current = root.scrollTop
+      capture()
+      return Math.abs(root.scrollTop - target) <= 1
+    }
+    put()
+    // The page around the timeline may still be laying out in the frames after it mounts (its column
+    // sized, rows reflowing at their final width): the place is put back by its row after every
+    // layout change (a resize observer runs after layout, before paint) and every frame, until the
+    // layout has held still for a few frames, the reader scrolls, or two seconds pass.
+    placing.current = true
+    let frame = 0, still = 0, size = ''
+    const until = performance.now() + 2000
+    const resize = new ResizeObserver(() => { put() })
+    resize.observe(root)
+    const stop = () => { placing.current = false; cancelAnimationFrame(frame); resize.disconnect(); root.removeEventListener('wheel', stop); root.removeEventListener('touchstart', stop); root.removeEventListener('keydown', stop) }
+    const again = () => {
+      if (stick.current || performance.now() > until) { stop(); return }
+      const now = `${root.clientWidth}:${root.clientHeight}:${root.scrollHeight}`
+      still = now === size ? still + 1 : 0
+      size = now
+      if (put() && still >= 3) { stop(); return }
+      frame = requestAnimationFrame(again)
+    }
+    root.addEventListener('wheel', stop, { passive: true }); root.addEventListener('touchstart', stop, { passive: true }); root.addEventListener('keydown', stop)
+    frame = requestAnimationFrame(again)
+    // rowIndex and the rest are read once, at the first paint with the transcript in.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadingHistory])
+  // Leaving (or hidden): where the reader is, for the next visit.
+  // The row is taken from the place kept now (the rows in view as last captured: after the reader's
+  // scroll, after a kept place was put back, after a layout change kept it), so a visit with no
+  // scroll of the reader's own keeps the row it came back to (#281).
+  useLayoutEffect(() => () => {
+    const a = anchors.current.find(x => x.el.isConnected && x.el.parentElement)
+    const row = a ? { row: Array.prototype.indexOf.call(a.el.parentElement!.children, a.el), offset: a.at - anchoredAt.current } : seenRow.current
+    leave.current?.(stick.current || !firstDrawn.current ? { follow: true } : { follow: false, first: firstDrawn.current, top: lastTop.current, ...row })
+  }, [])
 
   // Sizes change after a row is drawn (an image, a diagram or a highlighted code block lays out late;
   // opening the panel or laying out the composer resizes the viewport): following, the end stays in
@@ -1004,6 +1089,7 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
   function onScroll(e: React.UIEvent<HTMLDivElement>) {
     const el = e.currentTarget
     const top = el.scrollTop
+    if (placing.current) { lastTop.current = top; return }
     // Going up just after the reader asked to (or with a finger down) is not a return to the end,
     // even when the first step of it still lands within AT_END_PX of it.
     const leaving = top < lastTop.current
@@ -1024,6 +1110,8 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
     // changed since the last frame (a late image above) is made up for first: the reader's scroll
     // does not move the rows within the content, so this only undoes what the layout did.
     keepPlace()
+    const first = anchors.current[0]
+    seenRow.current = first ? { row: Array.prototype.indexOf.call(el.children, first.el), offset: first.at - el.scrollTop } : {}
   }
 
   function showNew() {

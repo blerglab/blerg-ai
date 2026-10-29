@@ -65,22 +65,22 @@ describe('the [+] in split view', () => {
     const keep = rowOf(container, 'const keep')
     const [oldCode, newCode] = [...keep.querySelectorAll<HTMLElement>('td.diff-code')]
     await userEvent.hover(oldCode)
-    expect(visible(keep).map(b => b.dataset.commentSide + ' ' + b.dataset.commentLine)).toEqual(['old 10'])
+    await expect.poll(() => visible(keep).map(b => b.dataset.commentSide + ' ' + b.dataset.commentLine)).toEqual(['old 10'])
     await userEvent.click(visible(keep)[0])
     blur()
     await userEvent.hover(newCode)
-    expect(visible(keep).map(b => b.dataset.commentSide + ' ' + b.dataset.commentLine)).toEqual(['new 20'])
+    await expect.poll(() => visible(keep).map(b => b.dataset.commentSide + ' ' + b.dataset.commentLine)).toEqual(['new 20'])
     await userEvent.click(visible(keep)[0])
     blur()
     // A removed line beside an added one: the left [+] comments on the old line, the right on the new.
     const changed = rowOf(container, 'const gone')
     const [left, right] = [...changed.querySelectorAll<HTMLElement>('td.diff-code')]
     await userEvent.hover(left)
-    expect(visible(changed)).toHaveLength(1)
+    await expect.poll(() => visible(changed).map(b => b.dataset.commentSide + ' ' + b.dataset.commentLine)).toEqual(['old 11'])
     await userEvent.click(visible(changed)[0])
     blur()
     await userEvent.hover(right)
-    expect(visible(changed)).toHaveLength(1)
+    await expect.poll(() => visible(changed).map(b => b.dataset.commentSide + ' ' + b.dataset.commentLine)).toEqual(['new 21'])
     await userEvent.click(visible(changed)[0])
     expect(anchors.map(where)).toEqual(['old 10', 'new 20', 'old 11', 'new 21'])
     // A wrapped line: each side's [+] is level with that side's line number.

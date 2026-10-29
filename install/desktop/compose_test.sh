@@ -15,7 +15,7 @@ for want in 'http://localhost:9001,http://localhost:9002,http://localhost:9003' 
             'RUNNER_UI_BASE: http://localhost:9003/sessions' 'BLERG_RUNNER_DATA_DIR: /data' \
             'BLERG_RUNNER_CORE_INTERNAL_KEY: k' 'pg_isready -U blerg -d blerg_core' \
             'BLERG_CORE_COOKIE_SECURE: "false"' 'BLERG_BOARD_SECRET_KEY: board-secret-sentinel' \
-            'BLERG_BOARD_DEFAULT_RUN_AS_CREATOR: "true"'; do
+            'BLERG_INSTALL_TYPE: desktop' 'BLERG_BOARD_DEFAULT_RUN_AS_CREATOR: "true"'; do
   grep -qF -- "$want" <<<"$out" || { echo "FAIL: $want"; fail=1; }
 done
 # Run as me: core and the board both get the mint key, and the board never gets the internal key.
@@ -88,6 +88,7 @@ grep -q 'check_b64_key BLERG_BOARD_SECRET_KEY' blerg-up.sh || { echo "FAIL: bler
 # BLERG_CORE_BOARD_MINT_KEY (Run as me): generated on a fresh .env, added to an existing one, validated.
 grep -q '^BLERG_CORE_BOARD_MINT_KEY=$(gen)' blerg-up.sh || { echo "FAIL: blerg-up.sh does not generate BLERG_CORE_BOARD_MINT_KEY"; fail=1; }
 grep -q "grep -q '^BLERG_CORE_BOARD_MINT_KEY=.' .env" blerg-up.sh || { echo "FAIL: blerg-up.sh does not add BLERG_CORE_BOARD_MINT_KEY to an existing .env"; fail=1; }
+grep -q 'BLERG_CORE_RUNNER_URL: http://blerg-runner:8080' docker-compose.yml || { echo "FAIL: core cannot reach the runner for Your desktops"; fail=1; }
 grep -qE 'check_secret "\$k".*' blerg-up.sh && grep -q 'BLERG_CORE_INTERNAL_KEY BLERG_CORE_BOARD_MINT_KEY; do check_secret' blerg-up.sh || { echo "FAIL: blerg-up.sh does not validate BLERG_CORE_BOARD_MINT_KEY"; fail=1; }
 
 for s in blerg-up.sh daemon/install.sh; do grep -q '^umask 077' "$s" || { echo "FAIL: $s lacks umask 077"; fail=1; }; done

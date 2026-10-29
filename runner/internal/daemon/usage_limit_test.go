@@ -159,12 +159,12 @@ func TestCodexDriverCorrelatesUsageRefusal(t *testing.T) {
 	}
 }
 
-func TestClaudeRefusalExcludesTransportAndSubagents(t *testing.T) {
+func TestClaudeRefusalCodesAndSubagentExclusion(t *testing.T) {
 	for _, tc := range []struct {
 		text, parent string
 		want         bool
 	}{
-		{"API Error: Rate limit reached", "", false},
+		{"API Error: Rate limit reached", "", true},
 		{"You've hit your limit", "tool-child", false},
 		{"5-hour limit reached ∙ resets 3pm", "", true},
 		{"Weekly limit reached ∙ resets Oct 20, 3pm", "", true},
@@ -217,8 +217,8 @@ func TestClaudeNormalizedResetTimezoneSafety(t *testing.T) {
 	}{
 		{name: "sandbox_bare_clock", text: "You've hit your limit · resets 3pm", sandbox: true},
 		{name: "sandbox_bare_date", text: "Weekly limit reached · resets Oct 16, 3pm", sandbox: true},
-		{name: "host_bare_clock", text: "You've hit your limit · resets 3pm", wantReset: true, want: time.Date(2030, time.October, 15, 19, 0, 0, 0, time.UTC)},
-		{name: "sandbox_explicit_zone", text: "You've hit your limit · resets 3pm (America/New_York)", sandbox: true, wantReset: true, want: time.Date(2030, time.October, 15, 19, 0, 0, 0, time.UTC)},
+		{name: "host_bare_clock", text: "You've hit your limit · resets 3pm", wantReset: true, want: time.Date(2030, time.October, 15, 19, 1, 0, 0, time.UTC)},
+		{name: "sandbox_explicit_zone", text: "You've hit your limit · resets 3pm (America/New_York)", sandbox: true, wantReset: true, want: time.Date(2030, time.October, 15, 19, 1, 0, 0, time.UTC)},
 		{name: "sandbox_unix", text: "Claude AI usage limit reached|" + strconv.FormatInt(now.Add(3*time.Hour).Unix(), 10), sandbox: true, wantReset: true, want: now.Add(3 * time.Hour)},
 		{name: "host_invalid_zone", text: "You've hit your limit · resets 3pm (Invalid/Invented)"},
 		{name: "host_local_zone_alias", text: "You've hit your limit · resets 3pm (Local)"},
@@ -253,6 +253,34 @@ func TestClaudeNormalizedResetTimezoneSafety(t *testing.T) {
 				}
 			}
 			t.Fatal("missing normalized refusal")
+		})
+	}
+}
+
+// The provider's session-limit wording is synthetic CLI error text, not prose
+// from an assistant. It must reach both the account meter and the retry scheduler.
+func TestClaudeSessionLimitRefusal(t *testing.T) {
+	now := time.Date(2030, time.October, 15, 14, 55, 0, 0, time.UTC)
+	for _, code := range []string{`"rate_limit"`, `""`} {
+		t.Run(code, func(t *testing.T) {
+			em := &collectEmitter{}
+			d := newClaudeCodeDriver("", "", "", em, nil)
+			d.now = func() time.Time { return now }
+			d.emitTurnMessage(agent.UserMessagePayload{Text: "continue", Source: "chat"})
+			var meterReset time.Time
+			d.onRateLimit = func(reset time.Time) { meterReset = reset }
+			d.noteRateLimit(&ccLine{Error: json.RawMessage(code)}, "You've hit your session limit · resets 3pm (UTC)")
+			em.mu.Lock()
+			defer em.mu.Unlock()
+			for _, ev := range em.events {
+				if p, ok := ev.Payload.(agent.UsageLimitPayload); ok {
+					if p.Provider != "claude" || p.TurnID == "" || p.ResetAt == nil || !p.ResetAt.Equal(now.Add(6*time.Minute)) || !meterReset.Equal(*p.ResetAt) {
+						t.Fatalf("incorrect session-limit refusal: %+v, meter reset %v", p, meterReset)
+					}
+					return
+				}
+			}
+			t.Fatal("session-limit error did not emit usage_limit; checked option cannot arm")
 		})
 	}
 }

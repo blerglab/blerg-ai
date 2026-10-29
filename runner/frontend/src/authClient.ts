@@ -7,6 +7,20 @@
 // tradeoff given redirectToRefresh below makes reacquiring it cheap (spec §1).
 let accessToken: string | null = null;
 
+// This runner copy also notifies local desktop caches when the signed-in
+// subject changes. The comparison is advisory; the server verifies authority.
+// blerg-login-changed also fires when only the login session (sid) or token kind changes,
+// for caches of data shown under one login, such as kept shell scrollback.
+function receiveAccessToken(token: string): void {
+  const claims = (raw: string | null): { sub: string; login: string } => {
+    try { const data = JSON.parse(atob((raw ?? '').split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))) as { sub?: string; sid?: string; kind?: string }; return { sub: data.sub ?? '', login: `${data.kind}:${data.sub}:${data.sid}` }; } catch { return { sub: '', login: '' }; }
+  };
+  const before = claims(accessToken), after = claims(token);
+  accessToken = token;
+  if (before.sub !== after.sub) window.dispatchEvent(new Event('blerg-identity-changed'));
+  if (before.login !== after.login) window.dispatchEvent(new Event('blerg-login-changed'));
+}
+
 export function getAccessToken(): string | null {
   return accessToken;
 }
@@ -18,7 +32,7 @@ export function getAccessToken(): string | null {
 export function consumeAccessTokenFromFragment(): void {
   const match = location.hash.match(/access_token=([^&]+)/);
   if (match) {
-    accessToken = decodeURIComponent(match[1]);
+    receiveAccessToken(decodeURIComponent(match[1]));
     history.replaceState(null, "", location.pathname + location.search);
   }
 }
@@ -155,11 +169,13 @@ function silentFrame(): { answered: Promise<SilentOutcome>; done: Promise<void> 
       const sameOrigin = loc.origin === location.origin;
       const match = sameOrigin ? loc.hash.match(/access_token=([^&]+)/) : null;
       if (match) {
-        accessToken = decodeURIComponent(match[1]);
+        receiveAccessToken(decodeURIComponent(match[1]));
         finish("token");
         return;
       }
       if (sameOrigin && /(?:^#|&)signin_error=/.test(loc.hash)) {
+        // Core confirmed the sign-in is gone: data shown under it must not outlive it.
+        window.dispatchEvent(new Event("blerg-signed-out"));
         finish("signed-out");
         return;
       }

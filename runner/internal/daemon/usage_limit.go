@@ -17,9 +17,46 @@ type codexError struct {
 	ResetsAt json.RawMessage `json:"resets_at"`
 }
 
+// Keep recognition in one place: these are provider refusals, never assistant prose.
+var claudeHitLimit = regexp.MustCompile(`(?i)\b(?:hit|reached) your [\w' -]*limit\b`)
+
+func claudeUsageRefusal(code, text string) bool {
+	if code == "rate_limit" {
+		return true
+	}
+	if code != "" {
+		return false
+	}
+	lower := strings.ToLower(text)
+	return claudeHitLimit.MatchString(text) || strings.Contains(lower, "usage limit") || strings.Contains(lower, "limit reached") && !strings.Contains(lower, "rate limit reached")
+}
+
+func claudeLimitWindow(text string) string {
+	lower := strings.ToLower(text)
+	switch {
+	case strings.Contains(lower, "session limit"), strings.Contains(lower, "5-hour"):
+		return "5h"
+	case strings.Contains(lower, "opus"):
+		return "7d_opus"
+	case strings.Contains(lower, "sonnet"):
+		return "7d_sonnet"
+	case strings.Contains(lower, "fable"):
+		return "7d_fable"
+	case strings.Contains(lower, "weekly"):
+		return "7d"
+	}
+	return ""
+}
+
+var codexOrdinal = regexp.MustCompile(`(?i)(\d)(?:st|nd|rd|th)\b`)
+
 var explicitResetTimestamp = regexp.MustCompile(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})`)
 
 func codexUsageRefusal(ev codexEvent, turnID string) (agent.UsageLimitPayload, bool) {
+	return codexUsageRefusalAt(ev, turnID, time.Now())
+}
+
+func codexUsageRefusalAt(ev codexEvent, turnID string, now time.Time) (agent.UsageLimitPayload, bool) {
 	if ev.Type != "error" && ev.Type != "turn.failed" {
 		return agent.UsageLimitPayload{}, false
 	}
@@ -47,6 +84,12 @@ func codexUsageRefusal(ev codexEvent, turnID string) (agent.UsageLimitPayload, b
 		if reset, err := time.Parse(time.RFC3339Nano, timestamp); err == nil {
 			reset = reset.UTC()
 			p.ResetAt = &reset
+		} else if i := strings.Index(lower, "try again at "); i >= 0 {
+			retry := codexOrdinal.ReplaceAllString(text[i+len("try again at "):], "${1}")
+			if reset, ok := claudeRateLimitReset("resets "+retry, now); ok {
+				reset = reset.UTC()
+				p.ResetAt = &reset
+			}
 		}
 	}
 	return p, true
@@ -67,7 +110,7 @@ func claudeResetZoneKnown(text string, sandbox bool) bool {
 	if m == nil {
 		return false
 	}
-	zone := strings.TrimSpace(m[6])
+	zone := strings.TrimSpace(m[7])
 	if zone == "" {
 		// An empty or malformed explicit zone must not become a local fallback.
 		return !sandbox && !strings.Contains(text, "(")

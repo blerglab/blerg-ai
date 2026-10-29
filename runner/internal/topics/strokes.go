@@ -133,13 +133,11 @@ func strokes(events []Event, wins []*Topic, opt Options) []Stroke {
 			if text == "" {
 				continue
 			}
-			// A line is the person's only when the person posted it; the agent's account of a ruling of
-			// theirs is the agent's line, recorded as theirs.
+			// Ownership and posting identity are separate: --by person records the person's ruling.
 			by, recorded := "agent", ""
 			if p.By == "person" {
-				if p.PostedBy == "owner" {
-					by = "person"
-				} else {
+				by = "person"
+				if p.PostedBy != "owner" {
 					recorded = "person"
 				}
 			}

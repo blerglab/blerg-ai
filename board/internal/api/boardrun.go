@@ -11,6 +11,7 @@ import (
 
 	"github.com/blerglab/blerg-ai/board/internal/auth"
 	"github.com/blerglab/blerg-ai/board/internal/db"
+	"github.com/blerglab/blerg-ai/board/internal/runner"
 )
 
 // Run-the-board: a deterministic server-side dispatcher. While a board run
@@ -59,6 +60,10 @@ const workerQuietGrace = 10 * time.Minute
 func isCapacityErr(err error) bool {
 	if err == nil {
 		return false
+	}
+	var refused *runner.StartRefusedError
+	if errors.As(err, &refused) && (refused.Status == http.StatusServiceUnavailable || refused.Status == http.StatusTooManyRequests) {
+		return true
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "cap reached") || strings.Contains(msg, "HTTP 503")

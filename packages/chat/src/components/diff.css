@@ -1,6 +1,6 @@
 /* ── the diff viewer (view "diff") and the diff card ─────────────────────── */
 @media (min-width: 900px) {
-  .artifact-dialog.artifact-viewer.is-diff {
+  .artifact-overlay > .artifact-dialog.artifact-viewer.is-diff:not(.is-maximized) {
     width: 96vw;
     height: 92vh;
   }
@@ -179,6 +179,15 @@
   vertical-align: top;
 }
 .diff-split .diff-code { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Line wrap (#265), the toggle in the toolbar: wrapped, the table fits the pane (no horizontal
+   scroll) and a long line continues under itself, its number shown once at the top of the row and
+   its row's background and +/- mark spanning every wrapped row. Unwrapped, side by side scrolls
+   sideways as one table, as unified does. */
+.diff-view.is-wrapped .diff-table { table-layout: fixed; width: 100%; }
+.diff-view.is-wrapped .diff-unified .diff-col-num { width: 4.2em; }
+.diff-view.is-wrapped .diff-code, .diff-view.is-wrapped .diff-hunk { white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff-view.is-unwrapped .diff-split { table-layout: auto; width: max-content; min-width: 100%; }
+.diff-view.is-unwrapped .diff-split .diff-code { white-space: pre; overflow-wrap: normal; }
 .diff-mark {
   display: inline-block;
   width: 1.2em;

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -113,6 +114,14 @@ func TestWSClient(t *testing.T) {
 	if firstHello.Type != "daemon_hello" {
 		t.Errorf("first message type = %q, want daemon_hello", firstHello.Type)
 	}
+	hostname, err := os.Hostname()
+	if err != nil || firstHello.Hostname != hostname || firstHello.Hostname == "" {
+		t.Error("hello missing actual hostname for enrollment confirmation")
+	}
+	account, err := user.Current()
+	if err != nil || account == nil || firstHello.OSUser != account.Username || firstHello.OSUser == "" {
+		t.Error("hello missing OS user for enrollment confirmation")
+	}
 	if firstHello.Name != "test-daemon" {
 		t.Errorf("name = %q, want test-daemon", firstHello.Name)
 	}
@@ -130,6 +139,12 @@ func TestWSClient(t *testing.T) {
 	}
 	if !firstHello.MCPGateway {
 		t.Error("hello does not report the mcp_gateway capability")
+	}
+	if !firstHello.UsageNotices {
+		t.Error("hello does not report usage_notices")
+	}
+	if !firstHello.PlanNudges {
+		t.Error("hello does not report plan_nudges")
 	}
 	if !firstHello.RestrictTools {
 		t.Error("hello does not report the restrict_tools capability")
@@ -160,10 +175,13 @@ func TestWSClient(t *testing.T) {
 // launch UI's picker.
 func TestListReposOnDiskExcludesDotdirs(t *testing.T) {
 	root := t.TempDir()
-	for _, name := range []string{"blerg", "clarity", ".blerg-runner", ".git", "example"} {
+	for _, name := range []string{"blerg", "clarity", ".blerg-runner", ".git-cache", "example"} {
 		if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", name, err)
 		}
+	}
+	for _, name := range []string{"blerg", "clarity", "example"} {
+		initChildRepo(t, filepath.Join(root, name))
 	}
 	// A plain file (not a directory) should also never appear.
 	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("hi"), 0o644); err != nil {

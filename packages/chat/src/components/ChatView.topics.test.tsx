@@ -55,7 +55,7 @@ describe('topics in the transcript', () => {
     )
     mount()
     const rows = await screen.findAllByTestId('mark-row')
-    expect(rows.map(r => r.textContent)).toEqual(['◆ Decision: Ship on Friday', '◇ Decision (agent): <img src=x onerror="alert(1)">', '✓ Milestone: Merged', '◇ Decision (agent): Recorded ruling'])
+    expect(rows.map(r => r.textContent)).toEqual(['◆ Decision: Ship on Friday', '◇ Decision (agent): <img src=x onerror="alert(1)">', '✓ Milestone: Merged', '◆ Decision: Recorded ruling'])
     expect(document.querySelector('img[src="x"]')).toBeNull()
     expect(rows[0]).toHaveAttribute('data-event-id', 'e2')
     expect(scrollToEvent('e2')).toBe(true)

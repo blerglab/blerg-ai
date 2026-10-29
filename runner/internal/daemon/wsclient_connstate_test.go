@@ -295,11 +295,10 @@ func TestRefusedTokenIsLoudRecordedAndBacksOff(t *testing.T) {
 		t.Fatalf("state after 4401 = %s", raw)
 	}
 	out := logs.String()
-	if !strings.Contains(out, "refused the daemon token") || !strings.Contains(out, "install/desktop/.env") ||
-		!strings.Contains(out, "BLERG_RUNNER_DAEMON_TOKEN") {
+	if !strings.Contains(out, "refused this desktop credential") || !strings.Contains(out, "Settings → Account → Your desktops") || !strings.Contains(out, "import-credential") {
 		t.Errorf("the 4401 line does not say what was refused and where the token comes from:\n%s", out)
 	}
-	if n := strings.Count(out, "refused the daemon token"); n != 1 {
+	if n := strings.Count(out, "refused this desktop credential"); n != 1 {
 		t.Errorf("the refusal was logged %d times in a burst, want once:\n%s", n, out)
 	}
 	if strings.Contains(out, "daemon: connected to") {

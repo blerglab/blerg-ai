@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/url"
@@ -177,12 +178,19 @@ func runTmuxFor(sessionID string, args ...string) *exec.Cmd {
 // sandboxNetworkEnv.
 func sandboxEnvArgs(env []string) []string {
 	var args []string
+	attachments := sandboxAttachmentsEnv(env)
 	for _, kv := range env {
 		if strings.HasPrefix(kv, "BLERG_RUNNER_DAEMON_TOKEN=") {
 			continue
 		}
 		// A host path: the CLI inside finds its token file under its own HOME
 		// (sessiontoken.go), not under the daemon's state directory.
+		if strings.HasPrefix(kv, attachmentsDirEnv+"=") {
+			if attachments != "" {
+				args = append(args, "-e", attachmentsDirEnv+"="+attachments)
+			}
+			continue
+		}
 		if strings.HasPrefix(kv, DaemonStateDirEnv+"=") {
 			continue
 		}
@@ -197,6 +205,7 @@ func sandboxEnvArgs(env []string) []string {
 // (terminal and agent kind alike) applies. The zero value joins no network
 // and mounts no CLI — what the cluster pod and most tests get.
 type SandboxOptions struct {
+	Workspace *LocalWorkspace
 	// Network is the docker network a sandbox joins when it exists
 	// (BLERG_RUNNER_SANDBOX_NETWORK, default blerg-sandbox; "" = never join).
 	// The desktop compose declares it and attaches only the board and the
@@ -427,6 +436,9 @@ var sandboxTestMounts []string
 // sandboxRunExtras are the per-start additions to `docker run` that depend on
 // the host's state at spawn time rather than on the session.
 type sandboxRunExtras struct {
+	workspaceRootMount string
+	workspaceMounts    []string
+	workspaceLabels    []string
 	// cloneObjects is the read-only mount of a sandbox clone's borrowed objects (sandboxclone.go); "" = none.
 	cloneObjects string
 	network      string // --network <name>; "" = default bridge
@@ -469,6 +481,10 @@ type sandboxRunExtras struct {
 // mount; the env rewrite that goes with the network is the caller's
 // (startSandboxContainer), since env arrives here already final.
 func sandboxRunArgs(container, hostProjectPath, home string, env []string, extras sandboxRunExtras, extraEnvArgs ...string) []string {
+	rootMount := sandboxBindMount(hostProjectPath, sandboxWorkdir)
+	if extras.workspaceRootMount != "" {
+		rootMount = extras.workspaceRootMount
+	}
 	args := []string{
 		"run", "-d", "--name", container,
 		// Never an in-band pull under the bounded run: the preflight requires the image to be
@@ -479,15 +495,22 @@ func sandboxRunArgs(container, hostProjectPath, home string, env []string, extra
 		// setuid escalation, and a process/memory ceiling. No --restart: a
 		// sandbox that outlives its session record is recoverSession's job to
 		// bring back, not Docker's.
-		"--cap-drop", "ALL",
+		"--cap-drop", "ALL", "--cap-add", "DAC_OVERRIDE",
+		"--tmpfs", workspaceExplorerTempMount,
 		"--security-opt", "no-new-privileges",
 		// Reap orphaned tool/test descendants: sleep as PID 1 never waits for
 		// them, so zombies otherwise consume the process ceiling permanently.
 		"--init",
 		"--pids-limit", "512",
 		"--memory", "4g",
-		"--mount", sandboxBindMount(hostProjectPath, sandboxWorkdir),
+		"--mount", rootMount,
 		"-w", sandboxWorkdir,
+	}
+	for _, mount := range extras.workspaceMounts {
+		args = append(args, "--mount", mount)
+	}
+	for _, label := range extras.workspaceLabels {
+		args = append(args, "--label", label)
 	}
 	if extras.cloneObjects != "" {
 		args = append(args, "--mount", extras.cloneObjects)
@@ -596,7 +619,17 @@ func createDockerSandbox(sessionID, hostProjectPath string, inner, env []string,
 // come up (or be upgraded to declare it) after the daemon did.
 func startSandboxContainer(sessionID, hostProjectPath string, env []string, cred sandboxCredential, opts SandboxOptions) (string, error) {
 	// Only this session's own clone is ever mounted: never the person's checkout or its .git.
-	if err := sandboxMountRefusal(hostProjectPath, sessionID); err != nil {
+	var plan WorkspaceDockerMountPlan
+	if opts.Workspace != nil {
+		if opts.Workspace.state.Session != sessionID || opts.Workspace.state.Root != hostProjectPath {
+			return "", errors.New("workspace mount binding mismatch")
+		}
+		var err error
+		plan, err = opts.Workspace.DockerMountPlan(context.Background())
+		if err != nil {
+			return "", err
+		}
+	} else if err := sandboxMountRefusal(hostProjectPath, sessionID); err != nil {
 		return "", err
 	}
 	// The clone borrows the repository's objects: they are mounted read-only, from the daemon's
@@ -609,12 +642,24 @@ func startSandboxContainer(sessionID, hostProjectPath string, env []string, cred
 		}
 	}
 	container := dockerContainerName(sessionID)
+	startToken := ""
 	// A container from an earlier life of this session (a daemon restart that
 	// left one behind, or a resumed session) still owns the name, and `docker
 	// run --name` would fail on the collision — with a message that says
 	// nothing about the real cause. Clear it first: the old container belongs
 	// to a session that is being recreated right now either way.
-	forceRemoveContainer(container)
+	if opts.Workspace != nil {
+		opts.Workspace.mu.Lock()
+		startToken = opts.Workspace.state.RuntimeToken
+		ready := opts.Workspace.state.RuntimePreparing && opts.Workspace.state.SupervisorLaunch.Validate() == nil && opts.Workspace.state.RuntimeContext == currentDockerContext()
+		opts.Workspace.mu.Unlock()
+		if !ready || startToken == "" {
+			return "", errors.New("workspace runtime creation intent missing")
+		}
+		container += "-" + startToken
+	} else {
+		forceRemoveContainer(container)
+	}
 	home, _ := os.UserHomeDir()
 	engines := sandboxEnginesFor(opts.Engine, opts.RestrictedEngine)
 	sbHome := ""
@@ -628,6 +673,11 @@ func startSandboxContainer(sessionID, hostProjectPath string, env []string, cred
 		ensureSandboxLoginRefresh()
 	}
 	extras := sandboxRunExtras{owner: sandboxOwner(), sandboxHome: sbHome, cloneObjects: cloneObjects, cliPath: messagingCLIPath(opts.RepoRoot), engine: opts.Engine, restrictedEngine: opts.RestrictedEngine, pluginCache: opts.PluginCache, codexHome: opts.CodexHome, codexSourceHome: opts.CodexSourceHome}
+	if opts.Workspace != nil {
+		extras.workspaceRootMount = plan.Mounts[0]
+		extras.workspaceMounts = append([]string(nil), plan.Mounts[1:]...)
+		extras.workspaceLabels = append(append([]string(nil), plan.Labels...), "blerg.runner.workspace-start="+startToken)
+	}
 	if opts.Network != "" {
 		exists, err := sandboxNetworkState(opts.Network)
 		if err != nil {
@@ -650,16 +700,37 @@ func startSandboxContainer(sessionID, hostProjectPath string, env []string, cred
 	forgetSandboxDeath(container) // a new container under the name: its stop is not reported yet
 	dockerContext := currentDockerContext()
 	args := sandboxRunArgs(container, hostProjectPath, home, env, extras, cred.args...)
+	if opts.Workspace != nil {
+		entryPolicy, err := workspaceEntrySecurityOption()
+		if err != nil {
+			return "", err
+		}
+		writable := fmt.Sprintf("rw,size=268435456,nr_inodes=16384,uid=%d,gid=%d", os.Getuid(), os.Getgid())
+		args = slices.Insert(args, 4, "--security-opt", entryPolicy, "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()), "--read-only", "--tmpfs", "/tmp:"+writable, "--tmpfs", "/home/agent/.cache:"+writable, "--tmpfs", "/home/agent/.blerg-runner-daemon:"+writable)
+	}
 	// Put the label before the image, and run on exactly the context recorded in it.
 	args = slices.Insert(args, 4, "--label", sandboxContextLabel+"="+dockerContext)
 	pinSandboxContext(container, dockerContext)
 	if err := dockerRunEnv(cred.clientEnv, pinnedDockerArgs(container, args...)...); err != nil {
 		// A half-created container (run failed after the name was taken) would
 		// otherwise linger and block the next attempt.
-		forceRemoveContainer(container)
+		if opts.Workspace == nil {
+			forceRemoveContainer(container)
+		} else {
+			// A failed run may have created our container. Never remove a name
+			// collision without the unique token attached by this exact launch.
+			owned, inspectErr := dockerOutput(pinnedDockerArgs(container, "inspect", "--format", `{{.Id}} {{index .Config.Labels "blerg.runner.workspace-start"}}`, container)...)
+			fields := strings.Fields(string(owned))
+			if inspectErr == nil && len(fields) == 2 && len(fields[0]) == 64 && fields[1] == startToken {
+				_ = dockerRun(pinnedDockerArgs(container, "rm", "-f", fields[0])...)
+			}
+		}
 		unregisterSandbox(sessionID)
 		forgetSandboxDeath(container)
 		return "", err
+	}
+	if opts.Workspace != nil {
+		workspaceCrashBoundary("after-runtime-create")
 	}
 	// Every later look at it goes to the Docker it was started on.
 	pinSandboxContext(container, dockerContext)
@@ -781,13 +852,17 @@ func listSandboxContainers() []string {
 // else's session (or a test's) that happens to share the prefix. An error is an empty list.
 func listOwnSandboxContainers(tied func(sessionID string) bool) []string {
 	out, err := dockerOutput("ps", "--filter", "name=^/"+sandboxContainerPrefix,
-		"--format", "{{.Names}}\t{{.Label \""+sandboxOwnerLabel+"\"}}\t{{.Label \""+sandboxContextLabel+"\"}}")
+		"--format", "{{.Names}}\t{{.Label \""+sandboxOwnerLabel+"\"}}\t{{.Label \""+sandboxContextLabel+"\"}}\t{{.Label \""+workspaceSessionLabel+"\"}}")
 	if err != nil {
 		return nil
 	}
 	own := sandboxOwner()
 	names := []string{}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		fields := strings.SplitN(strings.TrimSpace(line), "\t", 4)
+		if len(fields) == 4 && strings.TrimSpace(fields[3]) != "" {
+			continue
+		} // v2 has its own authenticated journal/recovery
 		name, labels, _ := strings.Cut(strings.TrimSpace(line), "\t")
 		owner, dockerContext, _ := strings.Cut(labels, "\t")
 		name, owner = strings.TrimSpace(name), strings.TrimSpace(owner)

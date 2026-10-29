@@ -438,6 +438,8 @@ func TestProjectScoped_MCP(t *testing.T) {
 		{"blerg_column_list", func(b, _, _, _ string) map[string]any { return map[string]any{"board_id": b} }},
 		{"blerg_column_create", func(b, _, _, _ string) map[string]any { return map[string]any{"board_id": b, "name": "n"} }},
 		{"blerg_column_move", func(_, _, col, _ string) map[string]any { return map[string]any{"column_id": col} }},
+		{"blerg_column_update", func(_, _, col, _ string) map[string]any { return map[string]any{"column_id": col, "name": "x"} }},
+		{"blerg_column_delete", func(_, _, col, _ string) map[string]any { return map[string]any{"column_id": col} }},
 		{"blerg_card_search", func(b, _, _, _ string) map[string]any { return map[string]any{"board_id": b, "query": "zebra"} }},
 		{"blerg_card_get", func(_, cd, _, _ string) map[string]any { return map[string]any{"card_id": cd} }},
 		{"blerg_card_create", func(b, _, _, _ string) map[string]any { return map[string]any{"board_id": b, "title": "sneak"} }},

@@ -42,6 +42,7 @@ type UserMessagePayload struct {
 // is what the transcript records instead (a slash skill: the person typed "/review x", the engine
 // gets the skill's instructions). ClientID is echoed on the user_message (UserMessagePayload).
 type Input struct {
+	PlanNudge      string `json:",omitempty"`
 	ExpectedTurnID string
 	Text           string
 	Shown          string
@@ -59,8 +60,9 @@ func (in Input) Payload() UserMessagePayload {
 }
 
 // UsageLimitPayload is an actual provider refusal of the identified input turn.
-// An absent reset is unknown and must never be guessed from account usage meters.
+// An absent reset can be resolved from the same engine/account usage meter.
 type UsageLimitPayload struct {
+	WindowID string     `json:"window_id,omitempty"`
 	Provider string     `json:"provider"`
 	ResetAt  *time.Time `json:"reset_at,omitempty"`
 	TurnID   string     `json:"turn_id"`
@@ -290,6 +292,34 @@ type TurnDonePayload struct {
 	// UsageByModel partitions Usage; consumers replace the aggregate with this
 	// map, never add both. An empty model key explicitly means unknown.
 	UsageByModel map[string]Usage `json:"usage_by_model,omitempty"`
+	// Context is how full the main agent's context window was when the turn ended (the context
+	// meter on its Running now row). Absent when the engine reported nothing about it.
+	Context *ContextUsage `json:"context,omitempty"`
+}
+
+// ContextUsage is the main agent's context at the end of a turn, as its engine reported it. Zero
+// means unknown: nothing is estimated.
+type ContextUsage struct {
+	// Tokens is the conversation's size at its latest model call: the prompt the model read
+	// (input + cache read + cache write for Claude, the native loop's own calls; Codex's reported
+	// token count of its last call). Zero when a compaction came after that call.
+	Tokens int `json:"tokens,omitempty"`
+	// Window is the model's context window, as the engine reports it.
+	Window int `json:"window,omitempty"`
+	// CompactAt is the size at which the engine compacts by itself, when it says.
+	CompactAt int `json:"compact_at,omitempty"`
+	// Compacted says the engine compacted the conversation during this turn; CompactedFrom is
+	// its size just before, when the engine says.
+	Compacted     bool `json:"compacted,omitempty"`
+	CompactedFrom int  `json:"compacted_from,omitempty"`
+}
+
+// Reported is the context to put on a turn_done: nil when nothing is known.
+func (c ContextUsage) Reported() *ContextUsage {
+	if c.Tokens <= 0 && !c.Compacted {
+		return nil
+	}
+	return &c
 }
 
 // ErrorPayload — kind "error".

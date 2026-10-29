@@ -1,0 +1,16 @@
+.permission-chip {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--stone);
+  border-radius: 4px;
+  color: var(--fog-dim);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.permission-chip.risky {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 45%, var(--stone));
+}

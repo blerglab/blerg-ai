@@ -73,10 +73,16 @@ async function moveTo(x: number, y: number) {
   await mouse.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: (f?.left ?? 0) + x * k, y: (f?.top ?? 0) + y * k })
 }
 async function hover(el: Element) {
-  const r = el.getBoundingClientRect()
-  const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2)
-  await moveTo(x, y - 1)
-  await moveTo(x, y)
+  // Resolving the card renders its hover binding after the link. Wait for
+  // that binding, then re-aim real input as the checklist finishes layout.
+  await expect.poll(() => el.closest('.hc-anchor, [data-hc-anchor]')).not.toBeNull()
+  await expect.poll(async () => {
+    const r = el.getBoundingClientRect()
+    const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2)
+    await moveTo(x, y - 1)
+    await moveTo(x, y)
+    return clock.pending() > 0 || card() !== null
+  }).toBe(true)
   clock.advance(HOVERCARD.openDelayMs)
   await expect.poll(card).not.toBeNull()
 }

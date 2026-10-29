@@ -29,8 +29,8 @@ func newDesktopClusterFx(t *testing.T) *clusterDelegFx {
 	t.Helper()
 	fx := newDelegFx(t)
 	f := &fakeK8s{
-		credentialFetchResponses: map[string][]byte{"owner-1:claude": []byte("oauth-token"), "owner-1:codex": []byte(`{"tokens":{}}`)},
-		secrets:                  map[string]map[string]string{"blerg-runner-agent": {"CLAUDE_CODE_OAUTH_TOKEN": b64("x"), "CODEX_AUTH_JSON": b64("{}")}},
+		credentialFetchResponses: map[string][]byte{"owner-1:claude": []byte("oauth-token"), "owner-1:codex": []byte(`{"tokens":{"access_token":"fixture-access-private"}}`)},
+		secrets:                  map[string]map[string]string{"blerg-runner-agent": {"CLAUDE_CODE_OAUTH_TOKEN": b64("x"), "CODEX_AUTH_JSON": b64(`{"OPENAI_API_KEY":"fixture-api-private"}`)}},
 	}
 	jm := newTestJobManager(t, f)
 	jm.GitHubOrg = "" // exercise a desktop cluster launch with no default organization

@@ -350,6 +350,6 @@ func (h *AgentHost) endIfSandboxStopped(ctx context.Context, sessionID string, s
 	}, container, exit)
 	reason := agent.ScrubCode(sandboxExitReason(exit), sess.emitter.markerNonce)
 	log.Printf("agent session %s: its sandbox container stopped; ending the session", sessionID)
-	h.killWith(sessionID, 1, reason)
+	h.killWith(sessionID, 1, reason) //nolint:contextcheck // cleanup outlives the cancelled engine and has its own bounded deadline
 	return true
 }

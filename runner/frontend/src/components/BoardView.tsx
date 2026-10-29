@@ -1,7 +1,7 @@
 // BoardView — the kanban board: loads data, subscribes to WS events,
 // renders columns (desktop) or ColumnPager (mobile).
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { useBoardStore, useBoard } from '../hooks/useBoardStore'
@@ -13,6 +13,7 @@ import BoardFilterBar, { type FilterState } from './BoardFilterBar'
 import { applyFilter } from './applyFilter'
 import ColumnPager from './ColumnPager'
 import TicketCard from './TicketCard'
+import { ConfirmPopover } from '@blerglab/chat'
 
 // ── per-column "add ticket" inline form state ──────────────────────────────────
 
@@ -35,7 +36,7 @@ interface ColumnViewProps {
   onSubmit: () => void
   onCancel: () => void
   onRename: (name: string) => void
-  onDelete: () => void
+  onDelete: () => Promise<void>
   onToggleTerminal: () => void
 }
 
@@ -56,6 +57,17 @@ function ColumnView({
   const [renaming, setRenaming] = useState(false)
   const [renameVal, setRenameVal] = useState(column.name)
   const [menuOpen, setMenuOpen] = useState(false)
+  const menuAnchor = useRef<HTMLButtonElement | null>(null)
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [deleteError, setDeleteError] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  async function deleteColumn() {
+    if (deleting) return
+    setDeleting(true)
+    try { await onDelete(); setDeleteOpen(false) }
+    catch { setDeleteError(true) }
+    finally { setDeleting(false) }
+  }
 
   async function commitRename() {
     setRenaming(false)
@@ -77,6 +89,18 @@ function ColumnView({
         maxHeight: '100%',
       }}
     >
+      {deleteOpen && <ConfirmPopover
+        anchor={menuAnchor}
+        title={deleteError ? 'Column could not be deleted' : 'Delete column?'}
+        description={deleteError ? 'The column must be empty. Check your connection and board access, then try again.' : `Delete column "${column.name}"? It must be empty.`}
+        confirmLabel={deleteError ? 'Retry' : 'Delete column'}
+        cancelLabel={deleteError ? 'Dismiss' : 'Cancel'}
+        danger={!deleteError}
+        busy={deleting}
+        closeOnConfirm={false}
+        onConfirm={() => { void deleteColumn() }}
+        onCancel={() => setDeleteOpen(false)}
+      />}
       {/* Column header */}
       <div
         style={{
@@ -151,6 +175,7 @@ function ColumnView({
         {/* Column actions menu */}
         <div style={{ position: 'relative', flexShrink: 0 }}>
           <button
+            ref={menuAnchor}
             data-testid={`column-menu-${column.id}`}
             onClick={() => setMenuOpen((v) => !v)}
             style={{
@@ -188,7 +213,7 @@ function ColumnView({
               <MenuButton onClick={onToggleTerminal}>
                 {column.is_terminal ? 'Unmark terminal' : 'Mark as terminal'}
               </MenuButton>
-              <MenuButton onClick={onDelete} danger>
+              <MenuButton onClick={() => { setDeleteError(false); setDeleteOpen(true) }} danger>
                 Delete column
               </MenuButton>
             </div>
@@ -395,9 +420,6 @@ export default function BoardView() {
   const setBoardData = useBoardStore((s) => s.setBoardData)
 
   const [error, setError] = useState<string | null>(null)
-  const [assisting, setAssisting] = useState(false)
-  // Why the last Assist start failed (the server's message), shown beside the button.
-  const [assistError, setAssistError] = useState<string | null>(null)
   const [addColumnOpen, setAddColumnOpen] = useState(false)
 
   // Per-column add-ticket form state: { [columnId]: { open, title } }
@@ -434,21 +456,6 @@ export default function BoardView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boardId])
 
-  // ── Assist ─────────────────────────────────────────────────────────────────
-
-  async function handleAssist() {
-    if (assisting) return
-    setAssisting(true)
-    setAssistError(null)
-    try {
-      const { session_id } = await boardApi.spawnAssist(boardId, {})
-      navigate(`/sessions/${session_id}`)
-    } catch (err) {
-      setAssistError(err instanceof Error && err.message ? err.message : 'Assist could not start')
-    } finally {
-      setAssisting(false)
-    }
-  }
 
   // ── Column editing helpers ─────────────────────────────────────────────────
 
@@ -457,15 +464,6 @@ export default function BoardView() {
       await boardApi.patchColumn(columnId, { name })
     } catch (err) {
       console.error('Failed to rename column:', err)
-    }
-  }
-
-  async function handleDeleteColumn(columnId: string) {
-    if (!confirm('Delete this column? It must be empty.')) return
-    try {
-      await boardApi.deleteColumn(columnId)
-    } catch (err) {
-      alert('Failed to delete column: ' + (err instanceof Error ? err.message : String(err)))
     }
   }
 
@@ -649,41 +647,6 @@ export default function BoardView() {
           Archive
         </Link>
 
-        {/* Assist button */}
-        <button
-          data-testid="assist-button"
-          onClick={handleAssist}
-          disabled={assisting}
-          style={{
-            background: assisting ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))',
-            color: assisting ? 'var(--stone)' : 'var(--amber)',
-            border: '1px solid var(--blaze)',
-            borderRadius: 6,
-            padding: '5px 14px',
-            fontWeight: 600,
-            cursor: assisting ? 'default' : 'pointer',
-            fontSize: '0.85rem',
-            letterSpacing: '0.05em',
-            fontFamily: 'inherit',
-          }}
-        >
-          {assisting ? 'Starting…' : 'Assist'}
-        </button>
-        {assistError && (
-          <span
-            role="alert"
-            data-testid="assist-error"
-            title={assistError}
-            style={{
-              color: 'var(--blaze)',
-              fontSize: '0.8rem',
-              maxWidth: 'min(100%, 640px)',
-              overflowWrap: 'anywhere',
-            }}
-          >
-            Assist failed: {assistError}
-          </span>
-        )}
       </div>
 
       {/* ── Filter bar ─────────────────────────────────────────────────────── */}
@@ -734,7 +697,7 @@ export default function BoardView() {
               onSubmit={() => handleCreateTicket(col.id)}
               onCancel={() => handleCancelAdd(col.id)}
               onRename={(name) => handleRenameColumn(col.id, name)}
-              onDelete={() => handleDeleteColumn(col.id)}
+              onDelete={() => boardApi.deleteColumn(col.id)}
               onToggleTerminal={() => handleToggleTerminal(col)}
             />
           ))}

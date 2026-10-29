@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -173,6 +174,41 @@ func (a *API) startOnRunnerConfigured(ctx context.Context, boardID string, req r
 	if err != nil {
 		return "", runner.StartRequest{}, err
 	}
+	// A start nobody placed (no per-run choice, no board target) never lands on a desktop's host.
+	chosen := req.Runtime != "" || req.DaemonID != "" || authority.RunRuntime != ""
+	if !chosen && !a.requiresStartIdentity() {
+		if board, err := db.GetBoard(ctx, a.Pool, boardID); err == nil {
+			chosen = board.RunRuntime != ""
+		}
+	}
+	if !chosen {
+		switch {
+		case target.Runtime == "daemon":
+			return "", runner.StartRequest{}, &automationError{msgNoSandbox("this desktop")}
+		case target.Runtime == "" && a.defaultRunRuntime() == "daemon":
+			target.Runtime = "docker" // the runner never demotes an explicit sandbox to the host
+		}
+	}
+	if target == (runTarget{}) && req.GitURL == "" && bareRepo(req.Repo) {
+		if target, err = a.bareRepoTarget(ctx, boardID, req.Repo); err != nil {
+			return "", runner.StartRequest{}, err
+		}
+	}
+	if !chosen && target == (runTarget{}) && a.defaultRunRuntime() == "" {
+		// Nothing placed this start and nothing will be sent to place it: the runner would choose,
+		// possibly a desktop's host. With target inventory, resolveBoardTarget already placed any
+		// desktop start in a sandbox, so the runner's choice is the cluster; with none (an older
+		// runner) the placement cannot be checked, so refuse.
+		options, err := a.discoverRunTargets(ctx, boardID, req.Repo)
+		switch {
+		case errors.Is(err, runner.ErrUnsupported):
+			// a driver with no placement inventory at all (not the production runner)
+		case err != nil:
+			return "", runner.StartRequest{}, &automationError{"could not check where this board runs; retry after the runner reconnects"}
+		case options.Targets == nil:
+			return "", runner.StartRequest{}, &automationError{msgNoInventory}
+		}
+	}
 	if target.Runtime == "cluster" && req.GitURL == "" {
 		board, err := db.GetBoard(ctx, a.Pool, boardID)
 		if err != nil {
@@ -193,6 +229,10 @@ func (a *API) startOnRunnerConfigured(ctx context.Context, boardID string, req r
 	req.Model = model
 	id, err := a.runner.Driver.Start(ctx, req)
 	req.Token = "" // never return authority as launch metadata
+	var refused *runner.StartRefusedError
+	if errors.As(err, &refused) && strings.HasPrefix(refused.Message, runner.ClusterBareRepoRefusal) {
+		err = &automationError{msgBareRepoCluster(req.Repo)}
+	}
 	return id, req, err
 }
 
@@ -204,7 +244,15 @@ func writeStartError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusUnprocessableEntity, automationErrText(err))
 		return
 	}
-	writeError(w, http.StatusBadGateway, "runner start failed: "+err.Error())
+	// The runner refused the start for a reason of its own: its words, not the HTTP exchange.
+	var refused *runner.StartRefusedError
+	if errors.As(err, &refused) {
+		writeError(w, http.StatusUnprocessableEntity, refused.Error())
+		return
+	}
+	// Not even an answer (the runner is unreachable): say so plainly; the detail is in the log.
+	log.Printf("board start: runner unreachable: %v", err)
+	writeError(w, http.StatusBadGateway, "could not reach the runner to start this session; retry in a moment")
 }
 
 // checkStartIdentity is the pre-flight a human-facing start runs BEFORE it

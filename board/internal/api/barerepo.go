@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -244,4 +245,62 @@ func (a *API) handleResolveBoardRepo(w http.ResponseWriter, r *http.Request, p a
 	}
 	a.Hub.Broadcast(board.ID, "board_changed")
 	writeJSON(w, http.StatusOK, b)
+}
+
+// bareRepoTarget places a start whose board left the choice to the runner (no Where it runs, no
+// per-run choice) and whose repo is a bare folder name. On an install with a cluster, the runner
+// would send such a start to the cluster, which cannot clone a folder name unless the install
+// resolves bare names itself: the start then failed with the runner's raw refusal. Instead the
+// start runs where the folder actually is, the automation owner's one connected desktop that has
+// it (in its sandbox), and any other case is refused with what the person can do about it. The
+// zero target keeps the runner's own choice wherever that choice already works.
+func (a *API) bareRepoTarget(ctx context.Context, boardID, repo string) (runTarget, error) {
+	board, err := db.GetBoard(ctx, a.Pool, boardID)
+	if err != nil {
+		return runTarget{}, err
+	}
+	if boardGitURL(board, repo) != "" {
+		return runTarget{}, nil
+	}
+	options, err := a.discoverRunTargets(ctx, boardID, repo)
+	if errors.Is(err, runner.ErrUnsupported) {
+		return runTarget{}, nil // a legacy driver has no placement inventory
+	}
+	if err != nil {
+		return runTarget{}, &automationError{"could not check where this board runs; retry after the runner reconnects"}
+	}
+	clusterFirst := a.defaultRunRuntime() == "cluster"
+	for _, t := range options.Targets {
+		if t.DaemonID == "" && slices.Contains(t.Runtimes, "cluster") {
+			clusterFirst = true
+		}
+	}
+	if !clusterFirst || !a.bareReposBlockCluster(board, options) {
+		return runTarget{}, nil
+	}
+	var with []runner.LaunchTarget
+	for _, t := range options.Targets {
+		if t.DaemonID == "" || !validDaemonID.MatchString(t.DaemonID) {
+			continue
+		}
+		if t.HasRepo == nil { // a runner that does not say which desktop has the folder
+			return runTarget{}, &automationError{msgBareRepoCluster(repo)}
+		}
+		if *t.HasRepo {
+			with = append(with, t)
+		}
+	}
+	switch len(with) {
+	case 0:
+		return runTarget{}, &automationError{fmt.Sprintf("%s is a desktop folder name, not owner/name, and none of the connected desktops has a folder named %s, so it can't run anywhere: open Blerg on the desktop that has it, or resolve it under Repos in board settings", repo, repo)}
+	case 1:
+	default:
+		return runTarget{}, &automationError{fmt.Sprintf("%d connected desktops have a folder named %s; choose which one in Where it runs in board settings, or resolve it under Repos in board settings", len(with), repo)}
+	}
+	desktop := with[0]
+	if !slices.Contains(desktop.Runtimes, "docker") {
+		// A desktop's host is never chosen for a person: only a board target they acknowledged runs there.
+		return runTarget{}, &automationError{fmt.Sprintf("%s is only on %s, which has no sandbox; choose its host in Where it runs in board settings, or resolve it under Repos in board settings", repo, desktop.Name)}
+	}
+	return runTarget{Runtime: "docker", DaemonID: desktop.DaemonID}, nil
 }

@@ -28,6 +28,6 @@ describe('IconMenu', () => {
     fireEvent.keyDown(cancel, { key: 'ArrowUp' })
     expect(screen.getByRole('menu', { hidden: true })).toHaveAttribute('hidden')
     expect(cancel).toHaveFocus()
-    expect(screen.getByRole('dialog', { name: 'Discard session and all children?' })).toBeInTheDocument()
+    expect(screen.getByRole('alertdialog', { name: 'Discard session and all children?' })).toBeInTheDocument()
   })
 })

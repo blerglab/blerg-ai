@@ -67,7 +67,7 @@ func (h *artifactsHandler) files(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *artifactsHandler) unpublish(w http.ResponseWriter, r *http.Request) {
-	sid, ok := h.agentSession(w, r)
+	sid, via, ok := h.agentSessionVia(w, r)
 	if !ok {
 		return
 	}
@@ -79,7 +79,8 @@ func (h *artifactsHandler) unpublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "a person attached this file; only they can remove it, from the Files panel")
 		return
 	}
-	if _, err := db.DeleteArtifact(r.Context(), h.api.dbPool, sid, row.ID); err != nil {
+	// The session's agent removed its own file: audited like every other deletion (#231).
+	if _, err := db.DeleteArtifactAudited(r.Context(), h.api.dbPool, *row, db.FileDeletion{Actor: "session:" + sid, Via: via}); err != nil {
 		writeDatabaseFailure(w, "delete the file", "files delete", err)
 		return
 	}

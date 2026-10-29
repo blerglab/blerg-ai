@@ -32,10 +32,11 @@ const childTurnSource = "child_turn"
 
 // What a child's turn ended in.
 const (
-	childTurnFinished = "finished"
-	childTurnAsked    = "asked"
-	childTurnApproval = "approval"
-	childTurnFailed   = "failed"
+	childTurnFinished  = "finished"
+	childTurnAsked     = "asked"
+	childTurnApproval  = "approval"
+	childTurnFailed    = "failed"
+	childRestartPaused = "restart_paused"
 	// childSessionFailed: the session itself failed (its runtime stopped, it exited with an
 	// error) rather than one of its turns. Its note is deduplicated apart from the turn's, so a
 	// child that dies after its last turn was reported is still reported.
@@ -151,7 +152,7 @@ func (a *API) noteChildTurn(ctx context.Context, childID, kind, detail string) {
 		return
 	}
 	text := childTurnNote(childTitle(child), childID, kind, detail)
-	if problem := a.lastTurnSyncProblem(ctx, childID); problem != "" {
+	if problem := a.lastTurnSyncProblem(ctx, childID); kind != childRestartPaused && problem != "" {
 		text += " Its commits from this turn were NOT brought back to wip/" + childID + ": " + quotedLine(problem, 160) + "."
 	}
 	principal := runnerPrincipal{Kind: "human", Sub: derefOrEmpty(parent.SpawningAccountID)}
@@ -191,6 +192,8 @@ func childTurnNote(title, childID, kind, detail string) string {
 		return s + ": " + line
 	}
 	switch kind {
+	case childRestartPaused:
+		return with(head+" paused after a restart") + fmt.Sprintf(". Check its interrupted work before resuming. blerg-runner session result %s", childID)
 	case childTurnAsked:
 		return with(head+" asked a question") + fmt.Sprintf(". Answer it with blerg-runner session send %s \"<answer>\"; escalate anything destructive with blerg-runner ask.", childID)
 	case childTurnApproval:

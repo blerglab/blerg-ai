@@ -41,6 +41,15 @@ func CountSessionKind(ctx context.Context, q Querier, sessionID, kind string) (i
 	return n, err
 }
 
+// CountRecentChecklist is how many checklist events the session recorded in the last minute
+// (database time), the window checklist.MaxEventsPerMinute applies to.
+func CountRecentChecklist(ctx context.Context, q Querier, sessionID string) (int, error) {
+	var n int
+	err := q.QueryRow(ctx, `SELECT count(*) FROM agent_events
+		WHERE session_id = $1 AND kind = 'checklist' AND ts > now() - interval '1 minute'`, sessionID).Scan(&n)
+	return n, err
+}
+
 // LatestChecklist is the session's newest checklist event with seq <= through (nil when none).
 func LatestChecklist(ctx context.Context, q Querier, sessionID string, through int64) (*AgentEventRow, error) {
 	var r AgentEventRow

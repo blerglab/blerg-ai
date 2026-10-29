@@ -1,5 +1,5 @@
 // The session panel's Files and Capabilities tabs, and the toolbar they leave lean: the chat's toolbar
-// keeps the model, effort, Rules and Stop; the Files and Skills & plugins dialogs are gone. Show thinking
+// keeps the model, effort and Rules (Stop is in the session header); the Files and Skills & plugins dialogs are gone. Show thinking
 // and Compact tool calls are the Settings dialog's (kept per browser); the panel has no Settings section.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react'
@@ -105,6 +105,7 @@ async function renderWithSettings() {
 const rail = () => screen.getByTestId('session-rail')
 const tab = (name: string) => within(rail()).getByRole('tab', { name: ['Live', 'Files', 'Capabilities'].includes(name) ? new RegExp(`^${name}`) : name })
 const toolbar = () => screen.getByTestId('agent-chat').querySelector('.agent-toolbar') as HTMLElement
+const composerActions = () => screen.getByTestId('agent-chat').querySelector('.agent-composer-actions') as HTMLElement
 
 describe('the session panel: Files, Capabilities and the Settings dialog', () => {
   beforeEach(() => {
@@ -130,34 +131,40 @@ describe('the session panel: Files, Capabilities and the Settings dialog', () =>
     localStorage.removeItem(THINKING_KEY)
   })
 
-  it('names the header control "End session" and the composer control "Stop"', async () => {
+  it('names the header controls "End session" and "Stop the agent\'s current turn", side by side; the composer has no Stop', async () => {
     seed({ status: 'running', model: 'claude-opus-5-5', effort: 'high' })
     await renderPage()
-    expect(within(toolbar()).getByRole('button', { name: 'Stop' })).toBeInTheDocument()
+    // Stop sits in the header, immediately left of End session; neither the composer nor the toolbar has one.
+    expect(within(composerActions()).queryByRole('button', { name: /^Stop/ })).toBeNull()
+    expect(within(toolbar()).queryByRole('button', { name: /^Stop/ })).toBeNull()
     expect(screen.getAllByRole('button', { name: 'End session' })).toHaveLength(1)
-    expect(screen.getAllByRole('button', { name: 'Stop' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: /^Stop/ })).toHaveLength(1)
     expect(screen.queryByRole('button', { name: 'Stop session' })).toBeNull()
-    // The header button draws an X; the composer's Stop keeps its own glyph.
+    // The header button draws an X; Stop draws a filled square.
     const end = screen.getByRole('button', { name: 'End session' })
     expect(end.querySelector('.end-session-x')).not.toBeNull()
     expect(end.classList.contains('danger')).toBe(true)
-    const stop = within(toolbar()).getByRole('button', { name: 'Stop' })
+    const stop = screen.getByRole('button', { name: "Stop the agent's current turn" })
+    expect(stop.nextElementSibling).toBe(end)
+    expect(stop.classList.contains('icon-btn')).toBe(true)
+    expect(stop.classList.contains('danger')).toBe(false)
     expect(stop.querySelector('.end-session-x')).toBeNull()
-    expect(stop.textContent).toContain('⏹')
+    expect(stop.querySelector('rect')).not.toBeNull()
   })
 
-  it('the toolbar keeps model, effort, Rules and Stop: no Files, Skills & plugins, Show thinking or Compact tool calls', async () => {
+  it('the panel keeps model and effort and the header keeps Stop: no Rules, Files, Skills & plugins, Show thinking or Compact tool calls', async () => {
     seed({ status: 'running', model: 'claude-opus-5-5', effort: 'high' })
     await renderPage()
-    const bar = toolbar()
+    const bar = within(rail()).getByTestId('rail-session')
     expect(within(bar).getByRole('combobox', { name: 'Model' })).toBeInTheDocument()
-    expect(within(bar).getByTestId('rules-toggle')).toBeInTheDocument()
-    expect(within(bar).getByRole('button', { name: 'Stop' })).toBeInTheDocument()
+    expect(within(bar).queryByTestId('rules-toggle')).toBeNull()
+    expect(within(bar).queryByRole('button', { name: 'Rules' })).toBeNull()
+    expect(within(screen.getByTestId('session-header-controls')).getByRole('button', { name: "Stop the agent's current turn" })).toBeInTheDocument()
     expect(within(bar).queryByTestId('files-toggle')).toBeNull()
     expect(within(bar).queryByTestId('capabilities-toggle')).toBeNull()
     expect(within(bar).queryByRole('checkbox', { name: 'Show thinking' })).toBeNull()
     expect(within(bar).queryByRole('checkbox', { name: 'Compact tool calls' })).toBeNull()
-    expect(within(bar).queryByRole('checkbox', { name: 'Resume when limit resets' })).not.toBeInTheDocument()
+    expect(within(toolbar()).queryByRole('checkbox', { name: 'Resume when limit resets' })).not.toBeInTheDocument()
     expect(within(screen.getByTestId('rail-session')).getByRole('checkbox', { name: 'Resume when limit resets' })).toBeInTheDocument()
     // The header has no Skills & plugins button for an agent session either.
     expect(screen.queryByTestId('capabilities-toggle-terminal')).toBeNull()
@@ -221,8 +228,8 @@ describe('the session panel: Files, Capabilities and the Settings dialog', () =>
     expect(screen.queryByTestId('artifacts-panel')).toBeNull()
 
     fireEvent.click(within(within(panel).getAllByTestId('artifact-row')[0]).getByRole('button', { name: /^View / }))
-    expect(await screen.findByRole('dialog', { name: /report\.md/ })).toBeInTheDocument()
-    fireEvent.keyDown(screen.getByRole('dialog', { name: /report\.md/ }), { key: 'Escape' })
+    expect(await screen.findByRole('region', { name: /report\.md/ })).toBeInTheDocument()
+    fireEvent.keyDown(screen.getByRole('region', { name: /report\.md/ }), { key: 'Escape' })
 
     const second = within(panel).getAllByTestId('artifact-row')[1]
     fireEvent.click(within(second).getByRole('button', { name: 'Delete' }))
@@ -381,7 +388,7 @@ describe('the session panel: Files, Capabilities and the Settings dialog', () =>
       const row = (await within(drawer).findAllByTestId('artifact-row'))[0]
       fireEvent.click(within(row).getByRole('button', { name: /^View / }))
       expect(screen.queryByRole('dialog', { name: 'Session panel' })).toBeNull()
-      expect(await screen.findByRole('dialog', { name: /report\.md/ })).toBeInTheDocument()
+      expect(await screen.findByRole('region', { name: /report\.md/ })).toBeInTheDocument()
     })
   })
 })

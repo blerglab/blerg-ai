@@ -5,7 +5,6 @@ package mcp
 // surface really does go through it, and reports the refusal the same way.
 
 import (
-	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -143,7 +142,7 @@ func TestMCPStartSessionRejectsAnEmptyIdempotencyKey(t *testing.T) {
 		t.Errorf("status = %v, want 400", body["status"])
 	}
 	msg, _ := body["error"].(string)
-	if msg != "idempotency key must be 1-128 characters" {
+	if msg != "idempotency key must be a single value of 1-128 characters using only A-Z, a-z, 0-9, '_', '.', ':' or '-'" {
 		t.Errorf("error = %q, want the shared key message", msg)
 	}
 	if strings.Contains(strings.ToLower(msg), "header") {
@@ -196,17 +195,15 @@ func TestMCPErrorEnvelopeIsUniform(t *testing.T) {
 func TestMCPGetEventsHonoursTheWindowCap(t *testing.T) {
 	api, pool := clusterMCPAPI(t)
 	srv := serveMCP(t, api)
-	started := toolJSON(t, call(t, srv, "start_session", map[string]any{"repo": "org/proj", "prompt": "go"}))
-	id, _ := started["session_id"].(string)
-	if id == "" {
-		t.Fatalf("start_session: %v", started)
+	ctx := t.Context()
+	const id = "11111111-2222-4333-8444-555555555555"
+	const daemonID = "22222222-3333-4444-8555-666666666666"
+	// Seed a quiet session: starting a cluster session also starts a pod watcher
+	// that can append progress events between the two paging requests.
+	if err := db.UpsertDaemon(ctx, pool, daemonID, "fixture", "local", "/repos"); err != nil {
+		t.Fatal(err)
 	}
-
-	ctx := context.Background()
-	// A start records its own progress events (start_stage) first; count
-	// whatever is already there so the paging arithmetic below is exact.
-	pre, err := db.ListAgentEvents(ctx, pool, id, 0, 500)
-	if err != nil {
+	if err := db.InsertSession(ctx, pool, id, daemonID, "idle", "/repos/proj", "org/proj", "Paging", ""); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 205; i++ {
@@ -236,8 +233,14 @@ func TestMCPGetEventsHonoursTheWindowCap(t *testing.T) {
 	rest := toolJSON(t, call(t, srv, "get_events",
 		map[string]any{"session_id": id, "after_seq": last["seq"], "limit": 400}))
 	restEvents, _ := rest["events"].([]any)
-	if want := 205 + len(pre) - 50; len(restEvents) != want {
+	if want := 205 - 50; len(restEvents) != want {
 		t.Errorf("paged remainder = %d events, want %d", len(restEvents), want)
+	}
+	for i, event := range append(first, restEvents...) {
+		row, ok := event.(map[string]any)
+		if !ok || row["seq"] != float64(i+1) {
+			t.Errorf("event %d = %v, want seq %d", i, event, i+1)
+		}
 	}
 	if rest["has_more"] != false {
 		t.Errorf("has_more = %v at the end of the transcript, want false", rest["has_more"])
@@ -296,6 +299,17 @@ func TestMCPSendMessageRefusesBlergRelaySources(t *testing.T) {
 		res := callAs(t, srv, tok, "send_message", map[string]any{"session_id": id, "text": "hello", "source": "human"})
 		if body := toolJSON(t, res); body["status"] == float64(http.StatusUnprocessableEntity) {
 			t.Fatalf("%s: an ordinary source was refused: %v", name, body)
+		}
+	}
+}
+
+func TestMCPStartSessionRejectsBadKeyCharset(t *testing.T) {
+	srv := clusterMCPServer(t)
+	for _, key := range []string{" ", " key", "key ", "key with spaces", "\tkey", "key\t", "key@invalid", "key/slash", "key%3Aencoded", "key+plus", "key,comma", "key\ttab", "key\nnewline", "key\x00nul", "key-é"} {
+		res := call(t, srv, "start_session", map[string]any{"repo": "org/proj", "prompt": "go", "idempotency_key": key})
+		body := toolJSON(t, res)
+		if res["isError"] != true || body["status"] != float64(400) || body["error"] != "idempotency key must be a single value of 1-128 characters using only A-Z, a-z, 0-9, '_', '.', ':' or '-'" {
+			t.Errorf("key %q: %v", key, res)
 		}
 	}
 }

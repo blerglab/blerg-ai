@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"os/exec"
 	"path/filepath"
@@ -75,6 +76,11 @@ func (w *cappedOutput) Write(p []byte) (int, error) {
 		w.buf.Write(p[:room])
 	}
 	return len(p), nil
+}
+
+// This sink only copies into bounded memory and never waits on external I/O.
+func (w *cappedOutput) WriteContext(_ context.Context, p []byte) (int, error) {
+	return w.Write(p)
 }
 
 // commitReadDir is where a session's commits are read: its workspace, or for a sandboxed session
@@ -155,6 +161,105 @@ func readWorkspaceCommit(parent context.Context, sessionID string, binding works
 		return fail("unavailable")
 	}
 	return res
+}
+
+// readChildMerged answers whether wip/<child> has work beyond its recorded clone base merged into the parent's branch (plan nudges:
+// a finished child can be discarded). child is a session id; nothing else from the request
+// reaches git.
+func readChildMerged(parent context.Context, sessionID string, binding workspaceFileBinding, child string) protocol.CommitResult {
+	return readChildMergedBase(parent, sessionID, binding, child, "", "")
+}
+func readChildMergedBase(parent context.Context, sessionID string, binding workspaceFileBinding, child, base, target string) protocol.CommitResult {
+	fail := func(code string) protocol.CommitResult { return protocol.CommitResult{ErrorCode: code} }
+	if !protocol.ValidChildBranchID(child) {
+		return fail("invalid")
+	}
+	if binding.live == nil || binding.info == nil || !binding.live() {
+		return fail("unavailable")
+	}
+	dir, trusted, ok := commitReadDir(sessionID, binding)
+	if !ok {
+		return fail("unavailable")
+	}
+	defer dir.close()
+	ctx, cancel := context.WithTimeout(parent, commitReadTimeout)
+	defer cancel()
+	if !dir.vet(ctx, trusted) {
+		return fail("unavailable")
+	}
+	tip, code := resolveRef(ctx, dir, "refs/heads/wip/"+child)
+	if code != "" {
+		return fail(code)
+	}
+	if base == "" {
+		clone, err := loadSandboxClone(child)
+		if err != nil {
+			return fail("unavailable")
+		}
+		base = clone.Base
+	} else if !protocol.ValidSessionOriginCommit(base) {
+		return fail("invalid")
+	}
+	res := protocol.CommitResult{OK: true}
+	if tip == base {
+		return res
+	}
+	worktrees := &cappedOutput{max: 64 << 10, strict: true}
+	if err := dir.git(ctx, worktrees, "worktree", "list", "--porcelain"); err != nil {
+		return fail("unavailable")
+	}
+	for _, line := range strings.Split(worktrees.buf.String(), "\n") {
+		if line == "branch refs/heads/wip/"+child {
+			return res
+		}
+	}
+	if _, code := resolveRef(ctx, dir, "refs/heads/wip/"+child+".incoming"); code != "not_found" {
+		return res
+	}
+	if target == "" {
+		target = "HEAD"
+		if trusted {
+			target = "refs/heads/wip/" + sessionID
+		}
+	}
+	head, code := resolveRef(ctx, dir, target)
+	if code != "" {
+		return fail(code)
+	}
+	err := dir.git(ctx, io.Discard, "merge-base", "--is-ancestor", "--end-of-options", tip, head)
+	var exit *exec.ExitError
+	switch {
+	case ctx.Err() != nil || !binding.live():
+		return fail("unavailable")
+	case err == nil:
+		res.Merged = true
+	case errors.As(err, &exit) && exit.ExitCode() == 1:
+		res.Merged = false
+	default:
+		return fail("unavailable")
+	}
+	return res
+}
+
+// resolveRef is a fixed ref's commit: "not_found" when there is none.
+func resolveRef(ctx context.Context, dir *pinnedGitDir, ref string) (string, string) {
+	out := &cappedOutput{max: 100, strict: true}
+	err := dir.git(ctx, out, "rev-parse", "--verify", "--quiet", "--end-of-options", ref+"^{commit}")
+	if ctx.Err() != nil {
+		return "", "unavailable"
+	}
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 1 && out.buf.Len() == 0 {
+			return "", "not_found"
+		}
+		return "", "unavailable"
+	}
+	full := strings.TrimSpace(out.buf.String())
+	if !protocol.ValidSessionOriginCommit(full) {
+		return "", "unavailable"
+	}
+	return full, ""
 }
 
 func resolveCommit(ctx context.Context, dir *pinnedGitDir, sha string) (string, string) {
@@ -334,10 +439,23 @@ func acquireCommitRead(sessionID string) (func(), bool) {
 }
 
 func queueCommitRead(ctx context.Context, sender Sender, req protocol.ReadCommit, binding workspaceFileBinding) {
+	queueCommitReadUsing(ctx, sender, req, func(ctx context.Context) protocol.CommitResult {
+		if req.MergedChild != "" {
+			return readChildMerged(ctx, req.SessionID, binding, req.MergedChild)
+		}
+		return readWorkspaceCommit(ctx, req.SessionID, binding, req.SHA, req.Patch)
+	})
+}
+
+func queueCommitReadUsing(ctx context.Context, sender Sender, req protocol.ReadCommit, read func(context.Context) protocol.CommitResult) {
 	if !validSessionOriginID(req.RequestID) || !validSessionOriginID(req.SessionID) {
 		return
 	}
 	reply := func(res protocol.CommitResult) {
+		res.WorkspaceGitRef = req.WorkspaceGitRef
+		if res.Commit != nil {
+			res.Commit.WorkspaceGitRef = req.WorkspaceGitRef
+		}
 		res.Type, res.RequestID, res.SessionID = "commit_result", req.RequestID, req.SessionID
 		outcome := res.ErrorCode
 		if res.OK {
@@ -359,13 +477,20 @@ func queueCommitRead(ctx context.Context, sender Sender, req protocol.ReadCommit
 	}
 	go func() {
 		defer release()
-		reply(readWorkspaceCommit(ctx, req.SessionID, binding, req.SHA, req.Patch))
+		bounded, cancel := context.WithTimeout(ctx, commitReadTimeout)
+		defer cancel()
+		reply(read(bounded))
 	}()
 }
 
 // ReadCommit answers read_commit from an existing launch, without preparing an engine.
 func (h *AgentHost) ReadCommit(ctx context.Context, req protocol.ReadCommit) {
-	queueCommitRead(ctx, h.sender, req, h.workspaceFileBinding(req.SessionID))
+	queueCommitReadUsing(ctx, h.sender, req, func(ctx context.Context) protocol.CommitResult {
+		if result, handled := h.explorer.readGit(ctx, req, false); handled {
+			return result
+		}
+		return readLegacyGit(ctx, req, false, h.workspaceFileBinding(req.SessionID))
+	})
 }
 
 func (m *Manager) handleReadCommit(raw []byte) {
@@ -373,7 +498,16 @@ func (m *Manager) handleReadCommit(raw []byte) {
 	if len(raw) > 1024 || json.Unmarshal(raw, &req) != nil {
 		return
 	}
-	queueCommitRead(context.Background(), m.client, req, m.workspaceFileBinding(req.SessionID))
+	if m.agents != nil && m.agents.get(req.SessionID) != nil {
+		m.agents.ReadCommit(context.Background(), req)
+		return
+	}
+	queueCommitReadUsing(context.Background(), m.client, req, func(ctx context.Context) protocol.CommitResult {
+		if result, handled := m.explorer.readGit(ctx, req, false); handled {
+			return result
+		}
+		return readLegacyGit(ctx, req, false, m.workspaceFileBinding(req.SessionID))
+	})
 }
 
 // SendCommitResult sends a reply (a diff of up to 2 MB) with a bounded write, like a workspace file's.

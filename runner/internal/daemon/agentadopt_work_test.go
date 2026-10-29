@@ -157,8 +157,8 @@ func TestAdoptStopsCutOffWorkAndTellsTheAgent(t *testing.T) {
 	host.NoteConnected()
 	sender.waitForKind(t, "turn_done")
 	users := userTexts(sender)
-	if len(users) != 1 || !strings.HasPrefix(users[0], "system:[system] The process hosting this session restarted") ||
-		!strings.HasSuffix(users[0], "\n\n"+adoptContinuePrompt) {
+	if len(users) != 1 || !strings.HasPrefix(users[0], "system:[system] ↻ Host restarted") ||
+		!strings.HasSuffix(users[0], " · continued") {
 		t.Fatalf("one system message tells the agent: %v", users)
 	}
 	argv, _ := os.ReadFile(claudeLog)
@@ -210,7 +210,7 @@ func TestAdoptOfCutOffWorkAlreadyContinuedWaits(t *testing.T) {
 	if !strings.Contains(string(argv), "agent id a5ef89e0e0329265b") || !strings.Contains(string(argv), "status?") {
 		t.Errorf("the next message carries the list: %s", argv)
 	}
-	if got := userTexts(sender); len(got) != 2 || !strings.HasPrefix(got[0], "system:[system] The process hosting") ||
+	if got := userTexts(sender); len(got) != 2 || !strings.HasPrefix(got[0], "system:[system] ↻ Host restarted") ||
 		strings.Contains(got[0], adoptContinuePrompt) || got[1] != "chat:status?" {
 		t.Errorf("the notice shows as the system's, then the person's own words: %v", got)
 	}
@@ -243,8 +243,8 @@ func TestAdoptResumesInteractiveCutOffWork(t *testing.T) {
 			host.NoteConnected()
 			sender.waitForKind(t, "turn_done")
 			users := userTexts(sender)
-			if len(users) != 1 || !strings.HasPrefix(users[0], "system:[system] The process hosting this session restarted") ||
-				!strings.HasSuffix(users[0], "\n\n"+adoptContinuePrompt) {
+			if len(users) != 1 || !strings.HasPrefix(users[0], "system:[system] ↻ Host restarted") ||
+				!strings.HasSuffix(users[0], " · continued") {
 				t.Fatalf("one system message tells the agent: %v", users)
 			}
 			argv, _ := os.ReadFile(claudeLog)
@@ -392,7 +392,7 @@ func TestAdoptOfInteractiveCutOffWorkThatNeedsThePersonWaits(t *testing.T) {
 				t.Errorf("notice: %v", notes)
 			}
 			users := userTexts(sender)
-			if len(users) != 1 || !strings.HasPrefix(users[0], "system:[system] The process hosting this session restarted") ||
+			if len(users) != 1 || !strings.HasPrefix(users[0], "system:[system] ↻ Host restarted") ||
 				strings.Contains(users[0], adoptContinuePrompt) {
 				t.Fatalf("the notice alone, as the system's: %v", users)
 			}
@@ -442,7 +442,7 @@ func TestAdoptResumesAnInteractiveTurnCutOffMidRun(t *testing.T) {
 				*r.ToolRunning = true
 				r.OpenCalls = []OpenCall{openCallOf("toolu_mk", "Bash", json.RawMessage(`{"command":"make build","description":"Build the binaries"}`))}
 			},
-			want: []string{"Your own tool calls that were cut off before they returned:\n- Bash: make build (Build the binaries)",
+			want: []string{"Tool calls cut off before they returned:\n- Bash: make build (Build the binaries)",
 				"Check its state first", "Never re-run anything destructive", "restarted while you were working"},
 		},
 		"mid-generation": {
@@ -477,7 +477,7 @@ func TestAdoptResumesAnInteractiveTurnCutOffMidRun(t *testing.T) {
 					t.Errorf("the engine was not given %q: %s", w, argv)
 				}
 			}
-			if users := userTexts(sender); len(users) != 1 || !strings.HasPrefix(users[0], "system:") || !strings.HasSuffix(users[0], adoptContinuePrompt) {
+			if users := userTexts(sender); len(users) != 1 || !strings.HasPrefix(users[0], "system:") || !strings.HasSuffix(users[0], " · continued") {
 				t.Errorf("the continue is the system's message: %v", users)
 			}
 			if got := pausedReports(sender); len(got) != 0 {
@@ -512,7 +512,7 @@ func TestAdoptOfAnOlderRecordWithAServerAskWaits(t *testing.T) {
 	if rec, _ := readRecord(t, recDir, "s1"); rec.AutoContinues != 0 {
 		t.Errorf("the continue that did not run is still counted: %+v", rec)
 	}
-	if users := userTexts(sender); len(users) != 1 || !strings.Contains(users[0], adoptAskCutOff) {
+	if users := userTexts(sender); len(users) != 1 || !strings.Contains(users[0], "paused — waiting for your message") {
 		t.Errorf("the person is not shown the question was cut off: %v", users)
 	}
 	host.UserMessage("s1", "Postgres", "chat")
@@ -553,8 +553,7 @@ func TestAdoptOfADestructiveCutOffPauses(t *testing.T) {
 			if _, err := os.Stat(claudeLog); err == nil {
 				t.Fatal("a session cut off in a destructive command was continued")
 			}
-			if users := userTexts(sender); len(users) != 1 || !strings.Contains(users[0], "install.sh install --yes") ||
-				!strings.Contains(users[0], "do not run it again unless the person asks you to") {
+			if users := userTexts(sender); len(users) != 1 || !strings.Contains(users[0], "paused — check the interrupted command\n") || !strings.Contains(users[0], "install.sh") {
 				t.Errorf("the cut-off list: %v", users)
 			}
 		})
@@ -582,8 +581,8 @@ func TestAdoptHeldMessagePreventsThePause(t *testing.T) {
 	}
 }
 
-// A session cut off before it had a conversation is not continued and not reported paused (a
-// continue would reach an agent that does not know its task): the person is asked to send it again.
+// A session cut off before it had a conversation pauses: it cannot continue without its task.
+// Reporting the pause also lets a child tell its parent to send the task again.
 func TestAdoptOfASessionCutOffBeforeItsConversation(t *testing.T) {
 	newHost, recDir, workDir, claudeLog := recoveryHost(t)
 	if err := writeAgentRecord(recDir, AgentRecord{SessionID: "s1", Repo: "proj", WorkDir: workDir,
@@ -597,8 +596,8 @@ func TestAdoptOfASessionCutOffBeforeItsConversation(t *testing.T) {
 		t.Errorf("notice: %v", n)
 	}
 	time.Sleep(150 * time.Millisecond)
-	if got := pausedReports(sender); len(got) != 0 {
-		t.Errorf("reported paused: %v", got)
+	if got := pausedReports(sender); len(got) != 1 {
+		t.Errorf("first-turn pause was not reported: %v", got)
 	}
 	if _, err := os.Stat(claudeLog); err == nil {
 		t.Fatal("it ran by itself")
@@ -801,7 +800,7 @@ func TestRecordKeepsToolCallsAndWaiting(t *testing.T) {
 	if !running() {
 		t.Error("a running command was not recorded")
 	}
-	if rec, _ := readRecord(t, dir, "s1"); len(rec.OpenCalls) != 1 || rec.OpenCalls[0] != (OpenCall{CallID: "c4", Tool: "Bash", Detail: "make check", Checked: true}) {
+	if rec, _ := readRecord(t, dir, "s1"); len(rec.OpenCalls) != 1 || rec.OpenCalls[0] != (openCallOf("c4", "Bash", bashIn("make check"))) {
 		t.Errorf("the running command is not named: %+v", rec.OpenCalls)
 	}
 	k.toolCall("c4", "", nil, "", false)
@@ -861,7 +860,7 @@ func TestCutOffNoticeAndCount(t *testing.T) {
 	calls := []OpenCall{openCallOf("c1", "Bash", json.RawMessage(`{"command":"make\n  build","description":"Build the binaries"}`))}
 	n = cutOffNotice(calls, nil, nil)
 	for _, w := range []string{
-		"Your own tool calls that were cut off before they returned:\n- Bash: make build (Build the binaries)",
+		"Tool calls cut off before they returned:\n- Bash: make build (Build the binaries)",
 		"Check its state first", "Never re-run anything destructive",
 	} {
 		if !strings.Contains(n, w) {
@@ -935,5 +934,58 @@ func TestEngineEndEndsItsSubagents(t *testing.T) {
 	d.closeBackgroundSubagent(noticeFromBlock("<task-id>a1234</task-id><status>completed</status>"))
 	if after := len(em.snapshot()); after != before {
 		t.Errorf("a late notification ended the subagent again")
+	}
+}
+
+// A healthy planned restart leaves idle sessions quiet; sessions with background work
+// still have work to recover even when their foreground turn already ended.
+func TestPlannedRestartIdleSessionHasNoRow(t *testing.T) {
+	factory, records, work, _ := recoveryHostAfter(t, RestartCause{Planned: true, Reason: "service"})
+	stubTranscripts(t, "conv-1")
+	if err := writeAgentRecord(records, AgentRecord{SessionID: "s1", WorkDir: work, ClaudeSessionID: "conv-1"}); err != nil {
+		t.Fatal(err)
+	}
+	host, sender := factory()
+	if host.AdoptRecorded() != 1 {
+		t.Fatal("idle session not adopted")
+	}
+	host.NoteConnected()
+	if got := userTexts(sender); len(got) != 0 {
+		t.Fatalf("idle planned restart added a visible row: %v", got)
+	}
+	if countRecoveryPauses(sender) != 0 {
+		t.Fatal("idle session reported paused")
+	}
+}
+
+func TestPausedRestartRowListsCutOffWork(t *testing.T) {
+	factory, records, work, _ := recoveryHostAfter(t, RestartCause{Planned: true, Reason: "service"})
+	stubTranscripts(t, "conv-1")
+	rec := openWorkRecord(work, protocol.InteractionUnattended)
+	rec.TurnActive = true
+	rec.OpenCalls = []OpenCall{
+		openCallOf("c1", "Bash", bashIn("make deploy")),
+		openCallOf("c2", "Read", []byte(`{"file_path":"notes.txt"}`)),
+	}
+	if err := writeAgentRecord(records, rec); err != nil {
+		t.Fatal(err)
+	}
+	host, sender := factory()
+	host.AdoptRecorded()
+	host.NoteConnected()
+	waitUntil(t, "restart pause", func() bool { return countRecoveryPauses(sender) == 1 })
+	rows := userTexts(sender)
+	if len(rows) != 1 {
+		t.Fatalf("want one row, got %v", rows)
+	}
+	for _, text := range []string{"paused — check the interrupted command\n", "- Bash: make deploy", "- Read: notes.txt", "bash bu90kf38e: Wait for the deploy", `general-purpose "Fix the parser", agent id a5ef89e0e0329265b`, `Explore "Find the callers"`} {
+		if !strings.Contains(rows[0], text) {
+			t.Errorf("row missing %q: %s", text, rows[0])
+		}
+	}
+	for _, text := range []string{"Never re-run", "Before trusting", "Resume a subagent", "Check its state"} {
+		if strings.Contains(rows[0], text) {
+			t.Errorf("agent instructions leaked into disclosure: %s", rows[0])
+		}
 	}
 }

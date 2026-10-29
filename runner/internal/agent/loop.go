@@ -273,13 +273,16 @@ func (l *Loop) runTurn(sessionCtx, ctx context.Context, msg queuedMsg) {
 	enf := &enforcer{}
 	completionDone := false
 	var totalUsage Usage
+	// The context meter's reading: the latest call's prompt against the loop's own window and
+	// compaction threshold (compaction.go), which are what it compacts by.
+	turnContext := ContextUsage{Window: l.windowTokens(), CompactAt: int(l.compactAt() * float64(l.windowTokens()))}
 
 	for {
 		blocks, stopReason, usage, err := l.callProvider(ctx)
 		if err != nil {
 			if ctx.Err() != nil && sessionCtx.Err() == nil {
 				// Interrupted (not shutdown): consistent transcript end.
-				l.emit("turn_done", TurnDonePayload{StopReason: "interrupted", Model: l.cfg.Model, Usage: totalUsage})
+				l.emit("turn_done", TurnDonePayload{StopReason: "interrupted", Model: l.cfg.Model, Usage: totalUsage, Context: turnContext.Reported()})
 				l.emit("status_changed", StatusPayload{Status: "idle", Reason: "interrupted"})
 				return
 			}
@@ -299,7 +302,7 @@ func (l *Loop) runTurn(sessionCtx, ctx context.Context, msg queuedMsg) {
 			// StopReason "error" is what distinguishes it from a turn that
 			// simply ran out of things to say; the `error` event above carries
 			// the reason.
-			l.emit("turn_done", TurnDonePayload{StopReason: "error", Model: l.cfg.Model, Usage: totalUsage})
+			l.emit("turn_done", TurnDonePayload{StopReason: "error", Model: l.cfg.Model, Usage: totalUsage, Context: turnContext.Reported()})
 			l.emit("status_changed", StatusPayload{Status: "idle", Reason: "provider error"})
 			return
 		}
@@ -313,7 +316,10 @@ func (l *Loop) runTurn(sessionCtx, ctx context.Context, msg queuedMsg) {
 		l.emit("provider_blocks", ProviderBlocksPayload{Blocks: blocks})
 		// Cached prefix tokens are excluded from InputTokens — with prompt
 		// caching the sum is the real context size.
-		l.maybeCompact(ctx, usage.InputTokens+usage.CacheReadTokens+usage.CacheWriteTokens)
+		turnContext.Tokens = usage.InputTokens + usage.CacheReadTokens + usage.CacheWriteTokens
+		if l.maybeCompact(ctx, turnContext.Tokens) {
+			turnContext.Compacted, turnContext.CompactedFrom, turnContext.Tokens = true, turnContext.Tokens, 0
+		}
 
 		if stopReason != "tool_use" {
 			if enf.mutated && !completionDone && !enf.reminded {
@@ -326,7 +332,7 @@ func (l *Loop) runTurn(sessionCtx, ctx context.Context, msg queuedMsg) {
 			}
 			l.emit("turn_done", TurnDonePayload{
 				StopReason: stopReason, Model: l.cfg.Model,
-				Usage: totalUsage, CheckInMissing: enf.mutated && !completionDone,
+				Usage: totalUsage, CheckInMissing: enf.mutated && !completionDone, Context: turnContext.Reported(),
 			})
 			l.emit("status_changed", StatusPayload{Status: "idle", Reason: "turn complete"})
 			return

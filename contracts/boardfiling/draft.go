@@ -10,6 +10,9 @@ import (
 
 // Origin is server-derived attribution, retained as structured card metadata.
 type Origin struct {
+	MemberID         string `json:"member_id,omitempty"`
+	LaunchGeneration string `json:"launch_generation,omitempty"`
+	Generation       int64  `json:"generation,omitempty"`
 	SessionURL       string `json:"session_url"`
 	Repo             string `json:"repo"`
 	Commit           string `json:"commit"`

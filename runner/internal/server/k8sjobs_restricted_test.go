@@ -69,7 +69,7 @@ func TestPlainSessionGetsOnlySelectedEngineSecrets(t *testing.T) {
 		{"hermes", []string{"HERMES_ENV_CONTENTS"}},
 	} {
 		t.Run(tc.engine, func(t *testing.T) {
-			f := &fakeK8s{}
+			f := &fakeK8s{secrets: map[string]map[string]string{"blerg-runner-agent": {"CODEX_AUTH_JSON": b64(`{"OPENAI_API_KEY":"fixture-api-private"}`)}}}
 			jm := newTestJobManager(t, f)
 			spec := cronJobSpec("s-plain-" + tc.engine)
 			spec.NoOperatorFallback = false

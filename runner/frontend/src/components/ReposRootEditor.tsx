@@ -1,3 +1,4 @@
+import '../../../../packages/settings/settings.css'
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, FormEvent, KeyboardEvent } from 'react'
 import { apiFetch } from '../apiFetch'
@@ -137,7 +138,7 @@ export default function ReposRootEditor({ daemonId, daemonName, reposRoot, onCha
         <div style={rowStyle}>
           <span style={{ flexShrink: 0 }}>Repos folder</span>
           <span data-testid="repos-root-value" style={pathStyle}>{reposRoot || '—'}</span>
-          <button
+          <button className="settings-action"
             type="button"
             data-testid="repos-root-edit"
             aria-label={`Change ${daemonName}'s repos folder`}
@@ -162,7 +163,7 @@ export default function ReposRootEditor({ daemonId, daemonName, reposRoot, onCha
         Repos folder on {daemonName}
       </label>
       <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-        <input
+        <input className="settings-field"
           id={`repos-root-input-${daemonId}`}
           data-testid="repos-root-input"
           type="text"
@@ -188,10 +189,10 @@ export default function ReposRootEditor({ daemonId, daemonName, reposRoot, onCha
             fontSize: '0.8rem',
           }}
         />
-        <button type="submit" data-testid="repos-root-save" disabled={!canSave} style={smallButton(true, !canSave)}>
+        <button className="settings-action" type="submit" data-testid="repos-root-save" disabled={!canSave} style={smallButton(true, !canSave)}>
           {saving ? 'Saving…' : 'Save'}
         </button>
-        <button type="button" data-testid="repos-root-cancel" onClick={cancel} disabled={saving} style={smallButton(false, saving)}>
+        <button className="settings-action" type="button" data-testid="repos-root-cancel" onClick={cancel} disabled={saving} style={smallButton(false, saving)}>
           Cancel
         </button>
       </div>

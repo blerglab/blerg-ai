@@ -66,6 +66,33 @@ describe('text nobody typed', () => {
     expect(notes[0].textContent).toContain('finished its turn')
   })
 
+  it('a usage-limit notice is attributed to Blerg and leaves an ask open', () => {
+    seed(
+      ev(1, 'user_message', { text: 'start', source: 'chat' }),
+      ev(2, 'ask', { body: 'Which branch?' }),
+      ev(3, 'user_message', { text: 'Usage limit: codex 7d is 95% used. Finish the current step and save state.', source: 'usage_limit' }),
+    )
+    mount()
+    expect(screen.getAllByText('You')).toHaveLength(1)
+    const note = screen.getByTestId('system-note')
+    expect(note).toHaveTextContent('Blerg')
+    expect(note).toHaveTextContent('95% used')
+    expect(screen.getByText('Which branch?')).toBeInTheDocument()
+  })
+
+  it('a nudge that the plan drifted is a Blerg note, never the person', () => {
+    seed(
+      ev(1, 'user_message', { text: 'start', source: 'chat' }),
+      ev(2, 'user_message', { text: 'Your plan drifted from what you are doing:\n- No checklist item is doing.', source: 'plan_drift' }),
+    )
+    mount()
+    expect(screen.getAllByText('You')).toHaveLength(1)
+    const notes = screen.getAllByTestId('system-note')
+    expect(notes).toHaveLength(1)
+    expect(notes[0].textContent).toContain('Blerg')
+    expect(notes[0].textContent).toContain('Your plan drifted')
+  })
+
   it('a prompt a board, a parent session or a cron wrote is drawn under that author, never "You"', () => {
     seed(
       ev(1, 'user_message', { text: 'You are working card #43 on the blerg-board board', source: 'blerg-board' }),
@@ -204,5 +231,114 @@ describe('API errors, retries and compactions', () => {
     expect(rows[0].textContent).toBe('✂ Conversation compacted (manual, 151k tokens before)')
     expect(rows[1].textContent).toBe('✂ Conversation compacted (3 char summary)')
     expect(compactionText({ summary: '', through_index: 0 })).toBe('Conversation compacted')
+  })
+})
+
+it.each([
+  ['Updated to abc1234 · continued', 'Updated to abc1234 · continued'],
+  ['Host restarted · paused — check the interrupted command', 'Paused after a restart'],
+])('replays one compact restart row: %s', (message, shown) => {
+  resetChatState()
+  const events = [
+    ev(1, 'tool_call', { call_id: 'c1', tool: 'Bash', input: { command: 'make restart-daemon' } }),
+    ev(2, 'error', { code: 'session_recovery', message: 'The session host restarted.', retryable: true }),
+    ev(3, 'user_message', { source: 'system', text: `[system] ↻ ${message}` }),
+    ev(4, 'user_message', { source: 'system', text: '[system] The process hosting this session restarted, and work that was running was cut off. Full private recovery instructions. Never re-run anything destructive without checking.' }),
+  ]
+  seed(...events)
+  const view = render(<ChatView session={SESSION} transport={createFakeTransport().transport} meta={idle} />)
+  expect(screen.getAllByTestId('restart-notice')).toHaveLength(1)
+  expect(screen.getByTestId('restart-notice')).toHaveTextContent(shown)
+  expect(screen.getByTestId('restart-notice')).not.toHaveTextContent('check the interrupted command')
+  expect(screen.queryByText(/Full private recovery instructions/)).not.toBeInTheDocument()
+  view.unmount()
+  // The same persisted event stream produces the same single row after reload.
+  mount()
+  expect(screen.getAllByTestId('restart-notice')).toHaveLength(1)
+})
+
+
+it.each(['chat', undefined, 'session'])('keeps recovery-like text from a person or parent visible (%s)', source => {
+  resetChatState()
+  const text = '[system] The process hosting this session restarted, and work that was running was cut off. Can you explain this?'
+  expect(userMessageShape({ source, text })).toEqual({ as: 'person' })
+  seed(ev(1, 'user_message', { source, text }))
+  mount()
+  expect(screen.getByText(/Can you explain this\?/)).toBeInTheDocument()
+})
+
+describe('a restart row that paused the session', () => {
+  beforeEach(() => resetChatState())
+  const paused = (seq: number, extra = '') => ev(seq, 'user_message', { source: 'system', text: `[system] ↻ Host restarted · paused — check the interrupted command${extra}` })
+
+  it('says "Paused after a restart" with Resume; details keep the reason and the cut-off list', () => {
+    seed(ev(1, 'user_message', { text: 'deploy it', source: 'chat' }), paused(2, '\nTool calls that were cut off:\n- Bash: make deploy'))
+    mount()
+    const row = screen.getByTestId('restart-notice')
+    expect(row.querySelector('summary')).toHaveTextContent(/^Paused after a restart$/)
+    expect(row).not.toHaveTextContent('check the interrupted command')
+    const details = screen.getByTestId('restart-details')
+    expect(details.textContent).toBe('A command was cut off: it may not have finished.\nTool calls that were cut off:\n- Bash: make deploy')
+    const button = screen.getByRole('button', { name: 'Resume' })
+    expect(button).toHaveClass('artifact-btn')
+    expect(button).toBeEnabled()
+  })
+
+  it('Resume sends the resume message once, is disabled while pending, then the row reads "Resumed"', async () => {
+    seed(ev(1, 'user_message', { text: 'deploy it', source: 'chat' }), paused(2))
+    const t = createFakeTransport()
+    const send = t.transport.send.bind(t.transport)
+    let release!: () => void
+    const gate = new Promise<void>(r => { release = r })
+    t.transport.send = async (...args) => { await gate; return send(...args) }
+    mount(idle, t)
+    const button = screen.getByRole('button', { name: 'Resume' })
+    fireEvent.click(button)
+    expect(button).toBeDisabled()
+    fireEvent.click(button)
+    await act(async () => { release(); await gate })
+    expect(t.sent).toEqual(['Continue the task you were working on.'])
+    const row = screen.getByTestId('restart-notice')
+    expect(row.querySelector('summary')).toHaveTextContent(/^Resumed$/)
+    expect(screen.queryByRole('button', { name: 'Resume' })).toBeNull()
+  })
+
+  it('stays paused with Resume when the send is refused, and says so', async () => {
+    seed(paused(1))
+    const t = createFakeTransport()
+    t.refuseSend(true)
+    mount(idle, t)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Resume' })) })
+    expect(screen.getByRole('button', { name: 'Resume' })).toBeEnabled()
+    expect(screen.getByTestId('send-notice')).toHaveTextContent('the session was not resumed')
+    expect(t.sent).toEqual([])
+  })
+
+  it('reads "Resumed" from the transcript after a reload, and a later message or restart takes the button away', () => {
+    seed(paused(1), ev(2, 'user_message', { text: 'Continue the task you were working on.', source: 'chat' }), paused(3), paused(4))
+    mount()
+    const rows = screen.getAllByTestId('restart-notice')
+    expect(rows.map(r => r.querySelector('summary')!.textContent)).toEqual(['Resumed', 'Paused after a restart', 'Paused after a restart'])
+    expect(rows.map(r => r.getAttribute('data-restart-state'))).toEqual(['resumed', 'superseded', 'paused'])
+    expect(screen.getAllByRole('button', { name: 'Resume' })).toHaveLength(1)
+    expect(rows[2].querySelector('button')).not.toBeNull()
+  })
+
+  it('has no Resume when the viewer cannot send, or the session ended', () => {
+    seed(paused(1))
+    render(<ChatView session={SESSION} transport={createFakeTransport().transport} meta={idle} readOnly />)
+    expect(screen.queryByRole('button', { name: 'Resume' })).toBeNull()
+    resetChatState()
+    seed(paused(1))
+    mount(meta({ status: 'ended' }))
+    expect(screen.queryByRole('button', { name: 'Resume' })).toBeNull()
+  })
+
+  it('a continued row is unchanged and has no button', () => {
+    seed(ev(1, 'user_message', { source: 'system', text: '[system] ↻ Updated to abc123456789 · continued' }))
+    mount()
+    expect(screen.getByTestId('restart-notice')).toHaveTextContent('Updated to abc123456789 · continued')
+    expect(screen.getByTestId('restart-notice').querySelector('button')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Resume' })).toBeNull()
   })
 })

@@ -49,6 +49,18 @@ describe("BoardSettings automation", () => {
     me = { kind: "service", is_admin: true, is_human: true };
   });
 
+  it.each([
+    [{ is_admin: true, board_id: 'b1' }, true],
+    [{ is_admin: true, board_id: 'other' }, false],
+    [{ is_admin: false }, false],
+  ])('shows the confirmation prompt only to an admin for this board: %j', async (viewer, allowed) => {
+    me = viewer;
+    render(<MeProvider><BoardSettings board={board({ key: '' })} /></MeProvider>);
+    await waitFor(() => expect(api).toHaveBeenCalledWith('/api/me'));
+    if (allowed) expect(await screen.findByText('· confirm board key')).toBeInTheDocument();
+    else expect(screen.queryByText('· confirm board key')).toBeNull();
+  });
+
   it("saves the board runtime and explains an unavailable desktop", async () => {
     me = { is_admin: true, is_human: true, account_id: "owner-fixture" };
     targets = { can_choose: true, default_runtime: "docker", targets: [

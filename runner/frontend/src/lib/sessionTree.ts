@@ -2,6 +2,11 @@ import type { SessionInfo } from '../types'
 
 export interface SessionTree { top: SessionInfo[]; childrenOf: ReadonlyMap<string, SessionInfo[]> }
 
+/** Archived parents leave the visible tree; their children must stand on their own. */
+export function hasLiveParent(session: SessionInfo, sessions: readonly SessionInfo[]): boolean {
+  return !!session.parent_session_id && sessions.some(parent => parent.id === session.parent_session_id && !parent.archived_at)
+}
+
 export function nestChildren(sessions: readonly SessionInfo[]): SessionTree {
   const visible = sessions.filter(session => !session.archived_at)
   const listed = new Map(visible.map(s => [s.id, s]))

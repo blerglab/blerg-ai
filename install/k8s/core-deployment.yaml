@@ -33,6 +33,12 @@ spec:
                 secretKeyRef:
                   name: blerg-secrets
                   key: DATABASE_URL_CORE
+            - name: BLERG_RUNNER_MAX_PARALLEL_CHILDREN
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MAX_PARALLEL_CHILDREN, optional: true }
+            - name: BLERG_RUNNER_MAX_CHILD_STARTS_PER_HOUR
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_MAX_CHILD_STARTS_PER_HOUR, optional: true }
             - name: BLERG_CORE_REGISTER_KEY
               valueFrom:
                 secretKeyRef:
@@ -46,6 +52,10 @@ spec:
                 secretKeyRef:
                   name: blerg-secrets
                   key: BLERG_CORE_INTERNAL_KEY
+            # Settings → Account → Your desktops reaches the runner's internal desktop
+            # routes through its in-cluster Service, with the key above.
+            - name: BLERG_CORE_RUNNER_URL
+              value: http://blerg-runner:8080
             # The board presents this to mint "Run as me" automation tokens; it
             # opens only POST /internal/tokens/board-automation(/revoke).
             - name: BLERG_CORE_BOARD_MINT_KEY
@@ -108,10 +118,10 @@ spec:
             # session attribution, never authorization.
             - name: BLERG_CORE_BEHIND_PROXY
               value: "true"
-            # Optional — the GitHub owner/repo marketplaces an account may
-            # register always-on plugins from (comma-separated; "*" = any).
-            # Absent = only anthropics/claude-plugins-official. Keep it equal
-            # to the runner's BLERG_RUNNER_PLUGIN_MARKETPLACES (configmap.yaml).
+            # Optional initial marketplace policy (owner/repo or codex:<marketplace>;
+            # comma-separated; "*" = any). Defaults enable official Anthropic and
+            # OpenAI Codex sources. Core seeds once; admin Settings wins thereafter.
+            # Servers and desktops receive saved policy; pods bootstrap from Core.
             - name: BLERG_CORE_PLUGIN_MARKETPLACES
               valueFrom:
                 configMapKeyRef: { name: blerg-config, key: BLERG_CORE_PLUGIN_MARKETPLACES, optional: true }

@@ -13,6 +13,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +34,7 @@ import (
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/updatehandoff"
 )
 
 const (
@@ -121,6 +123,12 @@ type OpenCall struct {
 	// Checked: Destructive was decided from the command itself (a record written since the
 	// deny-list). Without it (an older record) only Detail is left to match.
 	Checked bool `json:"checked,omitempty"`
+	// CommandHash binds the full input without persisting arbitrary shell text.
+	CommandHash string `json:"command_hash,omitempty"`
+	// UpdateSafe preserves the destructive-work decision made from the full input.
+	UpdateSafe    bool `json:"update_safe,omitempty"`
+	DaemonCommand bool `json:"daemon_command,omitempty"`
+	SignalCommand bool `json:"signal_command,omitempty"`
 }
 
 // destructive reports whether the call is one a restart must not let the agent pick up by
@@ -154,7 +162,7 @@ var restartDenyList = []*regexp.Regexp{
 // daemonCommand is the deny-list's entry for a command that can stop or restart the daemon
 // itself: the installer, blerg-up.sh, a service restart or stop. A restart notice names it as the
 // only kind of command that can have caused an unplanned restart (restartCauseWords).
-var daemonCommand = regexp.MustCompile(`(?i)\binstall\.sh\b|\bblerg-up\.sh\b|\bsystemctl\b[^;&|\n]*\b(restart|stop|kill)\b|\blaunchctl\b[^;&|\n]*\b(kickstart|stop|unload|bootout)\b|\bservice\s+\S+\s+(restart|stop)\b`)
+var daemonCommand = regexp.MustCompile(`(?i)\binstall\.sh\b|\bblerg-up\.sh\b|\bsystemctl\b[^;&|\n]*\b(restart|stop|kill)\b|\blaunchctl\b[^;&|\n]*\b(kickstart|stop|unload|bootout)\b|\bservice\s+\S+\s+(restart|stop)\b|\bmake\b[^;&|\n]*\b(install|restart)-daemon\b`)
 
 // rmSegment finds each rm invocation and its arguments, up to the next command separator.
 var rmSegment = regexp.MustCompile(`(?i)(^|[\s;&|(])rm(\s[^;&|\n]*)?`)
@@ -247,6 +255,10 @@ func openCallOf(callID, tool string, input json.RawMessage) OpenCall {
 		if json.Unmarshal(input, &in) == nil {
 			// The whole command, not the cut Detail, and never the description.
 			c.Destructive, c.Checked = destructiveCommand(in.Command), true
+			c.CommandHash = fmt.Sprintf("%x", sha256.Sum256([]byte(in.Command)))
+			c.UpdateSafe = safeUpdateCommand(in.Command)
+			c.DaemonCommand = daemonCommand.MatchString(in.Command)
+			c.SignalCommand = signalCommand.MatchString(in.Command)
 		}
 	}
 	return c
@@ -485,9 +497,10 @@ type recordKeeper struct {
 	dir    string
 	frozen *atomic.Bool // the host's: set when the daemon is stopping
 
-	mu      sync.Mutex
-	rec     AgentRecord
-	deleted bool
+	mu        sync.Mutex
+	rec       AgentRecord
+	deleted   bool
+	liveCalls map[string]OpenCall // complete calls observed in this process, never inferred from disk
 	// lastTurnErrored: the latest turn_done had stop reason "error" (see setTurnActive).
 	lastTurnErrored bool
 	// calls are the agent's own tool calls that have started and not returned (ToolRunning,
@@ -524,6 +537,7 @@ func (k *recordKeeper) update(change func(*AgentRecord) bool) {
 	if !change(&k.rec) {
 		return
 	}
+	k.observeUpdateLocked()
 	if err := writeAgentRecord(k.dir, k.rec); err != nil {
 		log.Printf("agent record %s: write: %v (the session would not survive a daemon restart)", k.rec.SessionID, err)
 	}
@@ -538,6 +552,7 @@ func (k *recordKeeper) delete() {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.deleted = true
+	updateObserver.Observe(updatehandoff.Request{SessionID: k.rec.SessionID})
 	deleteAgentRecord(k.dir, k.rec.SessionID)
 }
 
@@ -620,6 +635,14 @@ func (k *recordKeeper) toolCall(callID, tool string, input json.RawMessage, pare
 		return
 	}
 	k.update(func(r *AgentRecord) bool {
+		if k.liveCalls == nil {
+			k.liveCalls = make(map[string]OpenCall)
+		}
+		if open {
+			k.liveCalls[callID] = openCallOf(callID, tool, input)
+		} else {
+			delete(k.liveCalls, callID)
+		}
 		at := -1
 		for i, c := range k.calls {
 			if c.CallID == callID {

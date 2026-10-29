@@ -70,7 +70,11 @@ func TestClusterManagedCatalogUsesAccessOnlyAndFailsClosed(t *testing.T) {
 				t.Fatalf("managed access calls %d", calls)
 			}
 			if scenario != "usable" {
-				if !errors.Is(err, ErrClusterCodexCatalogAuth) || f.jobs != 0 || f.secrets != 0 {
+				want := ErrClusterCodexCatalog
+				if scenario == "reconnect" {
+					want = ErrClusterCodexCatalogAuth
+				}
+				if !errors.Is(err, want) || f.jobs != 0 || f.secrets != 0 {
 					t.Fatalf("unusable managed connection reached native probe: %v", err)
 				}
 				return

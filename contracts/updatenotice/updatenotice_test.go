@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,6 +32,7 @@ func TestNewer(t *testing.T) {
 		{"", "v0.5.0", false},
 		{"0.4.0", "v0.5.0+build", false},
 		{"0.4.0", "v0.-5.0", false},
+		{"0.4.0", "v00.5.0", false},
 		{"0.4.0", "v99999999999.0.0", false},
 	} {
 		if got := Newer(c.running, c.tag); got != c.want {
@@ -56,13 +58,13 @@ func TestValidReleaseURL(t *testing.T) {
 }
 
 func checkerFor(srv *httptest.Server, running string) *Checker {
-	return &Checker{APIBase: srv.URL, Repo: "o/r", Running: running, UserAgent: "blerg-core/test", Client: srv.Client()}
+	return &Checker{APIBase: srv.URL, Repo: DefaultRepo, Running: running, UserAgent: "blerg-core/test", Client: srv.Client()}
 }
 
 func serve(status int, body string, hits *atomic.Int32) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
-		if r.URL.Path != "/repos/o/r/releases/latest" || r.Header.Get("User-Agent") != "blerg-core/test" {
+		if r.URL.Path != "/repos/blerglab/blerg-ai/releases/latest" || r.Header.Get("User-Agent") != "blerg-core" {
 			http.Error(w, "bad", http.StatusBadRequest)
 			return
 		}
@@ -72,7 +74,7 @@ func serve(status int, body string, hits *atomic.Int32) *httptest.Server {
 }
 
 func TestCheck(t *testing.T) {
-	const good = `{"tag_name":"v0.4.1","html_url":"https://github.com/o/r/releases/tag/v0.4.1"}`
+	const good = `{"tag_name":"v0.4.1","html_url":"https://github.com/blerglab/blerg-ai/releases/tag/v0.4.1"}`
 	for _, c := range []struct {
 		name    string
 		status  int
@@ -80,14 +82,16 @@ func TestCheck(t *testing.T) {
 		wantVer string
 	}{
 		{"newer", 200, good, "0.4.1"},
-		{"equal", 200, `{"tag_name":"v0.4.0","html_url":"https://github.com/o/r/releases/tag/v0.4.0"}`, ""},
+		{"older", 200, `{"tag_name":"v0.3.9","html_url":"https://github.com/blerglab/blerg-ai/releases/tag/v0.3.9"}`, ""},
+		{"prerelease tag", 200, `{"tag_name":"v0.5.0-rc.1","html_url":"https://github.com/blerglab/blerg-ai/releases/tag/v0.5.0-rc.1"}`, ""},
+		{"equal", 200, `{"tag_name":"v0.4.0","html_url":"https://github.com/blerglab/blerg-ai/releases/tag/v0.4.0"}`, ""},
 		{"server error", 500, good, ""},
 		{"not found", 404, `{}`, ""},
 		{"garbage", 200, `nope`, ""},
 		{"non-github url", 200, `{"tag_name":"v0.4.1","html_url":"https://evil.example/x"}`, ""},
-		{"prerelease", 200, `{"tag_name":"v0.4.1","prerelease":true,"html_url":"https://github.com/o/r/releases/tag/v0.4.1"}`, ""},
-		{"draft", 200, `{"tag_name":"v0.4.1","draft":true,"html_url":"https://github.com/o/r/releases/tag/v0.4.1"}`, ""},
-		{"non-semver tag", 200, `{"tag_name":"nightly","html_url":"https://github.com/o/r/releases/tag/nightly"}`, ""},
+		{"prerelease", 200, `{"tag_name":"v0.4.1","prerelease":true,"html_url":"https://github.com/blerglab/blerg-ai/releases/tag/v0.4.1"}`, ""},
+		{"draft", 200, `{"tag_name":"v0.4.1","draft":true,"html_url":"https://github.com/blerglab/blerg-ai/releases/tag/v0.4.1"}`, ""},
+		{"non-semver tag", 200, `{"tag_name":"nightly","html_url":"https://github.com/blerglab/blerg-ai/releases/tag/nightly"}`, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var hits atomic.Int32
@@ -106,9 +110,9 @@ func TestCheck(t *testing.T) {
 	}
 }
 
-func TestCheckKeepsValueWhenGone(t *testing.T) {
+func TestCheckClearsValueWhenGone(t *testing.T) {
 	var hits atomic.Int32
-	srv := serve(200, `{"tag_name":"v0.4.1","html_url":"https://github.com/o/r/releases/tag/v0.4.1"}`, &hits)
+	srv := serve(200, `{"tag_name":"v0.4.1","html_url":"https://github.com/blerglab/blerg-ai/releases/tag/v0.4.1"}`, &hits)
 	ch := checkerFor(srv, "0.4.0")
 	ch.Check(context.Background())
 	if v, _ := ch.Latest(); v != "0.4.1" {
@@ -116,8 +120,8 @@ func TestCheckKeepsValueWhenGone(t *testing.T) {
 	}
 	srv.Close()
 	ch.Check(context.Background())
-	if v, _ := ch.Latest(); v != "0.4.1" {
-		t.Fatalf("after a failed check the last good value stays, got %q", v)
+	if v, _ := ch.Latest(); v != "" {
+		t.Fatalf("failed check retained notice: %q", v)
 	}
 }
 
@@ -136,7 +140,7 @@ func TestCheckTimeout(t *testing.T) {
 
 func TestOptOutAndUnknownRunningMakeNoRequest(t *testing.T) {
 	var hits atomic.Int32
-	srv := serve(200, `{"tag_name":"v9.9.9","html_url":"https://github.com/o/r/releases/tag/v9.9.9"}`, &hits)
+	srv := serve(200, `{"tag_name":"v9.9.9","html_url":"https://github.com/blerglab/blerg-ai/releases/tag/v9.9.9"}`, &hits)
 	defer srv.Close()
 	off := checkerFor(srv, "0.4.0")
 	off.Disabled = true
@@ -170,7 +174,7 @@ func TestEnvDefaults(t *testing.T) {
 
 func TestCoreFeed(t *testing.T) {
 	t.Setenv("BLERG_UPDATE_CHECK", "")
-	body := `{"latest_version":"0.4.1","latest_url":"https://github.com/o/r/releases/tag/v0.4.1"}`
+	body := `{"latest_version":"0.4.1","latest_url":"https://github.com/blerglab/blerg-ai/releases/tag/v0.4.1"}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/site" {
 			http.NotFound(w, r)
@@ -246,19 +250,19 @@ func TestInvalidRepoDisablesCheck(t *testing.T) {
 	}
 }
 
-func TestFailureKeepsLastGoodValue(t *testing.T) {
+func TestFailureClearsLastGoodValue(t *testing.T) {
 	status := 200
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(status)
-		_, _ = w.Write([]byte(`{"tag_name":"v0.4.1","html_url":"https://github.com/o/r/releases/tag/v0.4.1"}`))
+		_, _ = w.Write([]byte(`{"tag_name":"v0.4.1","html_url":"https://github.com/blerglab/blerg-ai/releases/tag/v0.4.1"}`))
 	}))
 	defer srv.Close()
 	ch := checkerFor(srv, "0.4.0")
 	ch.Check(context.Background())
 	status = 503
 	ch.Check(context.Background())
-	if v, _ := ch.Latest(); v != "0.4.1" {
-		t.Fatalf("a failed check dropped the known update: %q", v)
+	if v, _ := ch.Latest(); v != "" {
+		t.Fatalf("failed check retained notice: %q", v)
 	}
 	ch.Running = "0.4.1" // now up to date: a good answer clears it
 	status = 200
@@ -274,19 +278,19 @@ func TestOversizedAnswerIgnoredAndRedirectsNotFollowed(t *testing.T) {
 	defer other.Close()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/big/") {
-			_, _ = w.Write([]byte(`{"tag_name":"v0.4.1","html_url":"https://github.com/o/r/x","pad":"`))
+			_, _ = w.Write([]byte(`{"tag_name":"v0.4.1","html_url":"https://github.com/blerglab/blerg-ai/x","pad":"`))
 			_, _ = w.Write(make([]byte, maxBody+10))
 			return
 		}
 		http.Redirect(w, r, other.URL, http.StatusFound)
 	}))
 	defer srv.Close()
-	ch := &Checker{APIBase: srv.URL, Repo: "o/r", Running: "0.4.0", UserAgent: "t", Client: newClient(5 * time.Second)}
+	ch := &Checker{APIBase: srv.URL, Repo: DefaultRepo, Running: "0.4.0", UserAgent: "t", Client: newClient(5 * time.Second)}
 	ch.Check(context.Background())
 	if hits.Load() != 0 {
 		t.Fatal("redirect was followed")
 	}
-	ch.APIBase, ch.Repo = srv.URL, "big"
+	ch.APIBase = srv.URL + "/big"
 	ch.Check(context.Background())
 	if v, _ := ch.Latest(); v != "" {
 		t.Fatalf("reported %q", v)
@@ -315,5 +319,144 @@ func TestStartStopsOnCancelWithoutRequest(t *testing.T) {
 	}
 	if hits.Load() == 0 {
 		t.Fatal("Start never checked")
+	}
+}
+
+func TestAdminOffStopsRequestsAndNotice(t *testing.T) {
+	var hits atomic.Int32
+	srv := serve(200, `{"tag_name":"v0.5.1","html_url":"https://github.com/blerglab/blerg-ai/releases/tag/v0.5.1"}`, &hits)
+	defer srv.Close()
+	ch := checkerFor(srv, "0.5.0")
+	enabled := true
+	ch.Allowed = func(context.Context) bool { return enabled }
+	ch.Check(t.Context())
+	if v, _ := ch.Latest(); v != "0.5.1" {
+		t.Fatal("expected notice")
+	}
+	enabled = false
+	if v, _ := ch.Latest(); v != "" {
+		t.Fatal("disabled notice visible")
+	}
+	ch.Check(t.Context())
+	if hits.Load() != 1 {
+		t.Fatalf("disabled check made request: %d", hits.Load())
+	}
+	enabled = true
+	if v, _ := ch.Latest(); v != "" {
+		t.Fatal("disabled check retained stale notice")
+	}
+}
+
+func TestCoreFeedCachesAndClearsOnFailure(t *testing.T) {
+	t.Setenv("BLERG_UPDATE_CHECK", "true")
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.URL.Path != "/api/site" {
+			t.Error("feed requested unexpected path")
+		}
+		_, _ = w.Write([]byte(`{"latest_version":"0.5.1","latest_url":"https://github.com/blerglab/blerg-ai/releases/tag/v0.5.1"}`))
+	}))
+	defer srv.Close()
+	f := NewCoreFeed(srv.URL)
+	f.refresh()
+	for range 5 {
+		if v, _ := f.Latest(); v != "0.5.1" {
+			t.Fatal("feed lost successful answer")
+		}
+	}
+	if hits.Load() != 1 {
+		t.Fatal("cached reads repeated network check")
+	}
+	srv.Close()
+	f.refresh()
+	if v, _ := f.Latest(); v != "" {
+		t.Fatal("unreachable core left a stale notice")
+	}
+}
+
+func TestReleaseIntegrityAndPrivateBuild(t *testing.T) {
+	for _, u := range []string{
+		"https://github.com/attacker/fake/releases/tag/v0.5.1",
+		"https://github.com/blerglab/blerg-ai/releases/tag/v0.1.0",
+		"https://github.com/login", "https://github.com/blerglab/blerg-ai/releases/tag/v0.5.1?x=1",
+		"https://github.com/blerglab/blerg-ai/releases/tag/v0.5.1#x",
+		"https://github.com/blerglab/blerg-ai/releases/tag/%760.5.1",
+	} {
+		t.Run(u, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"tag_name":"v0.5.1","html_url":"` + u + `"}`))
+			}))
+			defer srv.Close()
+			c := NewChecker("0.5.0", "private-custom-build-xyz")
+			c.APIBase = srv.URL
+			c.Check(t.Context())
+			if v, _ := c.Latest(); v != "" {
+				t.Errorf("untrusted release URL accepted: %s", u)
+			}
+		})
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Header.Get("User-Agent"), "private-custom-build-xyz") {
+			t.Error("custom build label leaked")
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	c := NewChecker("0.5.0", "private-custom-build-xyz")
+	c.APIBase = srv.URL
+	c.Check(t.Context())
+	t.Setenv("BLERG_UPDATE_REPO", "attacker/fake")
+	if !NewChecker("0.5.0", "x").Disabled {
+		t.Error("alternate repository enabled")
+	}
+}
+
+func TestExpiredFeedWaitsForSharedRefresh(t *testing.T) {
+	t.Setenv("BLERG_UPDATE_CHECK", "true")
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	f := NewCoreFeed(srv.URL)
+	f.version = "0.5.1"
+	f.url = "https://github.com/blerglab/blerg-ai/releases/tag/v0.5.1"
+	f.fetchedAt = time.Now().Add(-24 * time.Hour)
+	if v, _ := f.Latest(); v != "" {
+		t.Error("first expired read returned stale notice")
+	}
+	if hits.Load() != 1 {
+		t.Error("read did not await refresh")
+	}
+}
+
+func TestColdFeedSharesRefreshAndReturnsFetchedNotice(t *testing.T) {
+	t.Setenv("BLERG_UPDATE_CHECK", "true")
+	var hits atomic.Int32
+	started, release := make(chan struct{}), make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if hits.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		_, _ = w.Write([]byte(`{"latest_version":"0.5.1","latest_url":"https://github.com/blerglab/blerg-ai/releases/tag/v0.5.1"}`))
+	}))
+	defer srv.Close()
+	f := NewCoreFeed(srv.URL)
+	var wg sync.WaitGroup
+	for range 100 {
+		wg.Go(func() {
+			if v, _ := f.Latest(); v != "0.5.1" {
+				t.Errorf("cold read did not await answer: %q", v)
+			}
+		})
+	}
+	<-started
+	close(release)
+	wg.Wait()
+	if hits.Load() != 1 {
+		t.Errorf("shared refresh made %d requests", hits.Load())
 	}
 }

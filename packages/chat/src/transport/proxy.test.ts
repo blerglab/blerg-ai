@@ -85,6 +85,32 @@ describe('createProxyTransport subscribe', () => {
     expect(t.connected()).toBe(false)
   })
 
+  it("labels every event with the session it was asked for: a broker's id differs from the runner's", async () => {
+    // The board proxies its own session id; the runner's events carry the runner's id for the same session.
+    const { r, t } = make()
+    r.on(/\/events\/live/, () => sse([
+      frame('agent_event', { type: 'agent_event', session_id: 'runner-1', client_event_id: 'c1', seq: 1, ts: 't', kind: 'user_message', payload: { text: 'hi', source: 'user' } }, 1),
+      frame('agent_event', { type: 'agent_event', session_id: 'runner-1', client_event_id: 'd', ts: 't', kind: 'assistant_text', payload: { text: 'He', done: false }, transient: true }),
+    ], true))
+    r.on(/\/events\?before_seq/, () => json({ events: [{ session_id: 'runner-1', seq: 0, ts: 't', kind: 'turn_done', payload: {} }], has_older: false }))
+    const h = handlers()
+    const off = t.subscribe('board-1', {}, h)
+    await until(() => h.onEvent.mock.calls.length === 1)
+    expect(h.onEvent.mock.calls[0][0]).toMatchObject({ seq: 1, kind: 'user_message', session_id: 'board-1' })
+    expect(h.onStreaming).toHaveBeenCalledWith('He')
+    const older = await t.loadOlder('board-1', 1, 10)
+    expect(older.events.map(e => e.session_id)).toEqual(['board-1'])
+    off()
+  })
+
+  it('leaves out where a session runs when the runner withholds it ("none")', async () => {
+    const { r, t } = make()
+    r.on(/\/sessions\/s1$/, () => json({ lifecycle: 'running', engine: 'claude', runtime: 'none', started_at: 't' }))
+    await expect(t.session('s1')).resolves.not.toHaveProperty('runtime', 'none')
+    r.on(/\/sessions\/s2$/, () => json({ lifecycle: 'running', engine: 'claude', runtime: 'docker', started_at: 't' }))
+    await expect(t.session('s2')).resolves.toMatchObject({ runtime: 'docker' })
+  })
+
   it('fills in the fields a bare runner event lacks', async () => {
     const { r, t } = make()
     r.on(/\/events\/live/, () => sse([frame('agent_event', { seq: 3, ts: 't', kind: 'turn_done', payload: {} }, 3)], true))

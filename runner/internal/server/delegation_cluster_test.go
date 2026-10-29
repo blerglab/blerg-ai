@@ -31,8 +31,8 @@ func newClusterDelegFx(t *testing.T) *clusterDelegFx {
 	t.Helper()
 	fx := newDelegFx(t)
 	f := &fakeK8s{
-		credentialFetchResponses: map[string][]byte{"owner-1:claude": []byte("oauth-token"), "owner-1:codex": []byte(`{"tokens":{}}`)},
-		secrets:                  map[string]map[string]string{"blerg-runner-agent": {"CLAUDE_CODE_OAUTH_TOKEN": b64("x"), "CODEX_AUTH_JSON": b64("{}")}},
+		credentialFetchResponses: map[string][]byte{"owner-1:claude": []byte("oauth-token"), "owner-1:codex": []byte(`{"tokens":{"access_token":"fixture-access-private"}}`)},
+		secrets:                  map[string]map[string]string{"blerg-runner-agent": {"CLAUDE_CODE_OAUTH_TOKEN": b64("x"), "CODEX_AUTH_JSON": b64(`{"OPENAI_API_KEY":"fixture-api-private"}`)}},
 	}
 	jm := newTestJobManager(t, f)
 	jm.MaxSessions = 20
@@ -368,7 +368,7 @@ func TestFailedClusterChildStartDoesNotCountAsAStart(t *testing.T) {
 		t.Fatalf("start with a refused Job = %d %v, want a 5xx", code, out)
 	}
 	ctx := context.Background()
-	if n, err := db.CountParentStarts(ctx, cx.pool, cx.cparent); err != nil || n != 0 {
+	if n, _, err := db.ParentStartWindow(ctx, cx.pool, cx.cparent, time.Now().Add(-time.Hour), "", 20); err != nil || n != 0 {
 		t.Fatalf("parent starts = %d %v, want 0", n, err)
 	}
 	if n, _, err := db.AccountStartsSince(ctx, cx.pool, "owner-1", time.Now().Add(-time.Hour)); err != nil || n != 0 {

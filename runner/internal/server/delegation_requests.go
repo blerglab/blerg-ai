@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/idempotency"
 )
 
 const (
@@ -39,7 +40,7 @@ const (
 // (keys "dr:"+id). It is not the parent's scope (session_delegate:<parent>), so a key the parent
 // chooses can never alias a decided start, and the reverse.
 func delegateDecideScope(parentID string) string {
-	return sessionDelegateKind + "_decide:" + parentID
+	return idempotency.Scope(sessionDelegateKind+"_decide", parentID)
 }
 
 // delegationCaller is who called a request route: a session (its own token) or a person (a browser
@@ -561,7 +562,7 @@ func (a *API) startDecidedChild(ctx context.Context, r db.DelegationRequest, cs 
 			// The decider is the owner, signed in now: their session is the newest proof a later
 			// rule or grant start of this parent's cluster children is authorized with.
 			recordLaunchAuthSession(ctx, a.dbPool, parent.ID, r.DecidedSid)
-		} else if host.dc = a.hub.GetHostDaemon(parent.DaemonID); host.dc == nil {
+		} else if host.dc = a.hub.ownedHostDaemon(ctx, derefOrEmpty(parent.SpawningAccountID), parent.DaemonID); host.dc == nil {
 			startError = msgDelegateDisconnected
 			return nil
 		}
@@ -598,6 +599,14 @@ func (a *API) storedStartProblem(ctx context.Context, parent *db.SessionRow, hos
 	// owner/name, and validateChildStart below checks the start with its provider).
 	recheck := cs
 	recheck.Provider = ""
+	recheck.WorkspaceLaunch = ""
+	if cs.WorkspaceLaunch != "" {
+		w, err := db.GetSessionWorkspace(ctx, a.dbPool, parent.ID)
+		if err != nil || w == nil || w.Manifest == nil || w.Manifest.LaunchGeneration != cs.WorkspaceLaunch {
+			return "parent workspace selection is unavailable or changed"
+		}
+		host.workspace = w.Manifest
+	}
 	raw, err := json.Marshal(recheck)
 	if err != nil {
 		return msgStartFailed

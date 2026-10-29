@@ -154,7 +154,8 @@ function makeMemoryStorage(): Storage {
   }
 }
 
-const CLUSTER_ON = { configured: true, available_engines: ['claude'], git_configured: false }
+// An affirmative fixture for future enabled-cluster UI; production status is OFF.
+const CLUSTER_ON = { configured: true, available_engines: ['claude'], git_configured: false, workspace_capabilities: { manifest_version: 2, shell_version: 1, cluster: true } }
 
 // What the sheet last knew lives in module memory (lib/launchCache): every
 // test below starts cold unless it primes the cache itself.
@@ -423,7 +424,7 @@ describe('LaunchSheet — Run column defaults', () => {
     await renderSheet({ clusterStatus: CLUSTER_ON })
     expect(screen.getByTestId('runtime-cluster')).toHaveAttribute('aria-checked', 'true')
     expect(screen.getByTestId('runtime-docker')).toHaveAttribute('aria-checked', 'false')
-    expect(screen.getByTestId('kind-agent')).toHaveAttribute('aria-checked', 'true')
+    expect(screen.queryByTestId('kind-agent')).not.toBeInTheDocument()
     // A cluster pod is throwaway — no acknowledgement to read.
     expect(screen.queryByTestId('agent-ack')).not.toBeInTheDocument()
   })
@@ -431,7 +432,7 @@ describe('LaunchSheet — Run column defaults', () => {
   it('defaults to the local sandbox when there is no cluster but the daemon has a sandbox image', async () => {
     await renderSheet()
     expect(screen.getByTestId('runtime-docker')).toHaveAttribute('aria-checked', 'true')
-    expect(screen.getByTestId('kind-agent')).toHaveAttribute('aria-checked', 'true')
+    expect(screen.queryByTestId('kind-agent')).not.toBeInTheDocument()
     expect(screen.queryByTestId('agent-ack')).not.toBeInTheDocument()
   })
 
@@ -445,17 +446,17 @@ describe('LaunchSheet — Run column defaults', () => {
     await waitFor(() => expect(screen.getByText(/Launch/).closest('button')).not.toBeDisabled())
   })
 
-  it('keeps a runtime the user picked when kind and engine change around it', async () => {
+  it('keeps a runtime the user picked when the engine changes', async () => {
     await renderSheet({ clusterStatus: CLUSTER_ON })
     fireEvent.click(screen.getByTestId('runtime-daemon'))
-    fireEvent.click(screen.getByTestId('kind-agent'))
     fireEvent.click(await screen.findByTestId('engine-codex'))
     expect(screen.getByTestId('runtime-daemon')).toHaveAttribute('aria-checked', 'true')
   })
 
-  it('leaves nothing collapsed — no Advanced disclosure survives', async () => {
+  it('keeps runtime choices visible and uses disclosures for optional explanations', async () => {
     await renderSheet()
-    expect(document.querySelector('details')).toBeNull()
+    expect(screen.getByTestId('runtime-docker')).toBeVisible()
+    expect(screen.getByText('Sandbox details').closest('details')).not.toHaveAttribute('open')
     expect(screen.queryByText('Advanced')).not.toBeInTheDocument()
   })
 
@@ -597,7 +598,7 @@ describe('LaunchSheet — runtime and kind on the wire', () => {
     fireEvent.change(await within(dialog).findByRole('combobox', { name: 'Access to Product' }), { target: { value: 'read' } })
     expect(within(dialog).getByTestId('pm-summary')).toHaveTextContent('Grant 2')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Permissions' })).toBeNull())
     expect(screen.getByRole('button', { name: 'Permissions… (2)' })).toBeInTheDocument()
     // Held until launch: reopening shows them selected, and Cancel keeps them.
     fireEvent.click(screen.getByRole('button', { name: 'Permissions… (2)' }))
@@ -793,7 +794,7 @@ describe('LaunchSheet — Run column rules', () => {
     expect(box).not.toBeChecked()
     expect(screen.getByLabelText(/Unattended/)).toBe(box)
     expect(screen.getByTestId('launch-unattended')).toHaveTextContent(
-      'Nobody is watching: the agent decides and finishes on its own instead of discussing and waiting for you.',
+      'Decide and finish without waiting for you.',
     )
     await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
@@ -1028,7 +1029,7 @@ describe('LaunchSheet — cluster credential preflight', () => {
     fireEvent.click(screen.getByText(/Launch/))
 
     await waitFor(() => expect(captureBody.value).toBeDefined())
-    expect(captureBody.value!.repo).toBe('org/myrepo')
+    expect(captureBody.value!.selection).toEqual({ members: [], hosted: [{ provider: 'github', full_name: 'org/myrepo' }] })
     expect(captureBody.value!.runtime).toBe('cluster')
   })
 
@@ -1043,21 +1044,23 @@ describe('LaunchSheet — cluster credential preflight', () => {
     name: 'scratchpad', full_name: 'scratchpad', checked_out: ['workstation'], is_local: true, cloneable: false,
   }
 
-  it('shows and sends the remote org/name for a local-only folder on cluster runtime', async () => {
-    await renderClusterAgent({
-      clusterStatus: CLUSTER_ON,
-      myCreds: { engines: ['claude'], git: true },
-      extraRepos: [LOCAL_KNOWN],
-    })
-    expect(screen.getByTestId('repo-remote')).toHaveTextContent('example-org/example-repo')
-    fireEvent.click(screen.getByText('entertainment'))
-    expect(screen.queryByTestId('cluster-repo-unresolved')).not.toBeInTheDocument()
-    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
+  it('keeps cluster workspace OFF while retaining a scalar hosted launch', async () => {
+    await renderClusterAgent({ clusterStatus: { ...CLUSTER_ON, workspace_capabilities: {} }, myCreds: { engines: ['claude'], git: true }, extraRepos: [LOCAL_KNOWN] })
+    expect(screen.queryByRole('group', { name: 'Hosted repositories' })).toBeNull()
+    expect(screen.queryByText('entertainment')).toBeNull()
+    expect(screen.getByText('Workspace sessions and owner shells are not enabled for this runtime.')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('myrepo'))
     fireEvent.click(screen.getByText(/Launch/))
-
     await waitFor(() => expect(captureBody.value).toBeDefined())
-    expect(captureBody.value!.repo).toBe('example-org/example-repo')
-    expect(captureBody.value!.runtime).toBe('cluster')
+    expect(captureBody.value!.selection).toBeUndefined()
+    expect(captureBody.value!.repo).toBe('org/myrepo')
+  })
+
+  it('keeps local origins separate from the authorized hosted cluster list', async () => {
+    await renderClusterAgent({ clusterStatus: CLUSTER_ON, myCreds: { engines: ['claude'], git: true }, extraRepos: [LOCAL_KNOWN] })
+    expect(screen.queryByText('entertainment')).toBeNull()
+    expect(screen.queryByText('example-org/example-repo')).toBeNull()
+    expect(screen.getByRole('group', { name: 'Hosted repositories' })).toBeTruthy()
   })
 
   it('labels a GitLab repository and sends its provider with a cluster launch', async () => {
@@ -1073,8 +1076,7 @@ describe('LaunchSheet — cluster credential preflight', () => {
     await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
-    expect(captureBody.value!.repo).toBe('example-group/lab-tool')
-    expect(captureBody.value!.provider).toBe('gitlab')
+    expect(captureBody.value!.selection).toEqual({ members: [], hosted: [{ provider: 'gitlab', full_name: 'example-group/lab-tool' }] })
   })
 
   it('blocks a local-only folder with no GitHub remote on cluster runtime and asks for org/name', async () => {
@@ -1083,15 +1085,7 @@ describe('LaunchSheet — cluster credential preflight', () => {
       myCreds: { engines: ['claude'], git: true },
       extraRepos: [LOCAL_UNKNOWN],
     })
-    fireEvent.click(screen.getByText('scratchpad'))
-
-    expect(screen.getByTestId('cluster-repo-unresolved')).toHaveTextContent(
-      'This folder has no GitHub or GitLab remote the cluster can clone — enter org/name',
-    )
-    const launch = screen.getByText(/Launch/).closest('button')!
-    expect(launch).toBeDisabled()
-    expect(screen.getByTestId('launch-blocked-reason')).toHaveTextContent('enter org/name')
-    fireEvent.click(launch)
+    expect(screen.queryByText('scratchpad')).toBeNull()
     expect(captureBody.value).toBeUndefined()
 
     // Resolving it through the existing free-text org/name entry unblocks.
@@ -1918,7 +1912,7 @@ describe('LaunchSheet — No repository', () => {
     await renderSheet()
     expect(screen.getByTestId('runtime-docker')).toHaveAttribute('aria-checked', 'true')
     expect(screen.getByTestId('no-repo-plan')).toHaveTextContent(
-      `+ Will create a scratch folder named ${SCRATCH} in /repos (kept after the session; never listed as a repository)`,
+      `Keeps your files in /repos/${SCRATCH}.`,
     )
     const body = await launch()
     expect(body.no_repo).toBe(true)
@@ -1934,7 +1928,7 @@ describe('LaunchSheet — No repository', () => {
     await renderSheet({ daemon: { sandbox_available: false, repos_root: '/home/dev/code' } })
     expect(screen.getByTestId('runtime-daemon')).toHaveAttribute('aria-checked', 'true')
     expect(screen.getByTestId('no-repo-plan')).toHaveTextContent(
-      `+ Will create a scratch folder named ${SCRATCH} in /home/dev/code`,
+      `Keeps your files in /home/dev/code/${SCRATCH}.`,
     )
     fireEvent.click(screen.getByTestId('agent-ack'))
     const body = await launch()
@@ -1945,7 +1939,7 @@ describe('LaunchSheet — No repository', () => {
     await renderSheet({ clusterStatus: CLUSTER_ON, myCreds: { engines: ['claude'], git: false } })
     expect(screen.getByTestId('runtime-cluster')).toHaveAttribute('aria-checked', 'true')
     const plan = screen.getByTestId('no-repo-plan')
-    expect(plan).toHaveTextContent("Runs in an empty, throwaway workspace — nothing is kept after the session's pod ends.")
+    expect(plan).toHaveTextContent("Uses an empty workspace that is deleted when the pod ends.")
     expect(plan.textContent).not.toMatch(/\/|\.scratch|folder/)
     expect(screen.queryByTestId('scratch-rename')).not.toBeInTheDocument()
     // Nothing is cloned, so the no-git-credential warning does not apply.
@@ -1980,7 +1974,7 @@ describe('LaunchSheet — No repository', () => {
     const input = screen.getByTestId('scratch-name-input')
     expect(input).toHaveValue('session-8080808080808080')
     fireEvent.change(input, { target: { value: 'my-notes' } })
-    expect(screen.getByTestId('no-repo-plan')).toHaveTextContent('+ Will create a scratch folder named .scratch-my-notes in /repos')
+    expect(screen.getByTestId('no-repo-plan')).toHaveTextContent('Keeps your files in /repos/.scratch-my-notes.')
     fireEvent.change(input, { target: { value: '../escape' } })
     expect(screen.getByText('Launch Session').closest('button')).toBeDisabled()
     expect(screen.getByTestId('launch-blocked-reason')).toHaveTextContent('must be 1-64 letters, digits')
@@ -1996,9 +1990,9 @@ describe('LaunchSheet — No repository', () => {
         { id: 'd2', name: 'beta', mode: 'local', repos_root: '/repos/b', status: 'connected', sandbox_available: true },
       ],
     })
-    expect(screen.getByTestId('no-repo-plan')).toHaveTextContent(`${SCRATCH} in /repos/a`)
+    expect(screen.getByTestId('no-repo-plan')).toHaveTextContent(`/repos/a/${SCRATCH}`)
     fireEvent.click(screen.getByTestId('daemon-d2'))
-    expect(screen.getByTestId('no-repo-plan')).toHaveTextContent(`${SCRATCH} in /repos/b`)
+    expect(screen.getByTestId('no-repo-plan')).toHaveTextContent(`/repos/b/${SCRATCH}`)
   })
 })
 
@@ -2030,6 +2024,8 @@ describe('LaunchSheet MCP servers', () => {
     )
     await screen.findByText('Repository')
     await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
+    const connections = screen.queryByText(/Choose connections/)
+    if (connections) fireEvent.click(connections)
   }
 
   async function launch() {
@@ -2338,13 +2334,13 @@ describe('LaunchSheet board access', () => {
     expect(screen.queryByLabelText('Board')).not.toBeInTheDocument()
     expect((await submit()).board_id).toBeUndefined()
   })
-  it('remembers the board on reopening and revalidates access', async () => {
+  it('starts every launch with no board, even after one was picked (#302)', async () => {
     const view = await open()
     fireEvent.change(await screen.findByLabelText('Board'), { target: { value: 'board-1' } })
     view.unmount()
     await open()
-    expect(await screen.findByLabelText('Board')).toHaveValue('board-1')
-    expect((await submit()).board_id).toBe('board-1')
+    expect(await screen.findByLabelText('Board')).toHaveValue('')
+    expect((await submit()).board_id).toBeUndefined()
   })
   it('keeps a selected board when the target cannot carry it and requires an explicit clear', async () => {
     await open()
@@ -2385,19 +2381,17 @@ describe('LaunchSheet board access', () => {
     expect(await screen.findByRole('button', { name: 'Retry boards' })).toBeInTheDocument()
     expect((await submit()).board_id).toBeUndefined()
   })
-  it('does not silently drop an inaccessible remembered board', async () => {
-    localStorage.setItem('blerg.launch.board', 'board-gone')
+  // #302: a board picked for one launch gave the next, unrelated session Full access to it.
+  it('never pre-selects a board, and forgets one an older version remembered', async () => {
+    localStorage.setItem('blerg.launch.board', 'board-1')
     await open()
-    expect(screen.getByRole('button', { name: /Launch/ })).toBeDisabled()
-    fireEvent.change(await screen.findByLabelText('Board'), { target: { value: '' } })
+    expect(await screen.findByLabelText('Board')).toHaveValue('')
+    expect(localStorage.getItem('blerg.launch.board')).toBeNull()
     expect((await submit()).board_id).toBeUndefined()
   })
-  it('holds an unverified remembered choice after failure until cleared', async () => {
-    localStorage.setItem('blerg.launch.board', 'board-1')
-    await open({ sessionBoards: 'fail' })
-    await screen.findByRole('button', { name: 'Retry boards' })
-    expect(screen.getByRole('button', { name: /Launch/ })).toBeDisabled()
-    fireEvent.click(screen.getByRole('button', { name: 'Clear board' }))
-    expect((await submit()).board_id).toBeUndefined()
+  it('does not remember a board picked for one launch', async () => {
+    await open()
+    fireEvent.change(await screen.findByLabelText('Board'), { target: { value: 'board-1' } })
+    expect(localStorage.getItem('blerg.launch.board')).toBeNull()
   })
 })

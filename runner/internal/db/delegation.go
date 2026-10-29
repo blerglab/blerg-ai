@@ -585,16 +585,30 @@ func CountRunningChildren(ctx context.Context, pool *pgxpool.Pool, parentID stri
 	return countOne(ctx, pool, `SELECT count(*)::int FROM sessions WHERE parent_session_id = $1::uuid AND ended_at IS NULL`, parentID)
 }
 
-// CountParentStarts counts the parent's starts: its children plus its pending requests, and its
-// allowed requests whose child is not recorded yet (between the decision and the start) or never
-// started (start_error), so they cannot be retried past the limit. A child whose launch failed
-// (end_reason start_failed: nothing ever ran) is not a start.
-func CountParentStarts(ctx context.Context, pool *pgxpool.Pool, parentID string) (int, error) {
-	return countOne(ctx, pool, `
-		SELECT (SELECT count(*) FROM sessions WHERE parent_session_id = $1::uuid
-		            AND end_reason IS DISTINCT FROM '`+EndReasonStartFailed+`')
-		     + (SELECT count(*) FROM delegation_requests WHERE parent_session_id = $1::uuid
-		            AND (status = 'pending' OR (status = 'allowed' AND child_session_id IS NULL)))`, parentID)
+// ParentStartWindow counts a parent's starts and approval attempts in the rolling
+// window. Linked requests count once, via the child; failed launches do not count.
+// Pending, denied, expired and allowed-but-unstarted requests consume rate budget
+// too, preventing approval loops. excludeRequest is the approval currently being
+// started, which already reserved its slot. The returned timestamp is the start
+// whose expiry leaves room under limit, even if configuration lowered the limit.
+func ParentStartWindow(ctx context.Context, pool *pgxpool.Pool, parentID string, since time.Time, excludeRequest string, limit int) (int, *time.Time, error) {
+	var n int
+	var freeingStart *time.Time
+	err := pool.QueryRow(ctx, `
+		WITH starts AS (
+		  SELECT started_at AS at FROM sessions
+		   WHERE parent_session_id = $1::uuid AND started_at > $2
+		     AND end_reason IS DISTINCT FROM '`+EndReasonStartFailed+`'
+		  UNION ALL
+		  SELECT created_at FROM delegation_requests
+		   WHERE parent_session_id = $1::uuid AND created_at > $2
+		     AND id::text <> $3 AND (status <> 'allowed' OR child_session_id IS NULL)
+		)
+		SELECT (SELECT count(*)::int FROM starts),
+		       (SELECT at FROM starts ORDER BY at
+		        OFFSET greatest((SELECT count(*) FROM starts) - $4, 0) LIMIT 1)
+	`, parentID, since, excludeRequest, limit).Scan(&n, &freeingStart)
+	return n, freeingStart, err
 }
 
 // CountAccountRunningChildren counts the children of the account's sessions that have not ended.

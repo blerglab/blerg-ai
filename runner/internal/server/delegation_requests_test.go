@@ -13,6 +13,7 @@ import (
 
 	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/idempotency"
 )
 
 // ask posts body for parent under a new key and returns the stored request's id (202 expected).
@@ -272,7 +273,7 @@ func TestDecideStartsFromStoredRequest(t *testing.T) {
 		delegateDecideScope(fx.parent), "dr:"+id); n != 1 {
 		t.Fatalf("decide scope records %d", n)
 	}
-	if n := fx.count(`SELECT count(*)::int FROM runner_idempotency WHERE scope = $1`, sessionDelegateKind+":"+fx.parent); n != 0 {
+	if n := fx.count(`SELECT count(*)::int FROM runner_idempotency WHERE scope = $1`, idempotency.Scope(sessionDelegateKind, fx.parent)); n != 0 {
 		t.Fatalf("the parent's own scope got %d records", n)
 	}
 }
@@ -325,6 +326,7 @@ func TestDecideStartFailureIsRecorded(t *testing.T) {
 }
 
 func TestDecideStartRechecksTheParentAndLimits(t *testing.T) {
+	t.Setenv("BLERG_RUNNER_MAX_CHILD_STARTS_PER_HOUR", "20")
 	fx := newDelegFx(t)
 	ctx := context.Background()
 	owner := fx.human("owner-1")
@@ -351,10 +353,10 @@ func TestDecideStartRechecksTheParentAndLimits(t *testing.T) {
 	}
 	fx.noSpawn()
 
-	// The request being decided is not counted twice: at maxStartsPerParent-1 children plus this
+	// The request being decided is not counted twice: at 20-1 children plus this
 	// request, the start still goes through.
 	p3, p3Tok := fx.session(sessOpts{owner: "owner-1"})
-	for i := 0; i < maxStartsPerParent-1; i++ {
+	for i := 0; i < 20-1; i++ {
 		c := fx.childOf(p3)
 		if _, err := fx.pool.Exec(ctx, `UPDATE sessions SET ended_at = now(), status = 'stopped' WHERE id = $1::uuid`, c); err != nil {
 			t.Fatal(err)

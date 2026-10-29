@@ -85,10 +85,10 @@ func TestWorkspaceFileAdversarialIntermediateSecretBeforeParentTraversal(t *test
 	if got := readWorkspaceFile(root, "alias.md", workspaceFileLimits{}); got.OK || got.ErrorCode != "forbidden" || got.ContentB64 != "" {
 		t.Fatalf("protected intermediate target erased by cleaning: %+v", got)
 	}
-	// A confined parent traversal in a benign symlink target remains usable.
+	// v3 refuses every symlink, including confined chains.
 	workspaceLink(t, "../public.md", filepath.Join(root, "docs", "safe.md"))
 	workspaceLink(t, "docs/safe.md", filepath.Join(root, "safe-chain.md"))
-	if got := readWorkspaceFile(root, "safe-chain.md", workspaceFileLimits{}); !got.OK {
-		t.Fatalf("ordinary confined link chain rejected: %+v", got)
+	if got := readWorkspaceFile(root, "safe-chain.md", workspaceFileLimits{}); got.OK || got.ErrorCode != "forbidden" {
+		t.Fatalf("ordinary confined link chain was followed: %+v", got)
 	}
 }

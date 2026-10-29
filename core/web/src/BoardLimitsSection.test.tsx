@@ -90,7 +90,7 @@ describe("Board call limits", () => {
     ).toHaveValue(8);
     expect(screen.getByText(/Default 100; 10 to 10000/)).toBeInTheDocument();
     expect(
-      screen.getByText(/runners use the other limits within 60 seconds/i),
+      screen.getByText("Limit how often sessions can use boards across this install."),
     ).toBeInTheDocument();
     fireEvent.change(perMinute, { target: { value: "1200" } });
     fireEvent.click(screen.getByRole("button", { name: "Save limits" }));

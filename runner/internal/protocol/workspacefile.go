@@ -1,8 +1,9 @@
 package protocol
 
-// ReadWorkspaceFile asks the current session daemon to read one relative workspace file.
+// ReadWorkspaceFile asks the current session daemon to read one authorized workspace file.
 // It never launches or resumes an engine.
 type ReadWorkspaceFile struct {
+	WorkspaceRuntimeRef
 	Type      string `json:"type"`
 	RequestID string `json:"request_id"`
 	SessionID string `json:"session_id"`
@@ -11,6 +12,7 @@ type ReadWorkspaceFile struct {
 
 // WorkspaceFileResult is a bounded, owner-only request reply, never a transcript event.
 type WorkspaceFileResult struct {
+	WorkspaceRuntimeRef
 	Type        string `json:"type"`
 	RequestID   string `json:"request_id"`
 	SessionID   string `json:"session_id"`
@@ -24,4 +26,6 @@ type WorkspaceFileResult struct {
 	Mtime       string `json:"mtime"`
 	ErrorCode   string `json:"error_code,omitempty"`
 	Error       string `json:"error,omitempty"`
+	// RequestedPath binds an absolute reference to the normalized relative Path.
+	RequestedPath string `json:"requested_path,omitempty"`
 }

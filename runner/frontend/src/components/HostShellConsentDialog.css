@@ -1,0 +1,18 @@
+.shell-consent-overlay { z-index: 1100; }
+.shell-consent { width: min(clamp(560px, 35vw, 900px), 100%); }
+.shell-consent .caps-header { padding: 20px 24px 4px; }
+.shell-consent-body { min-height: 0; overflow-y: auto; padding: 0 24px 16px; }
+.shell-consent-body:focus-visible { outline: 2px solid var(--chalk); outline-offset: -3px; }
+.shell-consent-body p { color: var(--fog); line-height: 1.6; }
+.shell-consent-brand { font-weight: 600; color: var(--chalk); }
+.shell-consent dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 14px 24px; margin: 24px 0 8px; }
+.shell-consent dt { color: var(--fog-dim); }
+.shell-consent dd { margin: 0; overflow-wrap: anywhere; font-family: var(--mono); }
+.shell-consent-actions { justify-content: flex-end; }
+/* The dialog's default choice is focused by script, which a browser does not count as focus-visible
+   after a mouse click: the focused choice always shows its ring. */
+.shell-consent-actions .pm-button:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 599px) {
+  .shell-consent dl { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .shell-consent dd { margin-bottom: 12px; }
+}

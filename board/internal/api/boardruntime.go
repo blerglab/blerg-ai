@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 
 	"github.com/blerglab/blerg-ai/board/internal/auth"
 	"github.com/blerglab/blerg-ai/board/internal/db"
@@ -39,21 +40,25 @@ func targetAvailable(target runTarget, options runner.LaunchOptions) bool {
 	return false
 }
 
-// defaultDesktop is the owner rule for an install with no cluster runtime: a board runs on a
-// desktop with no setting needed. One desktop is that desktop. With several, the one that has the
-// board's repository is chosen (as the runner's own repo-aware choice did before boards had a
-// target); none or more than one with it is refused with a message that says which. When the
-// runner cannot tell (no repo, or an older runner that does not report it), the zero target
-// leaves the choice to the runner. ok is false on an install with a cluster, or no desktop.
+// defaultDesktop is the owner rule for a board with no target of its own: on an install with no
+// cluster runtime, or one whose configured default runtime is a desktop (preferred daemon or
+// docker), a board runs on a desktop with no setting needed. One desktop is that desktop. With
+// several, the one that has the board's repository is chosen (as the runner's own repo-aware choice
+// did before boards had a target); none or more than one with it is refused with a message that
+// says which. When the runner cannot tell (no repo, or an older runner that does not report it), the
+// target names only the sandbox and leaves the desktop to the runner. ok is false when the cluster is
+// the default, or no desktop is connected.
+//
+// It never chooses a desktop's host: a start lands on a host only where the person chose and
+// acknowledged it (Where it runs). A desktop without a sandbox is refused with that instruction.
 func defaultDesktop(options runner.LaunchOptions, preferred, repo string) (target runTarget, ok bool, err error) {
+	preferDesktop := preferred == "daemon" || preferred == "docker"
 	var desktops []*runner.LaunchTarget
 	for i := range options.Targets {
 		t := &options.Targets[i]
 		if t.DaemonID == "" {
-			for _, rt := range t.Runtimes {
-				if rt == "cluster" {
-					return runTarget{}, false, nil
-				}
+			if !preferDesktop && slices.Contains(t.Runtimes, "cluster") {
+				return runTarget{}, false, nil
 			}
 			continue
 		}
@@ -67,7 +72,7 @@ func defaultDesktop(options runner.LaunchOptions, preferred, repo string) (targe
 		var with []*runner.LaunchTarget
 		for _, t := range desktops {
 			if t.HasRepo == nil {
-				return runTarget{}, true, nil
+				return runTarget{Runtime: "docker"}, true, nil
 			}
 			if *t.HasRepo {
 				with = append(with, t)
@@ -82,17 +87,22 @@ func defaultDesktop(options runner.LaunchOptions, preferred, repo string) (targe
 			return runTarget{}, true, &automationError{fmt.Sprintf("%d connected desktops have this board's repository %s; choose which one in Where it runs in board settings", len(with), repo)}
 		}
 	}
-	target = runTarget{Runtime: "daemon", DaemonID: desktop.DaemonID}
-	for _, rt := range desktop.Runtimes {
-		if rt == "docker" {
-			target.Runtime = "docker"
-		}
+	if !slices.Contains(desktop.Runtimes, "docker") {
+		return runTarget{}, true, &automationError{msgNoSandbox(desktop.Name)}
 	}
-	if preferred == "daemon" || preferred == "docker" {
-		target.Runtime = preferred
-	}
-	return target, true, nil
+	return runTarget{Runtime: "docker", DaemonID: desktop.DaemonID}, true, nil
 }
+
+// msgNoInventory: the runner did not say where an unplaced board start would run.
+const msgNoInventory = "this runner did not say where this board's sessions can run, and a board never runs on a desktop's host by itself: " +
+	"choose Where it runs in board settings, or update the runner"
+
+// msgNoSandbox: the desktop a board would run on has no sandbox, and a board never chooses a host.
+func msgNoSandbox(desktop string) string {
+	return fmt.Sprintf("%s has no sandbox, and a board never runs on a desktop's host by itself: install the sandbox on %s, "+
+		"or choose its host in Where it runs in board settings", desktop, desktop)
+}
+
 func targetUnavailable(t runTarget) error {
 	if t.Runtime == "cluster" {
 		return &automationError{"this board selected the cluster, but the cluster runtime is unavailable; choose Where it runs in board settings"}
@@ -152,8 +162,8 @@ func (a *API) resolveBoardTarget(ctx context.Context, boardID string, override r
 		if problem != nil {
 			return runTarget{}, problem
 		}
-		if desktop == (runTarget{}) {
-			return desktop, nil // the runner picks the desktop that has the repo
+		if desktop.DaemonID == "" {
+			return desktop, nil // the runner picks the desktop that has the repo, in its sandbox
 		}
 		if !targetAvailable(desktop, options) {
 			return runTarget{}, targetUnavailable(desktop)
@@ -167,9 +177,17 @@ func (a *API) resolveBoardTarget(ctx context.Context, boardID string, override r
 			}
 		}
 	}
-	// A legacy discovery adapter may not implement targets. Production always returns an array.
+	// An older runner whose discovery lists no targets cannot say where an unplaced start would land.
+	// It is never left to choose a desktop's host: the cluster default is sent as such, a desktop
+	// default goes to the sandbox, and with no default the start is refused until the person chooses.
 	if options.Targets == nil {
-		return runTarget{}, nil
+		switch a.defaultRunRuntime() {
+		case "cluster":
+			return runTarget{}, nil
+		case "daemon", "docker":
+			return runTarget{Runtime: "docker"}, nil
+		}
+		return runTarget{}, nil // a start refuses it (startOnRunnerConfigured); discovery shows it as unplaced
 	}
 	return runTarget{}, &automationError{"no single desktop is available for this board; connect its desktop or choose Where it runs in board settings"}
 }

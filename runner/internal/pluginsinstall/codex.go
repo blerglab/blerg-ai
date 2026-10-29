@@ -11,7 +11,8 @@ import (
 )
 
 // InstallCodex uses Codex's native plugin installer. The caller supplies an isolated,
-// credential-free CODEX_HOME and validates returned paths before loading any plugin.
+// CODEX_HOME and validates returned paths before loading any plugin. Native remote
+// marketplaces may require a private login copy, supplied and cleaned by the caller.
 func InstallCodex(ctx context.Context, o Options, entries []pluginspec.Entry) Result {
 	if o.Bin == "" {
 		o.Bin = "codex"
@@ -23,11 +24,16 @@ func InstallCodex(ctx context.Context, o Options, entries []pluginspec.Entry) Re
 	allowed := []pluginspec.Entry{}
 	markets := map[string]bool{}
 	for _, e := range entries {
-		if pluginspec.ValidateClaude(e) != nil || !p.allow.Allows(e.Marketplace) {
+		if pluginspec.ValidateCodex(e) != nil || !p.allow.Allows(e.Marketplace) {
 			res.Skipped = append(res.Skipped, sanitizeName(e.Plugin))
 			continue
 		}
 		key := strings.ToLower(e.Marketplace)
+		if native, ok := pluginspec.CodexMarketplaceName(e.Marketplace); ok {
+			res.Names[key] = native
+			allowed = append(allowed, e)
+			continue
+		}
 		if !markets[key] {
 			if _, err := p.step(ctx, "marketplace add "+e.Marketplace, "plugin", "marketplace", "add", e.Marketplace); err != nil {
 				res.Failed = append(res.Failed, e.Plugin)
@@ -41,7 +47,11 @@ func InstallCodex(ctx context.Context, o Options, entries []pluginspec.Entry) Re
 	if len(allowed) == 0 {
 		return res
 	}
-	out, err := p.step(ctx, "marketplace list", "plugin", "marketplace", "list", "--json")
+	var out string
+	var err error
+	if len(markets) > 0 {
+		out, err = p.step(ctx, "marketplace list", "plugin", "marketplace", "list", "--json")
+	}
 	var list struct {
 		Marketplaces []struct {
 			Name   string `json:"name"`
@@ -51,7 +61,7 @@ func InstallCodex(ctx context.Context, o Options, entries []pluginspec.Entry) Re
 			} `json:"marketplaceSource"`
 		} `json:"marketplaces"`
 	}
-	if err != nil || decodeCodexJSON(out, &list) != nil {
+	if len(markets) > 0 && (err != nil || decodeCodexJSON(out, &list) != nil) {
 		res.MarketplaceFailed = true
 		for _, e := range allowed {
 			res.Failed = append(res.Failed, e.Plugin)
@@ -63,6 +73,20 @@ func InstallCodex(ctx context.Context, o Options, entries []pluginspec.Entry) Re
 		if m.Source.Type == "git" && ValidMarketplaceName(m.Name) && markets[strings.ToLower(source)] {
 			res.Names[strings.ToLower(source)] = m.Name
 		}
+	}
+	// A local Git marketplace must not shadow an approved native identity (or
+	// another source) just by choosing the same manifest name.
+	sourceByName := map[string]string{}
+	for source, name := range res.Names {
+		key := strings.ToLower(name)
+		if previous, ok := sourceByName[key]; ok && previous != source {
+			res.MarketplaceFailed = true
+			for _, entry := range allowed {
+				res.Failed = append(res.Failed, entry.Plugin)
+			}
+			return res
+		}
+		sourceByName[key] = source
 	}
 	for _, e := range allowed {
 		name := res.Names[strings.ToLower(e.Marketplace)]
@@ -153,6 +177,9 @@ func ListCodexMarketplaces(ctx context.Context, o Options, limit int) ([]CodexMa
 			continue
 		}
 		source := ""
+		if m.Name == "openai-curated" && m.Source.Type == "local" {
+			source = "codex:openai-curated"
+		}
 		if m.Source.Type == "git" {
 			source = codexGitHubSource(m.Source.Source)
 		}

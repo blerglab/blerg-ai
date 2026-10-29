@@ -47,7 +47,7 @@ func TestSessionPluginsCoreTransportBoundedPrivateAndNoRedirect(t *testing.T) {
 				}
 				engine := "claude"
 				plugin := "release-notes"
-				market := pluginspec.DefaultMarketplaces
+				market := "anthropics/claude-plugins-official"
 				if mode == "bad-engine" {
 					engine = "codex"
 				}
@@ -69,7 +69,7 @@ func TestSessionPluginsCoreTransportBoundedPrivateAndNoRedirect(t *testing.T) {
 				t.Fatalf("unsafe error %v", err)
 			}
 			if mode == "ok" {
-				if err := c.Add(context.Background(), "owner", coreProof{SessionID: sid}, "claude", pluginspec.Entry{Marketplace: pluginspec.DefaultMarketplaces, Plugin: "release-notes"}); err != nil {
+				if err := c.Add(context.Background(), "owner", coreProof{SessionID: sid}, "claude", pluginspec.Entry{Marketplace: "anthropics/claude-plugins-official", Plugin: "release-notes"}); err != nil {
 					t.Fatal(err)
 				}
 				if err := c.Add(context.Background(), "owner", coreProof{TokenID: "agent"}, "claude", pluginspec.Entry{}); err == nil {
@@ -80,5 +80,21 @@ func TestSessionPluginsCoreTransportBoundedPrivateAndNoRedirect(t *testing.T) {
 	}
 	if reached {
 		t.Fatal("followedcredentialredirect")
+	}
+}
+
+func TestSessionPluginsCoreTransportPreservesNativeCodexIdentity(t *testing.T) {
+	e := pluginspec.Entry{Marketplace: "codex:openai-curated", Plugin: "selected"}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(sessionPluginCatalog{Engine: "codex", Allowed: []string{e.Marketplace}, Plugins: []pluginspec.Entry{e}})
+	}))
+	defer srv.Close()
+	c := &httpSessionPluginCore{url: srv.URL, key: "fixture-key", client: coreHTTPClient(nil)}
+	out, err := c.Catalog(t.Context(), "owner", coreProof{SessionID: "human"}, "codex")
+	if err != nil || len(out.Plugins) != 1 || out.Plugins[0] != e {
+		t.Fatalf("native catalog lost in transport: %+v %v", out, err)
+	}
+	if err := c.Add(t.Context(), "owner", coreProof{SessionID: "human"}, "codex", e); err != nil {
+		t.Fatal(err)
 	}
 }

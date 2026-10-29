@@ -46,7 +46,7 @@ describe('artifact cards in the chat', () => {
     seed(artifactEvent(report, 1))
     mount()
     const card = await screen.findByTestId('artifact-card')
-    expect(card).toHaveTextContent('📎')
+    expect(card.querySelector('svg')).toHaveAttribute('data-file-icon', 'markdown')
     expect(card).toHaveTextContent('report.md')
     expect(card).toHaveTextContent('2.0 KB')
     expect(within(card).getByRole('button', { name: 'Download' })).toBeInTheDocument()

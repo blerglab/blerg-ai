@@ -667,3 +667,26 @@ func TestCodexFreshDriverDoesNotReuseEndedNativeChildID(t *testing.T) {
 		t.Fatalf("native recovery identity lost: %+v", recovery)
 	}
 }
+
+func TestCodexCapabilitiesReportApprovalAndSandbox(t *testing.T) {
+	bin := fakeCodex(t)
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	em := &collectEmitter{}
+	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := startTestCodexDriver(ctx, t, d)
+	defer stop()
+	waitUntil(t, "native permission report", func() bool { return countKind(em, "capabilities") > 0 })
+	em.mu.Lock()
+	for _, e := range em.events {
+		if p, ok := e.Payload.(protocol.CapabilitiesPayload); ok && (p.PermissionMode != "never" || p.SandboxMode != "danger-full-access") {
+			t.Errorf("native permission=%q sandbox=%q", p.PermissionMode, p.SandboxMode)
+		}
+	}
+	em.mu.Unlock()
+	restricted := (&codexRestrictedRuntime{Restricted: true}).capabilities("")
+	if restricted.PermissionMode != "restricted" || restricted.SandboxMode != "read-only" {
+		t.Fatalf("restricted permission=%q sandbox=%q", restricted.PermissionMode, restricted.SandboxMode)
+	}
+}

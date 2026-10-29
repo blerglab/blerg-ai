@@ -344,6 +344,7 @@ export default function MarkupMode({ artifact, src, onSend, onClose }: MarkupMod
         </div>
         <div className="markup-group" role="group" aria-label="Color">
           {SWATCHES.map(s => (
+            // button-guard-ignore: each swatch's background is its color, from .markup-swatch.is-<color> (markup.css).
             <button
               key={s.id}
               type="button"

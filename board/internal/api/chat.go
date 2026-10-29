@@ -39,6 +39,13 @@ type chatOwnerProof struct{}
 // chatAccount carries the signed-in person's core account id to the proxy's Account option.
 type chatAccount struct{}
 
+// chatActing carries the person a file change is for (the proxy's Acting option): the signed-in
+// person the gate has just let change the session, and whether core made them an administrator.
+type chatActing struct {
+	account string
+	admin   bool
+}
+
 func (a *API) chatRoutes(mux *http.ServeMux, authed func(func(http.ResponseWriter, *http.Request, auth.Principal)) http.HandlerFunc) {
 	inner := http.NewServeMux()
 	chatproxy.MountWith(inner, "/api/chat", chatRunner{a}, chatproxy.Options{
@@ -54,6 +61,12 @@ func (a *API) chatRoutes(mux *http.ServeMux, authed func(func(http.ResponseWrite
 		},
 		MessageSource: "human",
 		Account:       func(r *http.Request) string { s, _ := r.Context().Value(chatAccount{}).(string); return s },
+		// The runner sees the board's shared key; it decides deletes, storage and upload
+		// attribution for the person named here (#231).
+		Acting: func(r *http.Request) (string, bool) {
+			a, _ := r.Context().Value(chatActing{}).(chatActing)
+			return a.account, a.admin
+		},
 	})
 	read := a.chatGate(inner, "card.read", false)
 	write := a.chatGate(inner, "card.write", false)
@@ -71,6 +84,7 @@ func (a *API) chatRoutes(mux *http.ServeMux, authed func(func(http.ResponseWrite
 	mux.HandleFunc("GET /api/chat/sessions/{id}/artifacts/{aid}/download", authed(read))
 	mux.HandleFunc("DELETE /api/chat/sessions/{id}/artifacts/{aid}", authed(write))
 	mux.HandleFunc("POST /api/chat/sessions/{id}/uploads", authed(person))
+	mux.HandleFunc("POST /api/chat/sessions/{id}/storage", authed(person))
 	// The person's display preferences (their code colours in Blerg Runner), read so the chat shows
 	// code in them. No board is involved, so there is no capability to hold; only a signed-in person
 	// (a core human token) has an account to read, anything else gets the defaults ({}).
@@ -102,6 +116,11 @@ func (a *API) chatGate(inner http.Handler, capability string, personOnly bool) f
 			return
 		}
 		ctx := context.WithValue(r.Context(), chatAllowed{}, true)
+		// The person the board vouches for on the runner's file routes: only a signed-in person,
+		// and only past this gate. An agent or service principal names nobody.
+		if account := p.HumanAccountID(); account != "" {
+			ctx = context.WithValue(ctx, chatActing{}, chatActing{account: account, admin: p.Token != nil && p.Token.HasCap("account.manage")})
+		}
 		// Reads use the board service identity; controls that may recover a
 		// conversation carry a fresh owner proof, never a stored launch token.
 		if r.Method == http.MethodPost && (strings.HasSuffix(r.URL.Path, "/messages") || strings.HasSuffix(r.URL.Path, "/model")) {

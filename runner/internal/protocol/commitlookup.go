@@ -6,11 +6,40 @@ package protocol
 // ValidCommitLookupSHA accepts it. Patch asks for the commit's diff instead of its summary. It never
 // starts an engine.
 type ReadCommit struct {
+	WorkspaceGitRef
 	Type      string `json:"type"`
 	RequestID string `json:"request_id"`
 	SessionID string `json:"session_id"`
 	SHA       string `json:"sha"`
 	Patch     bool   `json:"patch,omitempty"`
+	// MergedChild, instead of a sha, asks whether the branch wip/<MergedChild> (a child session's
+	// work, brought back into this session's repository) is merged into the branch the workspace
+	// has checked out (HEAD). It must be a session id (ValidChildBranchID), so the only ref that
+	// reaches git is refs/heads/wip/<uuid>. The answer is CommitResult.Merged and TipDate.
+	MergedChild string `json:"merged_child,omitempty"`
+	// The server supplies the persisted child's exact member launch and base.
+	ChildLaunchGeneration string `json:"child_launch_generation,omitempty"`
+	ChildBase             string `json:"child_base,omitempty"`
+}
+
+// ValidChildBranchID accepts a lower-case UUID and nothing else.
+func ValidChildBranchID(id string) bool {
+	if len(id) != 36 {
+		return false
+	}
+	for i, c := range id {
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // CommitFile is one file a commit changed, with its added and deleted line counts (both 0 and
@@ -25,6 +54,7 @@ type CommitFile struct {
 
 // CommitInfo is a commit's summary, every field bounded by the daemon (CommitLookupLimits).
 type CommitInfo struct {
+	WorkspaceGitRef
 	SHA            string       `json:"sha"`
 	Short          string       `json:"short"`
 	Subject        string       `json:"subject"`
@@ -44,6 +74,7 @@ type CommitInfo struct {
 // over CommitPatchMaxBytes), "busy", or "unavailable" (no live workspace, no repository, git
 // failed). PatchB64 is the diff's bytes, base64 (a diff need not be UTF-8).
 type CommitResult struct {
+	WorkspaceGitRef
 	Type      string      `json:"type"`
 	RequestID string      `json:"request_id"`
 	SessionID string      `json:"session_id"`
@@ -51,6 +82,11 @@ type CommitResult struct {
 	Commit    *CommitInfo `json:"commit,omitempty"`
 	PatchB64  string      `json:"patch_b64,omitempty"`
 	ErrorCode string      `json:"error_code,omitempty"`
+	// Merged answers a MergedChild read: the child's branch tip is an ancestor of HEAD. TipDate is
+	// the tip's committer date (RFC 3339), so the server can tell work merged from a branch that
+	// never moved. ErrorCode "not_found": no such branch.
+	Merged  bool   `json:"merged,omitempty"`
+	TipDate string `json:"tip_date,omitempty"`
 }
 
 // The bounds of a commit read, shared by the daemon (which enforces them) and the server (which

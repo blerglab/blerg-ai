@@ -51,7 +51,8 @@ describe('Markdown code blocks', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Open' }))
     const dialog = screen.getByRole('dialog')
     expect(dialog.textContent).toContain('40 lines')
-    expect(dialog.querySelector('.code-viewer-gutter')?.textContent).toMatch(/^1\n2\n3[\s\S]*\n40$/)
+    // Plain text reads as prose and wraps by default (#265): one numbered row per line.
+    expect([...dialog.querySelectorAll('.code-line')].map(row => row.getAttribute('data-n'))).toEqual(Array.from({ length: 40 }, (_, i) => String(i + 1)))
     expect(dialog.querySelector('.code-viewer-code')?.textContent).toContain('line 40')
     fireEvent.keyDown(dialog, { key: 'Escape' })
     expect(screen.queryByRole('dialog')).toBeNull()

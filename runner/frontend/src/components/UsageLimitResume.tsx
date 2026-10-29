@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { apiFetch } from '../apiFetch'
+import { sessionView } from '../lib/sessionView'
 import './UsageLimitResume.css'
 
 interface ResumeState {
@@ -12,7 +13,8 @@ interface ResumeState {
 
 /** Owner-only unattended continuation controls; the server remains the authority. */
 export default function UsageLimitResume({ sessionId }: { sessionId: string }) {
-  const [value, setValue] = useState<ResumeState | null>(null)
+  // The last read of this session (the explorer and panel cache) shows at once; it polls as before.
+  const [value, setValue] = useState<ResumeState | null>(() => sessionView<ResumeState | null>(sessionId, 'limit-resume').cached ?? null)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const revision = useRef(0)
@@ -23,24 +25,29 @@ export default function UsageLimitResume({ sessionId }: { sessionId: string }) {
   useEffect(() => {
     mounted.current = true
     let active = true
+    let reading: AbortController | null = null
     const load = async () => {
       if (busy.current) return
       const version = ++revision.current
+      const cache = sessionView<ResumeState | null>(sessionId, 'limit-resume')
+      reading?.abort()
+      const ac = new AbortController()
+      reading = ac
       try {
-        const response = await apiFetch(endpoint)
+        const response = await apiFetch(endpoint, { signal: ac.signal })
         if (!active || version !== revision.current) return
-        if (response.status === 404) { setValue(null); setError(''); return }
+        if (response.status === 404) { setValue(null); setError(''); cache.keep(null); return }
         if (!response.ok) throw new Error('Could not load automatic resume settings.')
         const next = await response.json() as ResumeState
-        if (active && version === revision.current) { setValue(next); setError('') }
+        if (active && version === revision.current) { setValue(next); setError(''); cache.keep(next) }
       } catch {
         if (active && version === revision.current) setError('Could not load automatic resume settings.')
       }
     }
     void load()
     const timer = window.setInterval(() => { void load() }, 15_000)
-    return () => { active = false; mounted.current = false; window.clearInterval(timer) }
-  }, [endpoint])
+    return () => { active = false; mounted.current = false; reading?.abort(); window.clearInterval(timer) }
+  }, [endpoint, sessionId])
 
   async function toggle(enabled: boolean) {
     busy.current = true
@@ -74,7 +81,7 @@ export default function UsageLimitResume({ sessionId }: { sessionId: string }) {
     if (value.state === 'pending' && value.reset_at) {
       status = `Resumes after ${new Date(value.reset_at).toLocaleString()}`
     } else if (value.state === 'unknown' || value.state === 'unknown_reset') {
-      status = 'Reset time unknown; continue manually.'
+      status = 'Reset time unknown; checking the usage meter.'
     } else if (value.state === 'blocked') {
       status = 'Automatic resume blocked; continue manually.'
     } else if (value.state === 'exhausted') {

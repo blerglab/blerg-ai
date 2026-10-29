@@ -1,3 +1,5 @@
+import InitialLoader from './InitialLoader'
+import { FileIcon } from '@blerglab/chat'
 import { modelDisplayName } from '@blerglab/chat'
 // HistoryTab: the session panel's History — a compact feed of the session's major strokes, newest
 // first, one line each (◆ a decision, ◇ the agent's own, ? what was asked of the person and how it was
@@ -12,7 +14,7 @@ import { modelDisplayName } from '@blerglab/chat'
 import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from 'react'
 import {
   CommitChips as SharedCommitChips,
-  Hover,
+  Hover, ReferenceScope, ReferenceText, type ChatRefs,
   formatDuration,
   loadPreviewUrl,
   previewKind,
@@ -21,6 +23,8 @@ import {
   tokenLabel,
   useTranscriptStore,
 } from '@blerglab/chat'
+import { boardCardsReader } from '../lib/cardRefs'
+import { useLiveBoardCard } from '../lib/liveBoardCard'
 import { apiFetch } from '../apiFetch'
 import { useTopics, type TopicsView } from '../hooks/useTopics'
 import {
@@ -29,7 +33,8 @@ import {
   type AgentItem, type AgentStatus, type CardItem, type DocItem, type DoneItem, type RenameItem, type Stroke, type StrokeCard, type StrokeKind,
   type Topic, type TopicCard, type TopicCommit, type TopicRename, type Unmarked,
 } from '../lib/topics'
-import { boardCardUrl, useBoardOrigin } from '../lib/boardLink'
+import { PinnedTicketModal } from './BoardCardView'
+import type { Ticket } from '@blerglab/chat'
 import { unknownBoardTarget, useSessionBoard } from '../lib/sessionBoard'
 import { ShowMissing } from './RailShowLink'
 
@@ -55,13 +60,46 @@ export interface HistoryTabProps {
 export default function HistoryTab({ active, filesKey, ...rest }: HistoryTabProps) {
   const view = useTopics(rest.sessionId, active, filesKey)
   const now = useNow(active)
-  return <TopicList {...rest} view={view} now={now} />
+  return <InitialLoader loading={view.status === 'loading'} active={active} loadKey={rest.sessionId} label="history"><TopicList key={rest.sessionId} {...rest} view={view} now={now} /></InitialLoader>
 }
 
 const NO_STROKES: Stroke[] = []
 
-/** How many lines the feed draws at first, and how many more each "Show earlier" adds. */
+/** Maximum mounted entries or strokes in each navigable History window. */
 export const FEED_STEP = 100
+
+function HistoryWindow<T>({ items, label, children }: { items: readonly T[]; label: string; children: (item: T) => ReactNode }) {
+  const [page, setPage] = useState(0)
+  const current = Math.min(page, Math.max(0, Math.ceil(items.length / FEED_STEP) - 1))
+  const start = current * FEED_STEP
+  const end = Math.min(start + FEED_STEP, items.length)
+  const newer = useRef<HTMLButtonElement>(null)
+  const earlier = useRef<HTMLButtonElement>(null)
+  const pageFocus = useRef<{ button: HTMLButtonElement; list: HTMLElement | null } | null>(null)
+  function turnPage(next: number, event: MouseEvent<HTMLButtonElement>) {
+    const button = event.currentTarget
+    if (button === document.activeElement) pageFocus.current = { button, list: button.closest('ul, ol') }
+    setPage(next)
+  }
+  useLayoutEffect(() => {
+    const pending = pageFocus.current
+    pageFocus.current = null
+    if (!pending || pending.button.isConnected) return
+    // The endpoint removed the activated button. Keep focus in this window, even if a
+    // concurrent refresh shortened the list enough to remove both pager buttons.
+    const target = newer.current ?? earlier.current ?? pending.list
+    if (target === pending.list && target && !target.hasAttribute('tabindex')) target.tabIndex = -1
+    target?.focus()
+  }, [current, items.length])
+  return <>
+    {items.slice(start, end).map(children)}
+    {items.length > FEED_STEP && <li className="history-window">
+      <span>{start + 1}–{end} of {items.length} {label}</span>
+      {current > 0 && <button ref={newer} type="button" className="rail-link" onClick={event => turnPage(current - 1, event)}>Show newer {label}</button>}
+      {end < items.length && <button ref={earlier} type="button" className="rail-link" data-testid="stroke-earlier" onClick={event => turnPage(current + 1, event)}>Show earlier {label} ({items.length - end})</button>}
+    </li>}
+  </>
+}
 
 /** The time spans are read against: set when the tab comes on screen, then moved on every 30 s. */
 function useNow(active: boolean): Date {
@@ -85,13 +123,18 @@ export function TopicList({ sessionId, view, now, missing, onJump, onOpenArtifac
   // Only where the held part of the conversation begins: a number, so streaming (every new event
   // changes the transcript) does not draw the list again.
   const held = useTranscriptStore(s => heldFrom(s.sessions[sessionId]))
-  const [open, setOpen] = useState<ReadonlySet<string>>(() => new Set())
+  const [open, setOpen] = useState<ReadonlyMap<string, boolean>>(() => new Map())
+  const [ticket, setTicket] = useState<Ticket | null>(null)
+  const refBoard = useSessionBoard()
+  const refs = useMemo<ChatRefs>(() => ({
+    cards: refBoard ? boardCardsReader(refBoard, sessionId) : undefined,
+    boardCards: (id, ns) => boardCardsReader({ id }, sessionId)(ns),
+    openCard: t => setTicket({ source: 'blerg-board', board_id: t.boardId, key: t.key, title: t.title ?? '' }),
+  }), [refBoard, sessionId])
   const [shown, setShown] = useState<ReadonlySet<StrokeKind>>(() => new Set())
-  const [limit, setLimit] = useState(FEED_STEP)
-  const toggle = useCallback((id: string) => setOpen(prev => {
-    const next = new Set(prev)
-    if (next.has(id)) next.delete(id)
-    else next.add(id)
+  const toggle = useCallback((id: string, defaultOpen = false) => setOpen(prev => {
+    const next = new Map(prev)
+    next.set(id, !(prev.get(id) ?? defaultOpen))
     return next
   }), [])
   const filter = useCallback((k: StrokeKind) => setShown(prev => {
@@ -112,33 +155,26 @@ export function TopicList({ sessionId, view, now, missing, onJump, onOpenArtifac
   const pinnedIds = useMemo<ReadonlySet<string>>(() => new Set(waiting.map(st => st.id)), [waiting])
   const openFile = useCallback((id: string) => latest.current.onOpenArtifact(id), [])
   if (view.status === 'no-route') return <p className="rail-empty reel-note" data-testid="reel-no-route">History needs a newer runner server.</p>
-  if (view.status === 'loading') return <p className="rail-empty reel-note" data-testid="reel-loading">Loading the history…</p>
+  if (view.status === 'loading') return null
   if (!view.reply) return <p className="rail-empty reel-note" data-testid="reel-error">Could not load the history. It is read again when something changes.</p>
   const { topics, unmarked } = view.reply
   const strokes = view.reply.strokes ?? NO_STROKES
   const rest = unmarked && (unmarked.agents > 0 || unmarked.documents.length > 0 || (unmarked.cards?.length ?? 0) > 0 || (unmarked.renames?.length ?? 0) > 0) ? unmarked : null
-  // The newest lines first, FEED_STEP more at a time: a long session's feed is not drawn whole.
-  const passing = shown.size === 0 ? strokes : strokes.filter(st => shown.has(st.kind))
-  const visible = passing.length > limit ? passing.slice(0, limit) : passing
-  const hidden = passing.length - visible.length
+  // Page entries and each nested stroke list independently. No click grows the mounted list.
+  const entries = feedEntries(topics, strokes, shown)
   const truncated = view.reply.strokes_truncated ?? 0
-  // While earlier lines are held back, a topic older than the oldest line drawn waits with them.
-  const oldest = hidden > 0 ? Date.parse(visible[visible.length - 1].at) : Number.NEGATIVE_INFINITY
-  const shownTopics = hidden > 0
-    ? topics.filter(t => t.status === 'open' || Date.parse(t.ended_at ?? t.started_at) >= oldest || visible.some(st => st.topic_id === t.id))
-    : topics
-  const entries = feedEntries(shownTopics, visible, shown)
   // Waiting items are pinned above the feed: never out of sight, however far back they are (#121).
 
   return (
-    <HistorySession.Provider value={sessionId}>
+    <ReferenceScope sessionId={`history:${sessionId}`} refs={refs}><HistorySession.Provider value={sessionId}>
+      <HistoryCardOpen.Provider value={setTicket}>
       {view.status === 'error' && <p className="rail-missing reel-note" role="status" data-testid="reel-stale">Could not refresh the history; this is the last list read.</p>}
       {strokes.length > 0 && <StrokeFilters counts={strokeCounts(strokes)} shown={shown} onToggle={filter} />}
       {waiting.length > 0 && (shown.size === 0 || shown.has('attention')) && (
         <section className="stroke-pinned" aria-label="Waiting on you" data-testid="stroke-pinned">
           <h3 className="stroke-pinned-head"><span aria-hidden="true">? </span>Waiting on you</h3>
           <ol className="stroke-list">
-            {waiting.map(st => <StrokeLine key={`pin:${st.id}`} stroke={st} now={now} heldFrom={held} missing={missing} onJump={jump} testId="stroke-pin" />)}
+            <HistoryWindow items={waiting} label="waiting items">{st => <StrokeLine key={`pin:${st.id}`} stroke={st} now={now} heldFrom={held} missing={missing} onJump={jump} testId="stroke-pin" />}</HistoryWindow>
           </ol>
         </section>
       )}
@@ -153,30 +189,27 @@ export function TopicList({ sessionId, view, now, missing, onJump, onOpenArtifac
         ? <p className="rail-empty reel-note" data-testid="stroke-none">Nothing of these kinds yet.</p>
         : (
           <ul className="rail-list reel-list" data-testid="reel-list">
-            {entries.map(e => (e.type === 'topic'
+            <HistoryWindow key={[...shown].sort().join(',')} items={entries} label="entries">{e => (e.type === 'topic'
               ? (
-                <TopicCard key={e.topic.id} topic={e.topic} strokes={e.strokes} pinned={pinnedIds} now={now} open={open.has(e.topic.id)} onToggle={toggle}
+                <TopicCard key={e.topic.id} topic={e.topic} strokes={e.strokes} pinned={pinnedIds} now={now} open={open.get(e.topic.id) ?? e.topic.status === 'open'} onToggle={toggle}
                   heldFrom={held} missing={missing} onJump={jump} onOpenArtifact={openFile} progress={e.topic.status === 'open' ? progress : null} />
               )
               : (
                 <li key={`loose:${e.key}`} className="stroke-run" data-testid="stroke-run">
                   <ol className="stroke-list">
-                    {e.strokes.map(st => <StrokeLine key={st.id} stroke={st} now={now} heldFrom={held} missing={missing} onJump={jump} pinned={pinnedIds} />)}
+                    <HistoryWindow items={e.strokes} label="strokes">{st => <StrokeLine key={st.id} stroke={st} now={now} heldFrom={held} missing={missing} onJump={jump} pinned={pinnedIds} />}</HistoryWindow>
                   </ol>
                 </li>
-              )))}
+              ))}</HistoryWindow>
           </ul>
         )}
-      {hidden > 0 && (
-        <button type="button" className="rail-link stroke-earlier" data-testid="stroke-earlier" onClick={() => setLimit(l => l + FEED_STEP)}>
-          Show earlier ({hidden})
-        </button>
-      )}
-      {hidden === 0 && truncated > 0 && shown.size === 0 && (
+      {truncated > 0 && shown.size === 0 && (
         <p className="rail-empty reel-note" data-testid="stroke-truncated">{truncated} older {truncated === 1 ? 'line is' : 'lines are'} not loaded.</p>
       )}
-      {rest && shown.size === 0 && hidden === 0 && <UnmarkedLine sessionId={sessionId} unmarked={rest} open={open.has(UNMARKED)} onToggle={toggle} onOpenArtifact={openFile} />}
-    </HistorySession.Provider>
+      {rest && shown.size === 0 && <UnmarkedLine sessionId={sessionId} unmarked={rest} open={open.get(UNMARKED) ?? false} onToggle={toggle} onOpenArtifact={openFile} />}
+      {ticket && <PinnedTicketModal ticket={ticket} sessionId={sessionId} onClose={() => setTicket(null)} />}
+      </HistoryCardOpen.Provider>
+    </HistorySession.Provider></ReferenceScope>
   )
 }
 
@@ -264,8 +297,8 @@ function StrokeRow({ stroke, now, heldFrom, missing, onJump, testId, pinned, key
   const listId = `fold-${(keyPrefix + testId).replace(/[^\w-]/g, '-')}-${stroke.id}`
   const text = (
     <>
-      {stroke.text}
-      {stroke.outcome && <span className="stroke-outcome"> → {stroke.outcome}</span>}
+      {folded ? stroke.text : <ReferenceText text={stroke.text} />}
+      {stroke.outcome && <span className="stroke-outcome"> → {folded ? stroke.outcome : <ReferenceText text={stroke.outcome} />}</span>}
     </>
   )
   return (
@@ -302,10 +335,10 @@ function StrokeRow({ stroke, now, heldFrom, missing, onJump, testId, pinned, key
         <ol className="stroke-list stroke-fold-items" id={listId} data-testid="stroke-fold-items">
           {/* The waiting members first, as a group of their own, then the rest newest first: "and N
               earlier" below them is then true of every row above it. */}
-          {waitingFirst(stroke.items!).map(([it, group]) => (
+          <HistoryWindow items={waitingFirst(stroke.items!)} label="strokes">{([it, group]) => (
             <StrokeLine key={it.id} stroke={it} now={now} heldFrom={heldFrom} missing={missing} onJump={onJump} testId="stroke-item" pinned={pinned}
               keyPrefix={`${rowKey}/`} group={group} />
-          ))}
+          )}</HistoryWindow>
           {(stroke.items_truncated ?? 0) > 0 && (
             <li className="stroke stroke-earlier-items" data-testid="stroke-items-earlier">and {stroke.items_truncated} earlier</li>
           )}
@@ -326,6 +359,7 @@ function waitingFirst(items: readonly Stroke[]): [Stroke, 'waiting' | 'rest'][] 
 
 /** The session History shows: its chips' hovercards read from it. */
 const HistorySession = createContext('')
+const HistoryCardOpen = createContext<(ticket: Ticket) => void>(() => {})
 
 /** A board card's hovercard target from History's copy of it. */
 function boardTarget(card: { board_id?: string; number: number; title?: string; column?: string; type?: string; priority?: string }) {
@@ -340,9 +374,11 @@ function boardTarget(card: { board_id?: string; number: number; title?: string; 
  *  hovercard, when the board is known: the chip's own, else the session's one board (#139). With no
  *  board known, just the number, whose hovercard says so ("Card #115 · board unknown"). */
 function StrokeCardChip({ card }: { card: StrokeCard }) {
-  const boardBase = useBoardOrigin()
+  const openCard = useContext(HistoryCardOpen)
   const sessionBoard = useSessionBoard()
   const boardId = card.board_id || sessionBoard?.id
+  const live = useLiveBoardCard(boardId ? { board: boardId, number: card.number } : null, useContext(HistorySession))
+  const reference = live.read?.card.reference || `#${card.number}`
   const boardName = card.board_id ? card.board_name : card.board_name || sessionBoard?.name
   const label = `${boardName ? `${boardName} ` : ''}#${card.number}${card.title ? ` ${card.title}` : ''}`
   if (!boardId) {
@@ -354,9 +390,9 @@ function StrokeCardChip({ card }: { card: StrokeCard }) {
     )
   }
   return (
-    <Hover target={boardTarget({ ...card, board_id: boardId })}>
-      <a className="reel-chip stroke-card" href={boardCardUrl(boardId, card.number, boardBase)} target="_blank" rel="noopener"
-        title={label} aria-label={`Card ${label}`} data-testid="stroke-card">#{card.number}</a>
+    <Hover target={{ ...boardTarget({ ...card, board_id: boardId }), key: reference }}>
+      <button type="button" className="reel-chip stroke-card" onClick={() => openCard({ source: 'blerg-board', key: reference, board_id: boardId, title: card.title ?? '' })}
+        title={label} aria-label={`Card ${label}`} data-testid="stroke-card">{reference}</button>
     </Hover>
   )
 }
@@ -368,7 +404,7 @@ interface CardProps {
   pinned: ReadonlySet<string>
   now: Date
   open: boolean
-  onToggle: (id: string) => void
+  onToggle: (id: string, defaultOpen?: boolean) => void
   /** The first seq the chat holds (heldFrom). */
   heldFrom: number
   missing: string | null
@@ -383,11 +419,12 @@ const TopicCard = memo(function TopicCard({ topic, strokes, pinned, now, open, o
   const running = topic.status === 'open'
   return (
     <li className={`rail-item reel-card${running ? ' is-open' : ''}`} data-testid="reel-card">
-      <button type="button" className="reel-head" aria-expanded={open} aria-controls={open ? bodyId : undefined} data-testid="reel-head" onClick={() => onToggle(topic.id)}>
+      <button type="button" className="reel-head" aria-expanded={open} aria-controls={open ? bodyId : undefined} data-testid="reel-head" onClick={() => onToggle(topic.id, running)}>
         <span className="reel-caret" aria-hidden="true" />
         {running && <span className="reel-now" data-testid="reel-now" title="Running now" aria-hidden="true" />}
         <span className="rail-item-title" title={topic.title}>{topic.title}</span>
         <span className="reel-meta">
+          {strokes.length > 0 && <span className="reel-stroke-count">{strokes.length} {strokes.length === 1 ? 'stroke' : 'strokes'}</span>}
           {running && progress && progress.total > 0
             ? <span className="reel-progress" data-testid="reel-progress" title={`Checklist: ${progress.done} of ${progress.total} done`}>{progress.done} of {progress.total}</span>
             : <span className="reel-span" data-testid="reel-span">{spanLabel(topic, now)}</span>}
@@ -398,10 +435,10 @@ const TopicCard = memo(function TopicCard({ topic, strokes, pinned, now, open, o
           )}
         </span>
       </button>
-      {topic.outcome && <div className="rail-item-line reel-outcome" data-testid="reel-outcome" title={topic.outcome}>{topic.outcome}</div>}
-      {strokes.length > 0 && (
+      {topic.outcome && <div className="rail-item-line reel-outcome" data-testid="reel-outcome" title={topic.outcome}><ReferenceText text={topic.outcome} /></div>}
+      {open && strokes.length > 0 && (
         <ol className="stroke-list">
-          {strokes.map(st => <StrokeLine key={st.id} stroke={st} now={now} heldFrom={heldFrom} missing={missing} onJump={onJump} pinned={pinned} />)}
+          <HistoryWindow items={strokes} label="strokes">{st => <StrokeLine key={st.id} stroke={st} now={now} heldFrom={heldFrom} missing={missing} onJump={onJump} pinned={pinned} />}</HistoryWindow>
         </ol>
       )}
       {open && <TopicSummary id={bodyId} topic={topic} now={now} heldFrom={heldFrom} missing={missing} onJump={onJump} onOpenArtifact={onOpenArtifact} />}
@@ -611,24 +648,24 @@ function scrollToProposal(id: string): boolean {
   return true
 }
 
-/** A card an approved proposal created: board, #number and title, as one chip that opens the card
- *  on its Board page, in Blerg (never a link out of Blerg). */
+/** A card an approved proposal created: board, number and title, opening the in-app ticket. */
 function CardChip({ card }: { card: TopicCard }) {
-  const boardBase = useBoardOrigin()
-  const label = `${card.board_name || 'Board'} #${card.number}${card.title ? ` ${card.title}` : ''}`
+  const openCard = useContext(HistoryCardOpen)
+  const live = useLiveBoardCard({ board: card.board_id, number: card.number }, useContext(HistorySession))
+  const reference = live.read?.card.reference || `#${card.number}`
+  const label = `${card.board_name || 'Board'} ${reference}${card.title ? ` ${card.title}` : ''}`
   return (
-    <Hover target={boardTarget(card)}>
-      <a className="reel-chip reel-card-chip" href={boardCardUrl(card.board_id, card.number, boardBase)} target="_blank" rel="noopener"
+    <Hover target={{ ...boardTarget(card), key: reference }}>
+      <button type="button" className="reel-chip reel-card-chip" aria-label={`Open card ${label}`} onClick={() => openCard({ source: 'blerg-board', key: reference, board_id: card.board_id, title: card.title ?? '', status: card.column })}
         title={`${label}${card.column ? ` · ${card.column}` : ''}${card.auto ? ' · approved by a session permission' : ''}`} data-testid="reel-card-chip">
-        <span className="reel-card-board">{card.board_name || 'Board'}</span> <span className="reel-card-number">#{card.number}</span>
+        <span className="reel-card-board">{card.board_name || 'Board'}</span> <span className="reel-card-number">{reference}</span>
         {card.title && <> <span className="reel-card-title">{card.title}</span></>}
-      </a>
+      </button>
     </Hover>
   )
 }
 
-/** The commits a done names: the chat's chips in the History classes (a link to the commit's page
- *  when the server knows the repository, else a button that copies the sha). */
+/** The commits a done names: the chat's chips, opening an in-app diff or copying the sha. */
 function CommitChips({ commits }: { commits: TopicCommit[] }) {
   const sessionId = useContext(HistorySession)
   return <SharedCommitChips commits={commits} variant="reel" hover={sessionId ? { sessionId } : undefined} />
@@ -704,7 +741,7 @@ function DocIcon({ sessionId, item }: { sessionId: string; item: DocItem }) {
     return () => { live = false }
   }, [sessionId, id, item.view, item.content_type])
   if (id && thumb?.id === id) return <img className="reel-thumb" src={thumb.url} alt="" data-testid="reel-thumb" />
-  return <span className="reel-icon" aria-hidden="true">{item.view === 'html' ? '🖥' : item.mock ? '🖼' : '📄'}</span>
+  return <FileIcon name={item.name} className="reel-icon" />
 }
 
 const STATUS_WORD: Record<AgentStatus, string> = {

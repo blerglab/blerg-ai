@@ -1,0 +1,12 @@
+/* Desktop chrome comes from SidePane; phones retain the full-screen sheet. */
+.explorer-dock { font-size: var(--text-sm); }
+.explorer-body { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.explorer-sheet { position: fixed; inset: 0; display: flex; flex-direction: column; width: 100%; height: 100dvh; z-index: 1000; border: 0; background: var(--basalt); color: var(--chalk); }
+.explorer-sheet .explorer-body { padding-bottom: env(safe-area-inset-bottom); }
+.explorer-hint { margin: 0; padding: 10px; font-size: 11px; line-height: 1.6; color: var(--fog-dim); border-top: 1px solid var(--stone); }
+.explorer-sheet-header { display: flex; gap: 12px; align-items: center; padding: 8px; min-height: 60px; box-sizing: border-box; border-bottom: 1px solid var(--stone); }
+.explorer-sheet-header .pane-collapse { position: static; display: inline-flex; gap: 4px; align-items: center; width: auto; min-height: 36px; padding: 0 4px; color: var(--blaze); }
+.explorer-sheet-header .pane-collapse::after { content: 'Back'; }
+.explorer-sheet-header strong { font-size: 15px; }
+.explorer-sheet .workspace-row { min-height: 42px; }
+.explorer-sheet .workspace-tools input { min-height: 36px; }

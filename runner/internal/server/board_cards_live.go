@@ -20,6 +20,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -39,6 +41,7 @@ func (a *API) boardCardURL(ctx context.Context, board string, number int) string
 
 // liveBoardCard is the card as the panel shows it: the fields it draws, never the whole record.
 type liveBoardCard struct {
+	Reference  string          `json:"reference,omitempty"`
 	ID         string          `json:"id"`
 	BoardID    string          `json:"board_id"`
 	Number     int             `json:"number"`
@@ -122,6 +125,15 @@ func (a *API) boardCardRequest(w http.ResponseWriter, r *http.Request) (mcpgw.Pr
 	if !gatewayServerName.MatchString(board) || err != nil || number <= 0 {
 		writeError(w, http.StatusBadRequest, "name a board id and a card number")
 		return mcpgw.Proof{}, "", 0, nil, false
+	}
+	proof := mcpgw.Proof{AccountID: principal.Sub, SessionID: principal.Sid}
+	if boardKeyReference.MatchString(board) {
+		resolved, err := a.resolveLiveBoardKey(r.Context(), proof, principal.Project, board)
+		if err != nil {
+			writeAPIError(w, err)
+			return mcpgw.Proof{}, "", 0, nil, false
+		}
+		board = resolved
 	}
 	if principal.Project != "" && principal.Project != board {
 		writeError(w, http.StatusNotFound, "card not found")
@@ -250,4 +262,20 @@ func (a *API) HandleSessionBoardCardURL(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"board_id": board, "number": number, "url": a.boardCardURL(r.Context(), board, number)})
+}
+
+var boardKeyReference = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,4}$`)
+
+// Discovery includes keys and aliases; never probe each board for a prose candidate.
+func (a *API) resolveLiveBoardKey(ctx context.Context, proof mcpgw.Proof, project, key string) (string, *APIError) {
+	boards, err := a.filingBoards(ctx, proof, project)
+	if err != nil {
+		return "", apiErrorf(http.StatusServiceUnavailable, "could not resolve the board key")
+	}
+	for _, b := range boards {
+		if b.Key == key || slices.Contains(b.KeyAliases, key) {
+			return b.ID, nil
+		}
+	}
+	return "", apiErrorf(http.StatusNotFound, "card not found")
 }

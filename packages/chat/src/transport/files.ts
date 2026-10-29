@@ -2,10 +2,12 @@
 // browser API and on the proxy contract (list, raw, download, delete, upload), only the prefix and
 // the authentication differ. Ported from the runner's lib/artifacts.ts, lib/attachments.ts and
 // apiFetch.ts; the pure helpers (grouping, versions, size text) live in the model, not here.
-import type { ArtifactInfo, CommitDetails, CommitDiff, TransportFiles, UploadedFile, WorkspaceFile } from './types'
+import type { ArtifactInfo, CommitDetails, CommitDiff, TransportFiles, UploadedFile, WorkspaceFile, WorkspaceGitRef } from './types'
 import { imageBlobType } from '../model/markdownHtml'
 
 export interface FilesOptions {
+  /** Stable account/server namespace; opt in to durable local attachment queues. Never a token. */
+  queueScope?: () => string
   /** The session's route prefix, e.g. `/api/sessions/<id>` or `/blerg/sessions/<id>`. */
   base: (sessionId: string) => string
   fetch?: typeof fetch
@@ -38,6 +40,7 @@ function commitDetails(j: unknown): CommitDetails | null {
   const num = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : 0)
   const str = (v: unknown) => (typeof v === 'string' ? v : '')
   return {
+    ...(typeof c.member_id === 'string' && typeof c.launch_generation === 'string' && typeof c.generation === 'number' ? { member_id: c.member_id, launch_generation: c.launch_generation, generation: c.generation } : {}),
     sha: c.sha,
     short: str(c.short) || c.sha.slice(0, 7),
     subject: c.subject,
@@ -78,9 +81,11 @@ export function isArtifactGone(e: unknown): boolean {
 export class FileRequestError extends Error {
   readonly status: number
   readonly errorId?: string
-  constructor(message: string, status: number, errorId?: string) {
+  readonly code?: string
+  constructor(message: string, status: number, errorId?: string, code?: string) {
     super(message)
     this.name = 'FileRequestError'
+    this.code = code
     this.status = status
     if (errorId) this.errorId = errorId
   }
@@ -92,6 +97,15 @@ export function fileErrorText(e: unknown, fallback: string): { message: string; 
   if (!(e instanceof Error) || !e.message) return { message: fallback }
   const id = (e as { errorId?: unknown }).errorId
   return typeof id === 'string' && id ? { message: e.message, errorId: id } : { message: e.message }
+}
+
+/** fileErrorText for an action the server may refuse (delete, increase storage): the server's
+ *  sentence when it refused, else a plain "couldn't reach the server" for a network failure,
+ *  never a browser's "Failed to fetch". */
+export function fileActionError(e: unknown, fallback: string): { message: string; errorId?: string } {
+  if (e instanceof FileRequestError) return fileErrorText(e, fallback)
+  if (e instanceof TypeError) return { message: 'Couldn’t reach the server. Check your connection and try again.' }
+  return { message: fallback }
 }
 
 /** text without control characters (a proxy's ANSI colours and the like); whitespace is kept. */
@@ -201,8 +215,8 @@ export function saveBlob(blob: Blob, name: string): void {
 
 /** Why an upload was refused, in words fit to show, with the server's error id. */
 async function uploadRefusal(r: Response): Promise<FileRequestError> {
-  const { detail, errorId } = await replyDetail(r)
-  const say = (fallback: string) => new FileRequestError(detail || fallback, r.status, errorId)
+  const { detail, errorId, code } = await replyDetail(r)
+  const say = (fallback: string) => new FileRequestError(detail || fallback, r.status, errorId, code)
   if (r.status === 413) return say('That file is larger than the server takes.')
   if (r.status === 409) return say('This session can’t take more files.')
   if (r.status === 404) return new FileRequestError('This session can’t be found.', r.status, errorId)
@@ -320,37 +334,61 @@ export function createFiles(opts: FilesOptions): TransportFiles {
 
   const commitUrl = (sessionId: string, sha: string) => `${opts.base(sessionId)}/commits/${enc(sha)}`
 
+  const qualification = (member?: WorkspaceGitRef) => member ? `?member_id=${enc(member.member_id)}&launch_generation=${enc(member.launch_generation)}&generation=${member.generation}` : ''
+  const sameMember = (a: Partial<WorkspaceGitRef> | null, b: WorkspaceGitRef) => a?.member_id === b.member_id && a.launch_generation === b.launch_generation && a.generation === b.generation
+
   /** The commit's summary; null for every refusal (no access, no workspace, unknown sha). */
-  const commit = async (sessionId: string, sha: string, signal?: AbortSignal): Promise<CommitDetails | null> => {
+  const commit = async (sessionId: string, sha: string, signal?: AbortSignal, member?: WorkspaceGitRef): Promise<CommitDetails | null> => {
     const s = sha.toLowerCase()
     if (!COMMIT_SHA.test(s)) return null
-    const r = await request(commitUrl(sessionId, s), { signal })
+    const r = await request(commitUrl(sessionId, s) + qualification(member), { signal })
     if (!r.ok) return null
     const c = commitDetails(await r.json().catch(() => null))
-    return c && c.sha.startsWith(s) ? c : null
+    return c && c.sha.startsWith(s) && (!member || sameMember(c, member)) ? c : null
   }
 
   /** The commit's diff, read no further than COMMIT_DIFF_MAX. */
-  const commitDiff = async (sessionId: string, sha: string, signal?: AbortSignal): Promise<CommitDiff> => {
+  const commitDiff = async (sessionId: string, sha: string, signal?: AbortSignal, member?: WorkspaceGitRef): Promise<CommitDiff> => {
     const s = sha.toLowerCase()
     if (!COMMIT_SHA.test(s)) return null
     const abort = new AbortController()
     const stop = () => abort.abort()
     signal?.addEventListener('abort', stop)
     try {
-      const r = await request(`${commitUrl(sessionId, s)}/diff`, { signal: abort.signal })
+      const r = await request(`${commitUrl(sessionId, s)}/diff${qualification(member)}`, { signal: abort.signal })
       if (r.status === 413) return 'large'
       if (!r.ok) return null
+      if (member && (r.headers.get('X-Blerg-Member-ID') !== member.member_id || r.headers.get('X-Blerg-Launch-Generation') !== member.launch_generation || Number(r.headers.get('X-Blerg-Generation')) !== member.generation)) return null
       const blob = await readCapped(r, COMMIT_DIFF_MAX, abort)
-      return blob ? { text: await blob.text() } : 'large'
+      return blob ? { text: await blob.text(), ...(member ? { member } : {}) } : 'large'
     } finally {
       signal?.removeEventListener('abort', stop)
     }
   }
 
   return {
+    ...(opts.queueScope ? {queueScope: opts.queueScope} : {}),
     ...(opts.workspace ? { workspaceFile } : {}),
     ...(opts.commits ? { commit, commitDiff } : {}),
+    async space(sessionId) {
+      const r = await request(artifacts(sessionId))
+      if (!r.ok) {
+        const {detail, errorId} = await replyDetail(r)
+        throw new FileRequestError(detail || 'Couldn’t read the session’s space.', r.status, errorId)
+      }
+      const body = await r.json()
+      const all = body.can_delete === true
+      // An older runner decides per session only: its files take the session's answer.
+      const rows = (Array.isArray(body.artifacts) ? body.artifacts : []).map((a: ArtifactInfo) => typeof a?.can_delete === 'boolean' ? a : {...a, can_delete: all})
+      return {artifacts: rows, limits: body.limits ?? {}, can_delete: all, can_increase: body.can_increase === true}
+    },
+    async increaseStorage(sessionId) {
+      const r = await request(`${opts.base(sessionId)}/storage`, {method: 'POST'})
+      if (r.ok) return
+      const {detail, errorId, code} = await replyDetail(r)
+      const fallback = r.status === 403 ? 'Only an administrator can increase this session’s storage.' : r.status === 409 ? 'This session already has the most storage this install allows.' : r.status >= 500 || r.status === 0 ? 'Couldn’t reach the server. Try again.' : 'Couldn’t increase the storage. Try again.'
+      throw new FileRequestError(detail || fallback, r.status, errorId, code)
+    },
     /** The session's artifacts, newest first. Throws when the list cannot be read. */
     async list(sessionId) {
       const r = await request(artifacts(sessionId))
@@ -386,7 +424,12 @@ export function createFiles(opts: FilesOptions): TransportFiles {
 
     async remove(sessionId, id) {
       const r = await request(`${artifacts(sessionId)}/${enc(id)}`, { method: 'DELETE' })
-      if (!r.ok && r.status !== 404) throw new Error(`HTTP ${r.status}`)
+      if (r.ok || r.status === 404) return
+      const { detail, errorId } = await replyDetail(r)
+      const fallback = r.status === 403
+        ? 'You can delete only the files you attached. The session’s owner or an administrator can delete the others.'
+        : r.status >= 500 ? 'The server couldn’t delete the file. Try again.' : 'Couldn’t delete the file. Try again.'
+      throw new FileRequestError(detail || fallback, r.status, errorId)
     },
 
     /** Uploads one file to the session as the person's attachment. Throws an Error whose message

@@ -353,3 +353,20 @@ func TestWithSPAFallbackBindsPathValues(t *testing.T) {
 		t.Fatalf("SPA fallback: code=%d body=%q", rec.Code, rec.Body.String())
 	}
 }
+
+func TestMarketplacePolicyLegacyDefaultUpgrade(t *testing.T) {
+	for _, raw := range []string{"", "anthropics/claude-plugins-official", " AnthROpics/claude-plugins-official , , "} {
+		t.Setenv("BLERG_CORE_PLUGIN_MARKETPLACES", raw)
+		allow := pluginAllowlist()
+		for _, source := range []string{"anthropics/claude-plugins-official", "codex:openai-curated", "codex:openai-curated-remote"} {
+			if !allow.Allows(source) {
+				t.Fatal("upgrade missing official source", raw, source)
+			}
+		}
+	}
+	t.Setenv("BLERG_CORE_PLUGIN_MARKETPLACES", "example-org/private")
+	allow := pluginAllowlist()
+	if !allow.Allows("example-org/private") || allow.Allows("codex:openai-curated-remote") {
+		t.Fatal("custom initial policy widened")
+	}
+}

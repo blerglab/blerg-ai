@@ -290,7 +290,7 @@ func (a *API) deliverCompletion(ctx context.Context, sessionID string) {
 	if row.Private && (row.SpawningAccountID == nil || *row.SpawningAccountID == "") {
 		return
 	}
-	res, err := a.buildSessionResult(ctx, sessionID)
+	res, err := a.buildSessionResult(ctx, sessionID, derefOrEmpty(row.SpawningAccountID))
 	if err != nil {
 		log.Printf("webhook %s: build result: %v", sessionID, err)
 		return
@@ -314,7 +314,7 @@ func (a *API) deliverCompletion(ctx context.Context, sessionID string) {
 	if row.CallbackSecret != nil {
 		secret = *row.CallbackSecret
 	}
-	a.runWebhookAttempts(ctx, sessionID, *row.CallbackURL, secret, body)
+	a.runWebhookAttempts(ctx, sessionID, *row.CallbackURL, secret, body, derefOrEmpty(row.SpawningAccountID))
 }
 
 // parseWebhookTarget re-checks the stored callback URL at delivery time. The
@@ -332,7 +332,7 @@ func parseWebhookTarget(raw string) (*url.URL, error) {
 // runWebhookAttempts POSTs the body, retrying on network errors and 5xx per the
 // backoff schedule. A 2xx (delivered) or a 4xx (the receiver's verdict, which
 // retrying cannot change) ends delivery, and so does a refused redirect.
-func (a *API) runWebhookAttempts(ctx context.Context, sessionID, rawURL, secret string, body []byte) {
+func (a *API) runWebhookAttempts(ctx context.Context, sessionID, rawURL, secret string, body []byte, recipient string) {
 	backoff := a.webhookBackoff
 	if backoff == nil {
 		backoff = webhookBackoffDefault
@@ -349,7 +349,7 @@ func (a *API) runWebhookAttempts(ctx context.Context, sessionID, rawURL, secret 
 	client := a.webhookHTTPClient(target)
 
 	for attempt := 1; attempt <= len(backoff)+1; attempt++ {
-		status, err := a.postWebhook(ctx, client, target.String(), sessionID, deliveryID, secret, body)
+		status, err := a.postCompletionSnapshot(ctx, client, target.String(), sessionID, deliveryID, secret, body, recipient)
 		ok := status >= 200 && status < 300
 		a.recordWebhookAttempt(ctx, sessionID, deliveryID, attempt, status, ok, webhookAttemptReason(status, ok, err))
 
@@ -457,4 +457,32 @@ func (a *API) recordWebhookAttempt(ctx context.Context, sessionID, deliveryID st
 	if _, _, err := db.AppendAgentEvent(ctx, a.dbPool, sessionID, newUUID(), webhookEventKind, string(payload)); err != nil {
 		log.Printf("webhook %s: record attempt %d: %v", sessionID, attempt, err)
 	}
+}
+
+// Recheck every retry at delivery, including an ownership change during retry
+// backoff. Bound the actual network write while holding desktop authority.
+func (a *API) postCompletionSnapshot(ctx context.Context, client *http.Client, target, sid, deliveryID, secret string, body []byte, recipient string) (int, error) {
+	status := 0
+	err := a.sessionReadFence(ctx, sid, func(fenced context.Context) error {
+		filtered, ok := a.hub.desktopPayloadFor(fenced, recipient, body)
+		if !ok {
+			return errDiscoveryUnavailable
+		}
+		row, err := db.GetSession(fenced, a.dbPool, sid)
+		if err != nil {
+			return err
+		}
+		if row == nil {
+			return errDiscoveryUnavailable
+		}
+		requestCtx := fenced
+		if derefOrEmpty(row.Runtime) != "cluster" {
+			var cancel context.CancelFunc
+			requestCtx, cancel = context.WithTimeout(fenced, time.Second)
+			defer cancel()
+		}
+		status, err = a.postWebhook(requestCtx, client, target, sid, deliveryID, secret, filtered)
+		return err
+	})
+	return status, err
 }

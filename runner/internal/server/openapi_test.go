@@ -82,3 +82,21 @@ func TestRunnerOpenAPIPathsAreRegisteredOnTheMux(t *testing.T) {
 		}
 	}
 }
+
+// Keep the machine-readable contract in step with REST and MCP validation.
+func TestRunnerOpenAPIIdempotencyKey(t *testing.T) {
+	spec := parseRunnerOpenAPI(t)
+	parameters := spec.Paths["/api/runner/start"]["post"].(map[string]any)["parameters"].([]any)
+	for _, raw := range parameters {
+		parameter := raw.(map[string]any)
+		if parameter["name"] != "Idempotency-Key" {
+			continue
+		}
+		schema := parameter["schema"].(map[string]any)
+		if parameter["in"] != "header" || parameter["required"] != false || schema["type"] != "string" || schema["minLength"] != float64(1) || schema["maxLength"] != float64(128) || schema["pattern"] != "^[A-Za-z0-9_.:-]{1,128}$" {
+			t.Fatalf("Idempotency-Key contract: %v", parameter)
+		}
+		return
+	}
+	t.Fatal("Idempotency-Key header is undocumented")
+}

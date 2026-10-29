@@ -42,6 +42,7 @@ describe('History chips', () => {
   it('a card, a commit and a file version each preview on hover', () => {
     const now = new Date(2026, 9, 15, 12, 0)
     render(<TopicList sessionId="sess-a" view={{ status: 'ready', reply: strokesReply(now) }} now={now} missing={null} onJump={() => {}} onOpenArtifact={() => {}} />)
+    for (const head of screen.getAllByTestId('reel-head')) if (head.getAttribute('aria-expanded') === 'false') fireEvent.click(head)
     const card = screen.getAllByTestId('stroke-card').find(c => c.textContent === '#42')!
     expect(hover(card)).toHaveAttribute('data-kind', 'card')
     expect(screen.getByTestId('hovercard-title')).toHaveTextContent('Export button is stale')

@@ -122,7 +122,7 @@ func (a *API) handleChildDiscard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	at := row.ArchivedAt.UTC().Format(time.RFC3339Nano)
-	a.hub.BroadcastJSON(map[string]string{"type": "session_archived", "session_id": child, "parent_session_id": parent.ID, "archived_at": at})
-	a.broadcastChildrenChanged(parent.ID, child)
+	a.hub.BroadcastJSON(map[string]string{"type": "session_archived", "session_id": child, "parent_session_id": parent.ID, "archived_at": at}) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
+	a.broadcastChildrenChanged(parent.ID, child)                                                                                               //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 	writeJSON(w, 200, map[string]string{"status": "discarded", "session_id": child, "archived_at": at})
 }

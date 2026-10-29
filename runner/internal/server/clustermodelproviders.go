@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 
+	"github.com/blerglab/blerg-ai/runner/internal/codexauth"
+
 	"github.com/blerglab/blerg-ai/runner/internal/models"
 )
 
@@ -13,6 +15,7 @@ type clusterModelProvider struct {
 	probe         func(context.Context, *JobManager, string, coreProof, bool) (models.List, error)
 	probeOperator func(context.Context, *JobManager, bool) (models.List, error)
 	safeError     func(error) string
+	reconnect     func(error) bool
 	// available, when set, says whether this cluster has a catalog for the
 	// engine at all; without one the engine keeps the public-or-none path.
 	available func(*JobManager) bool
@@ -20,6 +23,9 @@ type clusterModelProvider struct {
 
 var clusterModelProviders = map[string]clusterModelProvider{
 	"codex": {
+		reconnect: func(err error) bool {
+			return errors.Is(err, ErrClusterCodexCatalogAuth) || errors.Is(err, codexauth.ErrDedicatedLogin)
+		},
 		probeOperator: func(ctx context.Context, j *JobManager, force bool) (models.List, error) {
 			return j.codexOperatorModels(ctx, force)
 		},
@@ -27,6 +33,9 @@ var clusterModelProviders = map[string]clusterModelProvider{
 			return j.codexModels(ctx, account, proof, force)
 		},
 		safeError: func(err error) string {
+			if errors.Is(err, codexauth.ErrDedicatedLogin) {
+				return codexauth.ErrDedicatedLogin.Error()
+			}
 			if errors.Is(err, ErrClusterCodexCatalogAuth) {
 				return ErrClusterCodexCatalogAuth.Error()
 			}

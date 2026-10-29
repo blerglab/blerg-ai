@@ -15,6 +15,7 @@ import (
 
 	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // reposRootFixture is an API with one connected workstation daemon whose
@@ -25,6 +26,7 @@ type reposRootFixture struct {
 	mux   *http.ServeMux
 	dc    *DaemonConn
 	token string
+	pool  *pgxpool.Pool
 }
 
 func newReposRootFixture(t *testing.T) *reposRootFixture {
@@ -34,13 +36,15 @@ func newReposRootFixture(t *testing.T) *reposRootFixture {
 	t.Cleanup(core.Close)
 
 	hub := NewHub()
-	dc := &DaemonConn{ID: "d1", Name: "workstation", Mode: "local", ReposRoot: "/home/dev/repos", send: make(chan []byte, 8)}
+	dc := &DaemonConn{ID: newUUID(), Name: "workstation", Mode: "local", ReposRoot: "/home/dev/repos", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	dc.SetCheckedOutRepos([]string{"old-repo"})
 	dc.SetRepoRemotes(map[string]string{"old-repo": "example-org/old-repo"})
 	hub.Register(dc)
 
-	api := NewAPI(hub, nil, "", nil, "")
+	pool := connectSrvTestDB(t)
+	api := NewAPI(hub, pool, "", nil, "")
+	fixtureOwnDesktop(t, pool, dc, "human:test-user")
 	api.SetCoreAuth(ownedCoreAuthClient(t, core.URL))
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/daemons", api.HandleGetDaemons)
@@ -50,17 +54,20 @@ func newReposRootFixture(t *testing.T) *reposRootFixture {
 		Sub: "human:test-user", Aud: "blerg-runner", Kind: "human",
 		Caps: []string{"session.start"}, ExpiresAt: time.Now().Unix() + 60,
 	})
-	return &reposRootFixture{hub: hub, api: api, mux: mux, dc: dc, token: token}
+	return &reposRootFixture{hub: hub, api: api, mux: mux, dc: dc, token: token, pool: pool}
 }
 
 func (f *reposRootFixture) put(t *testing.T, daemonID, body string, auth bool) *httptest.ResponseRecorder {
+	if daemonID == "d1" {
+		daemonID = f.dc.ID
+	}
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPut, "/api/daemons/"+daemonID+"/repos-root", bytes.NewBufferString(body))
 	if auth {
 		req.Header.Set("Authorization", "Bearer "+f.token)
 	}
 	rec := httptest.NewRecorder()
-	f.mux.ServeHTTP(rec, req)
+	f.mux.ServeHTTP(&reviewDeadlineWriter{ResponseRecorder: rec}, req)
 	return rec
 }
 
@@ -148,7 +155,7 @@ func TestPutReposRootAppliesDaemonAnswer(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/daemons", nil)
 	req.Header.Set("Authorization", "Bearer "+f.token)
 	list := httptest.NewRecorder()
-	f.mux.ServeHTTP(list, req)
+	f.mux.ServeHTTP(&reviewDeadlineWriter{ResponseRecorder: list}, req)
 	var daemons []protocol.DaemonInfo
 	_ = json.Unmarshal(list.Body.Bytes(), &daemons)
 	if len(daemons) != 1 || daemons[0].ReposRoot != "/srv/repos" {
@@ -276,10 +283,11 @@ func TestPutReposRootDaemonDisconnectsMidRequest(t *testing.T) {
 
 func TestPutReposRootSendBufferFull(t *testing.T) {
 	f := newReposRootFixture(t)
-	full := &DaemonConn{ID: "d3", Name: "busy", Mode: "local", ReposRoot: "/r", send: make(chan []byte)} // unbuffered, nobody reading
+	full := &DaemonConn{ID: newUUID(), Name: "busy", Mode: "local", ReposRoot: "/r", send: make(chan []byte)} // unbuffered, nobody reading
 	full.SetSandboxClones(true)
+	fixtureOwnDesktop(t, f.api.dbPool, full, "human:test-user")
 	f.hub.Register(full)
-	if rec := f.put(t, "d3", `{"repos_root":"/srv/repos"}`, true); rec.Code != http.StatusServiceUnavailable {
+	if rec := f.put(t, full.ID, `{"repos_root":"/srv/repos"}`, true); rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("status %d, want 503", rec.Code)
 	}
 }

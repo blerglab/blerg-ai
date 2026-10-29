@@ -160,3 +160,38 @@ so the board cannot check whose desktop it is: resolving is kept to a signed-in 
 the board's automation token, and nothing is saved until they confirm. A folder with no remote stays
 desktop-only, and the cluster is not offered for it. A board's repos keep the order they were given;
 the first is the working directory of board sessions.
+
+
+### Board keys and card references
+
+Choose a unique key of 2–5 uppercase letters or digits, starting with a letter when creating a board. For example,
+a board named Blerg suggests `BLG`, and one named Launch Night suggests `LN`. Card numbers remain per board: `BLG-205`
+and `LN-6` resolve without a session-specific board. Board admins can change the key in Board
+settings; old keys remain reserved aliases, so existing references continue to work.
+
+Upgrade migration 029 leaves existing boards' keys unassigned. An admin confirms or edits the
+suggestion in Board settings. The upgrade preserves all card numbers and existing references.
+Until confirmation, CLI output uses `board:<board-id>#<number>`; both that legacy form and bare
+`#N` (when one board is unambiguous) continue to work. MCP card tools accept `reference: "BLG-205"`
+as an alternative to `card_id` or `board_id` plus `number`.
+
+#### One-time upgrade confirmation
+
+Immediately after upgrading, a board admin opens each existing board's **Board settings → Board key**,
+verifies the suggested key (for example `BLG` for a board named Blerg) and clicks **Confirm key**.
+If a suggestion has a numeric suffix, another board or a reserved alias already owns the
+shorter key: inspect the owner before choosing an alternative. Confirm once; subsequent
+upgrades preserve the keys. Verify by opening an existing `BLG-N` and `AD-N` reference.
+This is an admin action, not an automatic migration assignment.
+
+Migration 030 tightens validation to require an initial letter. If a pre-release installation
+already assigned keys beginning with a digit, fix those keys and remove their invalid aliases
+before upgrading; the migration refuses them rather than silently renaming references.
+All valid old keys stay reserved permanently and cannot be reused for another board.
+
+Suggestions come from the server and check current keys and aliases for availability; saving
+still checks for concurrent claims. Reference readers cache a key map for the session/viewer,
+so unknown prose such as `UTF-8` and `SHA-256` stays text without card reads. A real board
+using one of those keys intentionally makes it a reference. Reload the session after confirming
+or renaming a key to refresh its discovery snapshot. Chips show the canonical current key,
+even when the message used `#N`, `board:<id>#N`, or an old alias.

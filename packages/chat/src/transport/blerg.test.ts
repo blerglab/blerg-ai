@@ -871,6 +871,68 @@ describe('createBlergTransport files', () => {
     vi.unstubAllGlobals()
   })
 
+  it('preserves the quota code on an upload refusal without classifying ordinary 409s as quota failures', async () => {
+    const { t } = make()
+    try {
+      for (const code of ['file_space_required', undefined]) {
+        const xhr = refusingXhr(409, JSON.stringify({error: 'Not enough space or too many versions.', code}))
+        vi.stubGlobal('XMLHttpRequest', function FakeXhr() { return xhr })
+        const error = await t.files!.upload('s1', new File(['abc'], 'a.txt')).catch((e: unknown) => e)
+        expect(error).toBeInstanceOf(FileRequestError)
+        expect((error as FileRequestError).code).toBe(code)
+      }
+    } finally {vi.unstubAllGlobals()}
+  })
+
+  it('reads fresh space limits and deletion permission through the authenticated artifact list', async () => {
+    const { t, fetch } = make()
+    const value = {artifacts: [{id: 'old', name: 'old.txt', size: 3}], limits: {max_session_upload_bytes: 8}, can_delete: true}
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify(value), {status: 200}))
+    // An older runner decides per session: each file takes the session's answer.
+    expect(await t.files!.space!('s1')).toEqual({...value, artifacts: [{...value.artifacts[0], can_delete: true}], can_increase: false})
+    expect(String(fetch.mock.calls.at(-1)?.[0])).toBe('/api/sessions/s1/artifacts')
+    fetch.mockResolvedValueOnce(new Response('{"artifacts":[{"id":"mine","name":"m","size":1,"can_delete":true},{"id":"theirs","name":"t","size":1,"can_delete":false}],"can_increase":true}', {status: 200}))
+    const perFile = await t.files!.space!('s1')
+    expect(perFile.artifacts.map(a => a.can_delete)).toEqual([true, false])
+    expect(perFile).toMatchObject({can_delete: false, can_increase: true})
+    fetch.mockResolvedValueOnce(new Response('{"artifacts":[]}', {status: 200}))
+    expect(await t.files!.space!('s1')).toEqual({artifacts: [], limits: {}, can_delete: false, can_increase: false})
+  })
+
+  it('says why a delete or a storage increase was refused, in words (#231 review, finding 10)', async () => {
+    const { t, fetch } = make()
+    fetch.mockResolvedValueOnce(new Response('', {status: 403}))
+    await expect(t.files!.remove('s1', 'a1')).rejects.toThrow(/only the files you attached/)
+    fetch.mockResolvedValueOnce(new Response('{"error":"You can delete only the files you attached. Ask the owner."}', {status: 403}))
+    await expect(t.files!.remove('s1', 'a1')).rejects.toThrow('You can delete only the files you attached. Ask the owner.')
+    fetch.mockResolvedValueOnce(new Response(null, {status: 404}))
+    await expect(t.files!.remove('s1', 'gone')).resolves.toBeUndefined()
+    fetch.mockResolvedValueOnce(new Response('{"ok":true}', {status: 200}))
+    await t.files!.increaseStorage!('s1')
+    expect(String(fetch.mock.calls.at(-1)?.[0])).toBe('/api/sessions/s1/storage')
+    expect((fetch.mock.calls.at(-1)?.[1] as RequestInit).method).toBe('POST')
+    fetch.mockResolvedValueOnce(new Response('', {status: 403}))
+    await expect(t.files!.increaseStorage!('s1')).rejects.toThrow(/Only an administrator/)
+  })
+
+  it('namespaces durable queues by the runner and current viewer, disabling them when identity is unknown', () => {
+    let viewer = 'first-account'
+    const t = createBlergTransport({baseUrl: 'https://runner.example', getToken: async () => 'token', socket: fakeSocket(), viewerId: () => viewer})
+    expect(t.files!.queueScope!()).toBe('https://runner.example\0first-account')
+    viewer = 'second-account'
+    expect(t.files!.queueScope!()).toBe('https://runner.example\0second-account')
+    viewer = ''
+    expect(t.files!.queueScope!()).toBe('')
+  })
+
+  it('keeps a session-list 404 distinct from a removed individual file', async () => {
+    const { t, fetch } = make()
+    fetch.mockResolvedValueOnce(new Response('{"error":"session not found"}', {status: 404}))
+    const error = await t.files!.space!('s1').catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(FileRequestError)
+    expect(error).toMatchObject({status: 404, message: 'session not found'})
+  })
+
   it('uploads raw bytes with the percent-encoded name, reporting progress', async () => {
     const xhr = {
       headers: {} as Record<string, string>, sent: null as unknown, url: '',

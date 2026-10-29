@@ -144,7 +144,7 @@ func TestBoardLevelsEachAllowExactlyTheirOperations(t *testing.T) {
 		t.Fatalf("by name: %d %s", code, body)
 	}
 	// Tools outside the fixed set are never callable, at any level.
-	for _, tool := range []string{"blerg_card_archive", "blerg_board_update", "blerg_column_create", "nope"} {
+	for _, tool := range []string{"blerg_card_archive", "blerg_board_update", "blerg_board_create", "nope"} {
 		if code, _ := boardTool(fx, fx.sessTok, "board-a", tool, nil); code != 400 {
 			t.Fatalf("%s: %d", tool, code)
 		}
@@ -266,6 +266,67 @@ func permissionBoards(t *testing.T, fx *topicFx) []boardLevelView {
 		t.Fatalf("permissions: %d %s", rec.Code, rec.Body.String())
 	}
 	return out.Boards
+}
+
+// Column management (0.5.0) is part of Full: every column tool works at full and is refused at
+// propose, read and file, with nothing reaching the board.
+func TestColumnToolsFollowTheBoardLevel(t *testing.T) {
+	fx, fb, _ := newBoardLevelFx(t)
+	human := fx.token(topicOwner, "human")
+	tools := map[string]map[string]any{
+		"blerg_column_create": {"name": "0.5.0 to do"},
+		"blerg_column_update": {"column_id": "col-1", "name": "Next", "is_terminal": true},
+		"blerg_column_move":   {"column_id": "col-1", "before_id": "col-2"},
+		"blerg_column_delete": {"column_id": "col-1", "move_cards_to": "col-2"},
+	}
+	for _, level := range []string{db.BoardLevelPropose, db.BoardLevelRead, db.BoardLevelFile, db.BoardLevelFull} {
+		if level != db.BoardLevelPropose {
+			if code, body := setLevel(fx, human, "board-a", level); code != 200 {
+				t.Fatalf("set %s: %d %s", level, code, body)
+			}
+		}
+		for tool, args := range tools {
+			before := fb.count()
+			code, body := boardTool(fx, fx.sessTok, "board-a", tool, args)
+			if level == db.BoardLevelFull {
+				c := fb.last()
+				if code != 200 || fb.count() != before+1 || c.Tool != tool || c.ReadOnly || c.SessionRef != fx.sess || c.Proof.SessionID != testSID {
+					t.Fatalf("full: %s = %d %s (%+v)", tool, code, body, c)
+				}
+				if tool == "blerg_column_create" && !strings.Contains(string(c.Arguments), `"board_id":"board-a"`) {
+					t.Fatalf("create arguments %s", c.Arguments)
+				}
+				continue
+			}
+			if code != 403 || fb.count() != before || !strings.Contains(body, "needs full access") {
+				t.Fatalf("%s: %s = %d %s", level, tool, code, body)
+			}
+		}
+	}
+}
+
+// An untouched launch board made with an agent token has no person behind it: column management is
+// refused there until the person gives the board Full in Permissions.
+func TestColumnToolsNeedAPersonsAccess(t *testing.T) {
+	fx, fb, _ := newBoardLevelFx(t)
+	if _, err := mcpgw.CreateGrants(t.Context(), fx.pool, fx.sess, topicOwner, mcpgw.Proof{AccountID: topicOwner, TokenID: "launch-token"},
+		[]mcpgw.GrantSpec{mcpgw.BoardGrantSpec("board-a", "http://board.example.test/mcp")}); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := boardTool(fx, fx.sessTok, "board-a", "blerg_card_create", map[string]any{"title": "x"}); code != 200 {
+		t.Fatalf("card write on the untouched launch board: %d %s", code, body)
+	}
+	before := fb.count()
+	code, body := boardTool(fx, fx.sessTok, "board-a", "blerg_column_create", map[string]any{"name": "x"})
+	if code != 403 || fb.count() != before || !strings.Contains(body, "Full access the person gave") {
+		t.Fatalf("token launch column create: %d %s", code, body)
+	}
+	if code, body := setLevel(fx, fx.token(topicOwner, "human"), "board-a", db.BoardLevelFull); code != 200 {
+		t.Fatalf("set full: %d %s", code, body)
+	}
+	if code, body := boardTool(fx, fx.sessTok, "board-a", "blerg_column_create", map[string]any{"name": "x"}); code != 200 {
+		t.Fatalf("after the person set full: %d %s", code, body)
+	}
 }
 
 func TestLaunchBoardShowsAsFullAndCanBeLoweredOrRevoked(t *testing.T) {

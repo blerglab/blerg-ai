@@ -70,7 +70,8 @@ describe('TerminalDOMView — mobile touch scroll (real touch via CDP)', () => {
     expect(before).toBeGreaterThan(50)
 
     const client = cdp() as unknown as { send(method: string, params?: object): Promise<unknown> }
-    await client.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 })
+    // CDP dispatches real touch input without changing device emulation on the
+    // browser page that subsequent mouse fixtures reuse.
     const rect = scrollEl.getBoundingClientRect()
     const x = Math.round(rect.left + rect.width / 2)
     const yStart = Math.round(rect.top + rect.height * 0.2)
@@ -83,6 +84,7 @@ describe('TerminalDOMView — mobile touch scroll (real touch via CDP)', () => {
 
     await poll(() => scrollEl.scrollTop < before - 30, 2000)
     expect(scrollEl.scrollTop).toBeLessThan(before)
+    await expect.poll(() => window.matchMedia('(hover: hover)').matches).toBe(true)
   })
 
   // The real-world failing case: a session ACTIVELY STREAMING output. With tmux

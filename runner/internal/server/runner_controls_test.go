@@ -432,6 +432,7 @@ func TestRunnerResumeEligibilityUsesRuntimeOwnerAndRetainedState(t *testing.T) {
 
 func TestExistingSessionDiscoveryUsesActualHostAndEngine(t *testing.T) {
 	api, host, id := controlFixture(t)
+	fixtureOwnDesktop(t, api.dbPool, host, "owner")
 	host.SetAvailableEngines([]string{"codex", "claude"})
 	host.SetEngineModels(map[string]models.Report{"codex": rep(time.Now(), mdl("gpt-actual"))})
 	other := reportingDaemon(api.hub, "fixture-other-host", map[string]models.Report{"codex": rep(time.Now(), mdl("gpt-other"))})

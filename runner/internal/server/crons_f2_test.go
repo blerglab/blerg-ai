@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/blerglab/blerg-ai/runner/internal/cron"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/idempotency"
 )
 
 const cronTokRenewed = "c0c0c0c0-c0c0-4c0c-8c0c-c0c0c0c0c0c9"
@@ -78,11 +80,11 @@ func TestStartUsesTheCurrentTokenAndAStableScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start with a stale row: %v (the old token is revoked, the current one is live)", err)
 	}
-	if k, _ := db.GetIdempotencyKey(ctx, cf.pool, "cron:"+c.ID, run.IdempotencyKey()); k == nil || k.SessionID != sid {
-		t.Fatalf("key row = %+v, want it in scope cron:<cron id>", k)
+	if k, _ := db.GetIdempotencyKey(ctx, cf.pool, idempotency.Scope("cron", c.ID), run.IdempotencyKey()); k == nil || k.SessionID != sid {
+		t.Fatalf("key row = %+v, want it in the encoded cron scope", k)
 	}
-	if k, _ := db.GetIdempotencyKey(ctx, cf.pool, "agent:"+cronTokRenewed, run.IdempotencyKey()); k != nil {
-		t.Fatal("the key was written in a token scoped bucket")
+	if k, err := db.GetIdempotencyKey(ctx, cf.pool, idempotency.Scope("agent", cronTokRenewed), run.IdempotencyKey()); err != nil || k != nil {
+		t.Fatalf("token-scoped key = %+v, %v; want none", k, err)
 	}
 	// Renewed again, the replay of the same run still answers with the same session.
 	cur, _ := db.GetCron(ctx, cf.pool, c.ID)
@@ -320,5 +322,47 @@ func TestEnabledToggleMintsAndRevokesNothing(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"enabled":true`) {
 		t.Errorf("view = %s", rec.Body.String())
+	}
+}
+
+// A run claimed before the scope upgrade must replay before any new start side effects.
+func TestCronStartReplaysLegacyScope(t *testing.T) {
+	for _, withSession := range []bool{false, true} {
+		t.Run(fmt.Sprintf("session=%t", withSession), func(t *testing.T) {
+			cf := newCronFx(t)
+			ctx := t.Context()
+			c := cf.newCron(nil)
+			run := cf.run(c)
+			sid := newUUID()
+			if withSession {
+				if err := db.InsertSession(ctx, cf.pool, sid, cf.dc.ID, "running", "", "", "cron", ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, claimed, err := db.ClaimIdempotencyKey(ctx, cf.pool, "cron:"+c.ID, run.IdempotencyKey(), "h", sid, 24*time.Hour); err != nil || !claimed {
+				t.Fatalf("claim legacy key: claimed=%v err=%v", claimed, err)
+			}
+			got, err := cf.svc.Start(ctx, c, run)
+			if withSession {
+				if err != nil || got != sid {
+					t.Fatalf("replay = %q, %v; want session %s", got, err, sid)
+				}
+			} else if !isCapacity(err) || got != "" {
+				t.Fatalf("unfinished claim = %q, %v; want capacity error", got, err)
+			}
+			wantSessions := 0
+			if withSession {
+				wantSessions = 1
+			}
+			if cf.count("sessions") != wantSessions || cf.count("runner_idempotency") != 1 {
+				t.Fatal("replay created another session or claim")
+			}
+			cf.k8s.mu.Lock()
+			jobs := len(cf.k8s.created)
+			cf.k8s.mu.Unlock()
+			if jobs != 0 {
+				t.Fatalf("replay started %d Jobs, want none", jobs)
+			}
+		})
 	}
 }

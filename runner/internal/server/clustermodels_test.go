@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blerglab/blerg-ai/runner/internal/codexauth"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
 )
 
@@ -220,17 +221,26 @@ func TestCodexProbeAuthSnapshotWithholdsRefreshAndRejectsExpired(t *testing.T) {
 	if !decoded.LastRefresh.Equal(now.UTC()) {
 		t.Fatal("probe snapshot allows implicit refresh")
 	}
-	if err != nil || strings.Contains(string(snapshot), "fixture-refresh-value") || !strings.Contains(string(snapshot), "fixture-account") {
+	if err != nil || strings.Contains(string(snapshot), "refresh_token") || strings.Contains(string(snapshot), "fixture-refresh-value") || !strings.Contains(string(snapshot), "fixture-account") {
 		t.Fatalf("unsafe snapshot: error=%v", err)
 	}
-	for _, raw := range [][]byte{auth(now.Add(-time.Hour).Unix()), []byte(`{}`), []byte(`not-json`)} {
+	for _, raw := range [][]byte{[]byte(`{}`), []byte(`not-json`)} {
 		if _, err := codexProbeAuthSnapshot(raw, now); !errors.Is(err, ErrClusterCodexCatalogAuth) {
 			t.Fatalf("invalid auth accepted: %v", err)
 		}
 	}
 	snapshot, err = codexProbeAuthSnapshot([]byte(`{"auth_mode":"apikey","OPENAI_API_KEY":"fixture-api-value","tokens":{"refresh_token":"fixture-refresh-value"}}`), now)
-	if err != nil || strings.Contains(string(snapshot), "fixture-refresh-value") {
+	if err != nil || strings.Contains(string(snapshot), "refresh_token") || strings.Contains(string(snapshot), "fixture-refresh-value") {
 		t.Fatal("invalid API key snapshot")
+	}
+}
+
+func TestExpiredCodexSnapshotRequiresDedicatedLoginInsteadOfClaimingUnauthenticated(t *testing.T) {
+	claims, _ := json.Marshal(map[string]int64{"exp": time.Now().Add(-time.Hour).Unix()})
+	raw, _ := json.Marshal(map[string]any{"tokens": map[string]string{"access_token": "fixture." + base64.RawURLEncoding.EncodeToString(claims) + ".fixture", "refresh_token": "fixture-shared-refresh"}})
+	_, err := codexProbeAuthSnapshot(raw, time.Now())
+	if err == nil || errors.Is(err, ErrClusterCodexCatalogAuth) || !strings.Contains(err.Error(), "dedicated") {
+		t.Fatal("expired copied login must explain independent cluster login")
 	}
 }
 
@@ -254,7 +264,7 @@ func TestClusterCodexModelsPersonalCredentialAndExpiredAccess(t *testing.T) {
 			j.CredentialClient = core.Client()
 			_, err := j.CodexModels(context.Background(), "account", coreProof{SessionID: "session"})
 			if expired {
-				if !errors.Is(err, ErrClusterCodexCatalogAuth) || f.jobs != 0 || f.secrets != 0 {
+				if !errors.Is(err, codexauth.ErrDedicatedLogin) || f.jobs != 0 || f.secrets != 0 {
 					t.Fatal("expired access reached probe")
 				}
 				return
@@ -279,11 +289,13 @@ func TestClusterCodexCatalogCommandRequiresFreshRemoteCache(t *testing.T) {
 		t.Run(fmt.Sprint(fresh), func(t *testing.T) {
 			dir := t.TempDir()
 			auth := filepath.Join(dir, "auth.json")
-			if err := os.WriteFile(auth, []byte(`{}`), 0600); err != nil {
+			if err := os.WriteFile(auth, []byte(`{"tokens":{"access_token":"fixture-access"}}`), 0600); err != nil {
 				t.Fatal(err)
 			}
 			fake := `#!/usr/bin/python3
 import json,os,pathlib,sys
+native=json.loads((pathlib.Path(os.environ["CODEX_HOME"])/"auth.json").read_text())
+if native.get("tokens",{}).get("refresh_token") != "": sys.exit(71)
 for line in sys.stdin:
     message=json.loads(line)
     if message.get("method") not in ["initialize","initialized","model/list"]:

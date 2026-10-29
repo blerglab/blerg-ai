@@ -68,7 +68,7 @@ func TestSetRepoOriginsSanitizesAcrossProviders(t *testing.T) {
 // merged with it.
 func TestHandleGetReposCarriesProvider(t *testing.T) {
 	hub := NewHub()
-	d := &DaemonConn{ID: "d1", Name: "desk"}
+	d := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006b", Name: "desk"}
 	d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	d.SetCheckedOutRepos([]string{"lab-proj", "hub-proj"})
 	d.SetRepoOrigins(map[string]protocol.RepoOrigin{
@@ -76,7 +76,7 @@ func TestHandleGetReposCarriesProvider(t *testing.T) {
 		"hub-proj": {Provider: "github", FullName: "example-org/hub-proj"},
 	}, nil)
 	hub.Register(d)
-	api := NewAPI(hub, nil, "", nil, "")
+	api := ownedInventoryAPI(t, hub, "", nil, "")
 	r := getRepos(t, api)
 	if got := r["lab-proj"]; got.Provider != "gitlab" || got.FullName != "example-group/lab-proj" || got.Cloneable == nil || !*got.Cloneable {
 		t.Errorf("lab-proj = %+v", got)
@@ -288,19 +288,19 @@ func TestHandleGetReposMergesUserListsByProvider(t *testing.T) {
 	gl.set([]gitprovider.Repo{{Provider: "gitlab", Owner: "example-org", Name: "tool"}}, nil)
 
 	hub := NewHub()
-	d := &DaemonConn{ID: "d1", Name: "desk"}
+	d := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006b", Name: "desk"}
 	d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	d.SetCheckedOutRepos([]string{"tool"})
 	d.SetRepoOrigins(map[string]protocol.RepoOrigin{"tool": {Provider: "gitlab", FullName: "example-org/tool"}}, nil)
 	hub.Register(d)
-	api := NewAPI(hub, nil, "", nil, "")
+	api := ownedInventoryAPI(t, hub, "", nil, "")
 	api.userRepos = l
 
 	tok := enableBrowserAuth(t, api)("session.start")
 	req := httptest.NewRequest(http.MethodGet, "/api/repos", nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
-	api.HandleGetRepos(rec, req)
+	api.HandleGetRepos(&reviewDeadlineWriter{ResponseRecorder: rec}, req)
 	var resp reposResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
@@ -507,16 +507,16 @@ func TestPostSessionsClusterProvider(t *testing.T) {
 	jm.GitHubOrg = ""
 	jm.GitURLBase = "https://github.com"
 	hub.SetJobManager(jm)
-	d := &DaemonConn{ID: "d1", Name: "desk", send: make(chan []byte, 8)}
+	d := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006b", Name: "desk", send: make(chan []byte, 8)}
 	d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
 	d.SetCheckedOutRepos([]string{"lab-folder"})
 	d.SetRepoOrigins(map[string]protocol.RepoOrigin{"lab-folder": {Provider: "gitlab", FullName: "example-group/lab-proj"}}, nil)
 	hub.Register(d)
-	api := NewAPI(hub, nil, "daemon-tok-1234567890", nil, "")
+	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 
 	for i, body := range []map[string]any{
 		{"repo": "example-group/typed", "provider": "gitlab", "runtime": "cluster", "kind": "agent"},
-		{"repo": "lab-folder", "runtime": "cluster", "kind": "agent", "daemon_id": "d1"},
+		{"repo": "lab-folder", "runtime": "cluster", "kind": "agent", "daemon_id": "00000000-0000-4000-8000-00000000006b"},
 	} {
 		rec := postSpawn(t, api, body)
 		if rec.Code != 202 {
@@ -546,7 +546,7 @@ func TestPostSessionsClusterProvider(t *testing.T) {
 // for a daemon too old to honour it (it would clone github.com/grp/tool).
 func TestPostSessionsDaemonCarriesProvider(t *testing.T) {
 	api, dc := runtimeTestAPI(t)
-	body := map[string]any{"daemon_id": "d1", "repo": "grp/tool", "provider": "gitlab", "kind": "agent", "runtime": "daemon"}
+	body := map[string]any{"daemon_id": dc.ID, "repo": "grp/tool", "provider": "gitlab", "kind": "agent", "runtime": "daemon"}
 
 	// dc said nothing about providers: an older daemon.
 	if rec := postSpawn(t, api, body); rec.Code != http.StatusUnprocessableEntity {
@@ -572,8 +572,8 @@ func TestPostSessionsDaemonCarriesProvider(t *testing.T) {
 	}
 
 	for _, bad := range []map[string]any{
-		{"daemon_id": "d1", "repo": "grp/tool", "provider": "bitbucket", "kind": "agent", "runtime": "daemon"},
-		{"daemon_id": "d1", "repo": "grp/-bad", "provider": "gitlab", "kind": "agent", "runtime": "daemon"},
+		{"daemon_id": dc.ID, "repo": "grp/tool", "provider": "bitbucket", "kind": "agent", "runtime": "daemon"},
+		{"daemon_id": dc.ID, "repo": "grp/-bad", "provider": "gitlab", "kind": "agent", "runtime": "daemon"},
 	} {
 		if rec := postSpawn(t, api, bad); rec.Code != http.StatusUnprocessableEntity {
 			t.Errorf("%v: status %d, want 422", bad, rec.Code)

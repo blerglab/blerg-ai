@@ -1,0 +1,9 @@
+.image-view { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+.image-view-toolbar { display: flex; flex: none; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--chat-border); }
+.image-view-toolbar .artifact-btn { min-width: 36px; min-height: 36px; padding: 4px 8px; }
+.image-view-toolbar output { color: var(--chat-muted); font-size: var(--chat-text-sm); font-variant-numeric: tabular-nums; min-width: 5ch; text-align: right; }
+.image-view-viewport { position: relative; flex: 1; min-width: 0; min-height: 0; overflow: hidden; overscroll-behavior: contain; touch-action: pan-x pan-y; user-select: none; }
+.image-view-viewport:focus-visible { outline: 2px solid var(--chat-accent); outline-offset: -2px; }
+.image-view-viewport.can-pan { cursor: grab; touch-action: none; }
+.image-view-viewport.is-dragging { cursor: grabbing; }
+.image-view .image-view-image { position: absolute; left: 0; top: 0; max-width: none; max-height: none; transform-origin: 0 0; pointer-events: none; }

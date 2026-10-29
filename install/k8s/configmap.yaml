@@ -2,10 +2,12 @@
 # full DSNs (which embed the postgres password) live in the blerg-secrets
 # Secret instead — see secret.example.yaml and deploy.sh.
 #
-# Optional keys not listed in `data` below — add them here (or `kubectl -n
-# blerg edit configmap blerg-config`) only if you want the feature they
-# enable; runner-deployment.yaml reads all of them as `optional: true`, so
-# an absent key is simply unset, not an error:
+# Optional runner settings belong in install/k8s/.env (same BLERG_RUNNER_*
+# names as runner-deployment.yaml). deploy.sh overlays explicit environment
+# values, then existing ConfigMap values, then these shipped defaults. Manual
+# patches survive redeploys; explicit empty values clear them. The agent image
+# follows the deploy tag/off switch; pin a custom image in .env. See README.md.
+# Examples of optional settings:
 #   BLERG_RUNNER_GITHUB_ORG               — GitHub org for the repo picker's
 #                                            org listing (pair with
 #                                            BLERG_RUNNER_GITHUB_TOKEN in
@@ -35,17 +37,19 @@
 #                                            catalog (refreshed every 6 h); set
 #                                            it to "" for an air-gapped cluster
 #                                            to serve the runner's built-in list.
-#   BLERG_CORE_PLUGIN_MARKETPLACES         — GitHub owner/repo marketplaces an
-#   BLERG_RUNNER_PLUGIN_MARKETPLACES         account may pick always-on plugins
-#                                            from (comma-separated, "*" = any).
-#                                            Absent = only
-#                                            anthropics/claude-plugins-official.
-#                                            Core enforces it when a list is
-#                                            saved; the runner (and each
-#                                            session pod) again before
-#                                            installing. Set both to the same
-#                                            value. Plugins run code in
-#                                            sessions: widen it deliberately.
+#   BLERG_CORE_PLUGIN_MARKETPLACES         — initial saved marketplace policy:
+#                                            comma-separated owner/repo or
+#                                            codex:<marketplace>; "*" = any.
+#                                            Defaults allow official Anthropic
+#                                            and OpenAI Codex marketplaces.
+#                                            Admin Settings wins after seeding.
+#   BLERG_RUNNER_PLUGIN_MARKETPLACES       — fallback only before first Core
+#                                            contact on servers and desktops.
+#                                            Saved policy survives outages.
+#                                            Pods ignore this environment and
+#                                            bootstrap current Core authority.
+#                                            Plugins run code in sessions:
+#                                            widen policy deliberately.
 #   BLERG_CORE_MCP_ALLOW_HTTP_HOSTS        — hostnames an MCP connection's URL
 #   BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS       may use over plain http, or reach
 #   BLERG_RUNNER_MCP_ALLOW_HTTP_HOSTS        although they resolve to a private,
@@ -129,10 +133,20 @@ data:
   # Cluster runtime. Empty BLERG_RUNNER_AGENT_IMAGE = off (CLUSTER_RUNTIME=off).
   BLERG_RUNNER_AGENT_IMAGE: "${AGENT_IMAGE}"
   BLERG_RUNNER_AGENT_NAMESPACE: "blerg-runner-sessions"
+  # Cluster workspace storage (README.md, "Workspace storage"). Empty: "standard"
+  # storage, one retained claim per session in BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS
+  # (deploy.sh sets it to the class of blerg-runner-data; empty = the cluster's default
+  # class), with no physical size limit per workspace. A size- and inode-limited CSI
+  # class here makes workspaces "bounded" (11.25 GiB, 700000 inodes each).
+  BLERG_RUNNER_WORKSPACE_STORAGE_CLASS: "${WORKSPACE_STORAGE_CLASS}"
+  BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS: "${WORKSPACE_DEFAULT_CLASS}"
   # Session pods call the runner from inside the cluster, so this is the
   # Service DNS name, not the public Ingress host.
   BLERG_RUNNER_INTERNAL_URL: "http://blerg-runner.blerg.svc.cluster.local:8080"
   BLERG_RUNNER_MAX_SESSIONS: "4"
+  # Fresh installs use 8Gi. The renderer preserves the historical 4Gi when
+  # upgrading an existing ConfigMap without a limit. .env overrides win.
+  BLERG_RUNNER_POD_MEM_LIMIT: "8Gi"
   # A sandboxed desktop session's cluster children: "once" asks the person for each
   # one (the pod gets their credentials); "any" lets session permissions and standing
   # cluster rules start them, as for an unsandboxed desktop session.
@@ -163,3 +177,11 @@ data:
   # install whose public hostnames resolve to a private network (a private
   # network behind NAT) — otherwise every callback into that network is refused.
   BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE: "${WEBHOOK_ALLOW_PRIVATE}"
+
+  # Defaults for core Settings → Child session limits; saved admin settings win.
+  # Per parent: 1–50 running at once, 1–10000 starts per rolling hour.
+  BLERG_RUNNER_MAX_PARALLEL_CHILDREN: "3"
+  BLERG_RUNNER_MAX_CHILD_STARTS_PER_HOUR: "120"
+
+  # 0.5-only upgrade compatibility; new desktop installs use per-person tokens.
+  BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS: "auto"

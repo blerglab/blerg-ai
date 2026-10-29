@@ -4,7 +4,8 @@ package server
 // on demand from the session's own workspace through the daemon that runs it (read_commit; the
 // daemon side is internal/daemon/commitlookup.go).
 //
-// Who may read: the session's owner or an administrator (account.manage), and only a person, the
+// Who may read: the exact session and desktop owner for desktop workspaces, or
+// the existing session owner/administrator policy for cluster workspaces; only a person. The
 // workspace-file reader's rule (a commit by sha reaches any history in the workspace's repository,
 // so it is filesystem access, not transcript access). Someone else's private session answers the
 // uniform 404 (an administrator's too); anyone else gets 403; an agent, service or session token
@@ -24,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,9 +44,6 @@ const (
 	commitResultMaxFrame = (protocol.CommitPatchMaxBytes+2)/3*4 + (64 << 10)
 )
 
-// commitWriteGrace is how long past the read's deadline the success response may take to write.
-const commitWriteGrace = 5 * time.Second
-
 // The longest a read waits for its daemon (a summary, a diff).
 var (
 	commitLookupTimeout = 7 * time.Second
@@ -57,6 +56,7 @@ var (
 )
 
 type commitWaiter struct {
+	ref       protocol.WorkspaceGitRef
 	dc        *DaemonConn
 	sessionID string
 	account   string
@@ -68,8 +68,20 @@ type commitRequests struct {
 }
 
 func (h *Hub) requestCommit(ctx context.Context, dc *DaemonConn, account, sid, sha string, patch bool, timeout time.Duration) (protocol.CommitResult, error) {
+	return h.requestCommitRead(ctx, dc, account, protocol.ReadCommit{SessionID: sid, SHA: sha, Patch: patch}, timeout)
+}
+
+// requestCommitRead sends one read_commit (a commit, its diff, or whether a child's branch is
+// merged) under the same bounds and waits for its answer.
+func (h *Hub) requestCommitRead(ctx context.Context, dc *DaemonConn, account string, req protocol.ReadCommit, timeout time.Duration) (protocol.CommitResult, error) {
+	sid := req.SessionID
+	ref, err := h.qualifyWorkspaceGit(ctx, sid, req.WorkspaceGitRef)
+	if err != nil {
+		return protocol.CommitResult{}, err
+	}
+	req.WorkspaceGitRef = ref
 	id := newUUID()
-	w := commitWaiter{dc: dc, sessionID: sid, account: account, ch: make(chan protocol.CommitResult, 1)}
+	w := commitWaiter{ref: ref, dc: dc, sessionID: sid, account: account, ch: make(chan protocol.CommitResult, 1)}
 	r := &h.commitReqs
 	r.mu.Lock()
 	perDaemon, perSession, perAccount := 0, 0, 0
@@ -94,7 +106,8 @@ func (h *Hub) requestCommit(ctx context.Context, dc *DaemonConn, account, sid, s
 	r.pending[id] = w
 	r.mu.Unlock()
 	defer func() { r.mu.Lock(); delete(r.pending, id); r.mu.Unlock() }()
-	raw, _ := json.Marshal(protocol.ReadCommit{Type: "read_commit", RequestID: id, SessionID: sid, SHA: sha, Patch: patch})
+	req.Type, req.RequestID = "read_commit", id
+	raw, _ := json.Marshal(req)
 	if h.FindDaemonForSession(sid) != dc || !h.trySendToDaemon(dc, raw) {
 		return protocol.CommitResult{}, errCommitUnavailable
 	}
@@ -123,7 +136,7 @@ func (h *Hub) deliverCommitResult(dc *DaemonConn, res protocol.CommitResult) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	w, ok := r.pending[res.RequestID]
-	if !ok || w.dc != dc || w.sessionID != res.SessionID {
+	if !ok || w.dc != dc || w.sessionID != res.SessionID || w.ref != res.WorkspaceGitRef {
 		return
 	}
 	delete(r.pending, res.RequestID)
@@ -207,7 +220,11 @@ func (a *API) handleCommit(w http.ResponseWriter, r *http.Request, patch bool) {
 		commitProblem(w, http.StatusConflict, "The session's daemon is not connected.")
 		return
 	}
-	res, err := a.hub.requestCommit(ctx, dc, p.Sub, sid, sha, patch, timeout)
+	if derefOrEmpty(row.Runtime) != "cluster" && (!ownsSession(p.Sub, row) || a.hub.ownedHostDaemon(ctx, p.Sub, dc.ID) != dc) {
+		commitProblem(w, 403, "Only the desktop owner can read its commits.")
+		return
+	}
+	res, err := a.hub.requestCommitRead(ctx, dc, p.Sub, protocol.ReadCommit{SessionID: sid, SHA: sha, Patch: patch, WorkspaceGitRef: workspaceGitQuery(r)}, timeout)
 	if errors.Is(err, errCommitBusy) {
 		commitProblem(w, http.StatusTooManyRequests, "Too many commit reads at once; try again.")
 		return
@@ -240,29 +257,62 @@ func (a *API) handleCommit(w http.ResponseWriter, r *http.Request, patch bool) {
 		}
 		return
 	}
-	// A slow reader cannot hold the response (a diff of up to 2 MiB) past the request's deadline.
-	if until, ok := ctx.Deadline(); ok {
-		_ = http.NewResponseController(w).SetWriteDeadline(until.Add(commitWriteGrace))
-	}
-	w.Header().Set("Cache-Control", "private, no-store")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	if patch {
-		body, ok := validCommitPatch(res)
-		if !ok {
-			commitProblem(w, http.StatusConflict, "The daemon returned an invalid commit.")
-			return
+	send := func(fenced context.Context) error {
+		if !a.hub.currentWorkspaceGit(fenced, sid, res.WorkspaceGitRef) {
+			return errCommitUnavailable
 		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Header().Set("Content-Security-Policy", "sandbox")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(body)
-		return
+		if dc.RuntimeTokenID != "" {
+			if err := db.ValidateRuntimeBinding(fenced, a.dbPool, sid, dc.RuntimeTokenID, false); err != nil {
+				return err
+			}
+		}
+		if derefOrEmpty(row.Runtime) != "cluster" && a.hub.ownedHostDaemon(fenced, p.Sub, dc.ID) != dc {
+			return db.ErrDesktopAuthority
+		}
+		// A slow diff reader cannot extend the short final ownership fence.
+		deadline := time.Now().Add(time.Second)
+		if until, ok := fenced.Deadline(); ok && until.Before(deadline) {
+			deadline = until
+		}
+		_ = http.NewResponseController(w).SetWriteDeadline(deadline)
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Blerg-Generation", strconv.FormatInt(res.Generation, 10))
+		w.Header().Set("X-Blerg-Member-ID", res.MemberID)
+		w.Header().Set("X-Blerg-Launch-Generation", res.LaunchGeneration)
+		if patch {
+			body, ok := validCommitPatch(res)
+			if !ok {
+				commitProblem(w, http.StatusConflict, "The daemon returned an invalid commit.")
+				return nil
+			}
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("Content-Security-Policy", "sandbox")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(body)
+			return nil
+		}
+		if !validCommitInfo(res.Commit, sha) {
+			commitProblem(w, http.StatusConflict, "The daemon returned an invalid commit.")
+			return nil
+		}
+		res.Commit.WorkspaceGitRef = res.WorkspaceGitRef
+		writeJSON(w, http.StatusOK, res.Commit)
+		return nil
 	}
-	if !validCommitInfo(res.Commit, sha) {
-		commitProblem(w, http.StatusConflict, "The daemon returned an invalid commit.")
-		return
+	var deliveryErr error
+	switch {
+	case derefOrEmpty(row.Runtime) != "cluster":
+		deliveryErr = db.WithDesktopFence(ctx, a.dbPool, dc.ID, send)
+	case dc.RuntimeTokenID != "":
+		deliveryErr = db.WithRuntimeLaunchFence(ctx, a.dbPool, sid, send)
+	default:
+		deliveryErr = send(ctx)
 	}
-	writeJSON(w, http.StatusOK, res.Commit)
+	if deliveryErr != nil {
+		commitProblem(w, 409, "The session's workspace changed while reading the commit.")
+	}
+
 }
 
 func validCommitPatch(res protocol.CommitResult) ([]byte, bool) {

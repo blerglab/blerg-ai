@@ -35,6 +35,15 @@ const report: CapabilitiesReport = {
 }
 
 describe('CapabilitiesPanel', () => {
+  it.each(['danger-full-access', 'workspace-write', 'read-only'])('keeps Codex %s scope in the accessible description', sandbox => {
+    render(<CapabilitiesPanel report={{ ...report, payload: { ...report.payload, engine: 'codex', permission_mode: 'never', sandbox_mode: sandbox } }} onClose={() => {}} />)
+    const chip = screen.getByTestId('caps-permission')
+    expect(chip).toHaveTextContent(/^No prompts$/)
+    expect(chip).toHaveAttribute('title', expect.stringContaining(`Codex: approval never, sandbox ${sandbox}`))
+    expect(chip).toHaveAttribute('aria-description', chip.getAttribute('title'))
+    expect(chip.className).toContain('risky')
+  })
+
   it('renders groups with counts, not-reported and empty states', () => {
     render(<CapabilitiesPanel report={report} onClose={() => {}} />)
     const dialog = screen.getByRole('dialog', { name: 'Skills & plugins' })
@@ -50,7 +59,7 @@ describe('CapabilitiesPanel', () => {
     expect(screen.getByTestId('caps-meta').textContent).toBe('Claude Code 2.1.283 · Opus 5.5')
     expect(within(screen.getByTestId('caps-meta')).getByText('Opus 5.5').getAttribute('title')).toBe('Model: claude-opus-5-5')
     expect(screen.getByTestId('caps-cwd').textContent).toBe('~/repos/example')
-    expect(screen.getByTestId('caps-permission').textContent).toBe('Default')
+    expect(screen.getByTestId('caps-permission').textContent).toBe('Asks first')
     expect(screen.getByTestId('caps-permission').className).not.toContain('risky')
     expect(screen.getByTestId('caps-asof').textContent).toMatch(/^As of Sep 26(, 2026)?, \d{1,2}:\d{2}\s?[AP]M$/)
     // The explanations wait behind the ⓘ.

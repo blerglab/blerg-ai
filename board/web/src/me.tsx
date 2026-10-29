@@ -11,6 +11,7 @@ import { createContext, ReactNode, useContext, useEffect, useState } from "react
 import { api } from "./api";
 
 export interface Me {
+  board_id?: string | null;
   kind: string;
   is_admin: boolean;
   is_human: boolean;
@@ -35,4 +36,9 @@ export function MeProvider({ children }: { children: ReactNode }) {
 
 export function useMe(): Me | null {
   return useContext(MeContext);
+}
+
+export function useBoardAdmin(boardId: string): boolean {
+ const me = useMe();
+ return !!me?.is_admin && (!me.board_id || me.board_id === boardId);
 }

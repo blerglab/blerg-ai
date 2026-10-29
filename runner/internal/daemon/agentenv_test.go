@@ -59,54 +59,65 @@ func readEnvDump(t *testing.T, path string) map[string]string {
 // server URL and the per-session token (so blerg-runner is usable), plus the
 // board linkage — and must never carry the daemon master token.
 func TestAgentSessionEnvCarriesSessionIdentity(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("BLERG_RUNNER_DAEMON_TOKEN", "master-token-must-not-leak")
+	for _, mode := range []string{"host", "cluster"} {
+		t.Run(mode, func(t *testing.T) {
+			privateState := ""
+			if mode == "cluster" {
+				privateState = t.TempDir()
+			}
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("BLERG_RUNNER_DAEMON_TOKEN", "master-token-must-not-leak")
 
-	envFile := filepath.Join(t.TempDir(), "env.txt")
-	binDir := fakeEngineDumpingEnv(t, envFile, "")
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+			envFile := filepath.Join(t.TempDir(), "env.txt")
+			binDir := fakeEngineDumpingEnv(t, envFile, "")
+			t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 
-	reposRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(reposRoot, "proj"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	sender := &agentTestSender{}
-	host := NewAgentHost(sender, AgentHostConfig{
-		ReposRoot: reposRoot, HomeDir: t.TempDir(), ServerHTTP: "http://127.0.0.1:9",
-	})
-	host.Spawn(protocol.SpawnSession{
-		Type: "spawn_session", SessionID: "s-env", Repo: "proj", Kind: "agent",
-		Engine: "codex", InitialPrompt: "hello", SessionToken: "session-token-abc",
-		ExtraEnv: map[string]string{
-			"BLERG_BOARD_BOARD": "board-1",
-			"BLERG_BOARD_TOKEN": "board-token",
-			"BLERG_BOARD_URL":   "http://board.local",
-			// Task 3 guarantee: a caller may not smuggle daemon-owned vars in.
-			"BLERG_RUNNER_DAEMON_TOKEN": "smuggled",
-		},
-	})
-	sender.waitForKind(t, "turn_done")
+			reposRoot := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(reposRoot, "proj"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			sender := &agentTestSender{}
+			host := NewAgentHost(sender, AgentHostConfig{
+				AttachmentsStateDir: privateState,
+				ReposRoot:           reposRoot, HomeDir: t.TempDir(), ServerHTTP: "http://127.0.0.1:9",
+			})
+			host.Spawn(protocol.SpawnSession{
+				Type: "spawn_session", SessionID: "s-env", Repo: "proj", Kind: "agent",
+				Engine: "codex", InitialPrompt: "hello", SessionToken: "session-token-abc",
+				ExtraEnv: map[string]string{
+					"BLERG_BOARD_BOARD": "board-1",
+					"BLERG_BOARD_TOKEN": "board-token",
+					"BLERG_BOARD_URL":   "http://board.local",
+					// Task 3 guarantee: a caller may not smuggle daemon-owned vars in.
+					"BLERG_RUNNER_DAEMON_TOKEN": "smuggled",
+				},
+			})
+			sender.waitForKind(t, "turn_done")
 
-	env := readEnvDump(t, envFile)
-	for k, want := range map[string]string{
-		"BLERG_RUNNER_SESSION_ID":    "s-env",
-		"BLERG_RUNNER_SESSION_TOKEN": "session-token-abc",
-		"BLERG_RUNNER_SERVER_HTTP":   "http://127.0.0.1:9",
-		"BLERG_BOARD_BOARD":          "board-1",
-		"BLERG_BOARD_TOKEN":          "board-token",
-		"BLERG_BOARD_URL":            "http://board.local",
-	} {
-		if env[k] != want {
-			t.Errorf("env[%s] does not match fixture", k)
-		}
+			env := readEnvDump(t, envFile)
+			for k, want := range map[string]string{
+				"BLERG_RUNNER_SESSION_ID":    "s-env",
+				attachmentsDirEnv:            sessionAttachmentsPath(attachmentsStateDir(privateState), "s-env"),
+				"BLERG_RUNNER_SESSION_TOKEN": "session-token-abc",
+				"BLERG_RUNNER_SERVER_HTTP":   "http://127.0.0.1:9",
+				"BLERG_BOARD_BOARD":          "board-1",
+				"BLERG_BOARD_TOKEN":          "board-token",
+				"BLERG_BOARD_URL":            "http://board.local",
+			} {
+				if env[k] != want {
+					t.Errorf("env[%s] does not match fixture", k)
+				}
+			}
+			if _, ok := env["BLERG_RUNNER_DAEMON_TOKEN"]; ok {
+				t.Error("the daemon master token reached an agent-kind session")
+			}
+			if !strings.HasPrefix(env["PATH"], filepath.Join(home, ".local", "bin")+string(os.PathListSeparator)) {
+				t.Error("PATH does not start with ~/.local/bin (blerg-runner would not resolve)")
+			}
+		})
 	}
-	if _, ok := env["BLERG_RUNNER_DAEMON_TOKEN"]; ok {
-		t.Error("the daemon master token reached an agent-kind session")
-	}
-	if !strings.HasPrefix(env["PATH"], filepath.Join(home, ".local", "bin")+string(os.PathListSeparator)) {
-		t.Error("PATH does not start with ~/.local/bin (blerg-runner would not resolve)")
-	}
+
 }
 
 // End to end: the env an agent-kind session actually gets must let the real

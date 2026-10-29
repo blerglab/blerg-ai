@@ -1,6 +1,7 @@
-// The message box: the text, the paperclip and the chips of what is attached, Send, and the
-// keyboard: Enter sends, Shift+Enter breaks the line, Esc interrupts the running turn. The hidden
-// file input belongs to ChatView (the Files panel's empty state opens it too); onAttach opens it.
+// The message box: the text, the paperclip and the chips of what is attached, and Send, and the
+// keyboard: Enter sends, Shift+Enter breaks the line. Stop is not here: it sits far from Send, in the
+// host's session header (ChatReport.interrupt). The hidden file input belongs to ChatView (the Files
+// panel's empty state opens it too); onAttach opens it.
 import { insideOpenFence, markdownForPaste } from '../model/richClipboard'
 import { useEffect, useRef, type ReactNode } from 'react'
 import type { useAttachments } from '../hooks/useAttachments'
@@ -12,15 +13,13 @@ export interface ComposerProps {
   placeholder: string
   /** The session cannot take a message now (starting, ended). */
   locked: boolean
-  /** A turn is running: Esc interrupts it. */
-  busy: boolean
   onSubmit: () => void
-  onInterrupt?: () => void
   attachments: ReturnType<typeof useAttachments>
   /** Opens the file picker; absent when the transport takes no files (no paperclip, no paste). */
   onAttach?: () => void
   /** The host's own controls beside Send. */
   actions?: ReactNode
+  waitingActions?: ReactNode
   /**
    * Put the cursor in the box when it appears and whenever the session unlocks, so a switch to a
    * session is one click, not two. Skipped on touch screens, where focus would raise the keyboard.
@@ -55,7 +54,7 @@ function namePastedImage(file: File): File {
   return new File([file], name, { type: file.type, lastModified: file.lastModified })
 }
 
-export default function Composer({ draft, onDraft, placeholder, locked, busy, onSubmit, onInterrupt, attachments, onAttach, actions, autoFocus = true }: ComposerProps) {
+export default function Composer({ draft, onDraft, placeholder, locked, onSubmit, attachments, onAttach, actions, waitingActions, autoFocus = true }: ComposerProps) {
   const canSend = (draft.trim() !== '' || attachments.done.length > 0) && !attachments.uploading && !locked
   const box = useRef<HTMLTextAreaElement>(null)
   const plainPaste = useRef(false)
@@ -106,11 +105,9 @@ export default function Composer({ draft, onDraft, placeholder, locked, busy, on
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault()
               onSubmit()
-            } else if (e.key === 'Escape' && busy && onInterrupt) {
-              // Like the terminal: Esc stops the turn that is running.
-              e.preventDefault()
-              onInterrupt()
             }
+            // Esc never interrupts (owner, 2026-10-26): interrupting is rare and Stop sits in the
+            // session header, far from Send; Esc stays free for dismissing menus, popovers and dialogs.
           }}
         />
         <div className="agent-composer-actions">
@@ -130,7 +127,7 @@ export default function Composer({ draft, onDraft, placeholder, locked, busy, on
           <button onClick={onSubmit} disabled={!canSend}>Send</button>
         </div>
       </div>
-      <ComposerChips items={attachments.items} onRemove={attachments.remove} />
+      <ComposerChips items={attachments.items} onRemove={attachments.remove} waitingActions={waitingActions} />
     </>
   )
 }

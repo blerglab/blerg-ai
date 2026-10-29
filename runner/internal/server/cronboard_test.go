@@ -152,9 +152,16 @@ func TestCronWithBoardGetsTheBuiltinBoardGrant(t *testing.T) {
 		board.ProofKind != "token_id" || board.ProofValue != cronTok || board.AccountID != mcpAcct || board.URLSnapshot != bf.up.url() {
 		t.Errorf("board grant = %+v", *board)
 	}
-	for _, n := range mcpgw.BoardToolNames() {
+	for n := range mcpgw.BoardTools() {
 		if board.Tools[n].Mode != "allow" {
 			t.Errorf("board tool %s = %+v", n, board.Tools[n])
+		}
+	}
+	for _, n := range mcpgw.BoardToolNames() {
+		if mcpgw.IsBoardColumnTool(n) {
+			if _, ok := board.Tools[n]; ok {
+				t.Errorf("a cron's board grant carries column tool %s", n)
+			}
 		}
 	}
 	// The session's config carries the board like any other server, with its own token.

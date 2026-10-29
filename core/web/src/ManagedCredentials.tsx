@@ -177,8 +177,8 @@ function Connection({ capability, summary, label, onConnected }: {
     {pending ? <>
       <p>Open <a href={trustedLink(attempt.verification_url, capability.verification_origin)!} target="_blank" rel="noopener noreferrer">the sign-in page</a> and enter <strong className="mono">{attempt.user_code}</strong>.</p>
       <p role="status">Waiting for sign-in…</p>
-      <button className="btn btn-quiet" disabled={busy} onClick={() => void cancel()}>Cancel connection</button>
-    </> : <button className="btn btn-quiet" disabled={busy} onClick={() => void start()}>
+      <button className="settings-action btn btn-quiet" disabled={busy} onClick={() => void cancel()}>Cancel connection</button>
+    </> : <button className="settings-action btn btn-quiet" disabled={busy} onClick={() => void start()}>
       {busy ? "Connecting…" : `${state === "Not connected" ? "Connect" : "Reconnect"} ${label}`}
     </button>}
   </div>;
@@ -206,7 +206,7 @@ export default function ManagedCredentials({ summaries, labels, onConnected }: {
     return () => controller.abort();
   }, []);
   if (!capabilities.length) return null;
-  return <div className="group" aria-label="Managed engine connections">
+  return <div className="group" id="managed-connections" aria-label="Managed engine connections">
     <p className="eyebrow">Managed connections</p>
     {capabilities.map(capability => <Connection key={capability.engine} capability={capability}
       summary={summaries.find(s => s.engine === capability.engine)} label={labels[capability.engine] ?? capability.engine}

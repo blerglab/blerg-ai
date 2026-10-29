@@ -1,3 +1,5 @@
+import {useTranscriptStore} from '@blerglab/chat'
+import ownershipEvent from '../test/desktopOwnership.json'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import * as wsMock from '../test/wsMock'
 import { useSessionStore } from './useSessionStore'
@@ -11,7 +13,51 @@ const get = () => useSessionStore.getState()
 const TAKING_LONGER_MSG = "This is taking longer than expected — it may have failed to start. Try again or check the sidebar."
 
 describe('useSessionStore', () => {
+  it('removes desktop source fields on reassignment and clears all lists on identity change', () => {
+    useSessionStore.setState({ daemons: [makeDaemon({ id: 'desktop-a' })], sessions: [makeSession({ daemon_id: 'desktop-a', project_path: '/private-a', repo: 'private-a' })] })
+    wsMock.emit(ownershipEvent as import('../types').DesktopOwnershipChanged)
+    expect(get().daemons).toHaveLength(0)
+    expect(get().sessions[0].project_path).toBe('')
+    expect(get().sessions[0].repo).toBe('')
+    useTranscriptStore.getState().ingest({type:'agent_event',session_id:'cached',client_event_id:'caps',seq:1,ts:'2026-01-01T00:00:00Z',kind:'capabilities',payload:{private:'old owner'}})
+    window.dispatchEvent(new Event('blerg-identity-changed'))
+    expect(get().sessions).toHaveLength(0)
+    expect(useTranscriptStore.getState().sessions).toEqual({})
+  })
+
+  it('retains replay, transport and source state across enrollment refreshes', () => {
+    const daemon = makeDaemon({ id: 'desktop-a', compatibility: true })
+    const session = makeSession({ daemon_id: daemon.id, desktop_compatibility: true })
+    useSessionStore.setState({ daemons: [daemon], sessions: [session] })
+    useTranscriptStore.setState({ sessions: {} })
+    const store = useTranscriptStore.getState()
+    store.ingest({type:'agent_event',session_id:session.id,client_event_id:'caps',seq:1,ts:'2026-01-01T00:00:00Z',kind:'capabilities',payload:{cwd:'/workspace'}})
+    store.ingestReplayDone(session.id, {lastSeq:1,hasMore:false})
+    const transcript = useTranscriptStore.getState().sessions[session.id]
+    const reset = vi.fn()
+    window.addEventListener('blerg-desktop-scope-changed', reset)
+    wsMock.emit({type:'desktop_sources_changed',desktop_id:daemon.id})
+    wsMock.emit({type:'initial_state',daemons:[{...daemon,compatibility:false}],sessions:[{...session,desktop_compatibility:false}]})
+    expect(useTranscriptStore.getState().sessions[session.id]).toBe(transcript)
+    expect(get().sessions[0].project_path).toBe(session.project_path)
+    expect(reset).not.toHaveBeenCalled()
+    // A reconnect snapshot that has lost access must still clear source state.
+    wsMock.emit({type:'initial_state',daemons:[],sessions:[{...session,daemon_id:'',project_path:'',repo:''}]})
+    expect(reset).toHaveBeenCalledOnce()
+    expect(useTranscriptStore.getState().sessions[session.id].events).toEqual([])
+    window.removeEventListener('blerg-desktop-scope-changed', reset)
+  })
+
+  it('clears already delivered source and error state on a remote-replica invalidation', () => {
+    useSessionStore.setState({daemons:[makeDaemon({id:'desktop-a'})],sessions:[makeSession({daemon_id:'desktop-a',repo:'secret',project_path:'/secret',error_reason:'private failure'})]})
+    wsMock.emit({type:'desktop_inventory_invalidated'})
+    expect(get().daemons).toHaveLength(0)
+    expect(get().sessions[0]).toMatchObject({daemon_id:'',repo:'',project_path:''})
+    expect(get().sessions[0].error_reason).toBeUndefined()
+  })
+
   beforeEach(() => {
+    window.dispatchEvent(new Event('blerg-identity-changed'))
     localStorage.clear()
     vi.clearAllTimers()
     useSessionStore.setState({ daemons: [], sessions: [], statusChangedAt: {}, serverVersion: '', pendingSessionIds: {}, failedSessions: {} })
@@ -146,6 +192,13 @@ describe('useSessionStore', () => {
     wsMock.emit({ type: 'session_started', session: makeSession({ status: 'starting', daemon_id: 'pod-daemon' }) })
     expect(get().sessions).toHaveLength(1)
     expect(get().sessions[0].daemon_id).toBe('pod-daemon')
+  })
+
+  it('clears a stopped pod reason when the full resume snapshot omits it', () => {
+    wsMock.emit({ type: 'session_started', session: makeSession({ status: 'disconnected', runtime: 'cluster', error_reason: 'stopped: ran out of memory' }) })
+    expect(get().sessions[0].error_reason).toContain('ran out of memory')
+    wsMock.emit({ type: 'session_started', session: makeSession({ status: 'disconnected', runtime: 'cluster' }) })
+    expect(get().sessions[0].error_reason).toBeUndefined()
   })
 
   it('a late "starting" announcement never drags a live session back', () => {

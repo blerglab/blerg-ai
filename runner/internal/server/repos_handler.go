@@ -15,6 +15,7 @@ import (
 // ─── GET /api/repos ───────────────────────────────────────────────────────────
 
 type reposResponse struct {
+	Limited bool       `json:"limited,omitempty"`
 	Repos   []RepoInfo `json:"repos"`
 	StaleAt *string    `json:"stale_at"`
 }
@@ -64,7 +65,7 @@ func (a *API) HandleGetRepos(w http.ResponseWriter, r *http.Request) {
 	}
 	repos := mergeHostedRepos(sources...)
 
-	daemons := a.hub.GetHostDaemons()
+	daemons := a.hub.ownedHostDaemons(r.Context(), principal.Sub)
 	checkedOut := make(map[string][]string)
 	for _, d := range daemons {
 		for _, folder := range d.CheckedOutRepos() {
@@ -83,9 +84,9 @@ func (a *API) HandleGetRepos(w http.ResponseWriter, r *http.Request) {
 		return o
 	}
 
-	// A folder is the hosted repository of the same name unless the daemons
-	// agree its origin is some other repository. (An unknown origin keeps the
-	// historical same-name match.) Only same-named folders count: a daemon
+	// A folder matches a hosted repository only when the owned daemons
+	// agree its exact origin. An unknown origin remains local-only. Only
+	// same-named folders count: a daemon
 	// launch addresses the folder by the repository's bare name.
 	claimed := make(map[string]bool)
 	for i := range repos {
@@ -94,7 +95,7 @@ func (a *API) HandleGetRepos(w http.ResponseWriter, r *http.Request) {
 		if names == nil {
 			continue
 		}
-		if o := originOf(repos[i].Name); o != nil && repoKey(o.Provider, o.FullName) != repoKey(repos[i].Provider, repos[i].FullName) {
+		if o := originOf(repos[i].Name); o == nil || repoKey(o.Provider, o.FullName) != repoKey(repos[i].Provider, repos[i].FullName) {
 			continue
 		}
 		repos[i].CheckedOut = names
@@ -134,25 +135,29 @@ func (a *API) HandleGetRepos(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := reposResponse{Repos: repos}
+	for _, dc := range daemons {
+		resp.Limited = resp.Limited || dc.InventoryLimited()
+	}
 	if staleAt != nil {
 		s := staleAt.UTC().Format(time.RFC3339)
 		resp.StaleAt = &s
 	}
-	writeJSONWithETag(w, r, resp)
+	a.hub.deliverDesktopInventory(r.Context(), principal.Sub, daemons, w, func(out http.ResponseWriter) {
+		writeOwnerJSONWithETag(out, r, desktopScopeKey(daemons, principal.Sub), resp)
+	})
 }
 
-// writeJSONWithETag answers 200 with v and an ETag naming its exact bytes, or
-// 304 with no body when the request's If-None-Match already names them. The
-// list names private repositories, so the browser is told to keep no copy
-// (no-store); the app keeps the last list itself, in this tab, and asks with
-// If-None-Match — an unchanged list then costs a header round trip.
-func writeJSONWithETag(w http.ResponseWriter, r *http.Request, v any) {
+func writeOwnerJSONWithETag(w http.ResponseWriter, r *http.Request, scope string, v any) {
 	body, err := json.Marshal(v)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "encode response")
 		return
 	}
-	sum := sha256.Sum256(body)
+	salted := append([]byte(scope+"\x00"), body...)
+	if scope == "" {
+		salted = body
+	}
+	sum := sha256.Sum256(salted)
 	etag := `"` + hex.EncodeToString(sum[:16]) + `"`
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "private, no-store")

@@ -84,3 +84,15 @@ func TestToolSchemaRefreshPolicyIsAnAllowlistedCapability(t *testing.T) {
 		}
 	}
 }
+
+func TestCapabilitiesSandboxScopeSurvivesSanitization(t *testing.T) {
+	for _, sandbox := range []string{"danger-full-access", "workspace-write", "read-only", ""} {
+		got := SanitizeCapabilities(CapabilitiesPayload{Engine: "codex", PermissionMode: "never", SandboxMode: sandbox})
+		if got.SandboxMode != sandbox {
+			t.Fatalf("sandbox %q became %q", sandbox, got.SandboxMode)
+		}
+	}
+	if got := SanitizeCapabilities(CapabilitiesPayload{SandboxMode: "invalid scope"}); got.SandboxMode != "" {
+		t.Fatal("unsafe sandbox text retained")
+	}
+}

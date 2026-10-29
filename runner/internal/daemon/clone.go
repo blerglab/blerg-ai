@@ -182,15 +182,23 @@ func runClone(ctx context.Context, timeout time.Duration, cmd *exec.Cmd, what st
 // or ssh for the fallback; file for a local path) and every other refused; no submodule is
 // cloned. No memory limit: a large repository's clone legitimately needs the memory.
 func gitClone(ctx context.Context, timeout time.Duration, remote, dest string, extraEnv []string) error {
-	cmd, err := hostgit.Command(hostgit.Options{
+	actx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var stderr bytes.Buffer
+	err := hostgit.Run(actx, hostgit.Options{
 		UserConfig: true, UserEnv: sanitizedEnviron(), Env: append(gitSafetyEnv(), extraEnv...),
-		Protocols: hostgit.ProtocolsFor(remote),
+		Protocols: hostgit.ProtocolsFor(remote), Stderr: &stderr,
 	}, "clone", "--no-recurse-submodules", "--", remote, dest)
-	if err != nil {
-		return fmt.Errorf("git clone %s: %w", gitprovider.RedactURL(remote), err)
+	if actx.Err() != nil {
+		if ctx.Err() != nil {
+			return errCloneCancelled
+		}
+		return fmt.Errorf("git clone %s: %w after %s", gitprovider.RedactURL(remote), errCloneTimedOut, timeout)
 	}
-	defer hostgit.KillGroup(cmd)
-	return runClone(ctx, timeout, cmd, "git clone "+gitprovider.RedactURL(remote), nil)
+	if err != nil {
+		return fmt.Errorf("git clone %s: %w\n%s", gitprovider.RedactURL(remote), err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 // cloneTargetTimeout bounds one attempt of a named-repository clone. Larger

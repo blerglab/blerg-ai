@@ -4,7 +4,14 @@
 
 /** The sentence for a read the server refused. */
 export function workspaceErrorText(status: number, serverText = '', code?: string): string {
+  if (status === 403 && code === 'desktop_ownership') return 'This desktop is unavailable to you. Open Settings → Account → Your desktops and enroll it to you, or ask an administrator to assign it first.'
   const t = serverText.toLowerCase()
+  if (status === 403) {
+    if (code === 'person_required' || t.startsWith('workspace files can only be opened by a signed-in person')) return 'Sign in as a person to open workspace files.'
+    if (code === 'session_ownership' || t.startsWith('only the session owner or an administrator can open workspace files')) return 'You don’t have access to this session’s workspace files. Ask the session owner to open or publish the file for you.'
+    // Older runners did not send a reason code for desktop access refusals.
+    if (t.startsWith('this desktop is unavailable to you')) return 'This desktop is unavailable to you. Open Settings → Account → Your desktops and enroll it to you, or ask an administrator to assign it first.'
+  }
   // The server's machine-readable reason first; the sentence only for an older server.
   if (status === 409 && code) {
     if (code === 'busy') return 'The file reader is busy. Try again in a moment.'

@@ -21,8 +21,10 @@ const (
 	// MaxItems is how many items a checklist holds; MaxText an item's length in runes.
 	MaxItems = 50
 	MaxText  = 200
-	// MaxEvents is how many checklist events one session may hold.
-	MaxEvents = 500
+	// MaxEventsPerMinute is how many checklist events one session may record in a minute: enough for
+	// any real plan, and a stop for an agent looping on the CLI. There is no lifetime cap, so a
+	// long-running session keeps its checklist.
+	MaxEventsPerMinute = 60
 	// MaxCommits is how many commits one item holds.
 	MaxCommits = 20
 )
@@ -69,6 +71,9 @@ type Payload struct {
 	Items   []Item  `json:"items"`
 	Op      string  `json:"op"`
 	Changed *Change `json:"changed,omitempty"`
+	// Note says why Blerg made the change itself (e.g. "ticked: #127 done" when the session moved
+	// card #127 to a done column); empty for the agent's own changes.
+	Note string `json:"note,omitempty"`
 }
 
 // Request is a session-scoped checklist mutation. Existing-item operations select

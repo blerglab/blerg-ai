@@ -82,6 +82,10 @@ func TestModelsForUnsourcedEngineIsEmpty(t *testing.T) {
 func TestModelsServesARegisteredSource(t *testing.T) {
 	api, tok, coreSrv := newCredentialsAPI(t, nil)
 	defer coreSrv.Close()
+	pool := connectSrvTestDB(t)
+	api.dbPool = pool
+	api.hub.desktopPool = pool
+	dc := workspaceOwnedDesktop(t, api.hub, pool, "acct-1", "desktop")
 	var gotDaemon string
 	reg := models.NewRegistry()
 	reg.Register("codex", models.SourceFunc(func(_ context.Context, daemonID string) (models.List, error) {
@@ -91,7 +95,7 @@ func TestModelsServesARegisteredSource(t *testing.T) {
 		}}, nil
 	}))
 	api.SetModelSources(reg)
-	req := httptest.NewRequest("GET", "/api/models/codex?daemon_id=d7", nil)
+	req := httptest.NewRequest("GET", "/api/models/codex?daemon_id="+dc.ID, nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	w := httptest.NewRecorder()
 	mux := http.NewServeMux()
@@ -99,7 +103,7 @@ func TestModelsServesARegisteredSource(t *testing.T) {
 	mux.ServeHTTP(w, req)
 	var list models.List
 	_ = json.Unmarshal(w.Body.Bytes(), &list)
-	if w.Code != http.StatusOK || len(list.Models) != 1 || list.Models[0].EffortKind != "reasoning" || gotDaemon != "d7" {
+	if w.Code != http.StatusOK || len(list.Models) != 1 || list.Models[0].EffortKind != "reasoning" || gotDaemon != dc.ID {
 		t.Fatalf("%d %+v daemon=%q", w.Code, list, gotDaemon)
 	}
 	// Claude is not registered in this registry: empty, not the built-in.
@@ -295,4 +299,8 @@ func TestClusterModelsWithoutNativeProviderUsesOnlyPublicCatalog(t *testing.T) {
 			t.Fatalf("workstation catalog leaked: %+v", list)
 		}
 	}
+}
+
+func reportedModelList(hub *Hub, engine, daemonID string) models.List {
+	return mergeReportedModels(hub.GetHostDaemons(), engine, daemonID)
 }

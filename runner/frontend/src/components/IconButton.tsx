@@ -25,8 +25,22 @@ export function PanelToggleIcon() {
   return <Svg><rect x="3" y="4.5" width="18" height="15" rx="2" /><path d="M15 4.5v15" /></Svg>
 }
 
+/** The robot face that marks a subagent: on a Running now subagent row and on the panel toggle's
+ *  "work inside this session" count, so the two read as the same thing. With a label it is an image
+ *  with that name; without one it is decoration beside a count that is named elsewhere. */
+export function SubagentFace({label, className}: {label?: string; className?: string}) {
+  return label
+    ? <span className={className} role="img" aria-label={label}>🤖</span>
+    : <span className={className} aria-hidden="true">🤖</span>
+}
+
 export function EndSessionIcon() {
   return <Svg><path className="end-session-x" d="M6 6l12 12M18 6L6 18" strokeWidth="2.5" /></Svg>
+}
+
+/** Stop the agent's current turn: a filled square (■). */
+export function StopTurnIcon() {
+  return <Svg filled><rect x="6.5" y="6.5" width="11" height="11" rx="1.5" /></Svg>
 }
 
 export function MoreIcon() {

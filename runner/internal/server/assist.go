@@ -43,7 +43,8 @@ func (a *API) HandlePostAssist(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "board id required")
 		return
 	}
-	if _, ok := a.authBrowserOrBoard(w, r, boardID, "session.start"); !ok {
+	actor, ok := a.authBrowserOrBoard(w, r, boardID, "session.start")
+	if !ok {
 		return
 	}
 	if a.dbPool == nil {
@@ -60,6 +61,19 @@ func (a *API) HandlePostAssist(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	owner := ""
+	if actor.Core != nil {
+		owner = runnerPrincipalFromIdentity(*actor.Core).spawningAccountID()
+	} else if actor.Board != nil {
+		if parent, err := db.GetSession(ctx, a.dbPool, actor.Board.SessionID); err == nil && parent != nil {
+			owner = derefOrEmpty(parent.SpawningAccountID)
+		}
+	}
+	if owner == "" {
+		writeError(w, http.StatusForbidden, "a person-owned desktop is required")
+		return
+	}
+	ctx = withDesktopViewer(ctx, a.desktopRecipient(r, owner))
 	descriptor, supported := engines.Lookup(req.Engine)
 	if !supported || !descriptor.Terminal || !descriptor.SupportsRuntime("daemon") {
 		writeError(w, http.StatusUnprocessableEntity, "engine does not support host terminal Assist sessions")
@@ -102,7 +116,7 @@ func (a *API) HandlePostAssist(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "the board's pinned daemon is not a host execution target")
 			return
 		}
-		daemon = a.hub.GetHostDaemon(*board.DefaultDaemonID)
+		daemon = a.hub.ownedHostDaemon(ctx, owner, *board.DefaultDaemonID)
 		if daemon == nil {
 			writeError(w, http.StatusServiceUnavailable, "the board's pinned daemon is not connected")
 			return
@@ -113,7 +127,7 @@ func (a *API) HandlePostAssist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if daemon == nil {
-		daemon = a.hub.DaemonForScratch("daemon", selection)
+		daemon = a.hub.ownedDaemonForScratch(ctx, owner, "daemon", selection)
 	}
 	if daemon == nil {
 		writeError(w, http.StatusServiceUnavailable, "no daemon available for this board's repos")
@@ -162,6 +176,11 @@ func (a *API) HandlePostAssist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := db.SetSessionSpawningAccount(ctx, a.dbPool, sessionID, owner); err != nil {
+		_ = db.DeleteSession(ctx, a.dbPool, sessionID)
+		writeError(w, http.StatusInternalServerError, "session authority unavailable")
+		return
+	}
 	// Save the launch selection before dispatch; native notifications subsequently
 	// replace it with the effective settings.
 	if err := db.SetSessionEngine(ctx, a.dbPool, sessionID, req.Engine); err != nil {

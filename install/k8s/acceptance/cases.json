@@ -1,0 +1,395 @@
+[
+  {
+    "id": "placement-rbac",
+    "kind": "builtin",
+    "description": "All observed pods avoid excluded hostname labels; effective launcher SA cannot create pods/exec.",
+    "observations": [
+      "required_affinity",
+      "actual_placement",
+      "exec_denied"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "writer-fence",
+    "kind": "builtin",
+    "description": "Existing P3 real-pod opt-in: old Job/Pod gone before fresh UID replacement; namespace-scoped fixture.",
+    "observations": [
+      "old_writer_gone",
+      "replacement_uid",
+      "replacement_cleanup"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "mixed-providers",
+    "kind": "driver",
+    "description": "Actual private repositories on two providers plus anonymous public member; duplicate leaf names retain distinct members.",
+    "observations": [
+      "two_providers",
+      "private_and_public",
+      "duplicate_names",
+      "distinct_destinations"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "credential-boundary",
+    "kind": "driver",
+    "description": "Observe exact-host credential routing, redirect/wrong-host refusal, anonymous public clone and zero public push attempts.",
+    "observations": [
+      "exact_host",
+      "wrong_host_refused",
+      "redirect_refused",
+      "public_anonymous",
+      "public_push_absent"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "home-private",
+    "kind": "driver",
+    "description": "Agent and shell cannot read/mutate protected allocation or HOME/credential snapshots; inspect snapshot tree from trusted controller.",
+    "observations": [
+      "home_excluded",
+      "credentials_excluded",
+      "private_root_denied",
+      "snapshot_owned"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "csi-bytes",
+    "kind": "driver",
+    "description": "Chosen CSI physically enforces bytes, produces ENOSPC/statfs evidence, and retains recoverable work; never fill node filesystem.",
+    "observations": [
+      "driver_identity",
+      "physical_byte_limit",
+      "enospc",
+      "statfs",
+      "work_retained"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "csi-inodes-metadata",
+    "kind": "driver",
+    "description": "Chosen CSI enforces inode/entry ceiling under metadata-heavy and .git growth, aggregate accounting remains complete.",
+    "observations": [
+      "physical_inode_limit",
+      "metadata_growth",
+      "git_growth",
+      "bounded_node_usage",
+      "work_retained"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "partial-prepare",
+    "kind": "driver",
+    "description": "Inject second-member prepare failure and allocation failure, prove exact rollback without deleting prior retained work.",
+    "observations": [
+      "second_member_failure",
+      "allocation_failure",
+      "exact_rollback",
+      "prior_work_intact"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "partial-publication-resume",
+    "kind": "driver",
+    "description": "One destination fails after another succeeds; retain committed/uncommitted data and resume exact original claim/launch.",
+    "observations": [
+      "partial_publish",
+      "remote_refs",
+      "committed_retained",
+      "dirty_retained",
+      "exact_claim_resume"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "stop-fencing",
+    "kind": "driver",
+    "description": "Stop with active detached engine/shell descendants and readers; foreground UID fence, zero physical writers before release.",
+    "observations": [
+      "stop_during_output",
+      "descendants_empty",
+      "readers_joined",
+      "uid_precondition",
+      "release_after_proof"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "replacement-fencing",
+    "kind": "driver",
+    "description": "Replace Job/Pod/claim UID and stale socket generation; reject old replies/claim and overlapping writer admission.",
+    "observations": [
+      "job_uid",
+      "pod_uid",
+      "claim_uid_refusal",
+      "stale_reply_refusal",
+      "no_overlap"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "natural-exit",
+    "kind": "driver",
+    "description": "Natural exit, never-allocated, recoverable-ended and repeated terminal cleanup settle durably and retain uncertain work.",
+    "observations": [
+      "natural_exit",
+      "never_allocated",
+      "recoverable_ended",
+      "durable_cleanup",
+      "uncertain_retained"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "job-secret-token-cleanup",
+    "kind": "driver",
+    "description": "Check exact Job/Secret owner UIDs and persisted launch token revocation; no foreign resource deletion, idempotent retries.",
+    "observations": [
+      "job_uid_cleanup",
+      "secret_uid_cleanup",
+      "token_revoked",
+      "idempotent_retry",
+      "foreign_intact"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "containment-reader-joins",
+    "kind": "driver",
+    "description": "Verify real cgroup/PID identities for helper/engine/PTY and detached descendants, shell memory accounting, reader join before release.",
+    "observations": [
+      "cgroup_membership",
+      "detached_descendants",
+      "aggregate_memory",
+      "reader_cancel_join",
+      "storage_release_order"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "restart-orphan-recovery",
+    "kind": "driver",
+    "description": "Crash own session/controller, restart own runner, disconnect transport, recover orphans conservatively and retain unverifiable storage.",
+    "observations": [
+      "session_crash",
+      "runner_restart",
+      "transport_loss",
+      "orphan_proof",
+      "uncertain_retained"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "lease-freeze",
+    "kind": "driver",
+    "description": "Renew/expire/revoke while Git reader and shell descendants are frozen; verify thaw rebind and stale-grant refusal.",
+    "observations": [
+      "renew_frozen",
+      "expire_frozen",
+      "revoke_frozen",
+      "verified_thaw",
+      "fresh_rebind"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "outbound-transport",
+    "kind": "driver",
+    "description": "Use real outbound hello/control/status/list/search/viewer/PTY only; no exec; slow/flooded PTY does not starve control/sync.",
+    "observations": [
+      "hello_welcome",
+      "control",
+      "status",
+      "list_search",
+      "viewer",
+      "shell",
+      "exec_unused",
+      "bounded_fairness"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "storage-remount",
+    "kind": "driver",
+    "description": "Same retained claim across reschedule on an eligible worker: mount ownership/inode/root identity and missing/replaced claim refusal.",
+    "observations": [
+      "claim_uid",
+      "remount_identity",
+      "ownership",
+      "replaced_claim_refused"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "partition-fencing",
+    "kind": "driver",
+    "description": "Namespace-scoped fault injection only; API object absence is not physical writer death, no release until independent proof.",
+    "observations": [
+      "fault_scope",
+      "physical_writer_proof",
+      "no_object_absence_shortcut",
+      "retention_on_uncertainty"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "measure-1-ordinary",
+    "kind": "driver",
+    "description": "Actual target image/CSI/providers: 1 members, ordinary; record repeated cold/warm sync, stop, snapshot and transport load.",
+    "observations": [
+      "target_identity",
+      "member_count",
+      "profile",
+      "samples",
+      "latency_percentiles",
+      "bytes_inodes",
+      "cpu_memory",
+      "control_latency",
+      "cleanup_time"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "measure-1-metadata-heavy",
+    "kind": "driver",
+    "description": "Actual target image/CSI/providers: 1 members, metadata-heavy; record repeated cold/warm sync, stop, snapshot and transport load.",
+    "observations": [
+      "target_identity",
+      "member_count",
+      "profile",
+      "samples",
+      "latency_percentiles",
+      "bytes_inodes",
+      "cpu_memory",
+      "control_latency",
+      "cleanup_time"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "measure-5-ordinary",
+    "kind": "driver",
+    "description": "Actual target image/CSI/providers: 5 members, ordinary; record repeated cold/warm sync, stop, snapshot and transport load.",
+    "observations": [
+      "target_identity",
+      "member_count",
+      "profile",
+      "samples",
+      "latency_percentiles",
+      "bytes_inodes",
+      "cpu_memory",
+      "control_latency",
+      "cleanup_time"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "measure-5-metadata-heavy",
+    "kind": "driver",
+    "description": "Actual target image/CSI/providers: 5 members, metadata-heavy; record repeated cold/warm sync, stop, snapshot and transport load.",
+    "observations": [
+      "target_identity",
+      "member_count",
+      "profile",
+      "samples",
+      "latency_percentiles",
+      "bytes_inodes",
+      "cpu_memory",
+      "control_latency",
+      "cleanup_time"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "measure-20-ordinary",
+    "kind": "driver",
+    "description": "Actual target image/CSI/providers: 20 members, ordinary; record repeated cold/warm sync, stop, snapshot and transport load.",
+    "observations": [
+      "target_identity",
+      "member_count",
+      "profile",
+      "samples",
+      "latency_percentiles",
+      "bytes_inodes",
+      "cpu_memory",
+      "control_latency",
+      "cleanup_time"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  },
+  {
+    "id": "measure-20-metadata-heavy",
+    "kind": "driver",
+    "description": "Actual target image/CSI/providers: 20 members, metadata-heavy; record repeated cold/warm sync, stop, snapshot and transport load.",
+    "observations": [
+      "target_identity",
+      "member_count",
+      "profile",
+      "samples",
+      "latency_percentiles",
+      "bytes_inodes",
+      "cpu_memory",
+      "control_latency",
+      "cleanup_time"
+    ],
+    "status": "deferred",
+    "release": "0.5.1",
+    "card": 180
+  }
+]

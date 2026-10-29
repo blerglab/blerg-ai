@@ -6,6 +6,7 @@ import { resolve } from 'node:path'
 // Library build: one ESM entry, React left to the host, the three stylesheets copied beside it
 // (tokens.css is the theme contract, blerg.css the runner's theme, chat.css the components').
 export default defineConfig({
+  cacheDir: '.cache/vite',
   plugins: [
     react(),
     {

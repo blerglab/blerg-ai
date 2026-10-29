@@ -39,11 +39,54 @@ You need a bearer token. In order of likelihood:
 
     GET  /api/boards                       # find your board
     GET  /api/boards/{id}/schema           # declared custom fields
-    GET  /api/boards/{id}/cards/search?q=  # search before filing
+    GET  /api/boards/{id}/cards             # full live board, in board order
+    GET  /api/boards/{id}/cards/search?q=   # search before filing
     POST /api/boards/{id}/cards            # create (gated)
     PATCH /api/cards/{id}                  # update (send if_match)
     POST /api/cards/{id}/move              # {"column_id" | "column_name"}
     GET  /api/reviews/{id}                 # outcome of a held submission
+
+**Card filters (both GET endpoints).** GET /api/boards/{id}/cards and
+GET /api/boards/{id}/cards/search accept the same query parameters:
+
+- q: text over title/body (typo-tolerant), or KEY-N / #N / N; e.g. q=reconnect.
+  URL-encode # as %23 (q=%2342).
+- type: card type, e.g. type=bug.
+- tag: exact tag, e.g. tag=0.5.1. Use tag for release labels rather than text search.
+- priority: low, medium, high or urgent; e.g. priority=high.
+- column: exact column name (case-insensitive) or column UUID on this board.
+  Repeat it to match any listed column: column=inbox&column=ready.
+  Unknown columns return 400 naming the board's available columns.
+- field.{key}: custom-field equality, e.g. field.severity=sev1.
+- include_archived=1: include live and archived cards (default: live only).
+- archived=1: archived cards only (legacy option; takes precedence over include_archived).
+  Archiving removes a card from its column, so archived cards do not match a column filter.
+- limit: explicit positive result limit, e.g. limit=100. Unpaged /cards has no
+  default or maximum cap; /cards/search defaults to 20 with maximum 100.
+  Paged requests on either endpoint also default to 20 with maximum 100.
+- page=true: return {cards, next_cursor} instead of an array.
+- cursor: opaque next_cursor from the previous page, e.g. cursor=<next_cursor>;
+  implies paging. Keep all filters and limit unchanged, follow until next_cursor
+  is empty. Pages reflect current data, rather than a frozen snapshot.
+
+An unpaged GET /cards returns all matches unless you supply an explicit limit,
+including when filtering by tag or column. Bare GET /cards (or only archived=1)
+keeps board order; filtered lists use search ranking. GET /cards/search keeps
+its default limit: use page=true and follow every cursor to count all matches.
+Unknown query parameters are rejected with 400 and a JSON {error, supported}
+response listing supported names, including field.{key}. All parameters except
+column are single-valued; repeating any of them returns 400, even with identical
+values. Distinct custom-field keys can be combined (field.a=x&field.b=y).
+
+Examples (either endpoint supports these filters):
+
+    # count cards tagged 0.5.1 in the inbox: this array contains ALL matches
+    GET /api/boards/{id}/cards?tag=0.5.1&column=inbox
+    # alternatively traverse every search page and sum cards lengths
+    GET /api/boards/{id}/cards/search?tag=0.5.1&column=inbox&page=true&limit=100
+    GET /api/boards/{id}/cards/search?column=inbox&column=ready&priority=high
+    GET /api/boards/{id}/cards/search?type=bug&field.severity=sev1&include_archived=1
+    GET /api/boards/{id}/cards?tag=0.5.1&column=inbox&page=true&limit=100&cursor=<next_cursor>
 
 **CLI (if installed).** ` + "`blerg-board ls | get | search | new | move`" + ` with ` + "`BLERG_BOARD_URL`" + `,
 ` + "`BLERG_BOARD_TOKEN`" + `, ` + "`BLERG_BOARD_BOARD`" + ` env vars.

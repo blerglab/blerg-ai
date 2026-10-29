@@ -20,6 +20,7 @@ describe('nextThinking', () => {
   it('stays as it was for anything else, and for a subagent', () => {
     for (const keep of [
       ev('status_changed', { status: 'running' }), ev('user_message', { text: 'x', source: 'system' }),
+      ev('user_message', { text: '95%', source: 'usage_limit' }),
       ev('subagent_update'), ev('thinking_started', { parent_call_id: 'a' }), ev('tool_call', { tool: 'Read', parent_call_id: 'a' }),
     ]) {
       expect(nextThinking(true, keep), keep.kind).toBe(true)
@@ -32,6 +33,7 @@ describe('modelRetry', () => {
   it('is the newest retry notice with nothing from the model after it', () => {
     const turn = [ev('user_message', { text: 'go', source: 'chat' }), ev('status_changed', { status: 'running' })]
     expect(modelRetry([...turn, retry(1), retry(2)], true)).toEqual({ attempt: 2 })
+    expect(modelRetry([...turn, retry(2), ev('user_message', { source: 'usage_limit', text: '95%' })], true)).toEqual({ attempt: 2 })
     expect(modelRetry([...turn, retry(2), ev('status_changed', { status: 'running' })], true)).toEqual({ attempt: 2 })
     // A daemon older than the attempt field says it in the message.
     expect(modelRetry([...turn, retry(undefined, 'retrying the API (attempt 3 of 10) after overloaded_error (529)…')], true)).toEqual({ attempt: 3 })

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blerglab/blerg-ai/runner/internal/codexauth"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
 )
 
@@ -163,8 +163,11 @@ func (j *JobManager) codexCatalogCredential(ctx context.Context, accountID strin
 	credential, found, err := j.fetchPersonalCredential(ctx, accountID, "codex", proof)
 	if errors.Is(err, errCoreManagedCredential) {
 		access, managed, accessErr := fetchManagedAccess(ctx, j.CredentialClient, j.CoreURL, j.CoreInternalKey, managedAccessRequest{AccountID: accountID, Engine: "codex", TokenID: proof.TokenID, SessionID: proof.SessionID})
-		if accessErr != nil || !managed {
+		if errors.Is(accessErr, errManagedReconnectRequired) {
 			return nil, ErrClusterCodexCatalogAuth
+		}
+		if accessErr != nil || !managed {
+			return nil, ErrClusterCodexCatalog
 		}
 		// The transient catalog job receives access only, never refresh authority.
 		return json.Marshal(access)
@@ -179,29 +182,11 @@ func (j *JobManager) codexCatalogCredential(ctx context.Context, accountID strin
 }
 
 func (j *JobManager) codexOperatorCatalogCredential(ctx context.Context) ([]byte, error) {
-	name := j.SecretName
-	if j.OAuthSecretName != "" {
-		name = j.OAuthSecretName
-	}
-	resp, err := j.doWithContentType(ctx, http.MethodGet, "/api/v1/namespaces/"+j.Namespace+"/secrets/"+url.PathEscape(name), nil, "application/json")
+	credential, err := j.codexOperatorCredential(ctx)
 	if err != nil {
 		return nil, ErrClusterCodexCatalog
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, ErrClusterCodexCatalogAuth
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, ErrClusterCodexCatalog
-	}
-	var secret struct {
-		Data map[string]string `json:"data"`
-	}
-	if json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&secret) != nil {
-		return nil, ErrClusterCodexCatalog
-	}
-	credential, err := base64.StdEncoding.DecodeString(secret.Data["CODEX_AUTH_JSON"])
-	if err != nil || len(credential) == 0 {
+	if len(credential) == 0 {
 		return nil, ErrClusterCodexCatalogAuth
 	}
 	return credential, nil
@@ -213,55 +198,15 @@ func codexProbeAuthSnapshot(raw []byte, now time.Time) ([]byte, error) {
 	var managed managedAccess
 	if json.Unmarshal(raw, &managed) == nil && managed.Mode == "chatgptAuthTokens" {
 		if managed.AccessToken == "" || managed.AccountID == "" || !managed.ExpiresAt.After(now.Add(30*time.Second)) {
-			return nil, ErrClusterCodexCatalogAuth
+			return nil, ErrClusterCodexCatalog
 		}
 		return json.Marshal(managed)
 	}
-	var auth struct {
-		AuthMode    string    `json:"auth_mode"`
-		LastRefresh time.Time `json:"last_refresh"`
-		APIKey      string    `json:"OPENAI_API_KEY"`
-		Tokens      *struct {
-			AccessToken  string `json:"access_token"`
-			IDToken      string `json:"id_token"`
-			RefreshToken string `json:"refresh_token"`
-			AccountID    string `json:"account_id"`
-		} `json:"tokens"`
-	}
-	if json.Unmarshal(raw, &auth) != nil {
+	snapshot, err := codexauth.Snapshot(raw, now)
+	if errors.Is(err, codexauth.ErrInvalid) {
 		return nil, ErrClusterCodexCatalogAuth
 	}
-	if auth.APIKey != "" {
-		return json.Marshal(map[string]string{"auth_mode": "apikey", "OPENAI_API_KEY": auth.APIKey})
-	}
-	if auth.Tokens == nil || auth.Tokens.AccessToken == "" {
-		return nil, ErrClusterCodexCatalogAuth
-	}
-	parts := strings.Split(auth.Tokens.AccessToken, ".")
-	if len(parts) == 3 {
-		claimsRaw, err := base64.RawURLEncoding.DecodeString(parts[1])
-		if err != nil {
-			return nil, ErrClusterCodexCatalogAuth
-		}
-		var claims struct {
-			Exp int64 `json:"exp"`
-		}
-		if json.Unmarshal(claimsRaw, &claims) != nil {
-			return nil, ErrClusterCodexCatalogAuth
-		}
-		if claims.Exp > 0 && !time.Unix(claims.Exp, 0).After(now.Add(30*time.Second)) {
-			return nil, ErrClusterCodexCatalogAuth
-		}
-	}
-	// LastRefresh is probe-local metadata. Without it native Codex attempts a
-	// proactive refresh even for a valid access token. JWT expiry was checked
-	// above; this short-lived snapshot must use the access token alone.
-	auth.LastRefresh = now.UTC()
-	if auth.AuthMode == "" {
-		auth.AuthMode = "chatgpt"
-	}
-	auth.Tokens.RefreshToken = ""
-	return json.Marshal(auth) //nolint:gosec // G117: access-only credential intentionally marshaled only into the private Kubernetes Secret.
+	return snapshot, err
 }
 
 // Override the agent entrypoint. A native model/list request forces a remote
@@ -277,6 +222,10 @@ with open("/var/run/codex-auth/auth.json", "rb") as source:
     auth = json.loads(source.read(32769))
 managed = auth.get("mode") == "chatgptAuthTokens"
 if not managed:
+    # Native Codex requires this empty schema slot in its private local file.
+    # The mounted snapshot contains no refresh-token field or authority.
+    if isinstance(auth.get("tokens"), dict):
+        auth["tokens"]["refresh_token"] = ""
     target = pathlib.Path(os.environ["CODEX_HOME"]) / "auth.json"
     target.write_text(json.dumps(auth))
     target.chmod(0o600)
@@ -366,7 +315,7 @@ func (j *JobManager) probeClusterCodexModels(parent context.Context, credential 
 			"containers":      []map[string]any{{"name": "models", "image": j.Image, "command": []string{"/bin/sh", "-c", clusterCodexCatalogCommand}, "env": []map[string]any{{"name": "HOME", "value": "/workspace"}, {"name": "CODEX_HOME", "value": "/workspace/.codex"}}, "securityContext": sessionContainerSecurityContext(), "volumeMounts": []map[string]any{{"name": "auth", "mountPath": "/var/run/codex-auth", "readOnly": true}}, "resources": map[string]any{"requests": map[string]string{"cpu": "100m", "memory": "128Mi"}, "limits": map[string]string{"cpu": "1", "memory": "512Mi"}}}},
 		}},
 	}}
-	resp, err := j.doWithContentType(ctx, http.MethodPost, "/apis/batch/v1/namespaces/"+j.Namespace+"/jobs", job, "application/json")
+	resp, err := j.createLaunchObject(ctx, "/apis/batch/v1/namespaces/"+j.Namespace+"/jobs", job)
 	if err != nil {
 		return models.List{}, ErrClusterCodexCatalog
 	}
@@ -382,8 +331,9 @@ func (j *JobManager) probeClusterCodexModels(parent context.Context, credential 
 		return models.List{}, ErrClusterCodexCatalog
 	}
 	secret := map[string]any{"apiVersion": "v1", "kind": "Secret", "type": "Opaque", "metadata": map[string]any{"name": secretName, "namespace": j.Namespace, "labels": labels, "ownerReferences": []map[string]any{{"apiVersion": "batch/v1", "kind": "Job", "name": name, "uid": created.Metadata.UID, "controller": false, "blockOwnerDeletion": false}}}, "stringData": map[string]string{"auth.json": string(credential)}}
-	// Never decode or log a Kubernetes rejection body: it may echo auth.json.
-	resp, err = j.doWithContentType(ctx, http.MethodPost, "/api/v1/namespaces/"+j.Namespace+"/secrets", secret, "application/json")
+	// Never propagate or log a Kubernetes rejection body: it may echo auth.json.
+	// The create helper retains only its safe reason class.
+	resp, err = j.createLaunchObject(ctx, "/api/v1/namespaces/"+j.Namespace+"/secrets", secret)
 	if err != nil {
 		return models.List{}, ErrClusterCodexCatalog
 	}

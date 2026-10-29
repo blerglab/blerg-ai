@@ -141,6 +141,9 @@ func withSlotDeadline[T any](sem chan struct{}, deadline time.Duration, work fun
 	defer timer.Stop()
 	select {
 	case res = <-ch:
+		// Free the slot before returning so the caller never sees it still held; the
+		// worker's own deferred free is then a no-op.
+		free()
 		return res, true
 	case <-timer.C:
 		free()

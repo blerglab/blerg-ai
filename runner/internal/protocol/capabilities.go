@@ -89,6 +89,7 @@ type CapabilitiesPayload struct {
 	// ("~/…" or its last components) — never a full host path.
 	Cwd            string            `json:"cwd,omitempty"`
 	PermissionMode string            `json:"permission_mode,omitempty"`
+	SandboxMode    string            `json:"sandbox_mode,omitempty"`
 	Note           string            `json:"note,omitempty"`
 	Groups         []CapabilityGroup `json:"groups"`
 }
@@ -156,6 +157,7 @@ func SanitizeCapabilities(p CapabilitiesPayload) CapabilitiesPayload {
 		Version:           capToken(p.Version),
 		Cwd:               capClean(p.Cwd, CapMaxDetail),
 		PermissionMode:    capToken(p.PermissionMode),
+		SandboxMode:       capToken(p.SandboxMode),
 		Note:              capClean(p.Note, CapMaxNote),
 		Groups:            []CapabilityGroup{},
 	}

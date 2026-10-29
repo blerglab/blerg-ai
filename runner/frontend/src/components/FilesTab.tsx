@@ -3,7 +3,8 @@
 // chat's (useLiveState's `files`), so a delete here moves the chat's cards and History too; it is read
 // again each time the tab comes on screen. View opens the file in the chat's viewer; Attach files
 // opens the message box's file picker.
-import { useEffect, useRef } from 'react'
+import InitialLoader from './InitialLoader'
+import { useEffect, useRef, useState } from 'react'
 import { FilesList, fileCount, type ChatFiles } from '@blerglab/chat'
 
 export interface FilesTabProps {
@@ -30,7 +31,8 @@ export default function FilesTab({ sessionId, active, files, onOpenArtifact, onA
     }
     if (active) refresh()
   }, [active, refresh])
-  if (!files) return <p className="rail-empty reel-note" data-testid="rail-files-none">The files show once the chat has loaded.</p>
+  if (!files) return <MissingFiles key={sessionId} active={active} />
+  if (files.status === 'loading' && files.items.length === 0) return <InitialLoader loading active={active} loadKey={sessionId} label="files" />
   const count = fileCount(files.items)
   return (
     <div className="rail-files" data-testid="rail-files">
@@ -52,4 +54,17 @@ export default function FilesTab({ sessionId, active, files, onOpenArtifact, onA
       />
     </div>
   )
+}
+
+/** Some sessions never supply a Files source; stop waiting without preventing a late arrival. */
+function MissingFiles({ active }: { active: boolean }) {
+  const [expired, setExpired] = useState(false)
+  useEffect(() => {
+    if (!active || expired) return
+    const timer = setTimeout(() => setExpired(true), 3000)
+    return () => clearTimeout(timer)
+  }, [active, expired])
+  return <InitialLoader loading={!expired} active={active} label="files">
+    <p className="rail-empty">The files show once the chat has loaded.</p>
+  </InitialLoader>
 }

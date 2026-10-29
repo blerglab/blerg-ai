@@ -5,18 +5,24 @@
 // is inert while it shows, and Esc or a press outside cancels and the focus goes back to the anchor.
 // Under the anchor on a wide screen, kept inside the window; on a phone (640 px and less) a small
 // bottom sheet with the same two buttons.
-import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import './confirmPopover.css'
 
 export interface ConfirmPopoverProps {
   /** The control that opened it: placed against it, and the focus returns to it on cancel. */
   anchor: RefObject<HTMLElement | null>
+  /** Keep errors next to their initiating tab/control even on a phone. */
+  placement?: 'responsive' | 'anchor'
   title: string
-  description: string
+  description: ReactNode
   /** The red button's words, e.g. "End session". */
   confirmLabel: string
   cancelLabel?: string
+  /** Neutral actions (Retry) share the confirmation surface. */
+  danger?: boolean
+  busy?: boolean
+  closeOnConfirm?: boolean
   onConfirm: () => void
   onCancel: () => void
   testId?: string
@@ -26,7 +32,7 @@ export interface ConfirmPopoverProps {
 const GAP = 6
 const EDGE = 8
 
-export default function ConfirmPopover({ anchor, title, description, confirmLabel, cancelLabel = 'Cancel', onConfirm, onCancel, testId = 'confirm-popover' }: ConfirmPopoverProps) {
+export default function ConfirmPopover({ placement = 'responsive', anchor, title, description, confirmLabel, cancelLabel = 'Cancel', danger = true, busy = false, closeOnConfirm = true, onConfirm, onCancel, testId = 'confirm-popover' }: ConfirmPopoverProps) {
   const titleId = useId()
   const textId = useId()
   const box = useRef<HTMLDivElement | null>(null)
@@ -54,9 +60,12 @@ export default function ConfirmPopover({ anchor, title, description, confirmLabe
       setPos(p => (p && p.top === top && p.left === left ? p : { top, left }))
     }
     place()
+    const resize = new ResizeObserver(place)
+    if (box.current) resize.observe(box.current)
     window.addEventListener('resize', place)
     window.addEventListener('scroll', place, true)
     return () => {
+      resize.disconnect()
       window.removeEventListener('resize', place)
       window.removeEventListener('scroll', place, true)
     }
@@ -89,6 +98,7 @@ export default function ConfirmPopover({ anchor, title, description, confirmLabe
     focused.current = true
     cancel.current?.focus()
   }, [pos])
+  useEffect(() => { if (busy) box.current?.focus(); else if (focused.current) cancel.current?.focus() }, [busy])
 
   // Esc and a press outside cancel. Esc is caught on the way down, so a drawer or dialog around the
   // anchor does not close on it as well.
@@ -96,6 +106,7 @@ export default function ConfirmPopover({ anchor, title, description, confirmLabe
   useEffect(() => { onCancelRef.current = onCancel })
   useEffect(() => {
     const back = () => {
+      if (busy) return
       closing.current = true
       releaseInert(inerted.current)
       onCancelRef.current()
@@ -103,6 +114,7 @@ export default function ConfirmPopover({ anchor, title, description, confirmLabe
     }
     const key = (e: KeyboardEvent) => {
       if (e.key === 'Tab') {
+        if (busy) { e.preventDefault(); e.stopPropagation(); box.current?.focus(); return }
         // Two buttons: Tab and Shift+Tab move between them and never leave.
         e.preventDefault()
         e.stopPropagation()
@@ -119,7 +131,7 @@ export default function ConfirmPopover({ anchor, title, description, confirmLabe
     // it back to Cancel.
     const keep = (e: FocusEvent) => {
       const t = e.target as Node | null
-      if (!closing.current && t && box.current && !box.current.contains(t)) cancel.current?.focus()
+      if (!closing.current && t && box.current && !box.current.contains(t)) (busy ? box.current : cancel.current)?.focus()
     }
     const away = (e: PointerEvent) => {
       const t = e.target as Node
@@ -135,15 +147,17 @@ export default function ConfirmPopover({ anchor, title, description, confirmLabe
       document.removeEventListener('pointerdown', away, true)
       document.removeEventListener('focusin', keep, true)
     }
-  }, [anchor])
+  }, [anchor, busy])
 
   return createPortal(
     <>
       <div ref={scrim} className="confirm-popover-scrim" aria-hidden="true" />
       <div
         ref={box}
-        className="confirm-popover"
+        className={`confirm-popover${placement === 'anchor' ? ' confirm-popover-anchored' : ''}`}
         role="alertdialog"
+        tabIndex={-1}
+        aria-busy={busy || undefined}
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={textId}
@@ -153,8 +167,8 @@ export default function ConfirmPopover({ anchor, title, description, confirmLabe
         <h2 id={titleId} className="confirm-popover-title">{title}</h2>
         <p id={textId} className="confirm-popover-text">{description}</p>
         <div className="confirm-popover-actions">
-          <button ref={cancel} type="button" className="confirm-popover-btn" onClick={() => done(() => { onCancel(); anchor.current?.focus() })}>{cancelLabel}</button>
-          <button ref={confirm} type="button" className="confirm-popover-btn danger" data-testid={`${testId}-confirm`} onClick={() => done(onConfirm)}>{confirmLabel}</button>
+          <button ref={cancel} disabled={busy} type="button" className="confirm-popover-btn" onClick={() => done(() => { onCancel(); anchor.current?.focus() })}>{cancelLabel}</button>
+          <button ref={confirm} disabled={busy} type="button" className={`confirm-popover-btn${danger ? ' danger' : ''}`} data-testid={`${testId}-confirm`} onClick={() => closeOnConfirm ? done(onConfirm) : onConfirm()}>{confirmLabel}</button>
         </div>
       </div>
     </>,

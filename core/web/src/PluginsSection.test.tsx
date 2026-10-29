@@ -67,11 +67,7 @@ describe("Always-on plugins", () => {
     setup();
     render(<PluginsSection engines={PLUGIN_ENGINES.filter(e => e.engine === "claude")} />);
     await screen.findByText("No always-on plugins yet.");
-    const help = document.querySelector(".section-help")!.textContent ?? "";
-    expect(help).toMatch(/your supported agent sessions/);
-    expect(help).toMatch(/automation token/);
-    expect(help).toMatch(/do not change your engine settings on your own machine/);
-    expect(help).toMatch(/run code in your sessions, so only add ones you trust/);
+    expect(screen.getByText("Choose trusted plugins to run code in your sessions.")).toBeInTheDocument();
   });
 
   it("lists the plugins in order with remove buttons that PUT the rest", async () => {
@@ -154,6 +150,35 @@ describe("Always-on plugins", () => {
     expect(note).toHaveTextContent("Up to 20 plugins");
   });
 
+  it("labels native Codex sources and saves their exact identity", async () => {
+    setup();
+    render(<PluginsSection engines={PLUGIN_ENGINES.filter(e => e.engine === "codex")} />);
+    const source = await screen.findByLabelText("Marketplace (GitHub owner/repo or codex:<marketplace>)");
+    fireEvent.change(source, { target: { value: "codex:openai-curated" } });
+    fireEvent.change(screen.getByLabelText("Plugin name"), { target: { value: "helper" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add plugin" }));
+    await waitFor(() => expect(screen.getByRole("table")).toHaveTextContent("codex:openai-curated"));
+    expect(core.fetchMock).toHaveBeenCalledWith("/api/plugins/codex", expect.objectContaining({
+      body: JSON.stringify({ plugins: [{ marketplace: "codex:openai-curated", plugin: "helper" }] }),
+    }));
+  });
+
+  it("explains that wildcard policy includes Codex-native marketplaces", async () => {
+    setup();
+    core.state.anyMarketplace = true;
+    render(<PluginsSection engines={PLUGIN_ENGINES.filter(e => e.engine === "codex")} />);
+    expect(await screen.findByText(/This install accepts any GitHub or Codex-native marketplace/)).toBeInTheDocument();
+  });
+
+  it("keeps the Claude card to GitHub marketplaces, even under a wildcard policy", async () => {
+    setup();
+    core.state.anyMarketplace = true;
+    render(<PluginsSection engines={PLUGIN_ENGINES.filter(e => e.engine === "claude")} />);
+    expect(await screen.findByText(/This install accepts any GitHub marketplace\./)).toBeInTheDocument();
+    expect(screen.getByText("Marketplace (GitHub owner/repo)")).toBeInTheDocument();
+    expect(screen.queryByText(/codex:|Codex-native/)).not.toBeInTheDocument();
+  });
+
   it("provides a separate Codex list with the same operator allow-list", async () => {
     setup();
     render(<PluginsSection />);
@@ -169,4 +194,15 @@ describe("Always-on plugins", () => {
     const heading = await screen.findByRole("heading", { name: "Always-on plugins" });
     expect(within(heading.closest("section")!).getByText("Claude Code")).toBeInTheDocument();
   });
+});
+
+it("retains and flags saved plugins when their marketplace is disallowed", async () => {
+  vi.spyOn(authClient, "getAccessToken").mockReturnValue("test-access-token");
+  const core = fakeCore([{ marketplace: "codex:removed", plugin: "retained" }]);
+  vi.stubGlobal("fetch", core.fetchMock);
+  render(<PluginsSection engines={[PLUGIN_ENGINES[1]]} />);
+  expect(await screen.findByText(/Marketplace no longer allowed/)).toBeVisible();
+  expect(screen.getByRole("button", { name: "Remove retained" })).toBeEnabled();
+  expect(core.state.puts).toHaveLength(0);
+  vi.unstubAllGlobals(); vi.restoreAllMocks();
 });

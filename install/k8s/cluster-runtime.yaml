@@ -30,8 +30,8 @@ metadata:
 # delete the PER-SESSION credential Secrets that carry a spawning account's own
 # engine credential for the lifetime of one session (create + delete for the
 # Secret itself, patch to attach its ownerReferences to the session's Job so
-# k8s garbage-collects it alongside the Job), and read session pods (get/list
-# only) so the start progress a browser shows can say what the pod is waiting
+# k8s garbage-collects it alongside the Job), read session pods (get/list),
+# and label failed pods (patch). Start progress can say what the pod is waiting
 # on — Unschedulable, ImagePullBackOff, a missing Secret — instead of a bare
 # "Starting…". Without the pods rule sessions still start; the progress panel
 # just cannot see past "Job created". Model catalog probes also need pods/log
@@ -42,7 +42,10 @@ metadata:
   name: blerg-runner-agent-launcher
   namespace: blerg-runner-sessions
 rules:
-  # Only the runner launcher manages conversation PVCs. Workers mount no SA token.
+  # Only the runner launcher manages retained conversation/workspace PVCs.
+  # The UID-separated workspace controller uses a private emptyDir and init
+  # container inside the Job; neither receives an API token. No exec subresource
+  # is granted. Keep these permissions identical for legacy and workspace Jobs.
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list", "create", "delete"]
@@ -53,8 +56,11 @@ rules:
     resources: ["secrets"]
     verbs: ["get", "create", "patch", "delete"]
   - apiGroups: [""]
-    resources: ["pods", "pods/log"]
-    verbs: ["get", "list"]
+    resources: ["pods"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

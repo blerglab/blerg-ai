@@ -10,12 +10,14 @@ import type { McpLive } from '@blerglab/chat'
 import type { CapabilitiesReport } from '../lib/capabilities'
 import type { useSessionPlugins } from '../hooks/useSessionPlugins'
 import { CapabilitiesView } from './CapabilitiesPanel'
-import { PluginAddButton, PluginRequests } from './SessionPlugins'
+import { PluginAddButton, PluginRequests, DisallowedPlugins } from './SessionPlugins'
 import PluginBrowser from './PluginBrowser'
 import McpSignIn from './McpSignIn'
 import './CapabilitiesPanel.css'
 
 export interface CapabilitiesTabProps {
+  loading?: boolean
+  active?: boolean
   startedBySession?: boolean
   report: CapabilitiesReport | null
   /** Tool changes waiting on the session: noted on the MCP servers group. */
@@ -30,18 +32,19 @@ export interface CapabilitiesTabProps {
   machine?: string
 }
 
-export default function CapabilitiesTab({ report, pendingToolChanges, liveMcp, startedBySession, plugins, runtime, machine }: CapabilitiesTabProps) {
+export default function CapabilitiesTab({ loading = false, active = true, report, pendingToolChanges, liveMcp, startedBySession, plugins, runtime, machine }: CapabilitiesTabProps) {
   // Open for one session only: a switch to another session closes the form.
   const [addFor, setAddFor] = useState<string | null>(null)
   const adding = !!plugins && addFor === plugins.sessionId
   return (
     <div className="rail-capabilities" data-testid="rail-capabilities">
       {startedBySession && <p className="rail-empty caps-skipped">Plugins: skipped (started by another session)</p>}
-      <CapabilitiesView report={report} pendingToolChanges={pendingToolChanges} liveMcp={liveMcp}
+      <CapabilitiesView initialLoading={loading && active} report={report} pendingToolChanges={pendingToolChanges} liveMcp={liveMcp}
         toolbarAction={plugins && <PluginAddButton open={adding} onToggle={() => setAddFor(adding ? null : plugins.sessionId)} />}
         belowToolbar={plugins && (
           <div className="caps-addons">
             <PluginRequests model={plugins} />
+ <DisallowedPlugins model={plugins} />
           </div>
         )}
         itemAction={plugins ? (group, item) => group === 'mcp' ? <McpSignIn key={plugins.sessionId} item={item} ctx={{ sessionId: plugins.sessionId, runtime, machine }} /> : null : undefined} />

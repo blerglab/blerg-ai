@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/desktopauth"
 	"github.com/blerglab/blerg-ai/runner/internal/daemon"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
@@ -40,6 +41,9 @@ func TestDaemonWelcomeSentWhenTheHelloAsks(t *testing.T) {
 	var w protocol.DaemonWelcome
 	if err := json.Unmarshal(raw, &w); err != nil || w.Type != "daemon_welcome" {
 		t.Fatalf("first message = %s, want daemon_welcome", raw)
+	}
+	if w.WorkspaceCapabilities != (protocol.WorkspaceCapabilities{}) {
+		t.Fatal("unverified workspace capability escaped on the authenticated welcome")
 	}
 	if w.DaemonID == "" || w.Name != "work-laptop" {
 		t.Errorf("welcome = %+v, want the daemon id and the normalised name", w)
@@ -136,6 +140,8 @@ func TestDaemonWelcomeReachesABoundRuntimeConnection(t *testing.T) {
 func TestDaemonWelcomeComesBeforeTheReconnectWork(t *testing.T) {
 	api, hub, dc, pool := spawnTokenFixture(t)
 	ctx := context.Background()
+	ownedToken := "bdt_" + strings.Repeat("a", 64)
+	desktopFakeCore(t, api, map[string]desktopauth.Binding{ownedToken: *dc.DesktopBinding})
 	sessionID, _ := spawnViaREST(t, api, dc, "app")
 	now := time.Now()
 	if err := db.EndSessionStatus(ctx, pool, sessionID, "ended", &now, systemEnd(db.EndReasonStoppedByUser)); err != nil {
@@ -150,7 +156,7 @@ func TestDaemonWelcomeComesBeforeTheReconnectWork(t *testing.T) {
 	defer conn.Close()
 	// The same daemon comes back still hosting the session that was stopped while it was away.
 	if err := conn.WriteJSON(protocol.DaemonHello{Type: "daemon_hello", Name: dc.Name, Mode: "local", ReposRoot: "/repos",
-		Token: spawnTokenDaemonTok, ProtocolVersion: "1", ActiveSessions: []string{sessionID}, Welcome: true}); err != nil {
+		Token: ownedToken, DesktopID: dc.ID, ProtocolVersion: "1", ActiveSessions: []string{sessionID}, Welcome: true}); err != nil {
 		t.Fatal(err)
 	}
 	var types []string
@@ -202,6 +208,29 @@ func TestDaemonClientAgainstServeDaemon(t *testing.T) {
 					t.Fatalf("connection file = %s, want state %s", raw, tc.want)
 				}
 				time.Sleep(10 * time.Millisecond)
+			}
+		})
+	}
+}
+
+func TestDaemonHelloUsageNoticeCapability(t *testing.T) {
+	for _, capable := range []bool{false, true} {
+		name := "old"
+		if capable {
+			name = "capable"
+		}
+		t.Run(name, func(t *testing.T) {
+			hub := NewHub()
+			conn := dialDaemon(t, hub)
+			if err := conn.WriteJSON(protocol.DaemonHello{Type: "daemon_hello", Name: "usage-box", Token: "tok-1234567890", ProtocolVersion: "1", Welcome: true, UsageNotices: capable}); err != nil {
+				t.Fatal(err)
+			}
+			readFirstMessage(t, conn)
+			// The server sends the welcome before it registers the daemon, so wait for registration.
+			waitFor(t, "the daemon to register", func() bool { return len(hub.GetAllDaemons()) == 1 })
+			daemons := hub.GetAllDaemons()
+			if daemons[0].canUsageNotices() != capable {
+				t.Fatalf("usage_notices hello capability was not retained: capable=%v", capable)
 			}
 		})
 	}

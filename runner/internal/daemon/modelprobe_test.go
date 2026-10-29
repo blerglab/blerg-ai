@@ -876,3 +876,19 @@ func TestProbeAllLogsAnEmptyListOnce(t *testing.T) {
 		t.Errorf("log = %q (%d lines)", buf.String(), n)
 	}
 }
+
+// A completed synchronous refresh must allow the next catalog update immediately.
+func TestModelProberCompletedProbeAllowsImmediateRefresh(t *testing.T) {
+	probe := &fakeProbe{}
+	p := newModelProber(map[string]modelProbe{"codex": probe.probe})
+	for i := 0; i < 2000; i++ {
+		id := fmt.Sprintf("gpt-fixture-%d", i)
+		probe.set([]models.Model{codexModel(id)}, nil)
+		p.ProbeAll(t.Context())
+		snapshot, _ := p.Snapshot()
+		got := snapshot["codex"].Models
+		if len(got) != 1 || got[0].ID != id {
+			t.Fatal("an immediate refresh retained the previous catalog")
+		}
+	}
+}

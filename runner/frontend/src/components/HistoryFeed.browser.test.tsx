@@ -2,7 +2,7 @@
 // line with nothing wider than the screen; on a 4K screen (3840 px) the panel stays 340 px and every
 // line still fits it; and a stroke's time jumps to its message in the conversation.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { page, userEvent } from 'vitest/browser'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import '../index.css'
@@ -73,6 +73,7 @@ const noOverflow = (width: number) => {
 
 /** Every stroke is one line: its text on one line, and the line inside the panel. */
 function oneLineEach(panel: HTMLElement) {
+  for (const head of within(panel).queryAllByTestId('reel-head')) if (head.getAttribute('aria-expanded') === 'false') fireEvent.click(head)
   const p = panel.getBoundingClientRect()
   const strokes = within(panel).getAllByTestId('stroke')
   const all = [...strokes, ...within(panel).getAllByTestId('stroke-pin')]
@@ -179,6 +180,7 @@ describe('History feed on a 4K screen (3840 px)', () => {
     // An open question brings the panel up on Live: pick History.
     await userEvent.click(within(panel).getByRole('tab', { name: /History/ }))
     await within(panel).findAllByTestId('stroke')
+    for (const head of within(panel).queryAllByTestId('reel-head')) if (head.getAttribute('aria-expanded') === 'false') fireEvent.click(head)
     const line = (t: string) => [...within(panel).getAllByTestId('stroke'), ...within(panel).getAllByTestId('stroke-pin')].find(s => s.textContent!.includes(t))!
     const target = await waitFor(() => {
       const el = document.querySelector<HTMLElement>('[data-event-id="rail1"]')

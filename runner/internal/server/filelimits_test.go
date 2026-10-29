@@ -51,7 +51,8 @@ func TestConfigureFileLimits(t *testing.T) {
 	if maxArtifactBytes != 100<<20 || maxUploadBytesPerSession != 500<<20 || maxArtifactBytesPerSession != 1<<30 {
 		t.Fatalf("defaults = %d / %d / %d", maxArtifactBytes, maxUploadBytesPerSession, maxArtifactBytesPerSession)
 	}
-	if maxArtifactsPerSession != 50 || maxUploadsPerSession != 100 {
+	// No count caps: a long-running session keeps accepting files; the size totals bound storage.
+	if maxArtifactsPerSession != 0 || maxUploadsPerSession != 0 {
 		t.Fatalf("counts = %d / %d", maxArtifactsPerSession, maxUploadsPerSession)
 	}
 

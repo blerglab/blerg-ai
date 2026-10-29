@@ -77,10 +77,10 @@ func TestHostTargetsExplicitPinsCannotLaunchIntoPods(t *testing.T) {
 				}
 			}
 			svc := &CronService{api: api}
-			if _, err := svc.pickDaemon(&podID, false); err == nil {
+			if _, err := svc.pickOwnedDaemon(t.Context(), "user-1", &podID, false); err == nil {
 				t.Error("cron explicit pin accepted a pod")
 			}
-			if got, err := svc.pickDaemon(nil, false); err != nil || got != host {
+			if got, err := svc.pickOwnedDaemon(t.Context(), "user-1", nil, false); err != nil || got != host {
 				t.Error("cron automatic selection did not retain eligible host")
 			}
 			var afterSessions, afterTokens int
@@ -110,7 +110,7 @@ func TestHostTargetsBoardConfiguredPodPinIsRejected(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodPost, "/api/boards/"+board.ID+"/assist", strings.NewReader(`{}`))
 	req.SetPathValue("id", board.ID)
-	req.Header.Set("Authorization", "Bearer "+spawnTokenDaemonTok)
+	req.Header.Set("Authorization", "Bearer "+enableBrowserAuth(t, api)("session.start"))
 	rec := httptest.NewRecorder()
 	api.HandlePostAssist(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {

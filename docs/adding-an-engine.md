@@ -124,6 +124,38 @@ Declare `EngineSpec.ConfigBundle` roots, canonical home directory and optional a
 
 Native plugins need [Core plugin registration](../core/internal/plugins/service.go), [shared validation](../contracts/pluginspec/), UI metadata, and an adapter-owned installer/snapshot. Core's descriptor endpoint advertises plugin engines only when a real Core plugin validator is also registered. Settings uses that metadata; frontend suggestions are presentation hints, not a support registry. A newly registered plugin engine gets generic UI without copying a Claude/Codex list. Register only real native support. A marketplace string valid for one engine need not be meaningful for another.
 
+Codex-owned marketplaces use explicit `codex:<marketplace>` identities.
+The official `codex:openai-curated` and `codex:openai-curated-remote` forms ship
+enabled alongside Anthropic's official source. Admins manage the audited policy
+in Core Settings; runner servers distribute it to daemons, which enforce it
+locally. Environment lists initialize/fallback rather than intersecting saved
+policy. See [marketplace policy precedence](../core/docs/CONFIG.md#plugin-marketplace-policy).
+A GitHub source does not implicitly allow a corresponding native identity; the
+wildcard permits both valid source kinds. Claude's GitHub grammar is unchanged.
+People can save the native identity under Codex in Settings or use the session's
+by-name form when catalog browsing is unavailable. Deploy Core, runner/frontend
+and daemon together to make native identities available throughout the approval
+and startup paths.
+
+The daemon uses `codex plugin add <plugin>@<marketplace> --json` for native
+marketplaces. Codex 0.162.1 also exposes app-server `plugin/install` with
+`pluginName` and `remoteMarketplaceName`, but that RPC returns authentication
+metadata rather than the installed path the snapshot verifier needs. The CLI
+uses the same native installer and returns `installedPath`. It runs with no TTY,
+closed stdin, capped output, command and overall timeouts, and an isolated
+`CODEX_HOME`. Only a private copy of the session's native login is supplied;
+installer settings and credential refreshes cannot write through to the login
+home. The temporary home is removed after snapshotting or failure. GitHub-only
+installs retain their credential-free workshop. Remote-only catalog entries come
+from the session's app-server `plugin/list`; arbitrary local marketplace paths
+are never converted to native identities. Codex account restrictions remain
+visible in the browser and are enforced again by Codex at install time.
+
+Host and local sandbox agent sessions load the verified startup snapshot. Live
+application remains host-only. Cluster Codex plugin installation is unsupported
+and reports a startup warning; saving an always-on setting does not imply that
+an unsupported runtime loaded it. Agent tools still cannot call `plugin/install`.
+
 Live plugin reload is a separate capability from installation at launch. Advertise the engine in
 `DaemonHello.session_plugin_engines` only after implementing the owner-approved
 [`apply_session_plugins` / `session_plugins_result` protocol](../runner/internal/protocol/sessionplugins.go).
@@ -210,3 +242,13 @@ commands. Preserve the person's existing engine instructions and developer
 configuration. Managed terminal instructions belong in the session's private
 engine home, with atomic writes that cannot follow a link back to the user profile.
 Include recovery and sandbox launches in guide coverage tests.
+
+Host Claude and Codex sessions support owner-approved live plugin changes. Codex stops its
+app-server only between turns, after owned background work settles, then starts it with a
+fresh plugin home and resumes the same native thread. The old process's native helpers are
+terminated with it. The selection is reported as applied only after initialization and resume
+succeed; a failed replacement restores the previous plugins and resumes the conversation,
+with a plain failure message for the owner. Additions and session-only removals use the same
+approval, marketplace allowlist, durable request and replay checks. The open plugin browser
+refreshes when a request finishes, including changes deferred until a turn ends. Sandboxed
+and older runtimes keep always-on installation for new sessions.

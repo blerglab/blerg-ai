@@ -121,7 +121,7 @@ export function SearchModal({ boardId, onClose }: { boardId?: string; onClose: (
                 className={`search-hit${j === sel ? " selected" : ""}`} key={c.id}
                 onMouseEnter={() => setSel(j)} onClick={() => openAt(j)}
               >
-                <span className="mono num">#{c.number}</span>
+                <span className="mono num">{c.reference || `#${c.number}`}</span>
                 {(!scoped || !boardId) && <span className="hit-board">{boards[c.board_id] ?? "?"}</span>}
                 <span className="hit-title">{c.title}</span>
                 {c.archived_at && <span className="chip">archived</span>}

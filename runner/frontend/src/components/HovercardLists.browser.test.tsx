@@ -94,9 +94,16 @@ async function walk(to: { x: number; y: number }, opts: { step?: number; into?: 
  *  rest at once (warm), and the pointer never enters a card. */
 /** Hovercards' time, the test's own: a card opens when the test says the delay has passed. */
 let clock: ManualHoverClock
+/** Let browser input/rendering settle, then pass only the manual warm dwell. */
+async function warmDwell() {
+  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  await expect.poll(() => clock.pending()).toBeGreaterThan(0)
+  clock.advance(HOVERCARD.warmDwellMs)
+}
 /** The open delay passes; the card is there. */
 async function opened() {
-  await railReady()
+  // Wait for CDP to deliver the hover before advancing its clock.
+  await expect.poll(() => clock.pending()).toBeGreaterThan(0)
   clock.advance(HOVERCARD.openDelayMs)
   await expect.poll(() => card()?.style.visibility).toBe('visible')
 }
@@ -111,7 +118,7 @@ async function walkDown(chips: HTMLElement[], keyOf: (i: number) => string, x?: 
     const c = center(chips[i])
     await walk({ x: first.x, y: c.y })
     // At once: only the short warm dwell passes, far less than the open delay.
-    clock.advance(HOVERCARD.warmDwellMs)
+    await warmDwell()
     await expect.poll(() => card()?.textContent ?? '').toContain(keyOf(i))
     await expect.poll(() => card()?.style.visibility).toBe('visible')
     // Beside the list: the card is not over the list's rows.
@@ -133,6 +140,7 @@ describe('Hovercards in lists, with a real mouse', () => {
   it.each([1280, 3840])('at %i px: walking down Tickets opens each card in turn, beside the panel, never under the pointer', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 900)
     show(width)
+    await railReady()
     await userEvent.click(screen.getByTestId('rail-pin-more'))
     await moveTo(1, 1)
     const chips = screen.getAllByTestId('rail-pin-open')
@@ -144,6 +152,7 @@ describe('Hovercards in lists, with a real mouse', () => {
   it.each([1280, 3840])('at %i px: walking down History\'s card chips does the same', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 900)
     show(width)
+    await railReady()
     await userEvent.click(screen.getByRole('tab', { name: /History/ }))
     await moveTo(1, 1)
     const chips = within(screen.getByTestId('session-rail')).getAllByTestId('stroke-card')
@@ -154,6 +163,7 @@ describe('Hovercards in lists, with a real mouse', () => {
   it.each([1280, 3840])('at %i px: a Running now row\'s card names the model in full and the whole step; walking down the rows switches at once', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 900)
     showRunning(width)
+    await railReady()
     await moveTo(1, 1)
     const rows = [...within(screen.getByTestId('rail-running')).getByRole('list').children] as HTMLElement[]
     expect(rows.map(r => r.dataset.testid)).toEqual(['rail-main', 'rail-subagent', 'rail-subagent', 'rail-task', 'rail-child'])
@@ -161,7 +171,7 @@ describe('Hovercards in lists, with a real mouse', () => {
     const m = center(rows[0])
     await moveTo(m.x, m.y)
     await opened()
-    const model = within(card()!).getByTestId('hovercard-run-model')
+    const model = await within(card()!).findByTestId('hovercard-run-model')
     expect(model.textContent).toContain('Claude Code · Opus 5.5')
     expect(model.querySelector('dd')!.getAttribute('title')).toBe('claude-opus-5-5')
     expect(within(card()!).getByTestId('hovercard-step').textContent).toContain(LONG_STEP)
@@ -176,20 +186,36 @@ describe('Hovercards in lists, with a real mouse', () => {
     expect(within(card()!).getByTestId('hovercard-run-kind').textContent).toContain('Child session')
   })
 
+  it('waits for a Running now hover delivered on a later browser frame before advancing time', async () => {
+    await page.viewport(1280, 900)
+    showRunning(1280)
+    await railReady()
+    const row = center(screen.getByTestId('rail-main'))
+    // Model delayed input delivery under full-suite load without depending on wall-clock time.
+    const moved = new Promise<void>((resolve, reject) => {
+      requestAnimationFrame(() => { void moveTo(row.x, row.y).then(resolve, reject) })
+    })
+    await opened()
+    await moved
+    expect((await within(card()!).findByTestId('hovercard-run-model')).textContent).toContain('Claude Code · Opus 5.5')
+    expect(within(card()!).getByTestId('hovercard-step').textContent).toContain(LONG_STEP)
+  })
+
   it.each([1280, 3840])('at %i px: a subagent\'s card always states its model: its own, or the one it inherits from Main', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 900)
     showRunning(width)
+    await railReady()
     await moveTo(1, 1)
     const subs = within(screen.getByTestId('rail-running')).getAllByTestId('rail-subagent')
     const own = center(subs[0])
     await moveTo(own.x, own.y)
     await opened()
-    let model = within(card()!).getByTestId('hovercard-run-model').querySelector('dd')!
+    let model = (await within(card()!).findByTestId('hovercard-run-model')).querySelector('dd')!
     expect(model.textContent).toBe('Sonnet 4.5')
     expect(model.getAttribute('title')).toBe('claude-sonnet-4-5')
     const inherits = center(subs[1])
     await moveTo(inherits.x, inherits.y)
-    clock.advance(HOVERCARD.warmDwellMs)
+    await warmDwell()
     await expect.poll(() => card()?.textContent ?? '').toContain('Audit the tests')
     model = within(card()!).getByTestId('hovercard-run-model').querySelector('dd')!
     expect(model.textContent).toBe('Opus 5.5 (same as Main)')
@@ -199,6 +225,7 @@ describe('Hovercards in lists, with a real mouse', () => {
   it.each([1280, 3840])('at %i px: a 1 px staircase toward the card keeps it open', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 900)
     show(width)
+    await railReady()
     await userEvent.click(screen.getByTestId('rail-pin-more'))
     await moveTo(1, 1)
     // The last chip: nothing with a card of its own lies between it and its card's lower half (a
@@ -233,6 +260,7 @@ describe('Hovercards in lists, with a real mouse', () => {
   it.each([1280, 3840])('at %i px: a hand that starts down a little, then turns left to the card, keeps it open', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 900)
     show(width)
+    await railReady()
     await userEvent.click(screen.getByTestId('rail-pin-more'))
     await moveTo(1, 1)
     const chips = screen.getAllByTestId('rail-pin-open')
@@ -277,6 +305,7 @@ describe('Hovercards in lists, with a real mouse', () => {
     await page.viewport(width, width === 3840 ? 2160 : 900)
     // A long step: Main's card is tall, so a 20° drift down the list points into it.
     showRunning(width, Array.from({ length: 12 }, (_, i) => `${i + 1}. ${LONG_STEP}`).join('\n'))
+    await railReady()
     await moveTo(1, 1)
     const rows = [...within(screen.getByTestId('rail-running')).getByRole('list').children] as HTMLElement[]
     const from = { x: Math.round(rows[0].getBoundingClientRect().left + 120), y: center(rows[0]).y }
@@ -288,13 +317,14 @@ describe('Hovercards in lists, with a real mouse', () => {
     const to = center(rows[1]).y
     const drift = Math.tan((20 * Math.PI) / 180)
     for (let y = from.y + 3; y <= to; y += 3) await moveTo(Math.round(from.x - (y - from.y) * drift), y)
-    clock.advance(HOVERCARD.warmDwellMs)
+    await warmDwell()
     await expect.poll(() => card()?.textContent ?? '').toContain('Survey the layout')
   })
 
   it.each([1280, 3840])('at %i px: moving diagonally into the card keeps it open; the next chip\'s card opens with no delay', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 900)
     show(width)
+    await railReady()
     await userEvent.click(screen.getByTestId('rail-pin-more'))
     await moveTo(1, 1)
     const chips = screen.getAllByTestId('rail-pin-open')
@@ -314,7 +344,7 @@ describe('Hovercards in lists, with a real mouse', () => {
     const c1 = center(chips[3])
     await moveTo(c1.x, c1.y)
     // No open delay: the warm dwell alone.
-    clock.advance(HOVERCARD.warmDwellMs)
+    await warmDwell()
     await expect.poll(() => card()?.textContent ?? '').toContain('#124')
   })
 })

@@ -126,7 +126,7 @@ export default function CommentEditor({value, onChange, label = 'Comment', autoF
     ;(next ? previewTab : writeTab).current?.focus()
   }
 
-  return <div className="comment-editor">
+  return <div className="comment-editor" data-palette-shortcuts="ignore">
     <div className="comment-editor-header">
       <div className="comment-editor-tabs" role="tablist" aria-label={`${label} mode`}>
         <button type="button" role="tab" id={`${id}-write`} aria-controls={`${id}-panel`} aria-selected={!preview}

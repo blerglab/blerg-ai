@@ -40,6 +40,7 @@ func spawnTokenFixture(t *testing.T) (*API, *Hub, *DaemonConn, *pgxpool.Pool) {
 	dc.SetSessionTokenFile(true) // a current daemon: it can take a re-issued token
 	hub.Register(dc)
 	api := NewAPI(hub, pool, spawnTokenDaemonTok, nil, "")
+	fixtureOwnDesktop(t, pool, dc, "user-1")
 	return api, hub, dc, pool
 }
 
@@ -127,7 +128,7 @@ func TestForwardBrowserSpawnMintsSessionToken(t *testing.T) {
 	_, hub, dc, pool := spawnTokenFixture(t)
 	ctx := context.Background()
 
-	sessionID, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1"}, protocol.BrowserSpawnSession{
+	sessionID, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1", AccountID: "user-1"}, protocol.BrowserSpawnSession{
 		Kind: "agent", Type: "spawn_session", DaemonID: dc.ID, Repo: "app", Title: "t",
 	}, pool)
 	if err != nil {
@@ -153,19 +154,16 @@ func TestForwardBrowserSpawnMintsSessionToken(t *testing.T) {
 // gets no token. Guards the nil-pool branch.
 func TestForwardBrowserSpawnWithoutDBSendsNoToken(t *testing.T) {
 	hub := NewHub()
-	dc := &DaemonConn{ID: "d1", Name: "laptop", send: make(chan []byte, 8)}
-	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc := &DaemonConn{ID: "d1", send: make(chan []byte, 8)}
 	hub.Register(dc)
-	if _, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1"}, protocol.BrowserSpawnSession{Kind: "agent", Type: "spawn_session", DaemonID: "d1", Repo: "app"}, nil); err != nil {
-		t.Fatal(err)
+	if _, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1", AccountID: "user-1"}, protocol.BrowserSpawnSession{Kind: "agent", DaemonID: dc.ID, Repo: "app"}, nil); err == nil {
+		t.Fatal("missing desktop authority was accepted")
 	}
-	if msg := recvSpawn(t, dc); msg.SessionToken != "" {
-		t.Fatalf("token minted without a DB: %+v", msg)
+	if len(dc.send) != 0 {
+		t.Fatal("unowned spawn was dispatched")
 	}
 }
 
-// postAs posts an "update" message with tok and returns the status code —
-// what `blerg-runner update` does from inside the session.
 func postAs(api *API, tok string) int {
 	b, _ := json.Marshal(map[string]any{"kind": "update", "body": "still here"})
 	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(string(b)))
@@ -268,6 +266,7 @@ func TestPostSessionsAbortsTokenWhenDaemonBufferFull(t *testing.T) {
 	ctx := context.Background()
 	full := &DaemonConn{ID: dc.ID, Name: dc.Name, ReposRoot: dc.ReposRoot, send: make(chan []byte)} // unbuffered, nobody reading
 	full.SetSandboxClones(true)
+	fixtureOwnDesktop(t, pool, full, "user-1")
 	hub.Register(full)
 
 	tok := enableBrowserAuth(t, api)("session.start")
@@ -295,7 +294,7 @@ func TestPostSessionsAbortsTokenWhenDaemonBufferFull(t *testing.T) {
 	}
 
 	// Same guarantee on the browser-WS path.
-	if _, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1"}, protocol.BrowserSpawnSession{Kind: "agent", Type: "spawn_session", DaemonID: dc.ID, Repo: "app"}, pool); err == nil {
+	if _, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1", AccountID: "user-1"}, protocol.BrowserSpawnSession{Kind: "agent", Type: "spawn_session", DaemonID: dc.ID, Repo: "app"}, pool); err == nil {
 		t.Fatal("expected send-channel-full error")
 	}
 	if rows, _ := db.ListSessionsByDaemon(ctx, pool, dc.ID); len(rows) != 0 {

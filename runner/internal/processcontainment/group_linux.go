@@ -19,6 +19,16 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// WriterTaskLimit bounds the tasks (threads count) one traced command may hold. Real parallel builds
+// (a Go toolchain uses about one thread per core) stay well under it; a runaway fork is still stopped.
+const WriterTaskLimit = 4096
+
+// TaskLimitMessage is the plain line shown when a traced tree is ended for passing its task limit.
+// scope names what was stopped ("session", "shell").
+func TaskLimitMessage(limit int, scope string) string {
+	return fmt.Sprintf("blerg: process limit reached: more than %d processes and threads in this %s, so it was stopped. Retry with less parallelism (for example GOMAXPROCS=4, go -p 1, make -j4, fewer test workers).", limit, scope)
+}
+
 // Group is generation-local. Wrapping creation and freezing serialize on this
 // mutex; a pending launch must acknowledge readiness or cleanup stays unproven.
 type Group struct {
@@ -268,7 +278,7 @@ func ServeCommand(args []string) int {
 	ready := make(chan error, 1)
 	done := make(chan struct{})
 	code, runErr := 125, error(nil)
-	go func() { code, runErr = tree.Run(cmd, cmd.Start, 128, ready); close(done) }()
+	go func() { code, runErr = tree.Run(cmd, cmd.Start, WriterTaskLimit, ready); close(done) }()
 	if err := <-ready; err != nil {
 		<-done
 		emit(resultFrame("empty", runErr))
@@ -293,6 +303,14 @@ func ServeCommand(args []string) int {
 	for {
 		select {
 		case <-done:
+			if errors.Is(runErr, ErrTaskLimit) {
+				// The tree is gone (proven empty); say why on the command's own stderr, which the
+				// daemon shows with the exit, so the person and the agent can lower parallelism.
+				// A leading newline keeps it off any half-written engine line.
+				_, _ = fmt.Fprint(os.Stderr, "\n"+TaskLimitMessage(WriterTaskLimit, "session")+"\n")
+				emit(frame{Op: "empty", OK: true, Detail: runErr.Error()})
+				return code
+			}
 			emit(resultFrame("empty", runErr))
 			return code
 		case f, ok := <-requests:

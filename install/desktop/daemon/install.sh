@@ -1076,6 +1076,13 @@ offer_wsl_startup() {
     wsl_startup enable
     return
   fi
+  # Ask once: a reinstall keeps the task (only uninstall removes it), so skip the
+  # question when it is already registered. Checked only where we would ask (a
+  # terminal); a failed check falls back to asking.
+  if [ -t 0 ] && [[ "$(wsl_startup status 2>/dev/null)" == *"Task Scheduler: "*"; state: "* ]]; then
+    blerg_step "Windows sign-in startup: already enabled (./daemon/install.sh wsl-startup status|disable)."
+    return 0
+  fi
   blerg_step "WSL does not start this distro after Windows sign-in by itself."
   blerg_step "Optional: ./daemon/install.sh wsl-startup enable creates a Windows logon task that starts and keeps this distro running while signed in, including on battery."
   if [ -t 0 ]; then

@@ -168,12 +168,13 @@ container and ends with the `docker rm`.
   handle distro boot separately. See [WSL startup prerequisites and diagnostics](DAEMON.md#wsl2-return-after-windows-restart).
 - **Start again:** `./blerg-up.sh` (rebuilds by default so a `git pull` takes effect; `--no-build`
   to skip, `--no-open` to keep the browser closed).
-- **Upgrade:** `git pull && ./blerg-up.sh`; database migrations run automatically. On a large
-  database the runner's first start after an upgrade can take a while: migrations 041, 042 and 049
-  build indexes on its event table, and the daemon's events wait until they are done.
-  `./daemon/install.sh install` rebuilds the daemon (if agent sessions have work running that the
-  restart would cut off, it lists them and asks first; `--yes`, on it or on `blerg-up.sh`, skips
-  the question). Do it on every upgrade: much of what a session shows comes from the daemon (the
+- **Upgrade:** `git pull && ./blerg-up.sh`. That is the whole upgrade: it rebuilds the stack,
+  database migrations run automatically, and it reinstalls the daemon too (if agent sessions have
+  work running that the restart would cut off, it lists them and asks first; `--yes` skips the
+  question). On a large database the runner's first start after an upgrade can take a while:
+  migrations 041, 042 and 049 build indexes on its event table, and the daemon's events wait until
+  they are done. `./daemon/install.sh install` reinstalls just the daemon, for example after
+  `blerg-up.sh --no-daemon`. The daemon matters on every upgrade: much of what a session shows comes from it (the
   working line's thinking and retries, resumed subagents, picking work up after a restart and
   saying why it restarted, Codex agent sessions, resuming after a usage limit, the usage meters),
   and a session left with a revoked messaging token is given a new one only when both the stack

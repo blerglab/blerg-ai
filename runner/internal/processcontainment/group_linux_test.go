@@ -39,6 +39,35 @@ func TestMain(m *testing.M) {
 		}
 	}
 
+	if len(os.Args) > 1 && os.Args[1] == "tree-limit" {
+		cmd := exec.Command("/bin/sh", "-c", "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do sleep 5 & done; wait")
+		cmd.SysProcAttr = &syscall.SysProcAttr{Ptrace: true, Setsid: true, Pdeathsig: syscall.SIGKILL}
+		ready := make(chan error, 1)
+		_, err := NewTree().Run(cmd, cmd.Start, 4, ready)
+		switch {
+		case errors.Is(err, ErrUnproven):
+			fmt.Println("unproven:", err)
+		case errors.Is(err, ErrTaskLimit):
+			fmt.Println("task-limit")
+		default:
+			fmt.Println("other:", err)
+		}
+		os.Exit(0)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "many-threads" {
+		// More OS threads than the old 128-task limit, as a parallel build on a many-core host has.
+		var wg sync.WaitGroup
+		for range 300 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				runtime.LockOSThread()
+				time.Sleep(300 * time.Millisecond)
+			}()
+		}
+		wg.Wait()
+		os.Exit(0)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "cluster-writer" {
 		if os.Getenv("P6_GROUP_DROP_START_ACK") == "1" {
 			time.Sleep(10 * time.Second)
@@ -289,5 +318,42 @@ func TestGroupReportsFailedTreeCheck(t *testing.T) {
 	err = group.control(ctx, "unsupported")
 	if !errors.Is(err, ErrUnproven) || !strings.Contains(err.Error(), "writer helper 1") || !strings.Contains(err.Error(), "unsupported tree control operation") {
 		t.Fatalf("failed tree check did not reach group caller: %v", err)
+	}
+}
+
+func TestGroupCommandWithManyThreadsSurvives(t *testing.T) {
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := NewGroup(binary, uint32(os.Getuid()), uint32(os.Getgid()))
+	cmd := exec.Command(binary, "many-threads")
+	if err = group.Start(cmd); err != nil {
+		t.Fatal(err)
+	}
+	if err = cmd.Wait(); err != nil {
+		t.Fatalf("a 300-thread command was ended under the writer limit %d: %v", WriterTaskLimit, err)
+	}
+}
+
+func TestTreeOverTaskLimitReportsReasonAndEnds(t *testing.T) {
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The tracer installs a seccomp filter on its thread: run it in a child, never in this process.
+	start := time.Now()
+	out, err := exec.Command(binary, "tree-limit").CombinedOutput()
+	if err != nil {
+		t.Fatalf("tree-limit child: %v: %s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "task-limit" {
+		t.Fatalf("over the limit: got %q, want a proven-empty ErrTaskLimit end", got)
+	}
+	if time.Since(start) > 4*time.Second {
+		t.Fatal("the tree was not ended when it passed its limit")
+	}
+	if msg := TaskLimitMessage(4, "shell"); !strings.Contains(msg, "process limit reached") || !strings.Contains(msg, "this shell") {
+		t.Fatalf("message: %q", msg)
 	}
 }

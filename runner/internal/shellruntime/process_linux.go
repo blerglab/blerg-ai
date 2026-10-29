@@ -23,7 +23,9 @@ import (
 // A separate supervisor process owns this tracer thread. Every fork/clone is
 // stopped by the kernel before it runs; EXITKILL also covers supervisor crashes.
 // No /proc-name scan, PID reuse guess, or host docker-client kill is cleanup.
-const TasksPerShell = 32
+// TasksPerShell bounds one shell's processes and threads. Builds use about one thread per core, so it
+// leaves room for real parallel work; a runaway fork still ends the shell, with the reason shown.
+const TasksPerShell = 1024
 const SessionTaskBudget = 4 * TasksPerShell
 
 type tracedProcess struct {
@@ -35,6 +37,7 @@ type tracedProcess struct {
 	once   sync.Once
 	mu     sync.Mutex
 	err    error
+	limit  string // set when the shell was ended for passing TasksPerShell
 }
 
 func startTraced(i Identity, rootIdentity protocol.WorkspaceRoot, publicRoot string) (*tracedProcess, error) {
@@ -103,6 +106,10 @@ func (p *tracedProcess) trace(i Identity, rootIdentity protocol.WorkspaceRoot, p
 	}()
 	_, err = p.tree.Run(cmd, start, TasksPerShell, containmentReady)
 	p.mu.Lock()
+	if errors.Is(err, processcontainment.ErrTaskLimit) {
+		// The tree is proven empty; this is a reason to show, not a containment failure.
+		p.limit, err = processcontainment.TaskLimitMessage(TasksPerShell, "shell"), nil
+	}
 	p.err = err
 	p.mu.Unlock()
 	close(p.done)
@@ -161,8 +168,29 @@ func (p *tracedProcess) read() {
 			}
 		}
 		if err != nil {
+			p.sayLimit()
 			return
 		}
+	}
+}
+
+// sayLimit writes the task-limit reason into the terminal once the tree has ended for it, so the
+// person sees why the shell stopped. The PTY closes as the tree dies, so wait (best effort) for the verdict.
+func (p *tracedProcess) sayLimit() {
+	select {
+	case <-p.done:
+	case <-time.After(5 * time.Second):
+		return
+	}
+	p.mu.Lock()
+	msg := p.limit
+	p.mu.Unlock()
+	if msg == "" {
+		return
+	}
+	select {
+	case p.output <- []byte("\r\n" + msg + "\r\n"):
+	case <-p.kill:
 	}
 }
 func (p *tracedProcess) requestKill() {

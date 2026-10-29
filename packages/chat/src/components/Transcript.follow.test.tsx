@@ -471,6 +471,24 @@ describe('the New output pill', () => {
     expect(screen.queryByTestId('new-output')).not.toBeInTheDocument()
   })
 
+  it('names why following stopped (BLG-327): a wheel, or a scroll no input explains', () => {
+    const first = render(<Transcript {...props({ events: range(1, 3) })} />)
+    let tl = timelineOf(first.container)
+    scrollTo(tl, 900)
+    wheel(tl, -120)
+    scrollTo(tl, 860)
+    first.rerender(<Transcript {...props({ events: range(1, 4) })} />)
+    expect(screen.getByTestId('new-output')).toHaveAttribute('data-unfollow', 'a wheel or trackpad scroll up (-120)')
+    expect(screen.getByTestId('new-output').title).toMatch(/^Stopped following: a wheel or trackpad scroll up \(-120\), at /)
+    first.unmount()
+    const second = render(<Transcript {...props({ events: range(1, 3) })} />)
+    tl = timelineOf(second.container)
+    scrollTo(tl, 900)
+    scrollTo(tl, 400)
+    second.rerender(<Transcript {...props({ events: range(1, 4) })} />)
+    expect(screen.getByTestId('new-output').getAttribute('data-unfollow')).toMatch(/^an upward scroll with no wheel, finger or key \(900 → 400 px of /)
+  })
+
   it('comes up for a streaming reply too, and a tap goes to the end and follows again', () => {
     const { container, rerender } = render(<Transcript {...props({ events: range(1, 3) })} />)
     const tl = timelineOf(container)

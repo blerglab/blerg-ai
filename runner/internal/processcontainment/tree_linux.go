@@ -18,6 +18,10 @@ import (
 
 var ErrUnproven = errors.New("process containment could not be proven")
 
+// ErrTaskLimit means the tree passed its task limit (threads count) and was ended. The tree is still
+// proven empty when Run returns it; callers report the reason instead of an unexplained kill.
+var ErrTaskLimit = errors.New("process limit reached")
+
 type request struct {
 	op  string
 	ack chan error
@@ -84,7 +88,7 @@ func (t *Tree) Run(cmd *exec.Cmd, start func() error, maximum int, ready chan<- 
 	// Values retain the signal to deliver on thaw. -1 means still running or an
 	// initial child stop not yet consumed. Never equate signal submission to freeze.
 	tasks := map[int]int{root: -1}
-	frozen, killing := false, false
+	frozen, killing, limitHit := false, false, false
 	var pending *request
 	ready <- nil
 	if unix.PtraceCont(root, 0) != nil {
@@ -161,6 +165,9 @@ func (t *Tree) Run(cmd *exec.Cmd, start func() error, maximum int, ready chan<- 
 			if len(tasks) != 0 {
 				return code, fmt.Errorf("%w: wait reported no children with %d tracked tasks remaining", ErrUnproven, len(tasks))
 			}
+			if limitHit {
+				return code, fmt.Errorf("%w: more than %d tasks (threads count)", ErrTaskLimit, maximum)
+			}
 			return code, nil
 		}
 		if e != nil {
@@ -214,7 +221,7 @@ func (t *Tree) Run(cmd *exec.Cmd, start func() error, maximum int, ready chan<- 
 		}
 		tasks[pid] = signal
 		if len(tasks) > maximum {
-			killing = true
+			killing, limitHit = true, true
 		}
 		if !frozen && !killing {
 			if unix.PtraceCont(pid, signal) != nil {

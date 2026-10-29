@@ -218,3 +218,89 @@ describe('Mermaid statement separators', () => {
     expect(() => validateMermaid('flowchart LR\n A@{\n shape: hex\n img: "/private"\n }')).toThrow('"img"')
   })
 })
+
+// BLG-329: what the dataviz skill writes must draw; the refusal names what to fix.
+describe('Vega-Lite charts the viewer can draw', () => {
+  const values = [
+    {month: 'Jan', team: 'A', open: 3, closed: 5}, {month: 'Feb', team: 'A', open: 4, closed: 2},
+    {month: 'Jan', team: 'B', open: 1, closed: 6}, {month: 'Feb', team: 'B', open: 7, closed: 3},
+  ]
+  const bar = {mark: 'bar', encoding: {x: {field: 'month', type: 'nominal'}, y: {field: 'open', type: 'quantitative'}}}
+  const accepted: Array<[string, Record<string, unknown>]> = [
+    ['a themed bar chart', {
+      $schema: 'https://vega.github.io/schema/vega-lite/v6.json', data: {values}, ...bar,
+      config: {
+        background: '#ffffff', font: 'Inter, "Helvetica Neue", sans-serif',
+        range: {category: ['#2f6fdb', '#d9622b', '#3a9d5d'], ramp: {scheme: 'blues', count: 5}},
+        axis: {labelColor: '#43566d', titleColor: '#172130', gridColor: '#dbe1e9', labelFont: 'Inter', titleFontSize: 12, domain: false, gridDash: [2, 2]},
+        axisX: {labelAngle: 0}, legend: {orient: 'bottom', labelFont: 'Inter', symbolType: 'circle'},
+        title: {anchor: 'start', fontSize: 14, subtitleColor: '#43566d'}, view: {stroke: null, continuousWidth: 400},
+        bar: {color: '#2f6fdb', cornerRadiusEnd: 2}, line: {strokeWidth: 2, point: {filled: true}},
+        style: {'guide-label': {fill: '#43566d'}}, padding: 8, autosize: {type: 'fit', contains: 'padding'},
+      },
+    }],
+    ['a layered line with a rule annotation', {
+      data: {values},
+      layer: [
+        {mark: {type: 'line', point: true}, encoding: {x: {field: 'month', type: 'ordinal'}, y: {field: 'open', type: 'quantitative', aggregate: 'sum'}}},
+        {mark: {type: 'rule', strokeDash: [4, 4], color: '#d9622b'}, encoding: {y: {datum: 5}}},
+        {mark: {type: 'text', align: 'left', dx: 4}, encoding: {y: {datum: 5}, text: {value: 'target'}}},
+      ],
+    }],
+    ['faceted small multiples', {data: {values}, facet: {field: 'team', type: 'nominal'}, columns: 2, spec: {width: 160, height: 120, ...bar}}],
+    ['a row/column facet', {data: {values}, facet: {row: {field: 'team', type: 'nominal'}}, spec: bar}],
+    ['an hconcat of two charts', {data: {values}, hconcat: [bar, {mark: 'point', encoding: {x: {field: 'open', type: 'quantitative'}, y: {field: 'closed', type: 'quantitative'}}}]}],
+    ['a repeat over fields', {data: {values}, repeat: ['open', 'closed'], spec: {mark: 'bar', encoding: {x: {field: 'month', type: 'nominal'}, y: {field: {repeat: 'repeat'}, type: 'quantitative'}}}}],
+    ['a conditional color with an object test', {data: {values}, ...bar, encoding: {...bar.encoding, color: {condition: {test: {field: 'open', gt: 3}, value: '#d9622b'}, value: '#2f6fdb'}}}],
+    ['a stacked area of 50 keys by 5 groups', {
+      data: {values: Array.from({length: 250}, (_, i) => ({day: i % 50, team: `t${Math.floor(i / 50)}`, n: i % 7}))},
+      mark: 'area', encoding: {x: {field: 'day', type: 'quantitative'}, y: {field: 'n', type: 'quantitative', aggregate: 'sum'}, color: {field: 'team', type: 'nominal'}},
+    }],
+    ['a stacked area whose key is proven: 10 ordinal keys, 3,000 measure values, 50 groups', {
+      // Taking the larger of x and y (3,000 x 50) would refuse it; y is provably the stacked channel.
+      data: {values: Array.from({length: 3000}, (_, i) => ({k: i % 10, v: i, t: i % 50}))},
+      mark: 'area', encoding: {x: {field: 'k', type: 'ordinal'}, y: {field: 'v', type: 'quantitative'}, color: {field: 't', type: 'nominal'}},
+    }],
+    ['a stacked area whose key is proven by the only aggregate', {
+      data: {values: Array.from({length: 3000}, (_, i) => ({k: i % 10, v: i, t: i % 50}))},
+      mark: 'area', encoding: {x: {field: 'k', type: 'quantitative'}, y: {field: 'v', type: 'quantitative', aggregate: 'sum'}, color: {field: 't', type: 'nominal'}},
+    }],
+    ['a facet of 6', {data: {values: Array.from({length: 12}, (_, i) => ({k: `k${i % 6}`, open: i, month: 'Jan'}))}, facet: {field: 'k', type: 'nominal'}, columns: 3, spec: bar}],
+    ['a repeat of 4 inside an hconcat of 2 (8 panels)', {data: {values}, hconcat: [
+      {repeat: {row: ['open', 'closed'], column: ['open', 'closed']}, spec: {mark: 'point', encoding: {x: {field: {repeat: 'column'}, type: 'quantitative'}, y: {field: {repeat: 'row'}, type: 'quantitative'}}}},
+      bar,
+    ]}],
+    ['datasets referenced by name', {datasets: {tickets: values}, data: {name: 'tickets'}, ...bar}],
+    ['checked dates in a datum, a scale domain, axis values, a sort and a timed test', {
+      data: {values: [{when: '2026-01-05', n: 1}, {when: '2026-03-02', n: 4}]},
+      layer: [
+        {mark: 'line', encoding: {color: {condition: {test: {field: 'when', timeUnit: 'month', range: [{month: 'jan'}, {month: 3}]}, value: '#d9622b'}, value: '#2f6fdb'},
+          x: {field: 'when', type: 'temporal', timeUnit: 'yearmonth', sort: [{year: 2026, month: 1}],
+            axis: {values: [{year: 2026, month: 1}, {year: 2026, month: 3}]},
+          scale: {domain: [{year: 2026, month: 1}, {year: 2026, month: 'December', date: 31, utc: true}]}}, y: {field: 'n', type: 'quantitative'}}},
+        {mark: 'rule', encoding: {x: {datum: {year: 2026, month: 2, date: 1, hours: 12, minutes: 30, seconds: 0, milliseconds: 0}, type: 'temporal'}}},
+      ],
+    }],
+  ]
+  it.each(accepted)('accepts %s', (_name, spec) => {
+    expect(() => parseVegaLite(JSON.stringify(spec))).not.toThrow()
+  })
+
+  it.each(accepted)('lays out %s with the real renderer, without loading anything', async (_name, spec) => {
+    const [{compile}, {View, parse, logger}, {expressionInterpreter}, {denyVisualResources}] = await Promise.all([
+      import('vega-lite'), import('vega'), import('vega-interpreter'), import('./vega')])
+    const compiled = compile(parseVegaLite(JSON.stringify(spec)) as never, {logger: logger(0)}).spec
+    const view = new View(parse(compiled, undefined, {ast: true}), {renderer: 'none', loader: denyVisualResources, logger: logger(0), expr: expressionInterpreter})
+    try {
+      await expect(view.runAsync()).resolves.toBe(view)
+    } finally { view.finalize() }
+  })
+
+  it('fits single and layered charts to the message and lets compositions keep their panel sizes', () => {
+    const layered = parseVegaLite(JSON.stringify({data: {values}, layer: [bar]}))
+    expect(layered).toMatchObject({width: 640, height: 360, autosize: {type: 'fit'}, padding: 16, background: 'transparent'})
+    const concat = parseVegaLite(JSON.stringify({data: {values}, hconcat: [bar, bar]}))
+    expect(concat).not.toHaveProperty('width')
+    expect(concat).toMatchObject({autosize: {type: 'pad'}, padding: 16, background: 'transparent'})
+  })
+})

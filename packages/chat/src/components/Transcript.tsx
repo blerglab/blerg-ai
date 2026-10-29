@@ -497,6 +497,13 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
   // bottom" would still be following and every event would pull the view away from what they read);
   // it resumes only at the very end (within AT_END_PX) or when they send something (pin).
   const stick = useRef(!reading)
+  // Why following last stopped, and when (BLG-327): shown on the "New output" pill so an unexpected
+  // stop names its cause (the reader's wheel, finger or key, or a scroll no input explains).
+  const unfollow = useRef<{ why: string; at: number } | null>(null)
+  const stopFollowing = (why: string) => {
+    if (stick.current) unfollow.current = { why, at: Date.now() }
+    stick.current = false
+  }
   // The reader's last scroll position, to tell an upward scroll from a downward one.
   const lastTop = useRef(0)
   // Set (to when) just before every scroll we make ourselves (following, the pill, keeping the
@@ -519,6 +526,8 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
   // raised for one session and send (pin); another session or a send takes it down.
   const pillKey = `${sessionId}\n${pin}`
   const [unseenAt, setUnseenAt] = useState<string | null>(null)
+  // Why following stopped, captured when the pill comes up (shown as its tooltip).
+  const [unfollowWhy, setUnfollowWhy] = useState<{ why: string; at: string } | null>(null)
   const unseen = unseenAt === pillKey
   // Activity reconnects layout effects on reveal. Only a different session or a new send
   // resumes following; retained refs keep a reader's choice across hide/reveal cycles.
@@ -717,7 +726,11 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
     const first = seenTail.current === null
     const grew = !first && (tailId !== seenTail.current || streaming !== '')
     seenTail.current = tailId
-    if (grew && !stick.current) setUnseenAt(pillKey)
+    if (grew && !stick.current) {
+      setUnseenAt(pillKey)
+      const u = unfollow.current
+      setUnfollowWhy(u ? { why: u.why, at: new Date(u.at).toLocaleTimeString() } : null)
+    }
   }, [tailId, streaming, loadingHistory, pillKey])
 
   // A long live visit: the window is pinned by its first row, so every live row is drawn and the
@@ -987,9 +1000,9 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
     if (!root || !win) return
     // When the wheel gesture now going on began (the first event after a pause).
     let gestureAt = -Infinity
-    const up = (target: EventTarget | null, wheel?: WheelEvent) => {
+    const up = (target: EventTarget | null, why: string, wheel?: WheelEvent) => {
       if (innerCanGoUp(target, root)) return
-      stick.current = false
+      stopFollowing(why)
       upAt.current = performance.now()
       // A wheel event held back (a momentum stream after a page landed) scrolled nothing: it is
       // known only once every listener has seen it.
@@ -1025,7 +1038,7 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
       if (t - Math.max(lastWheel.current, landEnd.current) > WHEEL_GESTURE_GAP_MS) gestureAt = t
       lastWheel.current = t
       if (e.deltaMode === 0 && Math.abs(e.deltaY) < FINE_WHEEL_PX) lastFineWheel.current = inputClock.now()
-      if (e.deltaY < 0) up(e.target, e)
+      if (e.deltaY < 0) up(e.target, `a wheel or trackpad scroll up (${Math.round(e.deltaY)})`, e)
     }
     const onTouchStart = (e: TouchEvent) => {
       touching.current = true
@@ -1046,7 +1059,7 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
         }
         run.lastY = t.clientY
         const dy = t.clientY - run.y
-        if (dy > TOUCH_UP_PX && dy > Math.abs(t.clientX - run.x)) up(e.target)
+        if (dy > TOUCH_UP_PX && dy > Math.abs(t.clientX - run.x)) up(e.target, 'a finger scrolling up')
       }
     }
     const onTouchEnd = (e: TouchEvent) => {
@@ -1061,7 +1074,7 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
     }
     const onKey = (e: KeyboardEvent) => {
       if (typing(e.target)) return
-      if (UP_KEYS.has(e.key) || (e.key === ' ' && e.shiftKey)) up(e.target)
+      if (UP_KEYS.has(e.key) || (e.key === ' ' && e.shiftKey)) up(e.target, `the ${e.key === ' ' ? 'Shift+Space' : e.key} key`)
     }
     const passive = { passive: true }
     root.addEventListener('wheel', onWheel, passive)
@@ -1099,7 +1112,7 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
       stick.current = true
       setUnseenAt(null)
     } else if (top < lastTop.current && !isOurs(programmatic)) {
-      stick.current = false
+      stopFollowing(`an upward scroll with no wheel, finger or key (${Math.round(lastTop.current)} → ${Math.round(top)} px of ${el.scrollHeight}, view ${el.clientHeight})`)
       // Up by the scrollbar (or any way the input listeners do not see).
       // (A scroll a wheel made is the wheel's to judge: its gesture rule leaves momentum out.)
       if (inputClock.now() - lastWheel.current > WHEEL_GESTURE_GAP_MS) intent('scroll')
@@ -1250,7 +1263,9 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
         {lp.sheet && <LongPressSheet target={lp.sheet} onClose={lp.close} />}
         {unseen && (
           <div className="chat-new-output-dock">
-            <button type="button" className="chat-new-output" aria-live="off" data-testid="new-output" onClick={showNew}>
+            <button type="button" className="chat-new-output" aria-live="off" data-testid="new-output" onClick={showNew}
+              title={unfollowWhy ? `Stopped following: ${unfollowWhy.why}, at ${unfollowWhy.at}` : undefined}
+              data-unfollow={unfollowWhy?.why}>
               <span aria-hidden="true">↓</span> New output
             </button>
           </div>

@@ -8,6 +8,19 @@ minor release and are called out here.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-29
+
+### Fixed
+
+- Parallel builds no longer kill host workspace sessions or shells. Process containment counted threads against a limit of 128 per session and 32 per shell, so a Go build or test run on a many-core machine (about one thread per core per program) ended the whole session, the agent included ("exit status 137"), and left it unable to start again until the daemon restarted. The limits are now 4096 per session and 1024 per shell. A runaway that passes them still stops, with "blerg: process limit reached: … retry with less parallelism" shown with the exit or in the terminal, and the session can start its next turn (BLG-325).
+- Charts draw: the chart viewer refused most real Vega-Lite ("Chart resources and custom expressions are disabled"), including themed and layered charts. It now draws theming (`config`, literal values from an allowlist) and composition (`layer`, `concat`, `hconcat`, `vconcat`, `facet`, `repeat`, within limits of 64 panels in all, counting facet cells, 32 marks and the canvas size). Data transforms are not available yet (`transform` is refused), and so is anything that runs code or loads from outside (`calculate`, `expr`, `signal`, `params`, `impute`, `url`, `href`, image marks); dates must be checked date objects or numbers where Vega-Lite would turn them into expressions, and a string is refused wherever Vega-Lite's schema takes a number or a fixed word. Field names that reach a prototype (`__proto__`, `constructor`, `prototype`), stacked areas that would fill in more than 100,000 points, and number formats asking for widths or precisions above 100 are refused too. Every refusal names the key and where it is. The session guide tells agents what a chart may use (BLG-329; `@blerglab/chat` 1.39.6).
+- The desktop installer no longer asks about the Windows sign-in task (WSL) when it is already registered.
+- The desktop install README: `git pull && ./blerg-up.sh` is the whole upgrade (it reinstalls the daemon too).
+
+### Changed
+
+- The "New output" pill's tooltip says why the chat stopped following new output (a wheel or trackpad, a finger, a key, or a scroll nothing explains), so an unexpected stop can be reported with its cause (BLG-327; `@blerglab/chat` 1.39.0).
+
 ## [0.5.0] - 2026-10-28
 
 ### Security

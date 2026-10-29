@@ -304,6 +304,44 @@ describe('rich output in Chromium', () => {
     }, 40_000)
   }
 
+  // BLG-329: the dataviz skill's charts (theming config, layers, compositions) draw for real.
+  it('renders a themed, layered chart with a rule annotation', async () => {
+    const source = JSON.stringify({
+      $schema: 'https://vega.github.io/schema/vega-lite/v6.json',
+      width: 300, height: 180, data: { values },
+      config: { font: 'Inter, sans-serif', range: { category: ['#2f6fdb', '#d9622b', '#3a9d5d'] }, axis: { labelColor: '#43566d', gridDash: [2, 2] }, view: { stroke: null } },
+      layer: [
+        { mark: { type: 'line', point: true }, encoding: { x: { field: 'x', type: 'quantitative' }, y: { field: 'y', type: 'quantitative' }, tooltip: [{ field: 'category', type: 'nominal' }] } },
+        { mark: { type: 'rule', color: '#ff00ff', strokeWidth: 3 }, encoding: { y: { datum: 3 } } },
+      ],
+    })
+    const { container } = render(<VisualBlock kind="vega-lite" source={source} />)
+    const canvas = await renderedGraphic(container) as HTMLCanvasElement
+    expect(canvas).toBeInstanceOf(HTMLCanvasElement)
+    await waitFor(() => expect(canvasHasColor(canvas, '#ff00ff')).toBe(true))
+    expect(container.querySelector('.visual-failed-reason')).toBeNull()
+  }, 40_000)
+
+  it('renders hconcat, facet and repeat compositions and refuses one too large to draw', async () => {
+    const panel = (y: string) => ({ width: 160, height: 120, mark: 'bar', encoding: { x: { field: 'category', type: 'nominal' }, y: { field: y, type: 'quantitative' } } })
+    const { container } = render(<VisualBlock kind="vega-lite" source={JSON.stringify({ data: { values }, hconcat: [panel('x'), panel('y')] })} />)
+    const canvas = await renderedGraphic(container) as HTMLCanvasElement
+    expect(canvas.getBoundingClientRect().width).toBeGreaterThan(200)
+    const facet = render(<VisualBlock kind="vega-lite" source={JSON.stringify({ data: { values }, facet: { field: 'category', type: 'nominal' }, columns: 3, spec: panel('y') })} />)
+    expect((await renderedGraphic(facet.container) as HTMLCanvasElement).getBoundingClientRect().width).toBeGreaterThan(200)
+    const repeat = render(<VisualBlock kind="vega-lite" source={JSON.stringify({ data: { values }, repeat: ['x', 'y'], spec: { ...panel('y'), encoding: { ...panel('y').encoding, y: { field: { repeat: 'repeat' }, type: 'quantitative' } } } })} />)
+    expect((await renderedGraphic(repeat.container) as HTMLCanvasElement).getBoundingClientRect().width).toBeGreaterThan(200)
+    const six = Array.from({ length: 6 }, (_, i) => ({ category: `c${i}`, x: i, y: i + 1 }))
+    const facetSix = render(<VisualBlock kind="vega-lite" source={JSON.stringify({ data: { values: six }, facet: { field: 'category', type: 'nominal' }, columns: 3, spec: { ...panel('y'), width: 120, height: 90 } })} />)
+    expect((await renderedGraphic(facetSix.container) as HTMLCanvasElement).getBoundingClientRect().width).toBeGreaterThan(200)
+    const scatter = { width: 120, height: 90, mark: 'point', encoding: { x: { field: { repeat: 'column' }, type: 'quantitative' }, y: { field: { repeat: 'row' }, type: 'quantitative' } } }
+    const eight = render(<VisualBlock kind="vega-lite" source={JSON.stringify({ data: { values }, hconcat: [{ repeat: { row: ['x', 'y'], column: ['x', 'y'] }, spec: scatter }, panel('y')] })} />)
+    expect((await renderedGraphic(eight.container) as HTMLCanvasElement).getBoundingClientRect().width).toBeGreaterThan(200)
+    const huge = render(<VisualBlock kind="vega-lite" source={JSON.stringify({ data: { values }, hconcat: Array.from({ length: 8 }, () => ({ ...panel('y'), width: 1024 })) })} />)
+    await waitFor(() => expect(huge.container.textContent).toMatch(/Chart refused: it is too large to draw \(\d+ × \d+ pixels\)/), { timeout: 30_000 })
+    expect(huge.container.querySelector('canvas')).toBeNull()
+  }, 40_000)
+
   it('keeps the original source available and opens an enlarged, zoomable view', async () => {
     const source = diagrams.flowchart
     const { container, getByRole } = render(<VisualBlock kind="mermaid" source={source} />)

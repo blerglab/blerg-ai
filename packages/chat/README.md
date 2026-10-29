@@ -60,15 +60,29 @@ recorded a different integrity, the tarball did not match the manifest: stop and
 runner's operator.
 
 The tarball route is immutable (`Cache-Control: public, max-age=31536000, immutable`) and
-unauthenticated, as `/agents` is; a new version is a new file name. The package needs
-`react` and `react-dom` 19 as peers and brings `react-markdown`, `remark-gfm`, `zustand` and
-`lowlight` (the code highlighter), Mermaid and Vega-Lite/Vega with it. Renderers are loaded on
-demand. Closed `mermaid` and `vega-lite` fences render in messages and Markdown views; charts
-accept inline data only. `VisualBlock` exposes the same source/copy/zoom surface independently
-of a session or transport. Visuals resolve the surrounding `--chat-*` tokens for colors and
-fonts, remain transparent, fit the message width and redraw when those tokens change.
-Explicit chart mark and encoding colors override the theme defaults; uploaded chart
-configuration and external resources remain disabled.
+unauthenticated, as `/agents` is; a new version is a new file name. The package needs `react` and
+`react-dom` 19 as peers and brings `react-markdown`, `remark-gfm`, `zustand` and `lowlight` (the
+code highlighter), Mermaid and Vega-Lite/Vega with it. Renderers are loaded on demand. Closed
+`mermaid` and `vega-lite` fences render in messages and Markdown views; charts accept inline data
+only (`data.values`, or top-level `datasets` named by `data.name`). Charts may compose (`layer`,
+`concat`, `hconcat`, `vconcat`, `facet`, `repeat`; at most 16 charts per list, 64 panels in all
+counting facet cells and repeats, and 32 marks) and theme through an allowlisted `config` (colors,
+`range`, mark, `axis*`, `legend`, `header`, `title`, `view` and `style` settings with literal
+values, font family names, `padding`, `autosize`). Data transforms are not available yet:
+`transform` is refused. So are expressions (`calculate`, string tests, `expr`, `*Expr`), signals,
+`params`/selections, `impute`, URLs, links, images, custom formatters and locales. A string is
+refused wherever Vega-Lite's schema takes only a number or a few fixed words (`bandPosition` must be
+a number from 0 to 1). Dates are DateTime objects with whole-number parts (month and day may be
+English names); a field with a `timeUnit` takes numbers or dates, not strings, in its scale domain,
+axis or legend values, sort order and condition tests; a temporal field without one also takes ISO
+dates there. Field names may not reach `__proto__`, `constructor` or `prototype`; a stacked area (or
+stacked line or trail) may fill in at most 100,000 key × group points; numbers in number formats are
+at most 100 (time formats are not capped). Every refusal names the key and its path. A composition
+is laid out before it is drawn and refused if it would exceed 4096 pixels on a side. `VisualBlock`
+exposes the same source/copy/zoom surface independently of a session or transport. Visuals resolve
+the surrounding `--chat-*` tokens for colors and fonts, remain transparent, fit the message width
+and redraw when those tokens change. Explicit chart mark and encoding colors, and the chart's own
+`config`, override the theme defaults; external resources remain disabled.
 
 ## Mount the proxy
 

@@ -5,7 +5,9 @@ package shellruntime
 import "context"
 import "github.com/blerglab/blerg-ai/runner/internal/protocol"
 
-const TasksPerShell = 32
+// TasksPerShell bounds one shell's processes and threads. Builds use about one thread per core, so it
+// leaves room for real parallel work; a runaway fork still ends the shell, with the reason shown.
+const TasksPerShell = 1024
 const SessionTaskBudget = 4 * TasksPerShell
 
 // Unsupported containment fails closed; a process group alone cannot contain detached jobs.

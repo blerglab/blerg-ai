@@ -198,6 +198,25 @@ Invoke-BlergStartup $requestedAction $Distro $LinuxUser
                 self.assertIn(b"including on battery", output)
                 self.assertEqual(b"consent-registration" in output, answer in (b"y\n", b"Y\n"))
 
+    def test_already_enabled_task_is_not_offered_again(self):
+        source = INSTALLER.read_text()
+        offer = re.search(r"^offer_wsl_startup\(\) \{.*?^\}", source, re.M | re.S).group()
+        program = "\n".join([
+            "set -eu", "is_wsl() { return 0; }",
+            'blerg_step() { printf "%s\\n" "$*"; }',
+            'wsl_startup() { if [ "$1" = status ]; then echo "Task Scheduler: Blerg WSL Example; state: Ready; last result: 0"; else echo consent-registration; fi; }',
+            "WSL_STARTUP=0", offer, "offer_wsl_startup",
+        ])
+        master, slave = pty.openpty()
+        proc = subprocess.run(["/bin/bash", "-c", program], env=self.env, stdin=slave,
+                              capture_output=True, timeout=10)
+        os.close(slave)
+        os.close(master)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(b"already enabled", proc.stdout)
+        self.assertNotIn(b"[y/N]", proc.stdout)
+        self.assertNotIn(b"consent-registration", proc.stdout)
+
     def test_ci_and_make_include_required_suite(self):
         root = DESKTOP.parent.parent
         workflow = (root / ".github/workflows/ci.yml").read_text().split("\n  scripts:\n", 1)[1]

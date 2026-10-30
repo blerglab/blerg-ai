@@ -239,6 +239,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const [repoActions, setRepoActions] = useState(false)
   const [pickerReset, setPickerReset] = useState(0)
   const [newFolderMode, setNewFolderMode] = useState(false)
+  const [initializeGit, setInitializeGit] = useState(true)
   // Visibility of a new repository created on the cluster (private by default).
   const [visibility, setVisibility] = useState<'private' | 'public'>('private')
   // A repository nobody has checked out and nobody listed is still
@@ -679,6 +680,8 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const workspaceRuntimeReady = workspaceRuntimeAvailable(runtime === 'cluster' ? clusterStatus?.workspace_capabilities : selectedDaemon?.workspace_capabilities, runtime)
   const useWorkspacePicker = workspaceRuntimeReady && Boolean(runtime === 'cluster' || selectedDaemon?.discovery_version === 1)
   const workspaceSelection = workspacePick.scope === workspaceScope ? workspacePick.selection : null
+  const emptyHostFolder = runtime === 'daemon' && workspaceRuntimeReady && selectedDaemon?.discovery_version === 1 && (noRepoMode || newFolderMode || Boolean(workspaceSelection?.folder && workspaceSelection.members.length === 0))
+  const initializeHostGit = emptyHostFolder && initializeGit
 
   const hasRepoChoice =
     workspaceSelection !== null ||
@@ -857,7 +860,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
     // org); any other provider's goes as owner/name with its provider, so
     // the daemon clones it from that host — never a same-named GitHub repo.
     if (workspaceSelection) {
-      await postSession({ selection: workspaceSelection, daemon_id: selectedDaemon?.id })
+      await postSession({ selection: workspaceSelection, daemon_id: selectedDaemon?.id, initialize_git: initializeHostGit || undefined })
       return
     }
     if (noRepoMode) {
@@ -867,6 +870,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
         no_repo: true,
         // The name the sheet showed before Launch; the cluster has no folder.
         scratch_folder: onDaemonRuntime ? scratchFolder : undefined,
+        initialize_git: initializeHostGit || undefined,
       })
       return
     }
@@ -919,6 +923,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
       git_url: gitUrl,
       clone,
       new_repo: newFolderMode || undefined,
+      initialize_git: initializeHostGit || undefined,
       visibility: newRepoRef ? visibility : undefined,
     })
   }
@@ -1088,6 +1093,8 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                 </div>}
                 onChange={(selection, names) => { setWorkspacePick({scope: workspaceScope, selection, names}); setNoRepoMode(false); setSelectedRepo(null); setNewFolderMode(false); setFreeTextMode(false); setRepoActions(false) }} />}
               {useWorkspacePicker && emptyWorkspacePlan}
+              {emptyHostFolder && <label className="workspace-layout"><input type="checkbox" checked={initializeGit} onChange={event => setInitializeGit(event.target.checked)} />Initialize a Git repository here</label>}
+              {emptyHostFolder && <p className="workspace-note" style={{ minHeight: '3em' }}>{initializeGit ? 'Starts with an empty commit. Your files stay untracked.' : 'Host children won’t be available in this session.'}</p>}
               <RepositoryActions modern={useWorkspacePicker} hidden={!repoActions && !newFolderMode && !freeTextMode}>
               <input className="settings-field"
                 ref={repoInputRef}

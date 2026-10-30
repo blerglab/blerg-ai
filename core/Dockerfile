@@ -6,6 +6,8 @@
 # Stage 1: Go binary
 FROM golang:1.26.9@sha256:37cfcca63222ec499bec5e8ad7aad52dbf7529db36d5812b8eae2f0621aa92d6 AS build
 WORKDIR /src
+# The build context is a copy: Git can't run here, so don't stamp VCS data (COMMIT is passed in).
+ENV GOFLAGS=-buildvcs=false
 COPY . .
 # The release version is the repository's VERSION file; the commit is passed in (the build
 # context is a copy, so `git rev-parse` cannot run here). landing.Release/Commit report them.

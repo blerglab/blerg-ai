@@ -12,6 +12,9 @@ import (
 // only when unambiguous; stable member IDs always work. Runtime paths survive
 // subset selection, including a single member of a multi-repository parent.
 func selectWorkspaceChild(cs *childStart, parent protocol.WorkspaceManifest) *APIError {
+	if parent.Runtime == "host" && parent.Kind == "folder" && len(parent.Members) == 0 {
+		return apiErrorf(http.StatusUnprocessableEntity, "This session was started in a folder with no Git repository, so it can't start host children. Stop it and start a new session on the repository.")
+	}
 	fail := func() *APIError {
 		return apiErrorf(http.StatusUnprocessableEntity, "select parent workspace members with repeatable --repo <member> or --all-repos; keep the parent's runtime")
 	}

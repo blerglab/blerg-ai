@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import Upgrade from "./Upgrade";
 import Login from "./Login";
 import Settings from "./Settings";
 import ChangePassword from "./ChangePassword";
@@ -247,7 +246,6 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/app" element={<Home />} />
-        <Route path="/upgrade" element={<Upgrade />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/change-password" element={<ChangePassword />} />
         <Route path="/login" element={<Login />} />

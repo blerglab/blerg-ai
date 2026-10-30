@@ -142,7 +142,7 @@ describe("App / Home", () => {
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", "noopener noreferrer");
     expect(link).toHaveAttribute("title", "A newer Blerg release is available");
-    expect(screen.getByRole("link", { name: "How to upgrade" })).toHaveAttribute("href", expect.stringContaining("/upgrade"));
+    expect(screen.queryByRole("link", { name: "How to upgrade" })).toBeNull();
   });
 
   it("shows no version in the footer when /api/site fails", async () => {

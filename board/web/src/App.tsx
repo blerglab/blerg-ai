@@ -408,7 +408,6 @@ function ShellChrome({ children }: { children: React.ReactNode }) {
             <a className="build-update" href={build.update.href} target="_blank" rel="noopener noreferrer" title={build.update.title}>
               {build.update.label} ↗
             </a>
-            <a className="build-update" href={`${CORE_URL}/upgrade`}>How to upgrade</a>
           </>
         )}
         <nav>

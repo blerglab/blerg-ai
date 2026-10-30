@@ -199,6 +199,24 @@ describe('LaunchSheet', () => {
     fireEvent.click(screen.getByText('Launch Session'))
   }
 
+  it('initializes Git on the host Create & Launch path', async () => {
+    vi.stubGlobal('fetch', buildFetchMock(captureBody, { daemon: {
+      sandbox_available: false, discovery_version: 1,
+      workspace_capabilities: { manifest_version: 2, linux_host: true },
+    } }))
+    await renderAndWaitForLoad()
+    fireEvent.click(screen.getByRole('button', { name: 'New repository' }))
+    fireEvent.click(screen.getByTestId('new-folder-option'))
+    fireEvent.change(screen.getByPlaceholderText('Folder name...'), { target: { value: 'new-project' } })
+    fireEvent.click(screen.getByTestId('agent-ack'))
+    const create = screen.getByRole('button', { name: 'Create & Launch →' })
+    await waitFor(() => expect(create).not.toBeDisabled())
+    fireEvent.click(create)
+    await waitFor(() => expect(captureBody.value).toMatchObject({
+      runtime: 'daemon', repo: 'new-project', new_repo: true, initialize_git: true,
+    }))
+  })
+
   it('uses the sole discovered Codex engine without exposing an engine selector', async () => {
     vi.stubGlobal('fetch', buildFetchMock(captureBody, { launchOptions: { state: 'known', engines: [{ id: 'codex', name: 'Codex', restricted: true }] } }))
     await renderAndWaitForLoad()
@@ -1925,7 +1943,7 @@ describe('LaunchSheet — No repository', () => {
   })
 
   it('launches on This machine with only the runtime acknowledgement', async () => {
-    await renderSheet({ daemon: { sandbox_available: false, repos_root: '/home/dev/code' } })
+    await renderSheet({ daemon: { sandbox_available: false, repos_root: '/home/dev/code', discovery_version: 1, workspace_capabilities: { manifest_version: 2, linux_host: true } } })
     expect(screen.getByTestId('runtime-daemon')).toHaveAttribute('aria-checked', 'true')
     expect(screen.getByTestId('no-repo-plan')).toHaveTextContent(
       `Keeps your files in /home/dev/code/${SCRATCH}.`,
@@ -1933,6 +1951,18 @@ describe('LaunchSheet — No repository', () => {
     fireEvent.click(screen.getByTestId('agent-ack'))
     const body = await launch()
     expect(body).toMatchObject({ no_repo: true, scratch_folder: SCRATCH, runtime: 'daemon', daemon_id: 'd1' })
+    expect(body.initialize_git).toBe(true)
+  })
+
+  it('can keep a host scratch folder without Git', async () => {
+    await renderSheet({ daemon: { sandbox_available: false, discovery_version: 1, workspace_capabilities: { manifest_version: 2, linux_host: true } } })
+    const initialize = screen.getByRole('checkbox', { name: 'Initialize a Git repository here' })
+    expect(initialize).toBeChecked()
+    fireEvent.click(initialize)
+    fireEvent.click(screen.getByTestId('agent-ack'))
+    const body = await launch()
+    expect(body.initialize_git).toBeUndefined()
+    expect(body.no_repo).toBe(true)
   })
 
   it('launches on the cluster with zero extra input and never claims a path', async () => {
@@ -1947,6 +1977,8 @@ describe('LaunchSheet — No repository', () => {
     const body = await launch()
     expect(body.no_repo).toBe(true)
     expect(body.runtime).toBe('cluster')
+    expect(body.initialize_git).toBeUndefined()
+    expect(screen.queryByRole('checkbox', { name: 'Initialize a Git repository here' })).toBeNull()
     expect(body.scratch_folder).toBeUndefined()
     expect(body.repo).toBeUndefined()
   })

@@ -184,7 +184,7 @@ for (const members of [[], null] as const) for (const width of [390, 3840]) {
     await waitFor(() => expect(change).toHaveBeenLastCalledWith(expect.objectContaining({ folder: { path: 'notes', source_identity: 'source:notes' }, members: [] }), []))
     expect(screen.queryByRole('alert')).toBeNull()
     const note = screen.getByRole('note', { name: 'Folder without repositories' })
-    expect(note).toHaveTextContent('notes has no Git repositories. The session starts in it as a plain folder, on This machine only.')
+    expect(note).toHaveTextContent('notes has no Git repositories. Host children need a Git repository.')
     expect((folder as HTMLInputElement).checked).toBe(true)
     expect(screen.getByText('0 / 20')).toBeTruthy()
     const box = note.getBoundingClientRect()

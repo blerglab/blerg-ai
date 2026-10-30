@@ -1483,9 +1483,20 @@ or a `.scratch-` one (daemon). No other flag is stored. Every real repository na
 it is empty or starts with a dot. Wherever a session's repo is shown or grouped, the UI reads that
 name as "No repository".
 
+On **This machine**, the launch sheet enables **Initialize a Git repository here** for
+new projects, including scratch folders. This adds `.git` and an empty initial commit
+before the workspace manifest is recorded; existing files stay untracked and no global
+Git identity is needed or changed. Turn it off to keep a plain folder. A plain-folder
+session cannot start host children, even after Git is initialized later: start a new
+session on that repository instead. Existing worktrees are never initialized again.
+Sandbox and cluster behavior is unchanged.
+
 API: `POST /api/sessions` takes `"no_repo": true`, plus an optional `"scratch_folder"`
 (`.scratch-` followed by 1–64 letters, digits, `-` or `_`; daemon runtimes only). It is refused
-with `repo`, `git_url`, `provider`, `clone` or `new_repo`. `POST /api/runner/start` and MCP
+with `repo`, `git_url`, `provider`, `clone` or `new_repo`. For a host launch,
+`"initialize_git": true` initializes the selected empty folder or the new/scratch folder
+before creating the session. Omit it to keep the existing plain-folder API behavior.
+`POST /api/runner/start` and MCP
 `start_session` take `"no_repo": true` too. There the daemon (any connected one, preferring one
 with the sandbox image unless `runtime: daemon`) always gets a generated name. Without
 `no_repo`, a blank `repo` is refused exactly as before.

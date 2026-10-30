@@ -13,14 +13,13 @@ vi.mock('./api', async original => ({
   }),
 }));
 afterEach(cleanup);
-for (const width of [390,3840]) it(`shows release and upgrade links without clipping at ${width}px`,async()=>{
+for (const width of [390,3840]) it(`shows the release link without clipping at ${width}px`,async()=>{
   await page.viewport(width,1000);
   render(<MemoryRouter><Shell><div /></Shell></MemoryRouter>);
   const notice = await screen.findByRole('link',{name:/v0.5.1 available/});
-  const upgrade = screen.getByRole('link',{name:'How to upgrade'});
-  expect(upgrade.getAttribute('href')).toContain('/upgrade');
+  expect(screen.queryByRole('link',{name:'How to upgrade'})).toBeNull();
   expect(notice.getAttribute('href')).toBe('https://github.com/blerglab/blerg-ai/releases/tag/v0.5.1');
-  for (const el of [notice,upgrade]) {
+  for (const el of [notice]) {
     const box = el.getBoundingClientRect();
     expect(box.width).toBeGreaterThan(0);
     expect(box.left).toBeGreaterThanOrEqual(0);

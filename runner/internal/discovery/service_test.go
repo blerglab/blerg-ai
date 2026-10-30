@@ -806,3 +806,39 @@ func TestDiscoveryEmptyFolderRebindChecksDesktop(t *testing.T) {
 	}
 
 }
+
+func TestEmptyHostFolderCannotBindChild(t *testing.T) {
+	root := fixtureRoot(t)
+	if err := os.Mkdir(filepath.Join(root, "empty"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	s := NewOwned(func() string { return root }, "desktop")
+	folder := find(t, list(t, s, "."), "empty")
+	req := request("expand")
+	req.Folder = &protocol.SelectionRef{Path: folder.Path, SourceIdentity: folder.SourceIdentity}
+	selected := s.Handle(t.Context(), req)
+	if !selected.OK {
+		t.Fatal(selected.ErrorCode)
+	}
+	parent := manifestForSelection(selected.Resolved, "parent")
+	if err := s.RebindResumed(t.Context(), parent, filepath.Join(root, "empty"), nil); err != nil {
+		t.Fatal(err)
+	}
+	child := parent
+	child.LaunchGeneration = "child"
+	child.Digest = workspaceselection.Digest(child)
+	req = request("bind_child")
+	req.ParentLaunchGeneration = parent.LaunchGeneration
+	req.Manifest = &child
+	for _, initialized := range []bool{false, true} {
+		if initialized {
+			fixtureRepo(t, root, "empty", true)
+		}
+		if result := s.Handle(t.Context(), req); result.OK {
+			t.Fatalf("empty host folder bound a child (initialized later: %v)", initialized)
+		}
+		if _, ok := s.bound[child.LaunchGeneration]; ok {
+			t.Fatal("refused child retained a binding")
+		}
+	}
+}

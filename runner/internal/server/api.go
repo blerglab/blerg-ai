@@ -761,7 +761,8 @@ func (a *API) HandleGetSessions(w http.ResponseWriter, r *http.Request) {
 // ─── POST /api/sessions ───────────────────────────────────────────────────────
 
 type spawnSessionRequest struct {
-	Permissions json.RawMessage `json:"permissions,omitempty"`
+	InitializeGit bool            `json:"initialize_git,omitempty"`
+	Permissions   json.RawMessage `json:"permissions,omitempty"`
 
 	Selection *protocol.WorkspaceSelectionRequest `json:"selection,omitempty"`
 	workspace *protocol.WorkspaceManifest
@@ -1206,6 +1207,32 @@ func (a *API) postSessions(w http.ResponseWriter, r *http.Request, principal ide
 	if daemon == nil {
 		writeError(w, http.StatusNotFound, "daemon not found or not connected")
 		return
+	}
+	if req.InitializeGit && req.workspace == nil {
+		if req.Runtime != "daemon" || (!req.NoRepo && !req.NewRepo) || daemon.DiscoveryVersion != 1 || !daemon.WorkspaceCapabilities.Supports("host", false) {
+			writeError(w, 422, "Git initialization needs a new host folder or a fresh folder selection.")
+			return
+		}
+		folder := req.Repo
+		if req.NoRepo {
+			folder = req.ScratchFolder
+			if folder == "" {
+				folder = scratch.NewName()
+			}
+		}
+		res, err := a.hub.requestWorkspaceDiscovery(ctx, principal.Sub, daemon, protocol.DiscoverWorkspace{Operation: "initialize", Runtime: "host", Path: folder})
+		if err != nil || !res.OK || res.Resolved == nil || len(res.Resolved.Members) != 1 {
+			writeError(w, 409, "Could not initialize the Git repository. Choose a folder outside an existing worktree and try again.")
+			return
+		}
+		source := res.Resolved.Members[0]
+		selection := protocol.WorkspaceSelectionRequest{DaemonID: daemon.ID, RootIdentity: res.Resolved.RootIdentity, Members: []protocol.SelectionRef{{Path: source.Path, SourceIdentity: source.SourceIdentity}}}
+		manifest, err := a.prepareWorkspaceSelection(ctx, principal.Sub, daemon, spawnSessionRequest{Selection: &selection, Runtime: "daemon"})
+		if err != nil {
+			discoveryProblem(w)
+			return
+		}
+		req.workspace, req.Repo, req.NoRepo, req.NewRepo = manifest, "workspace", false, false
 	}
 	// A Local sandbox works in a clone of its own (sandboxclone.go on the daemon): a daemon that
 	// would mount the checkout, .git included, never gets one.

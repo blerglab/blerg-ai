@@ -16,6 +16,9 @@ func (s *Service) bindChild(root *rootHandle, req protocol.DiscoverWorkspace, op
 	if !ok || protocol.ValidateWorkspaceChild(parent.manifest, m) != nil || m.Root != parent.manifest.Root || m.Kind != parent.manifest.Kind {
 		return errInvalid
 	}
+	if parent.manifest.Runtime == "host" && parent.manifest.Kind == "folder" && len(parent.manifest.Members) == 0 {
+		return errInvalid
+	}
 	refs := []protocol.SelectionRef{}
 	for _, member := range m.Members {
 		for i, p := range parent.manifest.Members {

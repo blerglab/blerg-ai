@@ -318,7 +318,7 @@ export default function WorkspacePicker({ daemon, runtime, repos, onChange, acti
 
     {query && <p className="workspace-note">{cluster ? 'Searches hosted repositories.' : 'Searches loaded folders; expand a folder to include its contents.'}</p>}
     {selection?.folder && (selection.members.length === 0
-      ? <p className="workspace-note" role="note" aria-label="Folder without repositories"><b title={selection.folder.path}>{selection.folder.path === '.' ? 'This folder' : selection.folder.path.split('/').pop()}</b> has no Git repositories. The session starts in it as a plain folder, on This machine only.</p>
+      ? <p className="workspace-note" role="note" aria-label="Folder without repositories"><b title={selection.folder.path}>{selection.folder.path === '.' ? 'This folder' : selection.folder.path.split('/').pop()}</b> has no Git repositories. Host children need a Git repository.</p>
       : <details className="workspace-note"><summary>Folder workspace: relative paths are preserved.</summary><p>New repositories are never added to this selection automatically.</p></details>)}
     {!cluster && !selection?.folder && (selection?.members.length ?? 0) > 1 && <>
       <label className="workspace-layout"><input type="checkbox" checked={keepStructure} disabled={busy} onChange={event => void changeLayout(event.target.checked)} aria-describedby="workspace-layout-help" />Keep folder structure</label>

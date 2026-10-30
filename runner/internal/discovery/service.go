@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/scratch"
 	"github.com/blerglab/blerg-ai/runner/internal/workspaceselection"
 )
 
@@ -123,7 +124,8 @@ func cleanPath(name string) (string, error) {
 	}
 	if name != "." {
 		for _, part := range strings.Split(name, "/") {
-			if hiddenName(part) {
+			// Scratch repositories stay out of listings, but a launch can bind its exact leaf.
+			if hiddenName(part) && (name != part || !scratch.Valid(name)) {
 				return "", errInvalid
 			}
 		}
@@ -689,6 +691,13 @@ func (s *Service) Handle(ctx context.Context, req protocol.DiscoverWorkspace) pr
 	}
 	defer func() { _ = root.file.Close() }()
 	switch req.Operation {
+	case "initialize":
+		var record selectionRecord
+		record, err = s.initialize(root, req, op)
+		if err == nil {
+			s.remember(record)
+			result.Resolved = &record.resolved
+		}
 	case "list":
 		result.Page, err = s.list(root, req, op)
 	case "expand", "resolve":

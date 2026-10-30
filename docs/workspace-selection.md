@@ -7,7 +7,16 @@ snapshot its repositories. Checking a folder with more than twenty repositories
 requires an explicit smaller selection. The cluster picker searches hosted
 repositories by provider and org/name and supports up to twenty selections.
 Local-only folders never become cluster repositories by matching their names.
-An empty folder can run on This machine only.
+An empty folder can run on This machine only. For a new host project, **Initialize a Git
+repository here** is on by default. Blerg adds `.git` and makes an empty initial commit
+before recording the session's repository membership. Existing files stay untracked,
+and the commit identity is set for that command only. Initialization refuses folders
+inside an existing Git worktree. This also applies to new folders and scratch folders;
+sandbox and cluster launches keep their existing behavior.
+
+Turn the option off to keep a plain folder. Such a session cannot start host children,
+even if Git is initialized later: stop it and start a new session on the repository.
+Repository membership is fixed at launch.
 
 Desktop discovery requires an enrolled, person-owned desktop. Administrators do
 not gain access to another person's desktop inventory. Unknown desktops appear

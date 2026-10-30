@@ -63,7 +63,7 @@ type DiscoverWorkspace struct {
 
 	Type               string             `json:"type"`
 	RequestID          string             `json:"request_id"`
-	Operation          string             `json:"operation"` // list, expand, resolve, bind
+	Operation          string             `json:"operation"` // list, expand, resolve, initialize (host launch only), bind
 	Path               string             `json:"path,omitempty"`
 	Cursor             string             `json:"cursor,omitempty"`
 	RootIdentity       string             `json:"root_identity,omitempty"`

@@ -746,3 +746,140 @@ func TestReviewedChildPathPrecedesName(t *testing.T) {
 		}
 	}
 }
+
+func TestHostFolderWithoutMembersRefusesChildren(t *testing.T) {
+	parent := protocol.WorkspaceManifest{Version: 2, Kind: "folder", OwnerID: "owner", Runtime: "host", LaunchGeneration: "parent", Root: protocol.WorkspaceRoot{Inode: 1}}
+	parent.Digest = workspaceselection.Digest(parent)
+	for _, body := range []string{`{"all_repos":true,"prompt":"Review"}`, `{"repo":"new-repo","prompt":"Review"}`} {
+		if _, _, err := parseChildStart([]byte(body), childHost{workspace: &parent}); err == nil || !strings.Contains(err.Message, "Stop it and start a new session") {
+			t.Fatalf("parse accepted empty host folder: %+v", err)
+		}
+	}
+	for _, cs := range []childStart{{AllRepos: true}, {Repo: "new-repo"}, {}} {
+		err := selectWorkspaceChild(&cs, parent)
+		if err == nil || !strings.Contains(err.Message, "Stop it and start a new session on the repository.") {
+			t.Fatalf("expected actionable refusal, got %+v", err)
+		}
+		if cs.Workspace != nil {
+			t.Fatal("refusal selected a child workspace")
+		}
+	}
+}
+
+func TestHostFolderChildRefusalCreatesNoSessionOrFailureAlert(t *testing.T) {
+	fx := newDelegFx(t)
+	parent, _ := fx.session(sessOpts{owner: "owner-1", runtime: "daemon"})
+	m := protocol.WorkspaceManifest{Version: 2, Kind: "folder", OwnerID: "owner-1", Runtime: "host", LaunchGeneration: newUUID(), Root: protocol.WorkspaceRoot{Inode: 1}}
+	m.Digest = workspaceselection.Digest(m)
+	if err := db.InsertSessionWorkspace(t.Context(), fx.pool, parent, m); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := fx.api.startChild(t.Context(), fx.row(parent), childStart{AllRepos: true, Prompt: "Review"}, "rule", "")
+	if err == nil || err.Status != 422 || resp.SessionID != "" {
+		t.Fatalf("expected refusal before creation: %+v %+v", resp, err)
+	}
+	children, e := db.ListChildSessions(t.Context(), fx.pool, parent)
+	if e != nil || len(children) != 0 {
+		t.Fatalf("children: %+v %v", children, e)
+	}
+	var alerts int
+	if e := fx.pool.QueryRow(t.Context(), `SELECT count(*) FROM session_failure_alerts WHERE parent_session_id=$1 OR session_id=$1`, parent).Scan(&alerts); e != nil || alerts != 0 {
+		t.Fatalf("failure alerts: %d %v", alerts, e)
+	}
+}
+
+func TestHostLaunchInitializesBeforeManifest(t *testing.T) {
+	for _, mode := range []string{"selected", "plain", "new", "scratch"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newPrivFixture(t)
+			dc := workspaceOwnedDesktop(t, f.hub, f.pool, privAcctA, "desktop")
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			dc.SetReposRoot(root)
+			dc.WorkspaceCapabilities.ManifestVersion = 2
+			dc.WorkspaceCapabilities.LinuxHost = true
+			service := discovery.NewOwned(func() string { return root }, dc.ID)
+			body := map[string]any{"daemon_id": dc.ID, "runtime": "daemon", "kind": "agent", "initialize_git": mode != "plain"}
+			switch mode {
+			case "selected", "plain":
+				if err := os.Mkdir(filepath.Join(root, "project"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				page := service.Handle(t.Context(), protocol.DiscoverWorkspace{RequestID: "list", Operation: "list", Path: "."})
+				expand := service.Handle(t.Context(), protocol.DiscoverWorkspace{RequestID: "expand", Operation: "expand", Runtime: "host", Folder: &protocol.SelectionRef{Path: page.Page.Entries[0].Path, SourceIdentity: page.Page.Entries[0].SourceIdentity}})
+				v := expand.Resolved
+				body["selection"] = protocol.WorkspaceSelectionRequest{DaemonID: dc.ID, OwnershipRevision: 1, ConnectionGeneration: dc.DesktopGeneration, RootIdentity: v.RootIdentity, Folder: v.Folder, Members: []protocol.SelectionRef{}, MembershipSnapshot: v.MembershipSnapshot}
+			case "new":
+				body["new_repo"] = true
+				body["repo"] = "project"
+			case "scratch":
+				body["no_repo"] = true
+				body["scratch_folder"] = ".scratch-project"
+			}
+			spawned := make(chan protocol.SpawnSession, 1)
+			done := make(chan struct{})
+			defer close(done)
+			go func() {
+				for {
+					select {
+					case <-done:
+						return
+					case raw := <-dc.send:
+						var header struct {
+							Type string `json:"type"`
+						}
+						_ = json.Unmarshal(raw, &header)
+						switch header.Type {
+						case "discover_workspace":
+							var req protocol.DiscoverWorkspace
+							_ = json.Unmarshal(raw, &req)
+							f.hub.deliverWorkspaceDiscovery(dc, service.Handle(t.Context(), req))
+						case "spawn_session":
+							var msg protocol.SpawnSession
+							_ = json.Unmarshal(raw, &msg)
+							spawned <- msg
+						}
+					}
+				}
+			}()
+			raw, _ := json.Marshal(body)
+			req := httptest.NewRequest("POST", "/api/sessions", bytes.NewReader(raw))
+			req.Header.Set("Authorization", "Bearer "+f.tok(t, "human", privAcctA, "session.start"))
+			w := httptest.NewRecorder()
+			f.api.HandlePostSessions(w, req)
+			if w.Code != 202 {
+				t.Fatalf("launch: %d %s", w.Code, w.Body.String())
+			}
+			select {
+			case msg := <-spawned:
+				wantMembers := 1
+				if mode == "plain" {
+					wantMembers = 0
+				}
+				if msg.Workspace == nil || len(msg.Workspace.Members) != wantMembers || msg.Workspace.Runtime != "host" {
+					t.Fatalf("manifest: %+v", msg.Workspace)
+				}
+				ws, err := db.GetSessionWorkspace(t.Context(), f.pool, msg.SessionID)
+				if err != nil || ws == nil || len(ws.Manifest.Members) != wantMembers {
+					t.Fatalf("stored workspace: %+v %v", ws, err)
+				}
+				cs := childStart{AllRepos: true}
+				childErr := selectWorkspaceChild(&cs, *msg.Workspace)
+				if mode == "plain" {
+					if childErr == nil {
+						t.Fatal("plain folder selected a host child")
+					}
+					if _, err := os.Stat(filepath.Join(root, "project", ".git")); !os.IsNotExist(err) {
+						t.Fatal("opt-out initialized Git")
+					}
+				} else if childErr != nil {
+					t.Fatal("initialized parent cannot select child", childErr)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("no spawn")
+			}
+		})
+	}
+}

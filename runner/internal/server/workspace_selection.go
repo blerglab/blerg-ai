@@ -31,6 +31,18 @@ func (a *API) prepareWorkspaceSelection(ctx context.Context, owner string, dc *D
 		return nil, errDiscoveryUnavailable
 	}
 	v := res.Resolved
+	if req.InitializeGit {
+		if runtime != "host" {
+			return nil, errors.New("initializing Git is only available for host folders")
+		}
+		if len(v.Members) == 0 && v.Folder != nil {
+			res, err = a.hub.requestWorkspaceDiscovery(ctx, owner, dc, protocol.DiscoverWorkspace{Operation: "initialize", Runtime: "host", RootIdentity: v.RootIdentity, Folder: v.Folder})
+			if err != nil || !res.OK || res.Resolved == nil || len(res.Resolved.Members) != 1 {
+				return nil, errors.New("could not initialize Git; choose a folder outside an existing worktree")
+			}
+			v = res.Resolved
+		}
+	}
 
 	m := protocol.WorkspaceManifest{Version: 2, Layout: v.Layout, Kind: "repo", OwnerID: owner, Runtime: runtime, LaunchGeneration: newUUID(), Root: v.Root, Members: []protocol.WorkspaceMember{}}
 	if v.Folder != nil || len(v.Members) != 1 {

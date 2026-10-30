@@ -8,6 +8,14 @@ minor release and are called out here.
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-10-30
+
+### Fixed
+
+- New host projects can start with a Git repository and an empty initial commit, enabled by default in the launch sheet without staging existing files. Existing plain-folder sessions refuse host children before creating them, with instructions to start a new repository session (BLG-347).
+- Image builds no longer fail with "error obtaining VCS status" when the source is a Git checkout.
+- Update notices link directly to release notes; the upgrade instructions page and its links have been removed.
+
 ## [0.5.3] - 2026-10-30
 
 ### Added
@@ -1786,7 +1794,7 @@ breaking changes in later minor versions.
 - Repository hygiene: Apache-2.0 licence, a scrub check that keeps private hostnames and
   addresses out of tracked files, and an offline documentation link check.
 
-[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.5.4...HEAD
 [0.4.5]: https://github.com/blerglab/blerg-ai/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/blerglab/blerg-ai/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/blerglab/blerg-ai/compare/v0.4.2...v0.4.3

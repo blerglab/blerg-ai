@@ -110,3 +110,41 @@ it.each([390,3840])('keeps unsupported host workspace selection unavailable at %
   expect(screen.queryByRole('region',{name:'Workspace repositories'})).toBeNull()
   expect(screen.getByTestId('launch-col-repo').getBoundingClientRect().right).toBeLessThanOrEqual(width)
 })
+
+it.each([390,3840])('warns about host children for empty folders in the full sheet at %ipx',async width=>{
+  const {clearLaunchCache}=await import('../lib/launchCache');clearLaunchCache()
+  vi.stubGlobal('fetch',vi.fn((url:string,init?:RequestInit)=>{
+    if(url==='/api/daemons')return json([{id:'d1',name:'Desktop',mode:'local',repos_root:'/repos',status:'connected',sandbox_available:true,available_engines:['claude'],discovery_version:1,ownership_revision:1,connection_generation:'current',workspace_capabilities:{manifest_version:2,linux_host:true,sandbox:true}}])
+    if(url.startsWith('/api/workspace/discovery?'))return json({ok:true,page:{root_identity:'root',root:{path:'.',name:'Repositories',kind:'directory',source_identity:'root'},entries:[{path:'apps',name:'apps',kind:'directory',source_identity:'apps'}],truncated:false}})
+    if(url==='/api/workspace/preview'){
+      const body=JSON.parse(String(init?.body));const members: never[]=[]
+      return json({ok:true,selection:{...body.selection,members},members:[]})
+    }
+    return okFetch(url)
+  }))
+  await page.viewport(width,900)
+  render(<MemoryRouter><LaunchSheet open onClose={()=>{}}/></MemoryRouter>)
+  fireEvent.click(await screen.findByTestId('runtime-daemon'))
+  fireEvent.click(await screen.findByRole('checkbox',{name:/apps.*Folder/}))
+  const note=await screen.findByRole('note',{name:'Folder without repositories'})
+  const initialize=screen.getByRole('checkbox',{name:'Initialize a Git repository here'})
+  expect((initialize as HTMLInputElement).checked).toBe(true)
+  expect(note).toHaveTextContent('Host children need a Git repository.')
+  const beforeToggle=screen.getByTestId('launch-footer').getBoundingClientRect().y
+  fireEvent.click(initialize)
+  expect(screen.getByText('Host children won’t be available in this session.')).toBeTruthy()
+  expect(screen.getByTestId('launch-footer').getBoundingClientRect().y).toBe(beforeToggle)
+  const footer=screen.getByTestId('launch-footer').getBoundingClientRect()
+  const before=footer.y
+  await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))
+  expect(screen.getByTestId('launch-footer').getBoundingClientRect().y).toBe(before)
+  expect(screen.getAllByText('Empty workspace')).toHaveLength(1)
+  expect(screen.queryByTestId('no-repo-option')).toBeNull()
+  const picker=screen.getByRole('region',{name:'Workspace repositories'})
+  expect(getComputedStyle(picker).borderTopWidth).toBe('0px')
+  expect(getComputedStyle(picker).paddingLeft).toBe('0px')
+  expect(note.getBoundingClientRect().right).toBeLessThanOrEqual(width)
+  expect(note.getBoundingClientRect().left).toBeGreaterThanOrEqual(0)
+  expect(screen.getByPlaceholderText('Search repos, or owner/name or a URL...').closest('[hidden]')).not.toBeNull()
+  expect(picker.getBoundingClientRect().right).toBeLessThanOrEqual(width)
+})

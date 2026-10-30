@@ -579,6 +579,9 @@ func (s *Service) resolve(root *rootHandle, req protocol.DiscoverWorkspace, op *
 	anchorInstance := instanceIdentity(dir, info)
 	_ = dir.Close()
 	resolved.Root.Device, resolved.Root.Inode = fileIdentity(info)
+	if len(resolved.Members) == 0 {
+		resolved.Root.Identity = root.tag
+	}
 	raw, _ := json.Marshal(resolved)
 	resolved.SelectionIdentity = hashIdentity("selection-v1", string(raw), req.Runtime)
 	return selectionRecord{resolved: resolved, refs: refs, rootName: root.name, runtime: req.Runtime, anchorPath: anchor, anchorInstance: anchorInstance, physicalFolder: resolved.Folder != nil}, nil

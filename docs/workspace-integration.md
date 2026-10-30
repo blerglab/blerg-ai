@@ -137,7 +137,21 @@ Production desktop explorer registration now uses P1 host descriptors and P2's
 bound sandbox helper, including the legacy single-repository sandbox viewer.
 Readers serialize against P2's lifecycle mutex and are canceled/joined before
 freeze. Registration stays pinned through sync and verified thaw; cleanup failure
-fences reads and sync. Host admission and crash recovery retain a durable controller/helper handoff. See the [explorer guide](workspace-explorer.md).
+fences reads and sync. Linux freezes use ptrace exit events to account for a zombie
+thread-group leader whose final wait notification is delayed until its siblings exit.
+A sibling exec clears the old leader's exit proof before the replacement program runs.
+Slow freezes log at most 32 unheld tasks after two seconds and on failure, with tracer
+bookkeeping and kernel status fields; these diagnostics never supply containment proof.
+The tracer reconciles a creator's fork/clone event with its child's own reports in
+either order, counting reports per TID, so a child reaped before that event is never
+tracked again. A new task that reuses the TID of a thread whose exec is still to be
+reported is recognized by its auto-attach stop (SI_USER from PID 0) and recorded as a
+birth; that exec then drops only the stale entry. A lost
+host helper's tree is proven gone through its pidfd ledger (see
+[cluster workspaces](cluster-workspace.md)); the next engine then starts under a
+fresh helper, and a thaw never keeps admission closed for a dead helper.
+The Linux pthread/clone regression fixtures require a C compiler (`cc`).
+Host admission and crash recovery retain a durable controller/helper handoff. See the [explorer guide](workspace-explorer.md).
 
 P5 supervisor registration joins the coordinator using its private leaf mutex
 beneath the workspace lifecycle lock. A missing registration refuses cleanup

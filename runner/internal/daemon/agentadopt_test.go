@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -114,6 +115,8 @@ func sentTypes(s *agentTestSender) []string {
 		switch v := m.(type) {
 		case protocol.SessionStarted:
 			out = append(out, "session_started")
+		case protocol.SessionPaused:
+			out = append(out, "session_paused:"+v.SessionID)
 		case protocol.SessionEnded:
 			out = append(out, "session_ended:"+v.SessionID)
 		case protocol.SessionStateChanged:
@@ -523,8 +526,8 @@ func TestAdoptOfASessionThatNeverRanATurn(t *testing.T) {
 	}
 }
 
-// A record that cannot be acted on is removed, and its session's end is reported once connected.
-func TestAdoptFailureRemovesTheRecordAndReportsTheEnd(t *testing.T) {
+// A refused recovery retains its record and reports a reason once connected.
+func TestAdoptFailureKeepsTheRecordAndReportsAPause(t *testing.T) {
 	newHost, recDir, workDir, _ := recoveryHost(t)
 	gone := filepath.Join(filepath.Dir(workDir), "deleted")
 	if err := writeAgentRecord(recDir, AgentRecord{SessionID: "lost", Repo: "deleted", WorkDir: gone, ClaudeSessionID: "c"}); err != nil {
@@ -537,8 +540,8 @@ func TestAdoptFailureRemovesTheRecordAndReportsTheEnd(t *testing.T) {
 	if n := host.AdoptRecorded(); n != 0 || host.Has("lost") {
 		t.Fatalf("adopted %d", n)
 	}
-	if left := listAgentRecords(recDir); len(left) != 0 {
-		t.Errorf("records left behind: %+v", left)
+	if left := listAgentRecords(recDir); len(left) != 2 {
+		t.Errorf("recovery records lost: %+v", left)
 	}
 	host.ReportAdoptionFailures()
 	if types := sentTypes(sender); len(types) != 0 {
@@ -546,12 +549,19 @@ func TestAdoptFailureRemovesTheRecordAndReportsTheEnd(t *testing.T) {
 	}
 	host.NoteConnected()
 	types := strings.Join(sentTypes(sender), " ")
-	if !strings.Contains(types, "session_ended:lost") || !strings.Contains(types, "session_ended:relative") {
-		t.Errorf("ends reported: %v", types)
+	if !strings.Contains(types, "session_paused:lost") || !strings.Contains(types, "session_paused:relative") {
+		t.Errorf("pauses reported: %v", types)
 	}
 	host.NoteConnected()
 	if got := len(sentTypes(sender)); got != 2 {
-		t.Errorf("the ends were reported again (%d messages)", got)
+		t.Errorf("the pauses were reported again (%d messages)", got)
+	}
+	host.DropRecord("lost")
+	if slices.Contains(host.ActiveIDs(), "lost") {
+		t.Fatal("explicit stop retained a paused claim")
+	}
+	if _, ok := readRecord(t, recDir, "lost"); ok {
+		t.Fatal("explicit stop retained the recovery record")
 	}
 }
 
@@ -731,5 +741,80 @@ func TestSteeringAdoptionOfAnIdleSessionSaysNothing(t *testing.T) {
 	}
 	if st := starts(logLines(t, logPath)); len(st) != 1 || !strings.Contains(st[0], "--resume conv-9") {
 		t.Errorf("starts: %v", st)
+	}
+}
+
+func TestAdoptFailureRetriesWhenMessaged(t *testing.T) {
+	newHost, records, work, _ := recoveryHost(t)
+	missing := filepath.Join(filepath.Dir(work), "missing")
+	if err := writeAgentRecord(records, AgentRecord{SessionID: "retry", Repo: "missing", WorkDir: missing, Interaction: protocol.InteractionInteractive}); err != nil {
+		t.Fatal(err)
+	}
+	host, sender := newHost()
+	host.NoteConnected()
+	if n := host.AdoptRecorded(); n != 0 {
+		t.Fatal(n)
+	}
+	if !slices.Contains(host.ActiveIDs(), "retry") {
+		t.Fatal("paused recovery lost its session claim")
+	}
+	notices := errorTexts(sender)
+	if len(notices) != 1 || !strings.Contains(notices[0], "Recovery paused:") {
+		t.Fatalf("missing recovery reason: %v", notices)
+	}
+	if err := os.Mkdir(missing, 0700); err != nil {
+		t.Fatal(err)
+	}
+	host.UserMessage("retry", "continue", "chat")
+	waitUntil(t, "retried adoption", func() bool { return host.Has("retry") })
+	sender.waitForKind(t, "turn_done")
+	for _, kind := range sentTypes(sender) {
+		if strings.HasPrefix(kind, "session_ended:") {
+			t.Fatal(kind)
+		}
+	}
+}
+
+// A session that could not be re-proven only because the server was not connected yet is
+// retried by the connection itself, without being reported as paused first.
+func TestAdoptWaitingForTheServerRetriesOnConnect(t *testing.T) {
+	newHost, records, work, _ := recoveryHost(t)
+	rec := AgentRecord{SessionID: "wait", Repo: "proj", WorkDir: work, Interaction: protocol.InteractionInteractive}
+	if err := writeAgentRecord(records, rec); err != nil {
+		t.Fatal(err)
+	}
+	host, sender := newHost()
+	host.mu.Lock()
+	host.adopting["wait"] = &adoptingSession{rec: rec, failed: adoptAwaitsServer, awaitsServer: true}
+	host.adoptFailed = append(host.adoptFailed, "wait")
+	host.mu.Unlock()
+	host.NoteConnected()
+	waitUntil(t, "retried adoption", func() bool { return host.Has("wait") })
+	for _, kind := range sentTypes(sender) {
+		if strings.HasPrefix(kind, "session_paused:") || strings.HasPrefix(kind, "session_ended:") {
+			t.Fatal(kind)
+		}
+	}
+	for _, notice := range errorTexts(sender) {
+		if strings.Contains(notice, "Recovery paused") {
+			t.Fatalf("reported a pause it then retried: %q", notice)
+		}
+	}
+}
+
+// The pause reason reads as one sentence whatever adoptOne returned.
+func TestAdoptPauseDetailIsPunctuated(t *testing.T) {
+	newHost, records, work, _ := recoveryHost(t)
+	gone := filepath.Join(filepath.Dir(work), "gone")
+	if err := writeAgentRecord(records, AgentRecord{SessionID: "gone", Repo: "gone", WorkDir: gone}); err != nil {
+		t.Fatal(err)
+	}
+	host, sender := newHost()
+	host.NoteConnected()
+	host.AdoptRecorded()
+	notices := errorTexts(sender)
+	want := "Recovery paused: its workspace " + gone + " is gone. Send a message to retry."
+	if len(notices) != 1 || notices[0] != want {
+		t.Fatalf("notice %q, want %q", notices, want)
 	}
 }

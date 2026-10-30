@@ -455,7 +455,7 @@ func handleSessionEndedEffects(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 			hub.releaseWorkspaceSelection(hub.FindDaemonForSession(msg.SessionID), ws.Manifest)
 		}
 		hub.SessionTerminallyEnded(msg.SessionID)
-		if msg.ExitCode != 0 && msg.Message != "" {
+		if msg.Message != "" {
 			// Why it failed (its engine runtime stopped): the reason the session page, the
 			// sidebar and `session watch` show.
 			if err := db.SetSessionError(ctx, pool, msg.SessionID, msg.Message); err != nil {
@@ -511,6 +511,8 @@ func handleSessionEndedEffects(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 			})
 		}
 	}
+
+	effectErr = errors.Join(effectErr, recordSessionFailure(ctx, hub, pool, msg.SessionID))
 
 	effectErr = errors.Join(effectErr, failPendingSessionInputsChecked(ctx, hub, pool, msg.SessionID))
 	hub.QuestionSessionEnded(msg.SessionID) // nothing retries its questions' answers now

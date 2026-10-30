@@ -9,7 +9,8 @@ import (
 )
 
 // Registered host worktrees may keep metadata outside the member directory,
-// but both metadata roots must remain inside the approved explorer root. Capture
+// but both metadata roots must remain inside the approved explorer root unless a
+// signed host child allocation approves their exact external identities. Capture
 // the registration proof at launch, pin both descriptors, and never learn a new
 // gitdir from a later status request.
 // Sandbox/pod .git pointers have no such exception.
@@ -22,6 +23,11 @@ type hostWorktreePin struct {
 }
 
 func (e *LocalExplorer) pinHostWorktree(name string, info os.FileInfo) (hostWorktreePin, bool) {
+	return e.pinHostWorktreeAllocation(name, info, nil)
+}
+
+// Only the signed child allocation can approve metadata outside the explorer root.
+func (e *LocalExplorer) pinHostWorktreeAllocation(name string, info os.FileInfo, allocation *hostChildAllocation) (hostWorktreePin, bool) {
 	var result hostWorktreePin
 	public, err := e.openFile(filepath.ToSlash(filepath.Join(name, ".git")))
 	if err != nil {
@@ -48,7 +54,8 @@ func (e *LocalExplorer) pinHostWorktree(name string, info os.FileInfo) (hostWork
 	// A pointer and its registration cannot approve an arbitrary external root.
 	// The exact worktrees/<name> relationship below keeps gitPath inside commonPath.
 	relative, err := filepath.Rel(e.folder, commonPath)
-	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+	outside := err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator))
+	if outside && (allocation == nil || allocation.GitPath != gitPath || allocation.Source.CommonPath != commonPath || allocation.Root != workspaceRootIdentity(info)) {
 		return result, false
 	}
 	git, err := openWorkspaceExternalRoot(gitPath)
@@ -67,6 +74,9 @@ func (e *LocalExplorer) pinHostWorktree(name string, info os.FileInfo) (hostWork
 	}
 	ci, err := common.Stat(".")
 	if err != nil {
+		return fail()
+	}
+	if allocation != nil && (workspaceRootIdentity(gi) != allocation.GitIdentity || workspaceRootIdentity(ci) != allocation.Source.CommonIdentity) {
 		return fail()
 	}
 	pointers := map[string]string{}

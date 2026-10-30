@@ -8,7 +8,7 @@ import (
 )
 
 func testManifest() WorkspaceManifest {
-	return WorkspaceManifest{Version: 2, Kind: "folder", OwnerID: "owner", Runtime: "host", LaunchGeneration: "launch", Root: WorkspaceRoot{1, 2}, Digest: "digest", Members: []WorkspaceMember{{ID: "one", Name: "one", Path: "one", SourceIdentity: "source", CommonDirectoryIdentity: "common", Project: "org/one", Destination: "example-org/one"}}}
+	return WorkspaceManifest{Version: 2, Kind: "folder", OwnerID: "owner", Runtime: "host", LaunchGeneration: "launch", Root: WorkspaceRoot{Device: 1, Inode: 2}, Digest: "digest", Members: []WorkspaceMember{{ID: "one", Name: "one", Path: "one", SourceIdentity: "source", CommonDirectoryIdentity: "common", Project: "org/one", Destination: "example-org/one"}}}
 }
 func TestWorkspaceRoundTrip(t *testing.T) {
 	m := testManifest()

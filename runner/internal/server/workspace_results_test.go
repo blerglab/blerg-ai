@@ -38,3 +38,23 @@ func TestSessionEndedPersistsWorkspaceMemberResults(t *testing.T) {
 		t.Fatal("stale member result replaced trusted result")
 	}
 }
+
+func TestHostWorkspaceChildResultBranch(t *testing.T) {
+	f := newPrivFixture(t)
+	ctx := t.Context()
+	if _, err := f.pool.Exec(ctx, `UPDATE sessions SET runtime='daemon',parent_session_id=$2 WHERE id=$1`, f.pubSession, f.privSession); err != nil {
+		t.Fatal(err)
+	}
+	launch := protocol.WorkspaceManifest{Version: 2, Kind: "repo", OwnerID: privAcctA, Runtime: "host", LaunchGeneration: "host-child-launch", Digest: "digest", Members: []protocol.WorkspaceMember{{ID: "one", Name: "app", Path: ".", SourceIdentity: "source", CommonDirectoryIdentity: "common", Destination: "destination"}}}
+	if err := db.InsertSessionWorkspace(ctx, f.pool, f.pubSession, launch); err != nil {
+		t.Fatal(err)
+	}
+	result, err := f.api.buildSessionResult(ctx, f.pubSession, privAcctA)
+	if err != nil || result.Branch != "wip/"+f.pubSession {
+		t.Fatalf("host child branch: %+v %v", result, err)
+	}
+	other, err := f.api.buildSessionResult(ctx, f.pubSession, privAcctB)
+	if err != nil || other.Branch != "" {
+		t.Fatalf("desktop branch exposed to another viewer: %+v %v", other, err)
+	}
+}

@@ -8,6 +8,34 @@ minor release and are called out here.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-30
+
+### Added
+
+- Pre-release session acceptance tests exercise host turn-end process histories and commit isolation, with a real-install Hermes scenario runner and optional Claude/Codex smoke (BLG-342).
+
+### Fixed
+
+- On Linux 6.16 and later, a session no longer ends the moment a multi-threaded command starts a thread. Whatever ends a process tree early now says why on its stderr (BLG-339).
+- Failed or unexpectedly paused sessions now leave a Needs-you alert and push, even when their coordinator has ended. Parents receive the reason and work outcome; an unhandled child failure escalates after three minutes. Recovery locations remain visible until the alert is dismissed (BLG-343).
+- A child's `ask --no-wait` now calls its owner instead of silently suppressing the notification. Workspace child discard waits for cleanup on the first request instead of returning a premature retry error (BLG-343).
+- Empty host folders resumed after a restart verify their original desktop and configured root before binding again. Older empty-folder records without that identity are refused.
+- Host turn-end freezes now account for an exited thread-group leader using kernel exit events, so surviving threads can freeze and commits can be collected. (BLG-339).
+- Slow or failed host writer freezes now report bounded per-task tracer and kernel status diagnostics (BLG-339).
+- Host children of workspace sessions now use separate Git worktrees on `wip/<child-id>`, leaving the parent checkout unchanged. Discard keeps branches and retains worktrees with uncommitted work or uncertain state for recovery (BLG-339).
+- Host children of workspace sessions now use separate Git worktrees on `wip/<child-id>`, leaving the parent checkout unchanged. Discard keeps branches and retains worktrees with uncommitted work or uncertain state for recovery. Ignored build output does not block cleanup (BLG-339).
+- Long host workspace sessions no longer die after many builds or tests. The process tracer kept an entry for a short-lived process or thread that exited before its creator's fork was reported, so freezes could stall, the count crept toward the process limit until the whole session was killed, and an engine that exited normally (Claude after idle, Codex after a restart) left "writer-control: broken pipe" at every later turn end and refused the next engine start ("writer admission closed"). The tracer now accounts for either order (BLG-339).
+- A host session now survives losing its writer helper. Each process the helper runs is recorded with the daemon before it starts; once the helper and every recorded process have exited, the turn-end freeze succeeds and the next engine starts under a fresh helper. A thaw no longer leaves the session closed to new engines because of a dead helper (BLG-339).
+- A process-limit kill is logged by the daemon with the session, the tracer's task count and the kernel's (BLG-339).
+- Restarting the desktop daemon resumes host workspace sessions even when their last writer freeze or thaw failed. Recovery rechecks the saved workspace and retries sync on the next turn. A session that cannot be restored keeps its recovery record and pauses with a reason; sending a message retries recovery (BLG-339).
+- A host child resumed after a daemon restart continues in its own worktrees on `wip/<child-id>`; recovery refuses a child whose saved directories are not its own (BLG-339).
+- A host workspace session resumed after a daemon restart can start host children again; they were refused with "workspace runtime unavailable" because the restarted daemon had lost the parent's selection (BLG-339).
+- A session that cannot be brought back into its host workspace after a restart now says why: the workspace was already closed and its work delivered, a stop was not finished, or the saved record could not be verified or belongs to another session (BLG-339).
+- A host session no longer stays frozen when the server can't be reached at turn end. If the check after the freeze fails for a passing reason (a dropped connection, a timeout, a server error), the session is thawed, the turn's sync is skipped with a note, and the next turn end tries again. Only a definitive answer that the session ended or was replaced keeps it stopped, and the session says why (BLG-339).
+- A host session's engine is no longer killed when it kills one of its own shells. Claude Code does this when a Monitor expires or a tool times out. If the process tracer was holding one of that shell's processes at that moment, it ended the whole session with exit status 137 and logged no reason (BLG-339).
+- A host session no longer has every turn-end sync time out after a shell was killed while starting a process. The tracer read the dying process's exit status as a new process ID and waited for it forever (BLG-339).
+- A session replaced by a newer launch stays stopped at turn end, even when the refusal arrives as its authority call times out or its connection is replaced (BLG-339).
+
 ## [0.5.2] - 2026-10-29
 
 ### Fixed
@@ -1758,7 +1786,7 @@ breaking changes in later minor versions.
 - Repository hygiene: Apache-2.0 licence, a scrub check that keeps private hostnames and
   addresses out of tracked files, and an offline documentation link check.
 
-[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.4.4...HEAD
+[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.5.3...HEAD
 [0.4.5]: https://github.com/blerglab/blerg-ai/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/blerglab/blerg-ai/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/blerglab/blerg-ai/compare/v0.4.2...v0.4.3

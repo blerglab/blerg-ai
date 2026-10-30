@@ -44,7 +44,7 @@ func TestP6HostCrashController(t *testing.T) {
 	service.Supervisor = newWorkspaceSupervisors(rig.service)
 	msg := protocol.SpawnSession{SessionID: "host-crash", Kind: "agent", Workspace: &m}
 	token := ccUUID()
-	if _, err = service.beginHostIntent(msg, pins, token); err != nil {
+	if _, err = service.beginHostIntent(msg, pins, token, false); err != nil {
 		t.Fatal(err)
 	}
 	l, err := authority.Launch(t.Context(), msg.SessionID, m, token)

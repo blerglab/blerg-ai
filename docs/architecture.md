@@ -68,6 +68,17 @@ Every session runs in exactly one place, chosen on the launch sheet:
 | **Cluster** | A throwaway Kubernetes Job in its own namespace, with the credentials of the person who launched it | the Kubernetes install | the repository, and the credentials core fetched for that person |
 | **This machine** | The daemon's host, unsandboxed, as the person running the daemon | never; needs an acknowledgement | everything that person can see |
 
+Host children of workspace sessions get a separate Git worktree for each selected member,
+starting at that member's current parent HEAD on `wip/<child-id>`. Worktrees live under
+`host-children/<child-id>` in the daemon's private state directory; a signed per-member
+allocation journal supports restart cleanup. Commits are immediately available in the shared
+repository. Discard removes only clean worktrees still on their expected branch and keeps all
+branches. Worktrees with tracked changes, untracked non-ignored files, changed branches,
+detached HEADs or unproven allocations are retained and reported for recovery. Ignored build
+output does not block cleanup. A member without a Git commit
+is refused, as is a checkout with configured Git filters; a child never falls back to its
+parent's checkout. Top-level host sessions continue to use the selected source directories.
+
 How cluster sessions are built, scheduled and cleaned up: [`install/k8s/CLUSTER-RUNTIME.md`](../install/k8s/CLUSTER-RUNTIME.md).
 How the local sandbox is hardened and what it mounts: [`install/desktop/DAEMON.md`](../install/desktop/DAEMON.md).
 Changing the image sessions run in: [`sandbox-image.md`](sandbox-image.md).
@@ -147,6 +158,10 @@ the prepared public root. P2 and P3 own preparation, settlement, retention and
 writer cleanup. P4 reads only through that runtime binding. P5 independently
 checks live human identity, policy, grants and containment; selection grants no
 shell permission.
+
+Empty host folders carry an opaque desktop and configured-root identity in the
+manifest root metadata. Recovery verifies it independently of member identities;
+older empty-folder manifests without that identity fail closed.
 
 The desktop control adapter uses the enrolled outbound socket and persisted owner
 and connection fences. Migration 083 journals generation tokens and exact final

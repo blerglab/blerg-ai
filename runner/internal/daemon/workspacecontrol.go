@@ -17,6 +17,12 @@ type workspaceControlWait struct {
 	reply      chan protocol.LocalWorkspaceControlResult
 }
 
+// WorkspaceRefusedError is the server's definitive answer that a launch has no authority any more.
+// Every other authority failure may be transient.
+type WorkspaceRefusedError struct{ Reason string }
+
+func (e *WorkspaceRefusedError) Error() string { return "workspace authority refused: " + e.Reason }
+
 // WorkspaceAuthority is the concrete authenticated outbound adapter. A receipt
 // comes only from the correlated server response, never successful submission.
 type WorkspaceAuthority struct {
@@ -25,6 +31,12 @@ type WorkspaceAuthority struct {
 	pending  map[string]workspaceControlWait
 	launches map[string]protocol.SupervisorLaunch
 }
+
+// workspaceReplyReceived runs between a reply's delivery and its classification. Tests replace it.
+var workspaceReplyReceived = func() {}
+
+// workspaceReplySelecting runs just before a call waits for its reply. Tests replace it.
+var workspaceReplySelecting = func() {}
 
 func NewWorkspaceAuthority(client *WSClient) *WorkspaceAuthority {
 	a := &WorkspaceAuthority{client: client, pending: map[string]workspaceControlWait{}, launches: map[string]protocol.SupervisorLaunch{}}
@@ -62,17 +74,46 @@ func (a *WorkspaceAuthority) call(ctx context.Context, req protocol.LocalWorkspa
 	a.mu.Unlock()
 	defer func() { a.mu.Lock(); delete(a.pending, req.RequestID); a.mu.Unlock() }()
 	if err := a.client.sendBoundedReplyContext(ctx, conn, req, time.Second, time.Second, time.Time{}); err != nil {
-		return protocol.LocalWorkspaceControlResult{}, err
+		return a.abandon(req.RequestID, wait, err)
 	}
+	workspaceReplySelecting()
 	select {
 	case reply := <-wait.reply:
-		if !reply.OK || a.client.currentConn() != conn {
+		workspaceReplyReceived()
+		// A definitive refusal was authenticated and correlated on this call's connection when it
+		// was delivered; a later replacement can't make it less true, so it wins. Anything else on
+		// a replaced connection is no verdict.
+		if !reply.OK && reply.Refused != "" {
+			return reply, &WorkspaceRefusedError{Reason: reply.Refused}
+		}
+		if a.client.currentConn() != conn {
+			return reply, errors.New("workspace authority connection replaced")
+		}
+		if !reply.OK {
 			return reply, errors.New("workspace authority refused")
 		}
 		return reply, nil
 	case <-ctx.Done():
-		return protocol.LocalWorkspaceControlResult{}, ctx.Err()
+		return a.abandon(req.RequestID, wait, ctx.Err())
 	}
+}
+
+// abandon gives up on a call without a reply in hand. The handler delivers under a.mu, so once the
+// wait is withdrawn under a.mu a reply is either already queued or can never arrive. A queued
+// definitive refusal wins over the cause: select picks at random when both are ready, and a
+// timeout read as transient would thaw a superseded session.
+func (a *WorkspaceAuthority) abandon(id string, wait workspaceControlWait, cause error) (protocol.LocalWorkspaceControlResult, error) {
+	a.mu.Lock()
+	delete(a.pending, id)
+	a.mu.Unlock()
+	select {
+	case reply := <-wait.reply:
+		if !reply.OK && reply.Refused != "" {
+			return reply, &WorkspaceRefusedError{Reason: reply.Refused}
+		}
+	default:
+	}
+	return protocol.LocalWorkspaceControlResult{}, cause
 }
 func (a *WorkspaceAuthority) Launch(ctx context.Context, id string, m protocol.WorkspaceManifest, token string) (protocol.SupervisorLaunch, error) {
 	r, e := a.call(ctx, protocol.LocalWorkspaceControl{SessionID: id, Operation: "launch", Manifest: &m, Token: token})

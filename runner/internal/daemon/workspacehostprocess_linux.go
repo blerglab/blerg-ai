@@ -111,9 +111,10 @@ func hostControllerGone(want hostHelperIdentity) error {
 	}
 	return errors.New("host controller still owns this launch")
 }
-func hostWriterGroupFor(executable string, started func(int) error) hostWriterGroup {
+func hostWriterGroupFor(executable, session string, started func(int) error) hostWriterGroup {
 	g := processcontainment.NewGroup(executable, uint32(os.Getuid()), uint32(os.Getgid())) //nolint:gosec // Linux UID/GID are unsigned 32-bit values returned as int.
 	g.BeforeExec = started
+	g.Label = "session " + session
 	return g
 }
 func ServeHostWriter(args []string) int { return processcontainment.ServeCommand(args) }

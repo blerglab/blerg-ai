@@ -104,27 +104,43 @@ func (a *API) onChildTurnEnded(sessionID, kind, detail string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), childTurnNoteTimeout)
 		defer cancel()
-		a.noteChildTurn(ctx, sessionID, kind, detail)
+		if err := recordSessionFailure(ctx, a.hub, a.dbPool, sessionID); err != nil {
+			log.Printf("session failure alert: %v", err)
+		}
+		sent := a.noteChildTurn(ctx, sessionID, kind, detail)
+		if sent && (kind == childSessionFailed || kind == childRestartPaused) {
+			_, err := a.dbPool.Exec(ctx, `UPDATE session_failure_alerts SET parent_notified=true WHERE session_id=$1`, sessionID)
+			if err != nil {
+				log.Printf("child failure notice receipt: %v", err)
+			}
+		}
+		if err := a.escalateSessionFailures(ctx, time.Now()); err != nil {
+			log.Printf("child failure escalation: %v", err)
+		}
 	}()
 }
 
 // noteChildTurn relays one child-turn note to childID's parent, if it has one that is still
 // running. Best effort: a failure is logged.
-func (a *API) noteChildTurn(ctx context.Context, childID, kind, detail string) {
+func (a *API) noteChildTurn(ctx context.Context, childID, kind, detail string) bool {
+	// Reconciliation calls this directly too. A stuck coordinator must not
+	// hold up the independent owner alert or its escalation sweep.
+	ctx, cancel := context.WithTimeout(ctx, childTurnNoteTimeout)
+	defer cancel()
 	child, err := db.GetSession(ctx, a.dbPool, childID)
 	if err != nil || child == nil {
-		return
+		return false
 	}
 	parentID := derefOrEmpty(child.ParentSessionID)
 	if parentID == "" || child.ArchivedAt != nil {
-		return
+		return false
 	}
 	parent, err := db.GetSession(ctx, a.dbPool, parentID)
 	if err != nil || parent == nil || parent.Kind != "agent" {
-		return
+		return false
 	}
 	if parentEnded(parent) {
-		return
+		return false
 	}
 	if kind == childTurnFinished || (kind == childTurnFailed && detail == "") {
 		answer, failure := a.lastTurnAnswer(ctx, childID)
@@ -137,11 +153,14 @@ func (a *API) noteChildTurn(ctx context.Context, childID, kind, detail string) {
 	}
 	if (kind == childTurnFailed || kind == childSessionFailed) && detail == "" {
 		detail = derefOrEmpty(child.ErrorReason)
+		if detail == "" {
+			detail = strings.ReplaceAll(derefOrEmpty(child.EndReason), "_", " ")
+		}
 	}
 	turn, err := db.LatestUserMessageSeq(ctx, a.dbPool, childID)
 	if err != nil {
 		log.Printf("child turn note %s: %v", childID, err)
-		return
+		return false
 	}
 	group := kind
 	if kind == childTurnFailed {
@@ -149,11 +168,18 @@ func (a *API) noteChildTurn(ctx context.Context, childID, kind, detail string) {
 	}
 	clientID := fmt.Sprintf("child-turn-%s-%s-%d", childID, group, turn)
 	if !a.childTurns.first(clientID) {
-		return
+		return false
 	}
 	text := childTurnNote(childTitle(child), childID, kind, detail)
+	if kind == childSessionFailed && !db.TerminallyEnded(child) {
+		text = "Child " + quotedName(childTitle(child)) + " stopped unexpectedly: " + quotedLine(detail, 160) + ". Check its work before resuming. blerg-runner session result " + childID
+	}
 	if problem := a.lastTurnSyncProblem(ctx, childID); kind != childRestartPaused && problem != "" {
 		text += " Its commits from this turn were NOT brought back to wip/" + childID + ": " + quotedLine(problem, 160) + "."
+	}
+	if kind == childSessionFailed || kind == childRestartPaused || kind == childTurnFailed {
+		work, _ := failureWork(ctx, a.dbPool, child)
+		text += " " + work
 	}
 	principal := runnerPrincipal{Kind: "human", Sub: derefOrEmpty(parent.SpawningAccountID)}
 	var apiErr *APIError
@@ -166,6 +192,7 @@ func (a *API) noteChildTurn(ctx context.Context, childID, kind, detail string) {
 		a.childTurns.forget(clientID)
 		log.Printf("child turn note %s → %s: %s", childID, parentID, apiErr.Message)
 	}
+	return apiErr == nil
 }
 
 // parentEnded reports whether a parent is over for good: a note must not start it again.

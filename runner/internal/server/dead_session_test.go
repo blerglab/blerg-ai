@@ -111,7 +111,7 @@ func TestParentWatchEndsWhenChildRuntimeStops(t *testing.T) {
 	}
 
 	note := fx.parentNote(fx.parent, 10*time.Second)
-	want := `Child "Child" failed: "` + codexStoppedReason + `" and stopped; it takes no more messages. blerg-runner session result ` + child
+	want := `Child "Child" failed: "` + codexStoppedReason + `" and stopped; it takes no more messages. blerg-runner session result ` + child + ` Work delivery is unconfirmed. Check wip/` + child + ` and the session's recovery record.`
 	if note.Source != childTurnSource || note.Text != want {
 		t.Fatalf("parent note = %+v, want %q", note, want)
 	}
@@ -181,4 +181,47 @@ func TestChildEventsPollWaitsThroughARevivableError(t *testing.T) {
 	if took := time.Since(start); took < 1500*time.Millisecond {
 		t.Fatalf("the poll answered at once (%s) for a revivable error", took)
 	}
+}
+
+// Run the real child CLI, not just its message handler: --no-wait must say
+// where the question went and publish a live owner notification.
+func TestChildCLIAskNoWaitReachesOwner(t *testing.T) {
+	fx := newDelegFx(t)
+	child, token := fx.session(sessOpts{owner: "owner-1", parent: fx.parent, startedByKind: "session"})
+	fx.mux.HandleFunc("POST /api/messages", fx.api.HandlePostMessages)
+	srv := httptest.NewServer(fx.mux)
+	defer srv.Close()
+	browser := &BrowserConn{ID: "child-question-owner", AccountID: "owner-1", send: make(chan []byte, 32)}
+	fx.hub.RegisterBrowser(browser)
+	script, err := filepath.Abs("../../.claude/skills/session-messaging/blerg-runner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := []string{}
+	for _, v := range os.Environ() {
+		if !strings.HasPrefix(v, "BLERG_RUNNER_") && !strings.HasPrefix(v, "CLAUDE") {
+			env = append(env, v)
+		}
+	}
+	env = append(env, "BLERG_RUNNER_SERVER_HTTP="+srv.URL, "BLERG_RUNNER_SESSION_ID="+child, "BLERG_RUNNER_SESSION_TOKEN="+token, "BLERG_RUNNER_DAEMON_STATE_DIR="+t.TempDir())
+	cmd := exec.CommandContext(t.Context(), "python3", script, "ask", "--no-wait", "Which branch should I use?")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "is in the person's Needs you") {
+		t.Fatalf("child was not told where its ask went: %v %s", err, out)
+	}
+	rows, err := db.ListMessagesFor(t.Context(), fx.pool, 20, "owner-1")
+	if err != nil || len(rows) != 1 || rows[0].SessionID != child || !rows[0].NoWait || rows[0].Status != "open" {
+		t.Fatalf("child question missing from owner feed: %+v %v", rows, err)
+	}
+	for raw := range awaitAll(browser.send) {
+		var m protocol.MessageCreated
+		if json.Unmarshal(raw, &m) == nil && m.Type == "message_created" && m.Message.ID == rows[0].ID {
+			if m.Quiet || !m.Message.Answerable {
+				t.Fatalf("child question suppressed: %+v", m)
+			}
+			return
+		}
+	}
+	t.Fatal("owner received no live question notification")
 }

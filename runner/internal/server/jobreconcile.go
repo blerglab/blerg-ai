@@ -143,6 +143,9 @@ func (a *API) reconcileClusterJobsOnce(ctx context.Context) {
 	}
 	a.reconcileLocalWorkspaceFinals(ctx)
 	a.finaliseLostDaemonSessions(ctx)
+	if err := a.reconcileSessionFailures(ctx, time.Now()); err != nil {
+		log.Printf("session failure alerts: %v", err)
+	}
 }
 
 // reconcileClusterSession decides one session's fate from its Job's state.

@@ -96,7 +96,8 @@ just before the daemon dies. Three guards:
   only after it has gone.
 
 Deleted: when the session is killed (`AgentHost.Kill`); on `kill_session` for a session the
-daemon is not hosting (a stop that arrives before or instead of adoption); when adoption fails.
+daemon is not hosting (a stop that arrives before or instead of adoption). Failed adoption keeps
+the record so recovery can be retried.
 
 ## Adoption
 
@@ -269,8 +270,9 @@ once it is; a `kill_session` for it means it is never hosted. For each record:
    the hello: that answer is where a session stopped while the daemon was down is killed, and
    where its open asks are named. With no server, nothing is continued.
 
-A failed adoption deletes the record and reports `session_ended` with a non-zero exit code once
-the daemon is connected, so the row ends with a reason instead of flapping.
+A failed adoption keeps the record and session claim, reports `session_paused` and a retryable
+error once the daemon is connected, and retries when a message arrives. An explicit stop still
+removes the record.
 
 Because the claim precedes the connection, the hello already lists the claimed ids and the
 server's existing reconcile keeps (or revives) their rows. The daemon asks for an immediate
@@ -416,3 +418,25 @@ so the sessions running at that moment end as they do today.
   `session_paused_changed` and drops the reason when the session runs.
 - The real CLI, opt-in (`BLERG_REAL_CLAUDE=1`): a session is killed mid-tool, adopted by a second
   host, and the resumed conversation remembers the first and knows it was interrupted.
+
+### Host workspace recovery after an interrupted sync
+
+The new daemon recognizes retained agent records before sweeping host workspace
+journals. A failed freeze or thaw is not a stop request. Adoption restores the
+immutable manifest from the signed private journal, authenticates it against the
+server, reopens and checks the recorded directory identities, and proves the old
+controller and its journalled helpers are gone before starting new writers. This
+also works with journals written before this fix, without a P1 snapshot. The next
+turn retries workspace sync. Explicit stop and final delivery still use cleanup.
+
+The sweep leaves such a journal to adoption but still reaps the previous
+incarnation's journalled helpers once its controller is proven gone, so a
+session whose adoption stays paused leaves no writer running. A stop drops the
+recovery record before the sweep, which then takes the cleanup path. Adoption
+that failed only because the server was not connected yet is retried when the
+connection arrives instead of being reported as paused.
+
+Shell recovery accepts an interrupted `syncing` phase, but only reopens admission
+after the existing teardown/reconciliation proof succeeds. Terminal phases remain
+terminal. Failed adoption retains its record and session claim, reports a pause
+and a retryable error in the session, and retries when a message arrives.

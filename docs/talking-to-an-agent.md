@@ -58,7 +58,22 @@ you have not used it for a few minutes, a notification on your phone or desktop.
   minutes at most; then you are told the agent is waiting for you while a task still runs.
 - **A question** the agent asked with `blerg-runner ask`.
 
-Sessions nobody watches never call you: an unattended one, a cron's, and one a tool started
+Failed sessions and sessions paused unexpectedly after a restart leave an open alert in **Needs
+you** and send a push, including unattended sessions and children. The alert gives the reason and
+what is known about work delivery or retention. Missing delivery evidence is called unconfirmed;
+it is never called delivered or lost without evidence. A private session sends only a generic push.
+Open its session to check the work, then dismiss the alert. Alerts survive the session ending and
+the runner restarting. Clean turn finishes and requested stops stay quiet unless work needs recovery.
+
+A child failure also reaches its coordinator as a `child_turn` notice. If the coordinator is ended,
+paused or unavailable, the alert says it is not responding. Otherwise Blerg checks after three
+minutes. Reading the child's result, sending it a new input, archiving it, or dismissing its alert counts as handling it.
+
+A child's `blerg-runner ask --no-wait` goes directly to the person who owns it, in **Needs you** and
+the bell; the CLI says where it went. The child keeps working. A blocking ask still tells the parent,
+which can answer it or escalate a decision that belongs to the person.
+
+Ordinary waiting and turn-finish notices do not call you for sessions nobody watches: an unattended one, a cron's, and one a tool started
 without asking for you in the chat. Their questions still show on the Messages page. A board
 card's **Discuss**, the board session and a board's **Assist** have you in them and do call you.
 

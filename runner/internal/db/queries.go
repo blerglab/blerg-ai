@@ -1343,6 +1343,7 @@ func ListOpenAsks(ctx context.Context, conn *pgxpool.Pool, sessionID string) ([]
 	rows, err := conn.Query(ctx, `
 		SELECT `+messageCols+` FROM messages
 		 WHERE session_id = $1 AND kind = 'ask' AND status = 'open'
+           AND NOT EXISTS (SELECT 1 FROM session_failure_alerts f WHERE f.message_id=messages.id)
 		 ORDER BY created_at DESC
 	`, sessionID)
 	if err != nil {
@@ -1412,6 +1413,7 @@ func CloseOpenMessagesForSession(ctx context.Context, conn *pgxpool.Pool, sessio
 	rows, err := conn.Query(ctx, `
 		UPDATE messages SET answer = '', status = 'answered', answered_at = now()
 		 WHERE session_id = $1 AND status = 'open'
+           AND NOT EXISTS (SELECT 1 FROM session_failure_alerts f WHERE f.message_id=messages.id)
 		 RETURNING `+messageCols+`
 	`, sessionID)
 	if err != nil {
@@ -1443,11 +1445,16 @@ func CloseOpenAsksForSession(ctx context.Context, conn *pgxpool.Pool, sessionID 
 // again after a restart may still read "running" from before it, and only idle and waiting are
 // ever shown as paused; the next "running" clears the reason (UpdateSessionStatus).
 func SetSessionPaused(ctx context.Context, conn *pgxpool.Pool, sessionID, reason string) (bool, error) {
+	return SetSessionPausedWithDetail(ctx, conn, sessionID, reason, "")
+}
+
+// SetSessionPausedWithDetail records the pause and its recovery reason together.
+func SetSessionPausedWithDetail(ctx context.Context, conn *pgxpool.Pool, sessionID, reason, detail string) (bool, error) {
 	tag, err := conn.Exec(ctx, `
-		UPDATE sessions SET paused_reason = $2
+		UPDATE sessions SET paused_reason = $2, paused_detail=$3, status_changed_at=now()
 		 WHERE id = $1 AND ended_at IS NULL AND status NOT IN ('stopped', 'ended')
 		   AND paused_reason IS DISTINCT FROM $2
-	`, sessionID, reason)
+	`, sessionID, reason, detail)
 	if err != nil {
 		return false, err
 	}
@@ -2070,6 +2077,7 @@ func UndeliveredQuestionAnswers(ctx context.Context, conn *pgxpool.Pool, session
 	rows, err := conn.Query(ctx, `
 		SELECT `+messageCols+` FROM messages m
 		 WHERE m.session_id = $1 AND m.kind = 'ask' AND m.no_wait AND m.status = 'answered'
+		   AND NOT EXISTS (SELECT 1 FROM session_failure_alerts f WHERE f.message_id=m.id)
 		   AND m.answered_at > now() - interval '1 day'
 		   AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = m.session_id AND s.kind = 'agent')
 		   AND ((COALESCE(m.answer, '') <> '' AND NOT m.dismissed

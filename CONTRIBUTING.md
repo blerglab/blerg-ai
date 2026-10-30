@@ -248,14 +248,17 @@ on top of this repository's `main`. Pull requests merged here are merged back in
 repository before the next release, so they carry forward. To cut a release, from the private
 repository's up-to-date `main` with CI green:
 
-1. Merge this repository's `main` into it (`git fetch public && git merge public/main`).
-2. Move the `Unreleased` entries in `CHANGELOG.md` under a new `## [X.Y.Z] - YYYY-MM-DD`
+1. Before the public CI push or release cut, run the [session acceptance gate](docs/session-e2e.md):
+   deterministic daemon scenarios, the real-install Hermes campaign, and the optional Claude/Codex
+   smoke when those engines are release targets. Retain the summary and private logs as release evidence.
+2. Merge this repository's `main` into it (`git fetch public && git merge public/main`).
+3. Move the `Unreleased` entries in `CHANGELOG.md` under a new `## [X.Y.Z] - YYYY-MM-DD`
    heading, and update the compare links at the bottom.
-3. Put `X.Y.Z` in `VERSION`, and commit both.
-4. Run `scripts/release-public.sh vX.Y.Z` to build and inspect the release commit, then
+4. Put `X.Y.Z` in `VERSION`, and commit both.
+5. Run `scripts/release-public.sh vX.Y.Z` to build and inspect the release commit, then
    `scripts/release-public.sh --push vX.Y.Z` to push it as `main`, tag it `vX.Y.Z`, and merge
    it back. The script documents its checks and configuration at the top.
-5. Create a GitHub release for the tag, using that version's changelog entry as the notes.
+6. Create a GitHub release for the tag, using that version's changelog entry as the notes.
 
 **How a running service reports its version.** Each service is stamped at build time from a
 `VERSION` build argument, and reports `dev` when none was given.

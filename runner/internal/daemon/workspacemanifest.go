@@ -88,6 +88,8 @@ type workspacePrivateMember struct {
 }
 
 type workspacePrivateManifest struct {
+	HostChild                bool                              `json:"host_child"`
+	HostChildren             []hostChildAllocation             `json:"host_children,omitempty"`
 	HostHelpersJournaled     bool                              `json:"host_helpers_journaled"`
 	HostController           hostHelperIdentity                `json:"host_controller"`
 	Host                     bool                              `json:"host"`

@@ -199,6 +199,9 @@ func (a *API) buildSessionResult(ctx context.Context, sessionID string, viewers 
 		ownsSession(viewers[0], row) {
 		res.Workspace = ws.Manifest
 		res.WorkspaceResults = ws.Results
+		if ws.Kind != "folder" && ws.Manifest.Runtime == "host" && derefOrEmpty(row.ParentSessionID) != "" {
+			res.Branch = "wip/" + row.ID
+		}
 		if res.WorkspaceResults == nil {
 			res.WorkspaceResults = []protocol.WorkspaceMemberResult{}
 		}

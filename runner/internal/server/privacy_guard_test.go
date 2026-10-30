@@ -206,6 +206,8 @@ const (
 )
 
 var emitDecisions = map[string]emitDecision{
+	"session_failure_alerts.go:broadcastFailureAlert:BroadcastJSONPerAccount":   {1, "owner-only answerable Needs-you item; per-session private filtering remains enforced"},
+	"session_failure_alerts.go:broadcastFailureAlert:SendPush":                  {2, "private sessions send only generic text with no target; shared session alerts use the existing privacy backstop"},
 	"desktop_visibility.go:broadcastOwnedDesktop:BroadcastJSONPerAccount":       {1, "exact persisted desktop owner only, with private-session filtering at delivery"},
 	"session_discard.go:handleSessionDiscard:BroadcastJSONPerAccount":           {1, "owner-only durable archive notification; immutable same-account parent/child ownership checked before mutation"},
 	"delegation_discard.go:handleChildDiscard:BroadcastJSON":                    {1, whyScoped + "; parent and child independently scoped"},
@@ -233,7 +235,7 @@ var emitDecisions = map[string]emitDecision{
 	"messageevents.go:answerAskFrom:BroadcastJSON":                              {1, whyScoped},
 	"messageevents.go:fanOutServerEvent:FanOutAgentEvent":                       {1, whySubscribers},
 	"messages.go:HandlePostMessageExpire:BroadcastJSON":                         {1, whyScoped},
-	"messages.go:replyMessageUnlocked:BroadcastJSON":                            {1, whyScoped},
+	"messages.go:replyMessageUnlocked:BroadcastJSON":                            {2, whyScoped},
 	"questions.go:dismissMessageUnlocked:BroadcastJSON":                         {1, whyScoped},
 	"messages.go:HandlePostMessages:BroadcastJSON":                              {1, whyScoped},
 	"messages.go:HandlePostMessages:BroadcastJSONPerAccount":                    {1, whyScoped},

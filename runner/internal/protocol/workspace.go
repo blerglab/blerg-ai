@@ -44,8 +44,10 @@ func (c WorkspaceCapabilities) Require(m WorkspaceManifest, shell bool) error {
 }
 
 type WorkspaceRoot struct {
-	Device uint64 `json:"device"`
-	Inode  uint64 `json:"inode"`
+	// Identity binds empty selections to their configured root and desktop.
+	Identity string `json:"identity,omitempty"`
+	Device   uint64 `json:"device"`
+	Inode    uint64 `json:"inode"`
 }
 
 // WorkspaceMember contains authorized public metadata only. Private source paths,

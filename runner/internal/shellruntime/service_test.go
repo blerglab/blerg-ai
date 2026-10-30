@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"fmt"
 	"github.com/blerglab/blerg-ai/runner/internal/ownershell"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"log"
@@ -397,6 +398,37 @@ func TestIdentityRefreshRefusalCauses(t *testing.T) {
 			}
 			if want == ownershell.ReasonRuntimeCleanup && !entry.fenced {
 				t.Fatal("failed cleanup cleared the fence")
+			}
+		})
+	}
+}
+
+func TestServiceRecoversInterruptedSync(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		t.Run(fmt.Sprint(configured), func(t *testing.T) {
+			base, b, _, key := fixture(t)
+			service := NewService(func(RPC) error { return nil })
+			reconciled := 0
+			if err := service.Register(t.Context(), new(sync.Mutex), b, base.command, func(context.Context) error { reconciled++; return nil }); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+			b, _ = service.Binding(b.Session)
+			if configured && !service.execute(t.Context(), RPC{SessionID: b.Session, Op: "configure", Binding: b, Key: key.Public().(ed25519.PublicKey), Consent: base.command.Consent, Policy: base.command.Policy}).OK {
+				t.Fatal("configure refused")
+			}
+			native := service.Lifecycle(b.Session)
+			l := ownershell.SupervisorIdentity(b, ownershell.SignedGrant{}).Launch
+			if err := native.Notify(t.Context(), l, "syncing"); err != nil {
+				t.Fatal(err)
+			}
+			before := reconciled
+			proof, err := native.RecoverLaunch(t.Context(), l)
+			if err != nil || proof.ValidateFor(l, "") != nil {
+				t.Fatal("interrupted sync recovery refused", err)
+			}
+			if !configured && reconciled <= before {
+				t.Fatal("recovery skipped independent reconciliation")
 			}
 		})
 	}

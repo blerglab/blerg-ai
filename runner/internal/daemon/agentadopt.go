@@ -9,6 +9,7 @@ package daemon
 // for that. It never runs on a reconnect: the sessions are in memory then.
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -39,6 +40,41 @@ type adoptingSession struct {
 	rec     AgentRecord
 	held    []heldMessage // messages that arrived meanwhile, in order
 	dropped bool          // stopped meanwhile: it must not come back
+	failed  string        // retained while recovery is paused; input retries adoption
+	// awaitsServer: it failed only because the server was not connected yet, so the next
+	// connection retries it without waiting for a message.
+	awaitsServer bool
+}
+
+// adoptAwaitsServer is adoptOne's reason when a host workspace could not be re-proven because
+// the server was not connected yet.
+const adoptAwaitsServer = "Workspace recovery is waiting for the server connection."
+
+// Why a recorded session's host workspace journal cannot be resumed: adoptOne's reasons, shown
+// to the person on the paused session.
+const (
+	adoptWorkspaceUnverified = "Workspace recovery needs attention: the saved workspace record could not be verified."
+	adoptWorkspaceForeign    = "Workspace recovery needs attention: the saved workspace record does not belong to this host session."
+	adoptWorkspaceStopping   = "Its workspace was being stopped when the daemon went down, and the stop is not finished. It stays paused so no work is lost."
+	adoptWorkspaceClosed     = "Its workspace was already closed and its work delivered, so it cannot continue there. Start a new session to continue."
+)
+
+// workspaceResumeRefusal is why a host workspace journal cannot be resumed, "" when it can be
+// tried. A journal whose launch was closed (stop requested, final delivery made) can never be
+// resumed in place: its runtime authority is spent, and resuming it would run the session outside
+// its workspace. The person is told which case it is.
+func workspaceResumeRefusal(state workspacePrivateManifest, readErr error, sessionID string) string {
+	switch {
+	case readErr != nil:
+		return adoptWorkspaceUnverified
+	case !state.Host || state.Session != sessionID:
+		return adoptWorkspaceForeign
+	case state.Stopped && workspaceFinalComplete(state):
+		return adoptWorkspaceClosed
+	case state.StopRequested || state.FinalDelivery != nil:
+		return adoptWorkspaceStopping
+	}
+	return ""
 }
 
 type heldMessage = agent.Input
@@ -103,6 +139,9 @@ func (h *AgentHost) DropRecord(sessionID string) {
 	if a := h.adopting[sessionID]; a != nil {
 		a.dropped = true
 		a.held = nil
+		if a.failed != "" {
+			delete(h.adopting, sessionID)
+		}
 	}
 	h.mu.Unlock()
 	deleteAgentRecord(h.cfg.RecordsDir, sessionID)
@@ -132,8 +171,10 @@ func (h *AgentHost) BeginAdoption() int {
 }
 
 // RunAdoption hosts every claimed session again, one after another, and returns how many it
-// hosted. A session that cannot be hosted loses its record and has its end reported.
+// hosted. Failed recovery keeps its record and reports a retryable pause.
 func (h *AgentHost) RunAdoption() int {
+	h.adoptionMu.Lock()
+	defer h.adoptionMu.Unlock()
 	h.mu.Lock()
 	ids := make([]string, 0, len(h.adopting))
 	for id := range h.adopting {
@@ -157,17 +198,20 @@ func (h *AgentHost) RunAdoption() int {
 		// arrived while it was being hosted wins.
 		h.mu.Lock()
 		dropped, held := a.dropped, a.held
-		delete(h.adopting, id)
-		if reason != "" {
+		if reason == "" || dropped {
+			delete(h.adopting, id)
+		}
+		if reason != "" && !dropped {
+			a.failed = reason
+			a.awaitsServer = reason == adoptAwaitsServer
 			h.adoptFailed = append(h.adoptFailed, id)
 		}
 		h.mu.Unlock()
 		switch {
-		case reason != "":
-			log.Printf("agent session %s: not recovered after the restart: %s", id, reason)
-			deleteAgentRecord(h.cfg.RecordsDir, id)
 		case dropped:
 			h.Kill(id)
+		case reason != "":
+			log.Printf("agent session %s: not recovered after the restart: %s", id, reason)
 		default:
 			adopted++
 			for _, m := range held {
@@ -211,6 +255,10 @@ func (h *AgentHost) holdForAdoption(sessionID string, in agent.Input) bool {
 		return false
 	}
 	a.held = append(a.held, in)
+	if a.failed != "" {
+		a.failed = ""
+		go h.RunAdoption()
+	}
 	return true
 }
 
@@ -229,6 +277,30 @@ func (h *AgentHost) adoptOne(rec AgentRecord) string {
 		SessionToken: rec.SessionToken, BoardToken: rec.BoardToken, ExtraEnv: rec.ExtraEnv,
 		Plugins: rec.Plugins, Model: rec.Model, Effort: rec.Effort,
 		RequireRecoveryReady: rec.RequireRecoveryReady,
+	}
+	if h.cfg.Workspaces != nil {
+		path, err := workspaceRecord(rec.SessionID)
+		if err != nil {
+			return "Workspace recovery is unavailable; retry after restarting the daemon."
+		}
+		if _, err = os.Lstat(path); err == nil {
+			state, readErr := readPrivateWorkspace(path)
+			if reason := workspaceResumeRefusal(state, readErr, rec.SessionID); reason != "" {
+				return reason
+			}
+			if authority, ok := h.cfg.Workspaces.Authority.(*WorkspaceAuthority); ok {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				err = authority.client.WaitWorkspaceRuntime(ctx, "host")
+				cancel()
+				if err != nil {
+					return adoptAwaitsServer
+				}
+			}
+			msg.Workspace = &state.Launch
+			msg.WorkspaceCapabilities = protocol.WorkspaceCapabilitiesFor("host", "linux")
+		} else if !os.IsNotExist(err) {
+			return "Workspace recovery is unavailable; retry after restarting the daemon."
+		}
 	}
 	// A model or effort the daemon no longer accepts must not cost the session: fall back to the
 	// default, as a spawn with none would.
@@ -732,11 +804,23 @@ func cutOffBackgroundList(b *strings.Builder, shells []agent.BackgroundTaskStart
 // was holding back for one can go ahead.
 func (h *AgentHost) NoteConnected() {
 	h.connectedOnce.Do(func() { close(h.connected) })
+	// A session that waited for this connection is retried rather than reported as paused.
+	h.mu.Lock()
+	retry := false
+	for _, a := range h.adopting {
+		if a.failed != "" && a.awaitsServer && !a.dropped {
+			a.failed, a.awaitsServer, retry = "", false, true
+		}
+	}
+	h.mu.Unlock()
+	if retry {
+		go h.RunAdoption()
+	}
 	h.ReportAdoptionFailures()
 }
 
 // ReportAdoptionFailures tells the server about the sessions that could not be hosted again, so
-// their rows end with a reason instead of waiting out the lost-daemon window. Before the first
+// their rows stay paused with a reason instead of ending. Before the first
 // connection it does nothing; they are reported when there is one.
 func (h *AgentHost) ReportAdoptionFailures() {
 	select {
@@ -749,11 +833,24 @@ func (h *AgentHost) ReportAdoptionFailures() {
 	h.adoptFailed = nil
 	h.mu.Unlock()
 	for _, id := range failed {
-		if err := h.sender.Send(protocol.SessionEnded{Type: "session_ended", SessionID: id, ExitCode: 1}); err != nil {
+		h.mu.Lock()
+		pending := h.adopting[id]
+		detail := ""
+		if pending != nil && !pending.dropped {
+			detail = pending.failed
+		}
+		h.mu.Unlock()
+		if detail == "" {
+			continue
+		}
+		detail = "Recovery paused: " + strings.TrimSuffix(detail, ".") + ". Send a message to retry."
+		if err := h.sender.Send(protocol.SessionPaused{Type: "session_paused", SessionID: id, Reason: protocol.PausedByRestart, Detail: detail}); err != nil {
 			// The connection went away again: keep it for the next one.
 			h.mu.Lock()
 			h.adoptFailed = append(h.adoptFailed, id)
 			h.mu.Unlock()
+		} else {
+			newWSEmitter(h.sender, id, nil).Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "error", Payload: agent.ErrorPayload{Message: detail, Retryable: true, Code: "session_recovery"}})
 		}
 	}
 }

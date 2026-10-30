@@ -301,6 +301,16 @@ func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 		// Usage limits per provider (limits.go).
 		UsageLimits: cfg.UsageLimits,
 	})
+	if cfg.Workspaces != nil && cfg.AgentRecordsDir != "" {
+		cfg.Workspaces.RecoverableHost = func(id string) bool {
+			exists, err := secureAgentRecordsDir(cfg.AgentRecordsDir, false)
+			if err != nil || !exists {
+				return false
+			}
+			info, err := os.Lstat(agentRecordPath(cfg.AgentRecordsDir, id))
+			return err == nil && info.Mode().IsRegular() && ownedByDaemon(info)
+		}
+	}
 	if apiKey != "" {
 		log.Printf("manager: agent sessions enabled (Claude: the claude CLI when installed, else the native loop, budget $%.0f/session)", budget)
 	} else {
@@ -1673,7 +1683,7 @@ func (m *Manager) ReattachSessions() {
 	// events the server hasn't acked yet.
 	if m.agents != nil {
 		m.agents.ResendPending()
-		// There is a server to talk to: sessions a restart could not bring back have their end
+		// There is a server to talk to: sessions a restart could not bring back have their pause
 		// reported, and a cut-off turn waiting to be continued may be (agentadopt.go).
 		m.agents.NoteConnected()
 	}
@@ -2203,6 +2213,11 @@ func (m *Manager) killSession(id string) {
 		m.agents.Kill(msg.SessionID)
 		return
 	}
+	// Drop a paused recovery claim before the sweep, so an explicit stop
+	// cannot be mistaken for another request to resume its host journal.
+	if m.agents != nil {
+		m.agents.DropRecord(id)
+	}
 	// A stopped preparation has no AgentHost entry yet. Its service mutex joins
 	// cloning; the signed intent then takes the exact cleanup-only recovery path.
 	if service := m.config.Workspaces; service != nil {
@@ -2218,12 +2233,6 @@ func (m *Manager) killSession(id string) {
 		if err := m.recoverWorkspaces(context.Background()); err != nil {
 			log.Printf("workspace cleanup retained: %v", err)
 		}
-	}
-	// An agent session this daemon is not hosting may still have a recovery record (it was
-	// stopped while the daemon was down, and the server is saying so now): without this the
-	// record would bring it back at every start.
-	if m.agents != nil {
-		m.agents.DropRecord(msg.SessionID)
 	}
 	// Tear down the recovery record and the persistent tmux session
 	// unconditionally — even if we are not currently managing this session. A kill

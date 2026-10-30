@@ -120,3 +120,73 @@ func TestLocalWorkspaceAuthenticatedCompletionAndRecovery(t *testing.T) {
 		t.Fatal("completion encoding changed")
 	}
 }
+
+// Current says definitively when a launch is over (the daemon then keeps its writers stopped) and
+// leaves every other failure unmarked, so the daemon retries instead of wedging the session.
+func TestLocalWorkspaceCurrentRefusesOnlyDefinitively(t *testing.T) {
+	f := newTopicFx(t)
+	dc := workspaceOwnedDesktop(t, f.api.hub, f.pool, topicOwner, "refusal-desktop")
+	if _, err := f.pool.Exec(t.Context(), `UPDATE sessions SET daemon_id=$2,runtime='docker' WHERE id=$1`, f.sess, dc.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.api.hub.SetSessionOwner(f.sess, dc.ID)
+	m := protocol.WorkspaceManifest{Version: 2, Kind: "folder", Runtime: "sandbox", OwnerID: topicOwner, LaunchGeneration: newUUID(), Digest: "digest", Members: []protocol.WorkspaceMember{{ID: "one", Name: "one", Path: "one", SourceIdentity: "source", CommonDirectoryIdentity: "common", Destination: "source"}}}
+	if err := db.InsertSessionWorkspace(t.Context(), f.pool, f.sess, m); err != nil {
+		t.Fatal(err)
+	}
+	call := func(req protocol.LocalWorkspaceControl) protocol.LocalWorkspaceControlResult {
+		req.SessionID, req.RequestID = f.sess, newUUID()
+		var reply protocol.LocalWorkspaceControlResult
+		if err := db.WithDesktopFence(t.Context(), f.pool, dc.ID, func(ctx context.Context) error {
+			reply = f.api.hub.localWorkspaceControl(ctx, f.pool, dc, req)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return reply
+	}
+	launch := call(protocol.LocalWorkspaceControl{Operation: "launch", Token: newUUID(), Manifest: &m})
+	binding := protocol.WorkspaceRuntimeBinding{WorkspaceRuntimeRef: protocol.WorkspaceRuntimeRef{LaunchGeneration: m.LaunchGeneration, Generation: launch.Launch.RuntimeGeneration}, ManifestDigest: m.Digest, Root: protocol.WorkspaceRoot{Inode: 7}}
+	if !launch.OK || !call(protocol.LocalWorkspaceControl{Operation: "bind", Launch: launch.Launch, Binding: binding}).OK {
+		t.Fatal("launch or bind refused")
+	}
+	current := func(l protocol.SupervisorLaunch, b protocol.WorkspaceRuntimeBinding) protocol.LocalWorkspaceControlResult {
+		return call(protocol.LocalWorkspaceControl{Operation: "current", Launch: l, Binding: b})
+	}
+	if r := current(launch.Launch, binding); !r.OK || r.Refused != "" {
+		t.Fatalf("current launch: %+v", r)
+	}
+	stale := launch.Launch
+	stale.RuntimeGeneration++
+	if r := current(stale, binding); r.OK || r.Refused == "" {
+		t.Fatalf("a replaced launch must be refused definitively: %+v", r)
+	}
+	other := binding
+	other.Root.Inode++
+	if r := current(launch.Launch, other); r.OK || r.Refused == "" {
+		t.Fatalf("a replaced runtime binding must be refused definitively: %+v", r)
+	}
+	// A reconnect the daemon has not yet recovered is not a verdict.
+	dc.DesktopGeneration = newUUID()
+	if err := db.WithDesktopFence(t.Context(), f.pool, dc.ID, func(ctx context.Context) error {
+		return db.BindDesktopConnection(ctx, f.pool, *dc.DesktopBinding, dc.Name, dc.Mode, dc.ReposRoot, dc.DesktopGeneration)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if r := current(launch.Launch, binding); r.OK || r.Refused != "" {
+		t.Fatalf("an unrecovered reconnect must fail without a definitive refusal: %+v", r)
+	}
+	recovered := call(protocol.LocalWorkspaceControl{Operation: "recover", Launch: launch.Launch, Binding: binding})
+	if !recovered.OK {
+		t.Fatalf("recover: %+v", recovered)
+	}
+	if r := current(recovered.Launch, binding); !r.OK {
+		t.Fatalf("current after recovery: %+v", r)
+	}
+	if _, err := f.pool.Exec(t.Context(), `UPDATE sessions SET ended_at=now(),status='stopped' WHERE id=$1`, f.sess); err != nil {
+		t.Fatal(err)
+	}
+	if r := current(recovered.Launch, binding); r.OK || r.Refused == "" {
+		t.Fatalf("an ended session must be refused definitively: %+v", r)
+	}
+}

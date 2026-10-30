@@ -28,8 +28,11 @@ func (h *Hub) localWorkspaceControl(ctx context.Context, pool *pgxpool.Pool, dc 
 		}
 		row, err := db.GetSession(ctx, pool, req.SessionID)
 		ws, werr := db.GetSessionWorkspace(ctx, pool, req.SessionID)
-		if err != nil || werr != nil || row == nil || row.DaemonID != dc.ID || row.SpawningAccountID == nil || !h.ownsDesktopID(ctx, *row.SpawningAccountID, dc.ID) || ws == nil || ws.Manifest == nil || ws.Manifest.OwnerID != *row.SpawningAccountID || (ws.Manifest.Runtime != "sandbox" && ws.Manifest.Runtime != "host") || row.ArchivedAt != nil || row.DiscardRequestedAt != nil && !localWorkspaceCleanupOperation(req.Operation) {
+		if err != nil || werr != nil || row == nil || row.DaemonID != dc.ID || row.SpawningAccountID == nil || !h.ownsDesktopID(ctx, *row.SpawningAccountID, dc.ID) || ws == nil || ws.Manifest == nil || ws.Manifest.OwnerID != *row.SpawningAccountID || (ws.Manifest.Runtime != "sandbox" && ws.Manifest.Runtime != "host") {
 			return errWorkspaceUnavailable
+		}
+		if row.ArchivedAt != nil || row.DiscardRequestedAt != nil && !localWorkspaceCleanupOperation(req.Operation) {
+			return workspaceRefused("the session was archived or discarded")
 		}
 		m := *ws.Manifest
 		if req.Operation == "manifest" {
@@ -134,10 +137,13 @@ func (h *Hub) localWorkspaceControl(ctx context.Context, pool *pgxpool.Pool, dc 
 			return err
 		}
 		if err = pool.QueryRow(ctx, `SELECT token,connection_generation,aborted,stop_requested,final_digest IS NOT NULL FROM local_workspace_authority WHERE session_id=$1 AND runtime_generation=$2 AND NOT aborted`, req.SessionID, generation).Scan(&token, &connection, &aborted, &stopping, &completed); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return workspaceRefused("no launch holds this workspace any more")
+			}
 			return err
 		}
 		if req.Launch.SessionID != launch.SessionID || req.Launch.LaunchGeneration != launch.LaunchGeneration || req.Launch.RuntimeGeneration != launch.RuntimeGeneration || req.Launch.Runtime != launch.Runtime {
-			return errWorkspaceUnavailable
+			return workspaceRefused("a newer launch replaced this one")
 		}
 		if req.Operation == "final" {
 			// Completion reconciliation authenticates this new link independently of
@@ -153,11 +159,11 @@ func (h *Hub) localWorkspaceControl(ctx context.Context, pool *pgxpool.Pool, dc 
 			return nil
 		}
 		if completed {
-			return errWorkspaceUnavailable
+			return workspaceRefused("the session's workspace was completed")
 		}
 		cleanup := localWorkspaceCleanupOperation(req.Operation)
 		if (!live || stopping) && !cleanup {
-			return errWorkspaceUnavailable
+			return workspaceRefused("the session ended or is stopping")
 		}
 		if req.Operation == "recover" || req.Operation == "cleanup_recover" {
 			if binding == nil || *binding != req.Binding {
@@ -187,7 +193,7 @@ func (h *Hub) localWorkspaceControl(ctx context.Context, pool *pgxpool.Pool, dc 
 			return db.BindWorkspaceRuntime(ctx, pool, req.SessionID, ref, req.Binding)
 		case "current", "results", "cleanup_current", "cleanup_results":
 			if binding == nil || *binding != req.Binding {
-				return errWorkspaceUnavailable
+				return workspaceRefused("a newer runtime replaced this one")
 			}
 			if req.Operation == "results" || req.Operation == "cleanup_results" {
 				if cleanup {
@@ -204,8 +210,21 @@ func (h *Hub) localWorkspaceControl(ctx context.Context, pool *pgxpool.Pool, dc 
 		err = h.completeLocalWorkspaceFinal(ctx, pool, req.SessionID)
 	}
 	reply.OK = err == nil
+	var refused *workspaceRefusal
+	if errors.As(err, &refused) {
+		reply.Refused = refused.reason
+	}
 	return reply
 }
+
+// workspaceRefusal is a definitive answer: this launch has no authority any more, and asking again
+// will not change that. Only these reach the daemon as Refused; every other failure (a database
+// error, a connection not yet recovered) may be transient. It is still errWorkspaceUnavailable.
+type workspaceRefusal struct{ reason string }
+
+func workspaceRefused(reason string) error { return &workspaceRefusal{reason: reason} }
+func (r *workspaceRefusal) Error() string  { return errWorkspaceUnavailable.Error() + ": " + r.reason }
+func (r *workspaceRefusal) Unwrap() error  { return errWorkspaceUnavailable }
 
 type workspaceFinalCommittedKey struct{}
 

@@ -23,5 +23,5 @@ func reapHostHelper(context.Context, hostHelperIdentity) error {
 func hostControllerGone(hostHelperIdentity) error {
 	return errors.New("host cleanup proof unsupported")
 }
-func hostWriterGroupFor(string, func(int) error) hostWriterGroup { return nil }
-func ServeHostWriter([]string) int                               { return 125 }
+func hostWriterGroupFor(string, string, func(int) error) hostWriterGroup { return nil }
+func ServeHostWriter([]string) int                                       { return 125 }

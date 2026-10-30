@@ -1044,6 +1044,7 @@ func (d *claudeCodeDriver) idleFired(gen int, epoch uint64) {
 	d.sm.Unlock()
 	d.subMu.Unlock()
 	if closeNow {
+		log.Printf("claude-code: idle shutdown: generation=%d idle_for=%s", p.gen, ccIdleShutdown)
 		d.finishStdinClose(p)
 	}
 }
@@ -1175,6 +1176,11 @@ func (d *claudeCodeDriver) procExited(ctx context.Context, p *ccProc, werr error
 		d.steer.sq = nil
 	}
 	d.sm.Unlock()
+	pid := 0
+	if p.cmd != nil && p.cmd.Process != nil {
+		pid = p.cmd.Process.Pid
+	}
+	log.Printf("claude-code: process exited: generation=%d pid=%d status=%v intentional=%t driver_kill=%t shutdown=%t", p.gen, pid, werr, intentional, killed, shuttingDown)
 	close(p.done)
 
 	if p.cmd != nil && p.cmd.Process != nil && !d.prefix.enabled() {

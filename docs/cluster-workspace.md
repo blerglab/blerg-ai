@@ -73,8 +73,12 @@ kernel tracer. The tracer tracks forks, threads and detached descendants before
 they execute; EXITKILL covers helper failure. Freeze acknowledges only after all
 tracked tasks have kernel stop records. Thaw resumes that same tree. Stop waits
 for reaping and returns an explicit empty receipt. The runner and Git workers
-stay outside these trees. Uncertain helper loss fences settlement and retains
-storage. Plugin install commands use the same launcher. Launcher-created engine
+stay outside these trees. Before a new process of the tree runs, the tracer sends
+its pidfd to the runner over the control descriptor; if a helper is lost, its tree
+counts as gone only once the helper has exited, that stream was read intact to its
+end, and every recorded pidfd reports exit (EXITKILL ended the rest before they
+ran). Until then, and whenever no ledger was kept, helper loss fences settlement
+and retains storage. Plugin install commands use the same launcher. Launcher-created engine
 support files are transferred through bounded descriptor-rooted traversal;
 private runtime state is excluded.
 

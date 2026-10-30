@@ -694,3 +694,115 @@ func TestDiscoveryLayoutIdentityAndBinding(t *testing.T) {
 		t.Fatal("unknown layout accepted")
 	}
 }
+
+// A restarted daemon has no bound selections. A resumed host session rebuilds
+// its own from the launch journal's paths (repository, physical folder and
+// multi-repository selections), so a host child can be bound again; a path
+// whose repository was replaced is refused.
+func TestDiscoveryRebindsResumedLaunchFromJournalPaths(t *testing.T) {
+	for _, layout := range []string{"repo", "folder", "multi"} {
+		t.Run(layout, func(t *testing.T) {
+			root := fixtureRoot(t)
+			fixtureRepo(t, root, "group/api", false)
+			fixtureRepo(t, root, "group/web", false)
+			s := NewOwned(func() string { return root }, "desktop")
+			var selected protocol.WorkspaceDiscoveryResult
+			switch layout {
+			case "repo":
+				selected = resolve(t, s, ref(find(t, list(t, s, "group"), "group/api")))
+			case "folder":
+				folder := find(t, list(t, s, "."), "group")
+				expand := request("expand")
+				expand.Folder = &protocol.SelectionRef{Path: folder.Path, SourceIdentity: folder.SourceIdentity}
+				selected = s.Handle(t.Context(), expand)
+			case "multi":
+				page := list(t, s, "group")
+				selected = resolve(t, s, ref(find(t, page, "group/api")), ref(find(t, page, "group/web")))
+			}
+			if !selected.OK {
+				t.Fatal(selected.ErrorCode)
+			}
+			manifest := manifestForSelection(selected.Resolved, "launch")
+			bind := request("bind")
+			bind.SelectionIdentity = selected.Resolved.SelectionIdentity
+			bind.Manifest = &manifest
+			if result := s.Handle(t.Context(), bind); !result.OK {
+				t.Fatal(result.ErrorCode)
+			}
+			pins, err := s.PinBound(t.Context(), manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			anchor, sources := pins.AnchorPath, []string{}
+			for _, source := range pins.Sources {
+				sources = append(sources, source.CanonicalPath)
+			}
+			pins.Close()
+
+			child := manifest
+			child.LaunchGeneration = "child"
+			child.Digest = workspaceselection.Digest(child)
+			req := request("bind_child")
+			req.ParentLaunchGeneration = manifest.LaunchGeneration
+			req.Manifest = &child
+			restarted := NewOwned(func() string { return root }, "desktop")
+			if result := restarted.Handle(t.Context(), req); result.OK {
+				t.Fatal("a restarted daemon bound a child without its parent")
+			}
+			if err := restarted.RebindResumed(t.Context(), manifest, anchor, sources); err != nil {
+				t.Fatal(err)
+			}
+			if result := restarted.Handle(t.Context(), req); !result.OK {
+				t.Fatal(result.ErrorCode)
+			}
+			childPins, err := restarted.PinBound(t.Context(), child)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if childPins.AnchorPath != anchor || len(childPins.Sources) != len(sources) {
+				t.Fatal("rebound child moved", childPins.AnchorPath, anchor)
+			}
+			childPins.Close()
+
+			if err := NewOwned(func() string { return root }, "other-desktop").RebindResumed(t.Context(), manifest, anchor, sources); err == nil {
+				t.Fatal("rebind crossed desktop identity")
+			}
+			if err := os.Rename(filepath.Join(root, "group", "api"), filepath.Join(root, "group", "old-api")); err != nil {
+				t.Fatal(err)
+			}
+			fixtureRepo(t, root, "group/api", false)
+			if err := NewOwned(func() string { return root }, "desktop").RebindResumed(t.Context(), manifest, anchor, sources); err == nil {
+				t.Fatal("rebind accepted a replaced repository")
+			}
+		})
+	}
+}
+
+func TestDiscoveryEmptyFolderRebindChecksDesktop(t *testing.T) {
+	root := fixtureRoot(t)
+	if err := os.Mkdir(filepath.Join(root, "empty"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	s := NewOwned(func() string { return root }, "desktop")
+	folder := find(t, list(t, s, "."), "empty")
+	req := request("expand")
+	req.Folder = &protocol.SelectionRef{Path: folder.Path, SourceIdentity: folder.SourceIdentity}
+	selected := s.Handle(t.Context(), req)
+	if !selected.OK {
+		t.Fatal(selected.ErrorCode)
+	}
+	manifest := manifestForSelection(selected.Resolved, "empty-launch")
+	anchor := filepath.Join(root, "empty")
+	if err := NewOwned(func() string { return root }, "desktop").RebindResumed(t.Context(), manifest, anchor, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewOwned(func() string { return root }, "other-desktop").RebindResumed(t.Context(), manifest, anchor, nil); err == nil {
+		t.Fatal("empty-folder rebind crossed desktop identity")
+	}
+	manifest.Root.Identity = ""
+	manifest.Digest = workspaceselection.Digest(manifest)
+	if err := NewOwned(func() string { return root }, "desktop").RebindResumed(t.Context(), manifest, anchor, nil); err == nil {
+		t.Fatal("empty-folder rebind accepted missing root identity")
+	}
+
+}

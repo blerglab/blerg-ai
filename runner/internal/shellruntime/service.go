@@ -470,7 +470,7 @@ func (s *Service) execute(ctx context.Context, r RPC) (result RPC) {
 		launch.fenced = true
 	}
 	blocked := launch.fenced || launch.terminal
-	recoverable := !launch.terminal && launch.phase == "running" && launch.binding.Live
+	recoverable := !launch.terminal && (launch.phase == "running" || launch.phase == "syncing") && launch.binding.Live
 	launch.mu.Unlock()
 	if (r.Op == "configure" || r.Op == "open" || r.Op == "admit") && blocked {
 		result.ErrorCode = string(ownershell.ReasonRuntimeFenced)
@@ -494,6 +494,7 @@ func (s *Service) execute(ctx context.Context, r RPC) (result RPC) {
 		if r.Op == "recover" {
 			launch.mu.Lock()
 			launch.fenced = false
+			launch.phase = "running"
 			launch.mu.Unlock()
 		}
 		result.Cleanup = &protocol.SupervisorCleanup{Launch: expectedLaunch, ContainmentEmpty: true, PTYsClosed: true, Reaped: true}
@@ -756,6 +757,7 @@ func (s *Service) execute(ctx context.Context, r RPC) (result RPC) {
 		if err == nil {
 			launch.mu.Lock()
 			launch.fenced = false
+			launch.phase = "running"
 			launch.mu.Unlock()
 			result.Cleanup = &proof
 			result.OK = true

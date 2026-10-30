@@ -482,10 +482,11 @@ func (c *Coordinator) RecoverLaunch(ctx context.Context, l protocol.SupervisorLa
 	}
 	c.sessionMu.Lock()
 	defer c.sessionMu.Unlock()
-	if c.epoch != epoch || c.terminal || c.phase != runtimelifecycle.Running {
+	if c.epoch != epoch || c.terminal || (c.phase != runtimelifecycle.Running && c.phase != runtimelifecycle.Syncing) {
 		return protocol.SupervisorCleanup{}, ErrClosed
 	}
 	c.recovered = true
+	c.phase = runtimelifecycle.Running
 	c.fenced = false
 	c.launchClosing.Store(false)
 	return proof, nil

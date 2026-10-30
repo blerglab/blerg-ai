@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/blerglab/blerg-ai/runner/internal/mcpgw"
+	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
@@ -33,7 +34,27 @@ func (a *API) requestLocalWorkspaceStop(ctx context.Context, id string, end db.S
 		}
 	}
 	if strict {
-		return fmt.Errorf("desktop cleanup pending; stop retained")
+		// Stop admission is already closed, but a stop request is not a final
+		// receipt. Wait outside the runtime launch fence so the daemon can
+		// commit cleanup while this first discard request is still in flight.
+		wait, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		tick := time.NewTicker(25 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			var settled bool
+			if err := a.dbPool.QueryRow(wait, `SELECT final_digest IS NOT NULL FROM local_workspace_authority WHERE session_id=$1 AND NOT aborted`, id).Scan(&settled); err != nil {
+				return err
+			}
+			if settled {
+				return a.hub.completeLocalWorkspaceFinal(wait, a.dbPool, id)
+			}
+			select {
+			case <-wait.Done():
+				return fmt.Errorf("desktop cleanup pending; stop retained: %w", wait.Err())
+			case <-tick.C:
+			}
+		}
 	}
 	return nil
 }

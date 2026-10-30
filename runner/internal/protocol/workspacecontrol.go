@@ -44,11 +44,15 @@ type LocalWorkspaceControlResult struct {
 	ShellEligible   bool                    `json:"shell_eligible,omitempty"`
 	ParentSessionID string                  `json:"parent_session_id,omitempty"`
 
-	Type      string                `json:"type"`
-	RequestID string                `json:"request_id"`
-	SessionID string                `json:"session_id"`
-	OK        bool                  `json:"ok"`
-	Launch    SupervisorLaunch      `json:"launch,omitzero"`
-	Manifest  *WorkspaceManifest    `json:"manifest,omitempty"`
-	Receipt   WorkspaceFinalReceipt `json:"receipt,omitzero"`
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	SessionID string `json:"session_id"`
+	OK        bool   `json:"ok"`
+	// Refused, on a failed reply, is the server's definitive reason that this launch has no
+	// authority any more (the session ended or a newer launch replaced it). Empty means the failure
+	// may be transient: a database error, a connection not yet recovered, or an older server.
+	Refused  string                `json:"refused,omitempty"`
+	Launch   SupervisorLaunch      `json:"launch,omitzero"`
+	Manifest *WorkspaceManifest    `json:"manifest,omitempty"`
+	Receipt  WorkspaceFinalReceipt `json:"receipt,omitzero"`
 }

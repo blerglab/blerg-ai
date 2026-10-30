@@ -159,7 +159,7 @@ func (a *API) HandlePostMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	info := messageRowToInfo(*row)
 	// An ask from a session nobody attends is listed, not toasted (notices.go).
-	quiet := row.Kind == "ask" && headlessSession(sess)
+	quiet := row.Kind == "ask" && !row.NoWait && headlessSession(sess)
 	if row.NoWait {
 		// A question the owner alone answers notifies the owner alone: every other viewer gets it
 		// quiet and not answerable (they see it read-only in the session).
@@ -409,6 +409,15 @@ func (a *API) HandlePostMessageReply(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "only the session's owner can answer this approval")
 		return
 	}
+	alert, alertErr := failureAlertMessage(ctx, a.dbPool, id)
+	if alertErr != nil {
+		writeError(w, 503, "alert unavailable")
+		return
+	}
+	if alert {
+		a.replyMessageUnlocked(w, r, id, req, coreAnswerer(actor))
+		return
+	}
 	err = withCancelledLimitResume(ctx, a.dbPool, row.SessionID, func() error {
 		return withParentInputGuard(ctx, a.dbPool, row.SessionID, func() error {
 			a.replyMessageUnlocked(w, r, id, req, coreAnswerer(actor))
@@ -452,6 +461,17 @@ func (a *API) replyMessageUnlocked(w http.ResponseWriter, r *http.Request, id st
 	if err != nil || row == nil {
 		log.Printf("api reply reload %s: %v", id, err)
 		writeError(w, http.StatusInternalServerError, "reload failed")
+		return
+	}
+
+	alert, alertErr := failureAlertMessage(ctx, a.dbPool, id)
+	if alertErr != nil {
+		writeError(w, 503, "alert unavailable")
+		return
+	}
+	if alert {
+		a.hub.BroadcastJSON(protocol.MessageAnswered{Type: "message_answered", Message: messageRowToInfo(*row)}) //nolint:contextcheck // browser notification outlives its request
+		writeJSON(w, http.StatusOK, map[string]string{"id": id})
 		return
 	}
 

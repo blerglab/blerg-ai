@@ -168,6 +168,11 @@ func (a *API) deliverQuestionAnswer(row db.MessageRow, answer, answerer string) 
 // sendQuestionAnswer delivers row's answer, or, for a question the person dismissed, the dismissal
 // (questionDismissedText under its own client id): the same durable relay, retries and give-up.
 func (a *API) sendQuestionAnswer(ctx context.Context, row db.MessageRow, answer, answerer string) {
+	alert, err := failureAlertMessage(ctx, a.dbPool, row.ID)
+	if err != nil || alert {
+		return
+	}
+
 	text := questionAnswerText(row, answer)
 	if row.Dismissed {
 		text = questionDismissedText(row)
@@ -464,6 +469,15 @@ func (a *API) HandlePostMessageDismiss(w http.ResponseWriter, r *http.Request) {
 	}
 	if row.OwnerOnly && !a.actorOwnsMessageSession(ctx, actor, row.SessionID) {
 		writeError(w, http.StatusForbidden, "only the session's owner can dismiss this question")
+		return
+	}
+	alert, alertErr := failureAlertMessage(ctx, a.dbPool, id)
+	if alertErr != nil {
+		writeError(w, 503, "alert unavailable")
+		return
+	}
+	if alert {
+		a.dismissMessageUnlocked(w, r, id, person)
 		return
 	}
 	// Under the same locks as a reply: a discarded child's or an ended parent's question is refused

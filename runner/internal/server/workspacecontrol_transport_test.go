@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -114,8 +115,9 @@ func TestLocalWorkspaceTransportLostCompletionReceipt(t *testing.T) {
 	if err != nil || receipt.Digest != final.Digest() {
 		t.Fatalf("durable reconciliation: %v", err)
 	}
-	if err = authority.Current(t.Context(), launch, binding); err == nil {
-		t.Fatal("ordinary Current accepted ended session")
+	err = authority.Current(t.Context(), launch, binding)
+	if refused := (*daemon.WorkspaceRefusedError)(nil); !errors.As(err, &refused) {
+		t.Fatalf("ordinary Current on an ended session must be a definitive refusal: %v", err)
 	}
 	final.Message.ExitCode = 1
 	if _, err = authority.CommitFinal(t.Context(), launch, final); err == nil {

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -239,22 +241,59 @@ func (m *Manager) prepareHostWorkspaceForPlatform(ctx context.Context, msg proto
 	admission := workspaceAdmissionLock(msg.SessionID)
 	admission.Lock()
 	defer admission.Unlock()
-	pins, err := m.PinWorkspaceSelection(ctx, *msg.Workspace)
+	record, err := workspaceRecord(msg.SessionID)
 	if err != nil {
 		return "", nil, err
 	}
+	var pins *discovery.BoundPins
+	var intent *LocalWorkspace
+	var launch protocol.SupervisorLaunch
+	token := ccUUID()
 	success := false
 	defer func() {
-		if !success {
+		if !success && pins != nil {
 			pins.Close()
 		}
 	}()
-	token := ccUUID()
-	intent, err := service.beginHostIntent(msg, pins, token)
-	if err != nil {
-		return "", nil, err
+	_, statErr := os.Lstat(record)
+	resumed := statErr == nil
+	switch {
+	case resumed:
+		// A resume reuses its signed journal: its directories (a host child's
+		// own worktrees, never the parent's checkout) and whether it is a child
+		// come from there. A restarted daemon has no P1 selection to resolve.
+		pins, err = service.reopenHostPins(ctx, msg)
+		if err == nil {
+			intent, err = service.resumeHostIntent(ctx, msg, pins)
+		}
+		if err == nil {
+			token = intent.state.RuntimeToken
+			launch = intent.state.SupervisorLaunch
+		}
+	case os.IsNotExist(statErr):
+		var parent *workspacePrivateManifest
+		parent, err = service.hostChildParent(ctx, msg)
+		if err == nil {
+			pins, err = m.PinWorkspaceSelection(ctx, *msg.Workspace)
+		}
+		if err == nil {
+			intent, err = service.beginHostIntent(msg, pins, token, parent != nil)
+		}
+		if err == nil && parent != nil {
+			// A fresh child gets its own worktrees before any launch exists.
+			var childPins *discovery.BoundPins
+			childPins, err = intent.allocateHostChild(ctx, *parent)
+			if err == nil {
+				pins.Close()
+				pins = childPins
+			}
+		}
+		if err == nil {
+			launch, err = service.Authority.Launch(ctx, msg.SessionID, *msg.Workspace, token)
+		}
+	default:
+		err = statErr
 	}
-	launch, err := service.Authority.Launch(ctx, msg.SessionID, *msg.Workspace, token)
 	if err != nil {
 		return "", nil, err
 	}
@@ -299,6 +338,10 @@ func (m *Manager) prepareHostWorkspaceForPlatform(ctx context.Context, msg proto
 	if err != nil {
 		return "", nil, err
 	}
+	if err := intent.bindHostChildExplorer(ctx, wrapper.reader); err != nil {
+		_ = wrapper.Close()
+		return "", nil, err
+	}
 	intent.state.BindingIntent = &binding
 	if err = intent.save(); err != nil {
 		_ = wrapper.Close()
@@ -319,7 +362,29 @@ func (m *Manager) prepareHostWorkspaceForPlatform(ctx context.Context, msg proto
 	}
 	wrapper.workspace = workspace
 	success = true
+	if resumed && !intent.state.HostChild {
+		m.rebindResumedSelection(ctx, intent.state)
+	}
 	return filepath.Clean(workdir), wrapper, nil
+}
+
+// rebindResumedSelection gives a resumed host parent its P1 selection binding
+// back, so it can start host children after a daemon restart: a restarted
+// daemon's discovery is empty, and bind_child needs the parent's binding. The
+// binding is rebuilt from the session's MAC-protected journal and the server's
+// manifest only (resumeHostIntent has proven both), and is released with the
+// session's explorer like a fresh launch's. A failure costs only new children.
+func (m *Manager) rebindResumedSelection(ctx context.Context, state workspacePrivateManifest) {
+	if m.discovery == nil {
+		return
+	}
+	sources := make([]string, 0, len(state.Sources))
+	for _, source := range state.Sources {
+		sources = append(sources, source.Path)
+	}
+	if err := m.discovery.RebindResumed(ctx, state.Launch, state.Root, sources); err != nil {
+		log.Printf("agent session %s: resumed, but it cannot start host children: %v", state.Session, err)
+	}
 }
 
 // Terminal sandboxes use the same in-container legacy reader as agent sessions.

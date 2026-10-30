@@ -19,6 +19,8 @@ import (
 // P0b runtime authority to the concrete P2 lifecycle. Missing authority refuses
 // before any agent or shell starts; no capability advertisement is added here.
 type LocalWorkspaceService struct {
+	RecoverableHost func(string) bool // persisted agent recovery owns live host sessions
+
 	capabilityReady func() bool                                      // installed manager, not merely allocated callback closures
 	HostExecutable  string                                           // trusted writer helper image, never decoded from requests
 	HostCommand     func(shellruntime.Identity) shellruntime.Command // trusted image/test launcher; never decoded

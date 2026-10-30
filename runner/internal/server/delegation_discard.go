@@ -96,7 +96,11 @@ func (a *API) handleChildDiscard(w http.ResponseWriter, r *http.Request) {
 			if current.DiscardRequestedAt != nil {
 				return errDiscardPending
 			}
-			if !db.TerminallyEnded(current) {
+			var localPending bool
+			if err := a.dbPool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM local_workspace_authority WHERE session_id=$1 AND NOT aborted AND final_digest IS NULL)`, child).Scan(&localPending); err != nil {
+				return err
+			}
+			if !db.TerminallyEnded(current) || localPending {
 				// A cluster child is stopped through its Job, connected or not.
 				if !terminalSessionStatus(current.Status) && a.hub.FindDaemonForSession(child) == nil && derefOrEmpty(current.Runtime) != runnerRuntimeCluster {
 					return db.ErrDelegationNotFound

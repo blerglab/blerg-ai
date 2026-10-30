@@ -69,7 +69,7 @@ func handleSessionPaused(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, dc *
 		log.Printf("daemon %s: session_paused for a session it does not host (%s) — ignored", dc.ID, msg.SessionID)
 		return
 	}
-	set, err := db.SetSessionPaused(ctx, dbPool, msg.SessionID, msg.Reason)
+	set, err := db.SetSessionPausedWithDetail(ctx, dbPool, msg.SessionID, msg.Reason, msg.Detail)
 	if err != nil {
 		log.Printf("session_paused %s: %v", msg.SessionID, err)
 		return
@@ -91,6 +91,9 @@ func handleSessionPaused(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, dc *
 	for _, m := range closed {
 		h.SignalAskAnswered(m.ID)
 		h.BroadcastJSON(protocol.MessageAnswered{Type: "message_answered", Message: messageRowToInfo(m)}) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
+	}
+	if err := recordSessionFailure(ctx, h, dbPool, msg.SessionID); err != nil {
+		log.Printf("session pause alert: %v", err)
 	}
 	h.BroadcastJSON(protocol.SessionPausedChanged{Type: "session_paused_changed", SessionID: msg.SessionID, PausedReason: msg.Reason}) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 }

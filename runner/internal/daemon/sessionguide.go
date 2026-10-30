@@ -16,7 +16,7 @@ type sessionGuideLine struct {
 	ManagedSuffix string
 }
 
-const sandboxCodingGuideLine = "Sandboxed coding children work in a clone of their own on the branch wip/<child-id>, never in your checkout; their commits land on wip/<child-id> in your repository at the end of each of their turns. Ask them for commit IDs and test results; the parent reviews and handles merging or pushing with the person's authorization. Do not give children Git push credentials."
+const sandboxCodingGuideLine = "Sandboxed coding children work in their own clone; host children of workspace sessions work in their own worktrees. Both use wip/<child-id> and leave the parent checkout unchanged. Sandbox commits arrive in your repository at turn end; host worktree commits land there directly. Ask them for commit IDs and test results; the parent reviews and handles merging or pushing with the person's authorization. Do not give children Git push credentials."
 
 const checklistWorkMapGuideLine = "Mark current work with `blerg-runner checklist doing <n>` (several items may be doing); `pending <n>` clears that state and ticking finishes it. Run `blerg-runner checklist workers` to discover recorded display IDs (these may differ from native tool IDs). Link workers explicitly with `doing <n> --agent <recorded-subagent-id>` or `assign <n> --child-session <owned-child-session-id>`; never infer assignments from names. Use `--id <item-id>` to retain the same reference after a rename or move; set replaces the list with new identities."
 
@@ -49,7 +49,7 @@ func sessionWorkGuideLines() []sessionGuideLine {
 	return []sessionGuideLine{
 		{Text: visualGuideLine, ManagedPrefix: "- Rich output — "},
 		{Text: childSessionGuideLine, ManagedPrefix: "- `blerg-runner session` / `blerg-runner budget` — "},
-		{Text: sandboxCodingGuideLine, ManagedPrefix: "- Sandboxed coding children — "},
+		{Text: sandboxCodingGuideLine, ManagedPrefix: "- Coding child workspaces — "},
 		{Text: podToolBudgetGuideLine, ManagedPrefix: "- Agent pod tool budgets — "},
 		{Text: checklistWorkMapGuideLine, ManagedPrefix: "- Checklist work map — "},
 		{Text: usageNoticeGuideLine, ManagedPrefix: "- Usage-limit notices — "},

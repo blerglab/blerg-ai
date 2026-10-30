@@ -127,10 +127,11 @@ type AgentHost struct {
 	// Adoption after a daemon restart (agentadopt.go), all guarded by mu. adopting are the
 	// recorded sessions not hosted again yet: they are reported as this daemon's (the server
 	// must not write them off while they are being brought back) and messages for them are
-	// held. adoptFailed are those that could not be hosted; their end is reported once the
+	// held. adoptFailed are those that could not be hosted; their pause is reported once the
 	// daemon is connected.
 	adopting    map[string]*adoptingSession
 	adoptFailed []string
+	adoptionMu  sync.Mutex
 	// openAsks are the sessions the server says have a `blerg-runner ask` open (NoteOpenAsks): an
 	// adopted interactive session among them waits for the person.
 	openAsks map[string]bool

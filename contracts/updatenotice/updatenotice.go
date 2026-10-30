@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"regexp"
@@ -25,11 +26,16 @@ import (
 const DefaultRepo = "blerglab/blerg-ai"
 
 const (
-	maxBody       = 1 << 20
-	httpTimeout   = 10 * time.Second
-	startDelay    = 30 * time.Second
-	checkInterval = 6 * time.Hour
-	feedTTL       = 10 * time.Minute
+	maxBody     = 1 << 20
+	httpTimeout = 10 * time.Second
+	startDelay  = 30 * time.Second
+	// A new release shows within about 15 minutes: core checks every 10 (plus up to a minute of
+	// jitter, so installs restarted together don't check together), runner and board cache 5.
+	// A check sends the last answer's ETag, and GitHub's "304 Not Modified" does not count
+	// against its 60-an-hour unauthenticated limit, so many installs behind one address fit.
+	checkInterval = 10 * time.Minute
+	checkJitter   = time.Minute
+	feedTTL       = 5 * time.Minute
 )
 
 type semver struct{ major, minor, patch int }
@@ -150,6 +156,9 @@ type Checker struct {
 	version string
 	url     string
 	warned  bool
+	// The last full answer (its ETag and what it reported), reused when GitHub answers 304.
+	etag             string
+	lastVer, lastURL string
 }
 
 // NewChecker builds a Checker for the running release from the environment.
@@ -236,6 +245,12 @@ func (c *Checker) Check(ctx context.Context) {
 	}
 	req.Header.Set("User-Agent", "blerg-core")
 	req.Header.Set("Accept", "application/vnd.github+json")
+	c.mu.RLock()
+	etag, lastVer, lastURL := c.etag, c.lastVer, c.lastURL
+	c.mu.RUnlock()
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
 	client := c.Client
 	if client == nil {
 		client = newClient(httpTimeout)
@@ -246,6 +261,10 @@ func (c *Checker) Check(ctx context.Context) {
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotModified && etag != "" {
+		c.set(lastVer, lastURL)
+		return
+	}
 	if resp.StatusCode != http.StatusOK {
 		c.warnOnce(fmt.Sprintf("GitHub answered %d", resp.StatusCode))
 		return
@@ -256,14 +275,18 @@ func (c *Checker) Check(ctx context.Context) {
 		return
 	}
 	// Only a valid newer stable release may populate the cache.
-	if rel.Draft || rel.Prerelease || !Newer(c.Running, rel.TagName) || !releaseMatches(rel.HTMLURL, rel.TagName) {
-		c.set("", "")
-		return
+	ver, u := "", ""
+	if !rel.Draft && !rel.Prerelease && Newer(c.Running, rel.TagName) && releaseMatches(rel.HTMLURL, rel.TagName) {
+		ver, u = strings.TrimPrefix(strings.TrimSpace(rel.TagName), "v"), rel.HTMLURL
 	}
-	c.set(strings.TrimPrefix(strings.TrimSpace(rel.TagName), "v"), rel.HTMLURL)
+	c.mu.Lock()
+	c.etag, c.lastVer, c.lastURL = resp.Header.Get("ETag"), ver, u
+	c.mu.Unlock()
+	c.set(ver, u)
 }
 
-// Start runs Check shortly after startup (30 seconds, so it never slows boot) and then every six hours, until ctx ends.
+// Start runs Check shortly after startup (30 seconds, so it never slows boot) and then about every
+// ten minutes (checkInterval plus jitter), until ctx ends.
 func (c *Checker) Start(ctx context.Context) {
 	if c == nil || c.Disabled {
 		return
@@ -281,7 +304,7 @@ func (c *Checker) Start(ctx context.Context) {
 				return
 			case <-t.C:
 				c.Check(ctx)
-				t.Reset(checkInterval)
+				t.Reset(checkInterval + time.Duration(rand.Int64N(int64(checkJitter)))) //nolint:gosec // G404: scheduling jitter, nothing secret depends on it
 			}
 		}
 	}()

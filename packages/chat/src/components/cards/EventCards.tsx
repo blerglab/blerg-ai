@@ -182,11 +182,13 @@ function AskCard({ ev, cards }: { ev: AgentEvent; cards?: CardRegistry }) {
   )
 }
 
-// Thinking uses the same safe Markdown renderer as answers, with a distinct footer.
+// Thinking uses the same safe Markdown renderer as answers, with a distinct footer, and copies
+// like them: it looks like a reply, so it behaves like one.
 function ThinkingRow({ ev, text }: { ev: AgentEvent; text: string }) {
   return (
     <div className="agent-card assistant" data-kind="thinking" data-testid="thinking">
       <Markdown className="thinking-text" text={text} />
+      <CopyMessage text={text} />
       <div className="card-foot"><span className="card-time">thinking · <TimeLabel ts={ev.ts} /></span></div>
     </div>
   )

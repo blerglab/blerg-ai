@@ -19,6 +19,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// controlTimeout bounds one freeze, thaw or stop. A freeze waits for every traced task to reach a
+// stop; on a busy machine with hundreds of threads that can take more than a few seconds.
+const controlTimeout = 30 * time.Second
+
 // WriterTaskLimit bounds the tasks (threads count) one traced command may hold. Real parallel builds
 // (a Go toolchain uses about one thread per core) stay well under it; a runaway fork is still stopped.
 const WriterTaskLimit = 4096
@@ -314,7 +318,7 @@ func ServeCommand(args []string) int {
 			emit(resultFrame("empty", runErr))
 			return code
 		case f, ok := <-requests:
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), controlTimeout)
 			if !ok || f.Op == "stop" {
 				err := tree.Stop(ctx)
 				cancel()

@@ -290,6 +290,12 @@ func engineLabel(engine string) string {
 
 // trustDirect: the person launched this parent directly. Restricted-tool parents and every
 // other parent are untrusted-input, and rules and grants never apply to them.
+//
+// It reads who started the session, never whether it is private: private is visibility (only the
+// owner sees it), and a person's own launch that picked a board or MCP connection is private too
+// (BLG-338). Every other private session carries its own mark: a cron its cron id, a grant start
+// through the contract RestrictTools and its principal's started_by_kind (recordStartedBy, which
+// fails the start rather than leave it unmarked), a child its parent.
 func trustDirect(parent *db.SessionRow) bool {
 	if parent == nil || isChildSession(parent) || parent.RestrictTools {
 		return false
@@ -297,7 +303,7 @@ func trustDirect(parent *db.SessionRow) bool {
 	if parent.StartedByKind != "" && parent.StartedByKind != "human" {
 		return false
 	}
-	return derefOrEmpty(parent.BoardID) == "" && derefOrEmpty(parent.CronID) == "" && !parent.Private
+	return derefOrEmpty(parent.BoardID) == "" && derefOrEmpty(parent.CronID) == ""
 }
 
 // sandboxClusterChildrenEnv says whether a sandboxed (docker) desktop session's cluster children may

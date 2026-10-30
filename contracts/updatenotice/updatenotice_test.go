@@ -460,3 +460,59 @@ func TestColdFeedSharesRefreshAndReturnsFetchedNotice(t *testing.T) {
 		t.Errorf("shared refresh made %d requests", hits.Load())
 	}
 }
+
+// GitHub's 304 for an unchanged release keeps what the last full answer reported (it does not
+// count against the rate limit), and a later change is seen in full.
+func TestCheckReusesAnswerOnNotModified(t *testing.T) {
+	var mu sync.Mutex
+	body, etag := `{"tag_name":"v0.4.1","html_url":"https://github.com/blerglab/blerg-ai/releases/tag/v0.4.1"}`, `"one"`
+	var sent []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		sent = append(sent, r.Header.Get("If-None-Match"))
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	ch := checkerFor(srv, "0.4.0")
+	ch.Check(context.Background())
+	ch.Check(context.Background())
+	if v, _ := ch.Latest(); v != "0.4.1" {
+		t.Fatalf("after a 304: version = %q, want 0.4.1", v)
+	}
+	mu.Lock()
+	body, etag = `{"tag_name":"v0.4.2","html_url":"https://github.com/blerglab/blerg-ai/releases/tag/v0.4.2"}`, `"two"`
+	mu.Unlock()
+	ch.Check(context.Background())
+	if v, _ := ch.Latest(); v != "0.4.2" {
+		t.Fatalf("after a change: version = %q, want 0.4.2", v)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sent) != 3 || sent[0] != "" || sent[1] != `"one"` || sent[2] != `"one"` {
+		t.Fatalf("If-None-Match sent: %q", sent)
+	}
+}
+
+// A 304 with no earlier full answer is not trusted: nothing is reported.
+func TestNotModifiedWithoutEarlierAnswerReportsNothing(t *testing.T) {
+	var hits atomic.Int32
+	srv := serve(http.StatusNotModified, "", &hits)
+	defer srv.Close()
+	ch := checkerFor(srv, "0.4.0")
+	ch.Check(context.Background())
+	if v, u := ch.Latest(); v != "" || u != "" {
+		t.Fatalf("version %q url %q", v, u)
+	}
+}
+
+func TestCheckIntervalShowsANewReleaseWithinAboutFifteenMinutes(t *testing.T) {
+	if checkInterval+checkJitter+feedTTL > 16*time.Minute {
+		t.Fatalf("worst case %v, want at most about 15 minutes", checkInterval+checkJitter+feedTTL)
+	}
+}

@@ -8,6 +8,18 @@ minor release and are called out here.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-29
+
+### Fixed
+
+- Host workspace sessions no longer get stuck at the end of a turn while they run Go builds or tests. To copy a turn's commits safely, Blerg briefly freezes every process in the session; a freeze that landed while a program was starting another one (every Go `os/exec`, between `vfork` and `exec`) could never complete, so the turn's commits weren't brought back and the session refused to start anything again ("writer admission closed", "Codex app-server could not start", Stop doing nothing) until the daemon restarted, and a restart then ended it. The freeze now accounts for a thread waiting in `vfork` (it can run nothing while its child is stopped), a freeze that still can't be proven skips that turn's copy but leaves the session usable, and the helper allows 30 s instead of 5 (BLG-339).
+- "Always allow" for child sessions works again for sessions you launch yourself with a board or an MCP connection: such launches are private, and privacy wrongly dropped your own approval rules. Sessions started by agents, crons, board runs or with restricted tools still ask for every child; a start whose origin can't be recorded is now refused instead of being treated as yours (BLG-338).
+
+### Changed
+
+- The upgrade notice shows a new release within about 15 minutes instead of up to 6 hours: core checks GitHub about every 10 minutes (with a little jitter), sending the last answer's ETag so an unchanged release costs nothing against GitHub's rate limit; runner and board cache the notice for 5 minutes.
+- Thinking cards have the same Copy message button as replies (they look the same, so they copy the same) (`@blerglab/chat` 1.39.7).
+
 ## [0.5.1] - 2026-10-29
 
 ### Fixed

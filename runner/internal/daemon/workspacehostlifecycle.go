@@ -153,7 +153,22 @@ func (h *hostWorkspace) sync(ctx context.Context) ([]protocol.WorkspaceMemberRes
 		return w.results(), err
 	}
 	if err := h.writers.Freeze(ctx); err != nil {
-		return w.results(), fmt.Errorf("host workspace writer freeze: %w", err)
+		// No proof that writers stopped: this turn's sync is skipped (fail closed), but the session
+		// must not stay frozen and fenced. Thaw (which also cancels a freeze still in progress) and
+		// reopen; only if that fails too does the session stay closed until a restart.
+		err = fmt.Errorf("host workspace writer freeze: %w", err)
+		if thawErr := h.writers.Thaw(ctx); thawErr != nil {
+			return w.results(), errors.Join(err, fmt.Errorf("host workspace writer thaw after a failed freeze: %w", thawErr))
+		}
+		if notifyErr := h.service.Supervisor.Notify(ctx, w.state.SupervisorLaunch, "running"); notifyErr != nil {
+			return w.results(), errors.Join(err, notifyErr)
+		}
+		if h.service.ResumeStatus != nil {
+			if resumeErr := h.service.ResumeStatus(ctx, w.state.Session); resumeErr != nil {
+				return w.results(), errors.Join(err, resumeErr)
+			}
+		}
+		return w.results(), err
 	}
 	h.collect(ctx)
 	if err := w.authorize(ctx); err != nil {

@@ -60,10 +60,13 @@ func initialPromptSource(principal runnerPrincipal, req runnerStartRequest) stri
 	return ""
 }
 
-// recordStartedBy writes the start's attribution for a session the v1 contract created.
-func (a *API) recordStartedBy(ctx context.Context, sessionID string, principal runnerPrincipal, cronID string) {
+// recordStartedBy writes the start's attribution for a session the v1 contract created. A start
+// that is not the person's own must be marked (trustDirect reads the mark to keep agent, service
+// and runner-key sessions away from session approval), so an error there fails the start; the
+// person's own start writes nothing and never fails.
+func (a *API) recordStartedBy(ctx context.Context, sessionID string, principal runnerPrincipal, cronID string) error {
 	if a.dbPool == nil {
-		return
+		return nil
 	}
 	kind, name := principal.Kind, ""
 	if kind == "human" {
@@ -92,7 +95,9 @@ func (a *API) recordStartedBy(ctx context.Context, sessionID string, principal r
 	}
 	if err := db.SetSessionStartedBy(ctx, a.dbPool, sessionID, kind, name); err != nil {
 		log.Printf("SetSessionStartedBy %s: %v", sessionID, err)
+		return err
 	}
+	return nil
 }
 
 // fetchTokenName asks core for the owner's label of an agent token: POST /internal/tokens/status

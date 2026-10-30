@@ -828,7 +828,10 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 			}
 		}
 		recordLaunchAuthSession(ctx, a.dbPool, sessionID, principal.proof().SessionID)
-		a.recordStartedBy(ctx, sessionID, principal, req.CronID)
+		if err := a.recordStartedBy(ctx, sessionID, principal, req.CronID); err != nil {
+			a.abortGrantSession(ctx, sessionID)
+			return apiErrorCause(http.StatusServiceUnavailable, errDaemonUnavailable, "the session's origin could not be recorded — retry")
+		}
 		if req.CallbackURL != "" || req.CallbackSecret != "" {
 			if err := db.SetSessionCallback(ctx, a.dbPool, sessionID, req.CallbackURL, req.CallbackSecret); err != nil {
 				log.Printf("runner SetSessionCallback %s: %v", sessionID, err)
@@ -1094,7 +1097,10 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 		if principal.Kind != sessionDelegateKind {
 			// Every start records who made it, as the cluster path does: a service or runner-key
 			// start is not the person's own, and a session's trust class reads it (trustDirect).
-			a.recordStartedBy(ctx, sessionID, principal, req.CronID)
+			if err := a.recordStartedBy(ctx, sessionID, principal, req.CronID); err != nil {
+				abortSpawnSessionToken(ctx, a.dbPool, sessionID)
+				return apiErrorCause(http.StatusServiceUnavailable, errDaemonUnavailable, "the session's origin could not be recorded — retry")
+			}
 		} else {
 			// Must land: it is one of the marks that keep a child a child (isChildSession).
 			if err := db.SetSessionStartedBy(ctx, a.dbPool, sessionID, "session", a.parentLabel(ctx, principal.Sub)); err != nil {

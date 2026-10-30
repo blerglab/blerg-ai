@@ -125,7 +125,7 @@ func TestChildApprovalPartialAndStandingRulesStaySeparate(t *testing.T) {
 	}
 }
 func TestChildApprovalUnsafeParentsCannotEnable(t *testing.T) {
-	for name, options := range map[string]sessOpts{"private": {owner: "owner-1", private: true}, "board": {owner: "owner-1", boardID: "new"}, "child": {owner: "owner-1", parent: "placeholder"}, "agent-started": {owner: "owner-1", startedByKind: "agent"}, "ended": {owner: "owner-1", status: "ended"}} {
+	for name, options := range map[string]sessOpts{"private, agent-started": {owner: "owner-1", private: true, startedByKind: "agent"}, "board": {owner: "owner-1", boardID: "new"}, "child": {owner: "owner-1", parent: "placeholder"}, "agent-started": {owner: "owner-1", startedByKind: "agent"}, "ended": {owner: "owner-1", status: "ended"}} {
 		t.Run(name, func(t *testing.T) {
 			fx := newDelegFx(t)
 			if options.parent != "" {
@@ -161,6 +161,29 @@ func TestChildApprovalUnsafeParentsCannotEnable(t *testing.T) {
 		}
 	})
 }
+
+// BLG-338: a person's own launch that picked a board or MCP connection is private (visible only to
+// its owner). That must not take away session approval: the owner can enable it, and the grant lands.
+func TestChildApprovalPrivateOwnLaunchCanEnable(t *testing.T) {
+	fx := newDelegFx(t)
+	parent, _ := fx.session(sessOpts{owner: "owner-1", private: true})
+	owner := fx.human("owner-1")
+	code, view := fx.approval(parent, owner)
+	if code != 200 {
+		t.Fatal(code)
+	}
+	if approvalRuntime(t, view, "docker")["can_enable"] != true {
+		t.Fatalf("private own launch cannot enable: %v", view)
+	}
+	code, _ = fx.setApproval(parent, owner, "docker", true, asString(view["revision"]))
+	if code != 200 {
+		t.Fatal(code)
+	}
+	if n := fx.count(`SELECT count(*) FROM delegation_grants WHERE revoked_at IS NULL`); n == 0 {
+		t.Fatal("no grant for a private own launch")
+	}
+}
+
 func TestChildApprovalRuntimeConfinementAndOfflineRevocation(t *testing.T) {
 	fx := newDelegFx(t)
 	owner := fx.human("owner-1")

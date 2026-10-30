@@ -68,6 +68,18 @@ func TestMain(m *testing.M) {
 		wg.Wait()
 		os.Exit(0)
 	}
+	if len(os.Args) > 2 && os.Args[1] == "spawner" {
+		// Starts short processes back to back (os/exec uses vfork), writing a heartbeat between them,
+		// as a Go build or test run does.
+		deadline := time.Now().Add(60 * time.Second)
+		for i := 0; time.Now().Before(deadline); i++ {
+			_ = exec.Command("/bin/true").Run()
+			if i%20 == 0 {
+				_ = os.WriteFile(os.Args[2], []byte(strconv.Itoa(i)), 0600)
+			}
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "cluster-writer" {
 		if os.Getenv("P6_GROUP_DROP_START_ACK") == "1" {
 			time.Sleep(10 * time.Second)
@@ -355,5 +367,49 @@ func TestTreeOverTaskLimitReportsReasonAndEnds(t *testing.T) {
 	}
 	if msg := TaskLimitMessage(4, "shell"); !strings.Contains(msg, "process limit reached") || !strings.Contains(msg, "this shell") {
 		t.Fatalf("message: %q", msg)
+	}
+}
+
+// A freeze that lands while a task is blocked in vfork (its child not yet exec'd) completes: the
+// blocked parent runs no code of its own while its child is stopped. Before, such a freeze never
+// completed and the session was left frozen ("writer admission closed").
+func TestGroupFreezesASessionThatKeepsSpawning(t *testing.T) {
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	beat := filepath.Join(t.TempDir(), "beat")
+	group := NewGroup(binary, uint32(os.Getuid()), uint32(os.Getgid()))
+	cmd := exec.Command(binary, "spawner", beat)
+	if err = group.Start(cmd); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = group.Stop(ctx)
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+	until(t, func() bool { data, err := os.ReadFile(beat); return err == nil && len(data) > 0 })
+	for i := range 150 {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := group.Freeze(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("freeze %d of a spawning session: %v", i, err)
+		}
+		before, _ := os.ReadFile(beat)
+		time.Sleep(40 * time.Millisecond)
+		if after, _ := os.ReadFile(beat); string(after) != string(before) {
+			t.Fatalf("freeze %d: the session kept running (%s -> %s)", i, before, after)
+		}
+		ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+		err = group.Thaw(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("thaw %d: %v", i, err)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

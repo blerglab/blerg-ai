@@ -79,7 +79,7 @@ func (t *Tree) Run(cmd *exec.Cmd, start func() error, maximum int, ready chan<- 
 		_ = unix.Kill(root, unix.SIGKILL)
 		return fail(fmt.Errorf("%w: wait for initial trace stop: %w", ErrUnproven, e))
 	}
-	opts := unix.PTRACE_O_TRACEFORK | unix.PTRACE_O_TRACEVFORK | unix.PTRACE_O_TRACECLONE | unix.PTRACE_O_TRACEEXEC | unix.PTRACE_O_EXITKILL
+	opts := unix.PTRACE_O_TRACEFORK | unix.PTRACE_O_TRACEVFORK | unix.PTRACE_O_TRACEVFORKDONE | unix.PTRACE_O_TRACECLONE | unix.PTRACE_O_TRACEEXEC | unix.PTRACE_O_EXITKILL
 	if e := unix.PtraceSetOptions(root, opts); e != nil {
 		_ = unix.Kill(root, unix.SIGKILL)
 		_, _ = unix.Wait4(root, &status, 0, nil)
@@ -88,6 +88,29 @@ func (t *Tree) Run(cmd *exec.Cmd, start func() error, maximum int, ready chan<- 
 	// Values retain the signal to deliver on thaw. -1 means still running or an
 	// initial child stop not yet consumed. Never equate signal submission to freeze.
 	tasks := map[int]int{root: -1}
+	// vforkWait maps a task that vforked to its child until the parent's VFORK_DONE: the kernel keeps
+	// that thread blocked (uninterruptibly, so a SIGSTOP can't reach it) until the child execs or
+	// exits. While the child is stopped the parent can run nothing, so it counts as frozen; without
+	// this a freeze that lands between vfork and exec (every Go os/exec) never completes.
+	vforkWait := map[int]int{}
+	// held reports whether a task can run no code of its own: stopped, or blocked in vfork on a child
+	// (or a chain of vfork children) that is.
+	held := func(pid int) bool {
+		for depth := 0; depth < 64; depth++ {
+			if sig, ok := tasks[pid]; ok && sig >= 0 {
+				return true
+			}
+			child, waiting := vforkWait[pid]
+			if !waiting {
+				return false
+			}
+			if _, alive := tasks[child]; !alive {
+				return false
+			}
+			pid = child
+		}
+		return false
+	}
 	frozen, killing, limitHit := false, false, false
 	var pending *request
 	ready <- nil
@@ -114,9 +137,16 @@ func (t *Tree) Run(cmd *exec.Cmd, start func() error, maximum int, ready chan<- 
 					}
 				}
 			case "thaw":
-				if pending != nil || killing {
-					q.ack <- fmt.Errorf("%w: thaw conflicts with pending control or tree teardown", ErrUnproven)
+				if killing {
+					q.ack <- fmt.Errorf("%w: thaw conflicts with tree teardown", ErrUnproven)
 					break
+				}
+				if pending != nil {
+					// A freeze that has not completed is cancelled, never left to complete unobserved:
+					// tasks already stopped are continued below, and a stop still on its way is
+					// continued when it arrives (frozen is false by then).
+					pending.ack <- fmt.Errorf("%w: freeze cancelled by thaw", ErrUnproven)
+					pending = nil
 				}
 				frozen = false
 				for pid, sig := range tasks {
@@ -147,8 +177,8 @@ func (t *Tree) Run(cmd *exec.Cmd, start func() error, maximum int, ready chan<- 
 		}
 		if pending != nil {
 			all := !killing
-			for _, sig := range tasks {
-				if sig < 0 {
+			for pid := range tasks {
+				if !held(pid) {
 					all = false
 				}
 			}
@@ -182,6 +212,7 @@ func (t *Tree) Run(cmd *exec.Cmd, start func() error, maximum int, ready chan<- 
 		}
 		if status.Exited() || status.Signaled() {
 			delete(tasks, pid)
+			delete(vforkWait, pid)
 			if pid == root {
 				if status.Exited() {
 					code = status.ExitStatus()
@@ -202,16 +233,27 @@ func (t *Tree) Run(cmd *exec.Cmd, start func() error, maximum int, ready chan<- 
 				killing = true
 			} else {
 				delete(tasks, int(previous))
+				delete(vforkWait, int(previous))
 			}
+		}
+		if event == unix.PTRACE_EVENT_VFORK_DONE {
+			delete(vforkWait, pid)
 		}
 		if event == unix.PTRACE_EVENT_FORK || event == unix.PTRACE_EVENT_VFORK || event == unix.PTRACE_EVENT_CLONE {
 			child, e := unix.PtraceGetEventMsg(pid)
 			if e != nil {
 				killing = true
-			} else if _, seen := tasks[int(child)]; !seen {
-				tasks[int(child)] = -1
-				if frozen {
-					_, _, _ = unix.Syscall(unix.SYS_TKILL, uintptr(child), uintptr(unix.SIGSTOP), 0)
+			} else {
+				// Record the vfork wait whichever arrives first: the child's initial stop can be
+				// reported before the parent's VFORK event, so "seen" says nothing about it.
+				if event == unix.PTRACE_EVENT_VFORK {
+					vforkWait[pid] = int(child)
+				}
+				if _, seen := tasks[int(child)]; !seen {
+					tasks[int(child)] = -1
+					if frozen {
+						_, _, _ = unix.Syscall(unix.SYS_TKILL, uintptr(child), uintptr(unix.SIGSTOP), 0)
+					}
 				}
 			}
 		}

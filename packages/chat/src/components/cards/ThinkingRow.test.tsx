@@ -20,6 +20,14 @@ describe('thinking Markdown', () => {
     expect(card.querySelector('.thinking-text')?.classList.contains('md')).toBe(true)
   })
 
+  it('has the same Copy message button as a reply', () => {
+    render(thinking('Check **both** endpoints.'))
+    const card = screen.getByTestId('thinking')
+    const copy = within(card).getByRole('button', { name: 'Copy message' })
+    expect(copy).toHaveClass('msg-copy')
+    expect(copy.closest('.agent-card')).toBe(card)
+  })
+
   it('keeps untrusted HTML, unsafe links and remote images inert', () => {
     const { container } = render(thinking('<script>alert(1)</script>\n\n<img src="https://example.invalid/track" onerror="alert(1)">\n\n[unsafe](javascript:alert%281%29)\n\n![remote](https://example.invalid/pixel.png)'))
     expect(container.querySelector('script, img, iframe')).toBeNull()

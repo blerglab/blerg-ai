@@ -22,7 +22,7 @@ func TestDelegationPersistentApprovalRechecksCurrentParent(t *testing.T) {
 				body := codexBody()
 				body["runtime"] = "daemon"
 				id := fx.ask(fx.parent, fx.parentTok, body)
-				sql := map[string]string{"private": `UPDATE sessions SET private=true WHERE id=$1`, "sandbox": `UPDATE sessions SET runtime='docker' WHERE id=$1`, "owner": `UPDATE sessions SET spawning_account_id='owner-2' WHERE id=$1`, "ended": `UPDATE sessions SET status='ended',ended_at=now(),end_reason='process_exited' WHERE id=$1`, "child": `UPDATE sessions SET delegation_via='request:old' WHERE id=$1`}[mode]
+				sql := map[string]string{"private": `UPDATE sessions SET private=true, started_by_kind='agent' WHERE id=$1`, "sandbox": `UPDATE sessions SET runtime='docker' WHERE id=$1`, "owner": `UPDATE sessions SET spawning_account_id='owner-2' WHERE id=$1`, "ended": `UPDATE sessions SET status='ended',ended_at=now(),end_reason='process_exited' WHERE id=$1`, "child": `UPDATE sessions SET delegation_via='request:old' WHERE id=$1`}[mode]
 				if _, err := fx.pool.Exec(context.Background(), sql, fx.parent); err != nil {
 					t.Fatal(err)
 				}

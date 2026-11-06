@@ -236,7 +236,7 @@ func TestRulesListShowsLimits(t *testing.T) {
 		t.Fatalf("list: %d %v", code, out)
 	}
 	limits, _ := out["limits"].(map[string]any)
-	want := map[string]float64{"per_parent_running": 3, "per_parent_starts_per_hour": 120, "per_account_running": 6, "per_account_starts_per_hour": 60}
+	want := map[string]float64{"per_parent_running": 3, "per_parent_starts_per_hour": 120, "per_account_running": 12, "per_account_starts_per_hour": 60}
 	if len(limits) != len(want) {
 		t.Fatalf("limits %v", limits)
 	}

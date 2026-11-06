@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/blerglab/blerg-ai/contracts/childlimits"
+	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -14,13 +15,128 @@ import (
 	"time"
 )
 
+// Spread existing children across parents so the parent's running limit cannot
+// hide the account boundary. These are fixture rows, not real agent launches.
+func seedAccountChildren(fx *delegFx, account string, count int) {
+	fx.t.Helper()
+	parents := make([]string, 3)
+	for i := range parents {
+		parents[i], _ = fx.session(sessOpts{owner: account})
+	}
+	for i := range count {
+		fx.session(sessOpts{owner: account, parent: parents[i%len(parents)]})
+	}
+}
+
+func TestChildLimitsAccountTwelfthAcrossParents(t *testing.T) {
+	t.Setenv("BLERG_RUNNER_MAX_PARALLEL_CHILDREN", "12")
+	fx := newDelegFx(t)
+	fx.rule("claude", runnerRuntimeDocker, false)
+	seedAccountChildren(fx, "owner-1", 11)
+	code, out, _ := fx.postChild(fx.parent, fx.parentTok, claudeBody("twelfth"), "twelfth")
+	if code != http.StatusCreated {
+		t.Fatalf("twelfth start: %d %v", code, out)
+	}
+	fx.spawn()
+	if n, err := db.CountAccountRunningChildren(t.Context(), fx.pool, "owner-1"); err != nil || n != 12 {
+		t.Fatalf("running children: %d, %v; want 12", n, err)
+	}
+}
+
+func TestChildLimitsAccountThirteenthRefused(t *testing.T) {
+	t.Setenv("BLERG_RUNNER_MAX_PARALLEL_CHILDREN", "12")
+	fx := newDelegFx(t)
+	fx.rule("claude", runnerRuntimeDocker, false)
+	seedAccountChildren(fx, "owner-1", 12)
+	code, out, hdr := fx.postChild(fx.parent, fx.parentTok, claudeBody("thirteenth"), "thirteenth")
+	if code != http.StatusTooManyRequests || asString(out["error"]) != "your sessions already run 12 started sessions; stop one first" || hdr.Get("Retry-After") != "60" {
+		t.Fatalf("thirteenth start: %d %v %v", code, out, hdr)
+	}
+	fx.noSpawn()
+	if n, err := db.CountAccountRunningChildren(t.Context(), fx.pool, "owner-1"); err != nil || n != 12 {
+		t.Fatalf("refusal changed running children: %d, %v", n, err)
+	}
+}
+
+func TestChildLimitsAccountConcurrentTwelfth(t *testing.T) {
+	t.Setenv("BLERG_RUNNER_MAX_PARALLEL_CHILDREN", "12")
+	fx := newDelegFx(t)
+	fx.rule("claude", runnerRuntimeDocker, false)
+	seedAccountChildren(fx, "owner-1", 11)
+	parents := []struct{ id, token string }{{fx.parent, fx.parentTok}}
+	for range 2 {
+		id, token := fx.session(sessOpts{owner: "owner-1"})
+		parents = append(parents, struct{ id, token string }{id, token})
+	}
+	type outcome struct {
+		code int
+		body map[string]any
+	}
+	ready := make(chan struct{})
+	results := make(chan outcome, 20)
+	var wg sync.WaitGroup
+	for i := range 20 {
+		wg.Go(func() {
+			<-ready
+			parent := parents[i%len(parents)]
+			code, body, _ := fx.postChild(parent.id, parent.token, claudeBody("contending child"), fmt.Sprintf("contender-%d", i))
+			results <- outcome{code, body}
+		})
+	}
+	close(ready)
+	wg.Wait()
+	close(results)
+	started, refused := 0, 0
+	for result := range results {
+		switch result.code {
+		case http.StatusCreated:
+			started++
+		case http.StatusTooManyRequests:
+			refused++
+			if asString(result.body["error"]) != "your sessions already run 12 started sessions; stop one first" {
+				t.Errorf("wrong refusal: %v", result.body)
+			}
+		default:
+			t.Errorf("unexpected outcome: %d %v", result.code, result.body)
+		}
+	}
+	if started != 1 || refused != 19 {
+		t.Fatalf("concurrent starts: %d admitted, %d refused; want 1/19", started, refused)
+	}
+	fx.spawn()
+	fx.noSpawn()
+	// No child ends during this test: a final count of 12 also proves that
+	// the monotonic running count never exceeded 12 during the race.
+	if n, err := db.CountAccountRunningChildren(t.Context(), fx.pool, "owner-1"); err != nil || n != 12 {
+		t.Fatalf("running children after race: %d, %v; want 12", n, err)
+	}
+}
+
+func TestChildLimitsAccountIsolationAtTwelve(t *testing.T) {
+	t.Setenv("BLERG_RUNNER_MAX_PARALLEL_CHILDREN", "12")
+	fx := newDelegFx(t)
+	fx.rule("claude", runnerRuntimeDocker, false)
+	seedAccountChildren(fx, "other-owner", 12)
+	fx.session(sessOpts{owner: "owner-1", parent: fx.parent, status: "stopped"})
+	code, out, _ := fx.postChild(fx.parent, fx.parentTok, claudeBody("own account"), "own-account")
+	if code != http.StatusCreated {
+		t.Fatalf("other account consumed allowance: %d %v", code, out)
+	}
+	fx.spawn()
+	for account, want := range map[string]int{"owner-1": 1, "other-owner": 12} {
+		if n, err := db.CountAccountRunningChildren(t.Context(), fx.pool, account); err != nil || n != want {
+			t.Errorf("%s running children: %d, %v; want %d", account, n, err, want)
+		}
+	}
+}
+
 func TestChildLimitConfiguration(t *testing.T) {
 	for _, tc := range []struct {
 		name, value string
 		want        int
 		warning     bool
 	}{
-		{"positive", "7", 7, false}, {"zero", "0", 3, true},
+		{"positive", "7", 7, false}, {"approved ceiling", "12", 12, false}, {"zero", "0", 3, true},
 		{"negative", "-1", 3, true}, {"text", "invalid", 3, true},
 		{"fraction", "1.5", 3, true}, {"empty", "", 3, true},
 		{"overflow", "999999999999999999999999999", 3, true},

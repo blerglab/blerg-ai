@@ -7,7 +7,7 @@ import SettingsDialog from './SettingsDialog'
 const apiFetch = vi.hoisted(() => vi.fn())
 vi.mock('../apiFetch', () => ({ apiFetch }))
 
-const limits = { per_parent_running: 3, per_parent_starts_per_hour: 120, per_account_running: 6, per_account_starts_per_hour: 60 }
+const limits = { per_parent_running: 3, per_parent_starts_per_hour: 120, per_account_running: 12, per_account_starts_per_hour: 60 }
 const rule = { id: 'rule', engine: 'codex', runtime: 'docker', daemon_id: 'host', daemon_name: 'Workstation', local_only: false, created_at: '2026-10-17T10:00:00Z' }
 const shellLimits = { desktop: { detached_seconds: 0, idle_seconds: 0 }, cluster: { detached_seconds: 300, idle_seconds: 1800 } }
 const unset = { desktop: { detached_seconds: null, idle_seconds: null }, cluster: { detached_seconds: null, idle_seconds: null } }

@@ -951,7 +951,7 @@ limits (parallel 1–50, starts/hour 1–10000); saved settings win and apply on
 core for its Settings defaults and on a standalone runner for its fallback defaults. Invalid values
 log a startup warning and use the built-in default. Runner reads core with its internal key;
 unavailable/older core retains the last valid settings, or environment defaults before a successful
-read. Account limits remain six running children and sixty starts per rolling hour across all
+read. Account limits remain twelve running children and sixty starts per rolling hour across all
 parents, so these can be reached before a higher per-parent limit. Approval requests reserve rate
 budget too; allowed requests with a child count once. Refusals name the limit and say to stop a
 child or give the next available time in UTC (with `Retry-After` for the rolling window). A real parent end stops non-kept children and invalidates old grants,

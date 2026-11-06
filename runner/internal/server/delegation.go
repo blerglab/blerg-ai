@@ -33,7 +33,7 @@ const (
 
 	maxRunningChildrenPerParent  = childlimits.DefaultParallel
 	defaultMaxChildStartsPerHour = childlimits.DefaultStartsPerHour
-	maxRunningChildrenPerAccount = 6
+	maxRunningChildrenPerAccount = 12
 	maxStartsPerAccountPerHour   = 60
 
 	delegationPromptExcerpt  = 500      // runes in the event and card

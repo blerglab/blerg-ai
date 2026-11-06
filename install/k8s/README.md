@@ -362,7 +362,7 @@ lifetime start cap. Saved settings win and runner reads them on the next start r
 The environment variables `BLERG_RUNNER_MAX_PARALLEL_CHILDREN` and
 `BLERG_RUNNER_MAX_CHILD_STARTS_PER_HOUR` seed those defaults; set them in `configmap.yaml`
 for core and runner before rollout. Invalid values produce a startup warning and fall back
-to 3 or 120. Account limits remain six running children and sixty starts per rolling hour,
+to 3 or 120. Account limits remain twelve running children and sixty starts per rolling hour,
 so they can be reached before a higher per-parent limit. Approval requests reserve rate
 budget too. Core migration 024 stores saved settings; runner reads `/internal/child-limits`
 with its internal key. Unavailable core retains runner's last valid values (or its defaults

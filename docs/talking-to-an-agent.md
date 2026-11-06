@@ -774,10 +774,11 @@ again and renew the parent's level), or when the parent was stopped for good or 
 **Each child has its own limits.** A child's board calls count against its own limits, not its
 parent's: 8 board calls at once and 600 board requests a minute per session (the defaults; see above),
 and at most 20 filings an hour approved without asking per permission. By default a parent runs at most 3
-children at once and an account at most 6, so with children an account can have up to 48 more board
+children at once and an account at most 12, so with children an account can have up to 96 more board
 calls in flight, and a parent at **File without asking** and its children together up to 80 filings
 an hour without asking at the default child limit. The install administrator can change the
-parallel child limit in core Settings; the account cap still applies.
+parallel child limit in core Settings; the account cap still applies. Core’s shared account-wide
+exchange-token limit also applies, so these ceilings are not occupancy targets.
 
 Every board call of the child is checked against the lower of its own level and the parent's level
 at that moment. Lowering or revoking the parent's level lowers every child at its next call, and
@@ -1023,7 +1024,7 @@ usage separately from the parent's own usage.
 
 By default a parent can run three children at once and start 120 per rolling hour, with no
 lifetime start cap. An administrator can change both under core Settings → Child session limits;
-changes apply on the next start request. Across your account, the limits remain six running
+changes apply on the next start request. Across your account, the limits remain twelve running
 children and sixty starts per rolling hour, which can be reached before the parent limit.
 Approval requests reserve rate budget too. A refusal names the limit and says to stop a child
 or gives the next available time in UTC. Approval requests expire after ten minutes.

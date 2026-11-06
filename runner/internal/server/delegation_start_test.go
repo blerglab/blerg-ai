@@ -622,12 +622,11 @@ func TestDelegationLimits(t *testing.T) {
 		}
 		fx.noSpawn()
 	})
-	t.Run("6 running across the account", func(t *testing.T) {
+	t.Run("12 running across the account", func(t *testing.T) {
 		fx := newDelegFx(t)
 		fx.rule("claude", runnerRuntimeDocker, false)
-		p2, _ := fx.session(sessOpts{owner: "owner-1"})
-		p3, _ := fx.session(sessOpts{owner: "owner-1"})
-		for _, p := range []string{fx.parent, p2, p3} {
+		for range 6 {
+			p, _ := fx.session(sessOpts{owner: "owner-1"})
 			fx.childOf(p)
 			fx.childOf(p)
 		}
@@ -929,7 +928,7 @@ func TestCrossRepoSessionGrantStillEnforcesEveryLimit(t *testing.T) {
 			}
 		}},
 		{"account running", func(fx *delegFx) {
-			for range 2 {
+			for range 4 {
 				p, _ := fx.session(sessOpts{owner: "owner-1"})
 				for range 3 {
 					fx.childOf(p)

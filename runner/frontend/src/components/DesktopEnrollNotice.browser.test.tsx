@@ -9,7 +9,7 @@ const apiFetch = vi.hoisted(() => vi.fn())
 vi.mock('../apiFetch', () => ({ apiFetch }))
 beforeEach(() => {
   vi.clearAllMocks()
-  apiFetch.mockImplementation(() => Promise.resolve(new Response(JSON.stringify({ rules: [], limits: { per_parent_running: 3, per_parent_starts_per_hour: 120, per_account_running: 6, per_account_starts_per_hour: 60 } }))))
+  apiFetch.mockImplementation(() => Promise.resolve(new Response(JSON.stringify({ rules: [], limits: { per_parent_running: 3, per_parent_starts_per_hour: 120, per_account_running: 12, per_account_starts_per_hour: 60 } }))))
 })
 
 const shots = (import.meta.env as Record<string, string | undefined>).VITE_SETTINGS_SHOTS

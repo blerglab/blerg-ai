@@ -905,7 +905,7 @@ seed defaults at core startup; invalid values log a warning and use 3/120. Saved
 always win. Runner reads `POST /internal/child-limits` using `X-Internal-Key` on the
 next start request, so settings changes require no restart. Runner retains the last
 valid values if core is unavailable, or its environment defaults before its first read.
-Account limits remain six running children and sixty starts per rolling hour across
+Account limits remain twelve running children and sixty starts per rolling hour across
 parents. Approval requests also reserve rate budget.
 
 ### Session storage

@@ -31,7 +31,7 @@ func TestEnvironmentSeedsAndRanges(t *testing.T) {
 			}
 		})
 	}
-	for _, l := range []Limits{{1, 1}, {50, 10000}, {3, 120}} {
+	for _, l := range []Limits{{1, 1}, {50, 10000}, {3, 120}, {12, 120}} {
 		if err := l.Validate(); err != nil {
 			t.Fatal(err)
 		}

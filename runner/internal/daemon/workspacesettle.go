@@ -12,18 +12,62 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/blerglab/blerg-ai/runner/internal/hostgit"
+	"github.com/blerglab/blerg-ai/runner/internal/workbranch"
 )
+
+const workspaceNestedRepositoryNotice = "A nested repository is kept; release it from Release storage."
 
 // Settlement runs only in the capped copy worker after exact runtime absence.
 // Git uses a new trusted gitdir/config, never the agent's config or hooks. No
 // filter drivers are configured, so attributes cannot spawn agent commands.
-func settleWorkspaceMember(ctx context.Context, m *workspacePrivateMember, session string) (bool, error) {
+func settleWorkspaceMember(ctx context.Context, m *workspacePrivateMember, session string, recorded ...string) (bool, error) {
+	return settleWorkspaceRoot(ctx, m, nil, session, recorded...)
+}
+
+// settleWorkspaceRoot keeps the reserved paths out of a root member's snapshot.
+// They come from the signed journal: the clone's own info/exclude is the agent's,
+// and a path missing from this list would land in the repository as a gitlink.
+func settleWorkspaceRoot(ctx context.Context, m *workspacePrivateMember, reserved []string, session string, recorded ...string) (bool, error) {
 	if err := checkSandboxCloneTreeContext(ctx, m.Clone); err != nil {
 		return false, err
+	}
+	m.Result.SyncNote = ""
+	nestedRepository := false
+	// Nested repositories are independent work, including ignored repositories
+	// inside cache directories. Never infer disposability from their names.
+	if err := filepath.WalkDir(m.Clone, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(m.Clone, path)
+		if err != nil {
+			return err
+		}
+		if rel == ".git" {
+			return filepath.SkipDir
+		}
+		if m.Member.Path == "." && d.IsDir() && slices.Contains(reserved, rel) {
+			return filepath.SkipDir
+		}
+		if d.Name() == ".git" {
+			nestedRepository = true
+			return filepath.SkipAll
+		}
+		return nil
+	}); err != nil {
+		return false, err
+	}
+	if nestedRepository {
+		m.Result.SyncNote = workspaceNestedRepositoryNotice
+		return false, nil
 	}
 	if err := resetCloneAlternates(m.Clone, &m.Source); err != nil {
 		return false, err
@@ -32,7 +76,14 @@ func settleWorkspaceMember(ctx context.Context, m *workspacePrivateMember, sessi
 	if err != nil {
 		return false, err
 	}
-	branch := "refs/heads/" + sandboxBranch(session)
+	name := sandboxBranch(session)
+	if len(recorded) > 0 {
+		name = workbranch.Effective(session, recorded[0])
+	}
+	if !workbranch.Valid(name) {
+		return false, errors.New("invalid session work branch")
+	}
+	branch := "refs/heads/" + name
 	cleanRefs := m.InitialRefsDigest != "" && workspaceRefsDigest(refs, branch) == m.InitialRefsDigest
 	safe, err := os.MkdirTemp("", "blerg-settle-*")
 	if err != nil {
@@ -49,7 +100,19 @@ func settleWorkspaceMember(ctx context.Context, m *workspacePrivateMember, sessi
 	if err := os.WriteFile(filepath.Join(safe, "HEAD"), []byte("ref: "+branch+"\n"), 0o600); err != nil {
 		return false, err
 	}
-	if err := os.MkdirAll(filepath.Join(safe, "refs", "heads", "wip"), 0o700); err != nil {
+	var exclude strings.Builder
+	if m.Member.Path == "." {
+		for _, name := range reserved {
+			exclude.WriteString("/" + name + "/\n")
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(safe, "info"), 0o700); err != nil {
+		return false, err
+	}
+	if err := os.WriteFile(filepath.Join(safe, "info", "exclude"), []byte(exclude.String()), 0o600); err != nil {
+		return false, err
+	}
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(safe, filepath.FromSlash(branch))), 0o700); err != nil {
 		return false, err
 	}
 	if head, ok := readCloneRef(m.Clone, branch); ok {
@@ -135,11 +198,27 @@ func settleWorkspaceMember(ctx context.Context, m *workspacePrivateMember, sessi
 	if err := workspaceVerifyTreeBytes(ctx, m.Clone, head, git); err != nil {
 		return false, err
 	}
-	ignored, err := git("ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+	// Reserved paths are not ignored work: they are other members, settled apart.
+	ignored, err := git("ls-files", "--others", "--ignored", "--exclude-per-directory=.gitignore", "-z")
 	if err != nil {
 		return false, err
 	}
-	return cleanRefs && ignored == "", nil
+	for _, name := range strings.Split(ignored, "\x00") {
+		if name == "" {
+			continue
+		}
+		if !workspaceRegenerableCache(name) {
+			return false, nil
+		}
+		info, err := os.Lstat(filepath.Join(m.Clone, filepath.FromSlash(name)))
+		if err != nil {
+			return false, err
+		}
+		if !info.Mode().IsRegular() {
+			return false, nil
+		}
+	}
+	return cleanRefs, nil
 }
 func workspaceCopyFile(source, target string, allowExisting bool) error {
 	from, err := os.Open(source) //nolint:gosec // daemon-created safe gitdir inside the isolated worker
@@ -234,6 +313,12 @@ func workspaceVerifyTreeBytes(ctx context.Context, clone, head string, git func(
 		}
 		meta, name, ok := strings.Cut(entry, "\t")
 		fields := strings.Fields(meta)
+		if ok && len(fields) == 3 && fields[0] == "160000" && fields[1] == "commit" {
+			if err := workspaceVerifyGitlink(root, name); err != nil {
+				return err
+			}
+			continue
+		}
 		if !ok || len(fields) != 3 || fields[1] != "blob" {
 			return errors.New("snapshot contains unsupported tree entry")
 		}
@@ -312,6 +397,12 @@ func workspaceVerifyFetchedBytes(ctx context.Context, m workspacePrivateMember, 
 		}
 		meta, name, ok := strings.Cut(entry, "\t")
 		fields := strings.Fields(meta)
+		if ok && len(fields) == 3 && fields[0] == "160000" && fields[1] == "commit" {
+			if err := workspaceVerifyGitlink(root, name); err != nil {
+				return err
+			}
+			continue
+		}
 		if !ok || len(fields) != 3 || fields[1] != "blob" {
 			return errors.New("saved tree entry unsupported")
 		}
@@ -352,6 +443,31 @@ func workspaceVerifyFetchedBytes(ctx context.Context, m workspacePrivateMember, 
 	return nil
 }
 
+// Uninitialized submodules contain no working bytes. A populated submodule is
+// separate work and must keep the allocation, even if its gitlink was saved.
+func workspaceVerifyGitlink(root *os.Root, name string) error {
+	info, err := root.Lstat(name)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return errors.New("gitlink path contains local work; retained")
+	}
+	dir, err := root.Open(name)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	entries, err := dir.ReadDir(1)
+	if len(entries) == 0 && errors.Is(err, io.EOF) {
+		return nil
+	}
+	return errors.New("populated submodule contains local work; retained")
+}
+
 type workspaceByteComparer struct {
 	reader io.Reader // Only the retained regular file or an in-memory symlink value.
 	file   *os.File
@@ -382,4 +498,32 @@ func (w *workspaceByteComparer) Write(p []byte) (int, error) {
 		return 0, errors.New("saved blob bytes differ")
 	}
 	return len(p), nil
+}
+
+// Cache names alone do not authorize deletion. Only regular ignored files
+// matching these documented tool layouts may be discarded automatically.
+var workspaceMypyCacheFile = regexp.MustCompile(`^[0-9]+\.[0-9]+/(?:@plugins_snapshot\.json|(?:[A-Za-z_][A-Za-z0-9_]*/)*[A-Za-z_][A-Za-z0-9_]*\.(?:data|meta)\.json)$`)
+var workspaceRuffCacheFile = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$`)
+var workspaceNodeCacheFile = regexp.MustCompile(`^(?:babel-loader/[0-9a-f]{32,64}\.json|webpack/[A-Za-z0-9_.-]+/(?:index|[0-9]+)\.pack(?:\.gz|\.br)?(?:\.old)?)$`)
+
+func workspaceRegenerableCache(name string) bool {
+	parts := strings.Split(name, "/")
+	for i, part := range parts {
+		rest := strings.Join(parts[i+1:], "/")
+		switch part {
+		case "__pycache__":
+			return i+2 == len(parts) && (strings.HasSuffix(rest, ".pyc") || strings.HasSuffix(rest, ".pyo"))
+		case ".pytest_cache":
+			return slices.Contains([]string{".gitignore", "CACHEDIR.TAG", "README.md", "v/cache/nodeids", "v/cache/lastfailed", "v/cache/stepwise"}, rest)
+		case ".mypy_cache":
+			return rest == ".gitignore" || rest == "CACHEDIR.TAG" || workspaceMypyCacheFile.MatchString(rest)
+		case ".ruff_cache":
+			return rest == ".gitignore" || rest == "CACHEDIR.TAG" || workspaceRuffCacheFile.MatchString(rest)
+		case "node_modules":
+			if i+1 < len(parts) && parts[i+1] == ".cache" {
+				return workspaceNodeCacheFile.MatchString(strings.Join(parts[i+2:], "/"))
+			}
+		}
+	}
+	return false
 }

@@ -379,7 +379,7 @@
 
 .caps-group-head button:hover .caps-count,
 .caps-group-head button:focus-visible .caps-count {
-  background: var(--stone);
+  background: var(--fill-muted, var(--stone));
 }
 
 .caps-group-head.static {

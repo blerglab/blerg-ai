@@ -63,6 +63,30 @@ describe('ChatView compact tool calls', () => {
     expect(screen.queryAllByTestId('tool-row')).toHaveLength(0)
   })
 
+  // Every row, and the folded group wrapper itself, carries a real,
+  // non-empty data-event-id — the attribute the release-perf harness's
+  // markWhenPainted and scrollToCall.ts both rely on to tell "a
+  // transcript event actually rendered" from "the pane is merely
+  // present." A collapsed group of 4000 Bash calls (same shape as
+  // BLG-453's seeded long-transcript scenario) rendered with none at all
+  // while folded — its default state — since neither ToolGroup's own
+  // wrapper nor its hidden, unmounted rows set it, silently starving
+  // transcript-open of its own readiness signal.
+  it('gives every tool row, and the folded group itself, a real data-event-id', () => {
+    seed(...bashRun(2))
+    const { t } = mount()
+    for (const row of screen.getAllByTestId('tool-row')) {
+      expect(row.getAttribute('data-event-id')).toBeTruthy()
+    }
+
+    arrive(t, ...bashRun(1, 3))
+    expect(screen.getByTestId('tool-group').getAttribute('data-event-id')).toBeTruthy()
+    fireEvent.click(screen.getByTestId('tool-group-toggle'))
+    for (const row of screen.getAllByTestId('tool-row')) {
+      expect(row.getAttribute('data-event-id')).toBeTruthy()
+    }
+  })
+
   it('splits groups at assistant text and other cards, but not at hidden kinds', () => {
     seed(
       ...bashRun(2),

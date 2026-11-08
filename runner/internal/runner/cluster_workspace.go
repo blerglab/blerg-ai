@@ -16,6 +16,7 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/clusterworkspace"
 	"github.com/blerglab/blerg-ai/runner/internal/daemon"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/workbranch"
 )
 
 func takeClusterWorkspace() (*clusterworkspace.Plan, error) {
@@ -86,6 +87,10 @@ func prepareClusterDisk(cfg Config) (*clusterworkspace.DiskGit, *clusterworkspac
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := disk.SetWorkBranch(workbranch.Effective(cfg.SessionID, cfg.Workspace.WorkBranch)); err != nil {
+		disk.Close()
+		return nil, nil, err
+	}
 	rt, err := clusterworkspace.New(*cfg.Workspace, disk)
 	if err != nil {
 		disk.Close()
@@ -110,9 +115,9 @@ func clusterWorkspaceGuide(plan clusterworkspace.Plan) string {
 	var guide strings.Builder
 	guide.WriteString("Workspace repositories (commit changes in each affected repository):\n")
 	for _, m := range plan.Manifest.Members {
-		guide.WriteString("- " + m.ID + ": " + path.Join(clusterworkspace.PublicRoot, m.Path) + " (wip/" + plan.SessionID + ")\n")
+		guide.WriteString("- " + m.ID + ": " + path.Join(clusterworkspace.PublicRoot, m.Path) + " (" + workbranch.Effective(plan.SessionID, plan.WorkBranch) + ")\n")
 	}
-	guide.WriteString("Start cluster children with session start --repo <member-id-or-path> (repeat for a subset) or --all-repos. Each child uses its own wip/<child-id> branches.\n\n")
+	guide.WriteString("Start cluster children with session start --repo <member-id-or-path> (repeat for a subset) or --all-repos. Each child uses its own recorded session branches.\n\n")
 	return guide.String()
 }
 
@@ -137,9 +142,15 @@ func workspaceCommandLauncher(ctx context.Context, rt *clusterworkspace.Runtime,
 
 // Shared by the shipped Run path and agent-start regression.
 func newPodAgentHost(sender daemon.Sender, cfg Config, rt *clusterworkspace.Runtime, services func() ClusterServices, options daemon.AgentHostConfig) *daemon.AgentHost {
+	options.ResultBundleRoot = filepath.Join(cfg.Home, "projects")
+	options.SkillReadGroup = true
 	options.AttachmentsStateDir = "/home/agent/.blerg-runner-daemon"
 	options.PrepareHostWorkspace = clusterAgentWorkspace(cfg, rt, services)
-	return daemon.NewAgentHost(sender, options)
+	host := daemon.NewAgentHost(sender, options)
+	if cfg.OnTaskLimit != nil {
+		cfg.OnTaskLimit(func(message string) { host.TaskLimit(cfg.SessionID, message) })
+	}
+	return host
 }
 
 // The pod has already prepared this exact runtime. AgentHost's default host

@@ -109,7 +109,7 @@ export const SubagentCard = memo(function SubagentCard({ sub, live, options }: {
   // A subagent that reports no effort of its own runs at the session's: say so, never "unknown"
   // while the session's is known.
   const ownEffort = subagentEffort(sub)
-  const effort = ownEffort || (chat?.sessionEffort ? `${chat.sessionEffort} (the session's)` : 'unknown')
+  const effort = ownEffort || (chat?.sessionEffort ? `${chat.sessionEffort} (the workspace's)` : 'unknown')
   // A resumed run's call is the SendMessage: the message it was sent stands for the prompt.
   const prompt = inputField(sub.call?.call.input, resumed ? 'message' : 'prompt')
   // A background subagent's call returned its launch, not its report; a resumed run's call may have

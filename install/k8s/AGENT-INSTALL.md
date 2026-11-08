@@ -538,3 +538,24 @@ More rows, with background, are in README's "Troubleshooting".
 | A re-deploy changed nothing | `kubectl -n blerg get deploy -o wide` shows the old tag | `TAG` was not changed. Use a new `TAG`. |
 | Human lost the setup link, or it says "not valid" | — | Give them the command from the handoff message, step 1, to run in their own terminal (each run replaces the code, so an older link stops working). Do not run `setup-link` yourself: it prints the link. To see whether setup is still open without minting anything: `kubectl -n blerg exec deploy/blerg-core -- /blerg-core setup-link --check`. |
 | Human lost the admin password | — | Give them `kubectl -n blerg exec deploy/blerg-core -- /blerg-core users set-password --subject <username>` (the username: `kubectl -n blerg exec postgres-0 -- psql -U blerg -d blerg_core -tAc "select provider_subject from accounts where provider='local' and role='admin' order by created_at limit 1"`). Do not run `users set-password` yourself: it prints the new password. |
+
+### Scoped MCP internal transport
+
+Remote MCP sign-in control-plane requests carrying the shared internal key require
+HTTPS, except for literal loopback addresses, `localhost`, qualified Kubernetes
+Service names (`service.namespace.svc` or `service.namespace.svc.cluster.local`),
+and the exact built-in Docker service aliases: `blerg-core` for gateway-to-Core
+requests and `blerg-runner` for Core-to-Runner authority requests. Arbitrary short
+names, public plaintext hosts, user information, query strings and fragments are
+refused before the key is sent; refusal logs contain a classified cause.
+Existing account MCP clients keep their current operator configuration behavior.
+Production session authority and lifecycle wiring remain disabled until the
+BLG-145 lifecycle increment passes its security review.
+
+Scoped MCP internal clients always bypass environment and configured standard HTTP
+proxies, including `HTTP_PROXY` and `HTTPS_PROXY`; credentials never rely on
+`NO_PROXY`. Kubernetes Service suffixes permit plaintext only when the operator
+sets `BLERG_MCP_CLUSTER_DEPLOYMENT=true` (default false). The Kubernetes ConfigMap
+and Core/Runner deployments set and consume this flag; desktop installations
+leave it unset and use their exact Docker aliases or loopback. Authority wiring
+must explicitly pass this deployment flag to the Core authority client.

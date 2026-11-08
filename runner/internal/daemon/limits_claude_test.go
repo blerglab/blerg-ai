@@ -52,7 +52,7 @@ func TestClaudeDriverReportsARateLimitWithItsReset(t *testing.T) {
 	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", em, nil)
 	d.now = func() time.Time { return time.Unix(1_792_160_000, 0) }
 	d.steer.legacy = false
-	p := &ccProc{}
+	p := claudeTestProc(t, d, &ccProc{})
 	d.steer.proc = p
 	var got []time.Time
 	d.onRateLimit = func(reset time.Time) { got = append(got, reset) }

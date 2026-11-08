@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -41,6 +42,8 @@ import (
 
 	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
+	"github.com/blerglab/blerg-ai/runner/internal/clusterworkspace"
+	"github.com/blerglab/blerg-ai/runner/internal/commandsteps"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/idempotency"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
@@ -165,6 +168,12 @@ func apiErrorCause(status int, cause error, format string, args ...any) *APIErro
 
 // writeAPIError renders an APIError exactly as the handlers always have.
 func writeAPIError(w http.ResponseWriter, e *APIError) {
+	if refusal := clusterRefusal(e); refusal != nil {
+		w.Header().Set("X-Blerg-Launch-Refusal", refusal.code)
+		logClusterRefusal(e)
+		writeJSON(w, e.Status, map[string]any{"error": e.Message, "code": refusal.code, "retryable": false})
+		return
+	}
 	if e.RetryAfter > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(e.RetryAfter))
 	}
@@ -226,10 +235,26 @@ func (a *API) authRunnerPrincipal(w http.ResponseWriter, r *http.Request) (runne
 	return runnerPrincipal{}, false
 }
 
+type ContractRepository struct {
+	Repo     string `json:"repo"`
+	GitURL   string `json:"git_url,omitempty"`
+	Provider string `json:"provider,omitempty"`
+}
+
 type runnerStartRequest struct {
-	WorkspaceRepos  []string                    `json:"workspace_repos,omitempty"`
-	WorkspaceLaunch string                      `json:"workspace_launch,omitempty"`
-	Workspace       *protocol.WorkspaceManifest `json:"-"`
+	CommandSteps      *commandsteps.Definition `json:"-"`
+	Repositories      []ContractRepository     `json:"repositories,omitempty"`
+	channelInput      *channelStart
+	channelRestricted bool
+	personChannel     bool
+	channelPrivate    bool
+	WorkspaceRepos    []string                    `json:"workspace_repos,omitempty"`
+	WorkspaceLaunch   string                      `json:"workspace_launch,omitempty"`
+	Workspace         *protocol.WorkspaceManifest `json:"-"`
+	// Base is BLG-501's required --base <branch> for a host Main's cluster worker (design
+	// §3.3), carried alongside WorkspaceRepos/WorkspaceLaunch rather than inside Workspace,
+	// since a host-originated cluster child never has one (see childRunnerRequest).
+	Base string `json:"base,omitempty"`
 
 	resolvedRepoProvider bool
 	Repo                 string `json:"repo"`
@@ -237,10 +262,13 @@ type runnerStartRequest struct {
 	// Provider is the git provider Repo lives on (a gitprovider ID). Optional:
 	// absent means GitHub, as it always did for this contract (see
 	// repo_provider.go). omitempty keeps an older request's idempotency hash.
-	Provider string `json:"provider,omitempty"`
-	Title    string `json:"title"`
-	Prompt   string `json:"prompt"`
-	Model    string `json:"model"`
+	Provider           string `json:"provider,omitempty"`
+	Title              string `json:"title"`
+	WorkerKind         string `json:"kind,omitempty"`
+	workerKindResolved bool
+	workerKindInferred bool
+	Prompt             string `json:"prompt"`
+	Model              string `json:"model"`
 	// Effort is the Claude reasoning effort ("" = the model's default). Tagged
 	// omitempty so a request without it hashes exactly as it did before the
 	// field existed (startRequestHash) — a retry across the upgrade must not
@@ -257,8 +285,9 @@ type runnerStartRequest struct {
 	// layer explicitly ("cluster" | "docker" | "daemon" | "" = cluster where
 	// one is configured, else the daemon's sandbox when it has the image, else
 	// the daemon host — see resolveDaemonRuntime).
-	Engine  string `json:"engine"`
-	Runtime string `json:"runtime"`
+	Engine          string `json:"engine"`
+	Runtime         string `json:"runtime"`
+	RuntimeTargetID string `json:"runtime_target_id,omitempty"`
 	// TargetDaemonID pins a discovered host target. Unlike the internal cron
 	// pin, its presence is part of the caller's idempotency hash.
 	TargetDaemonID string `json:"daemon_id,omitempty"`
@@ -272,6 +301,7 @@ type runnerStartRequest struct {
 	// contract, which is what a tool's job is; a cron's session is unattended whatever is
 	// asked. Anything else is a 400. omitempty keeps an older request's idempotency hash.
 	Interaction string `json:"interaction,omitempty"`
+	Verbosity   string `json:"verbosity,omitempty"`
 	// NoRepo starts a session tied to no repository (repo, git_url and
 	// provider must then be absent). Explicit, never inferred from a blank
 	// repo: without it a blank repo is still "repo is required". On the
@@ -559,10 +589,31 @@ type StartResponse struct {
 // it from the Idempotency-Key header, MCP from the tool's idempotency_key
 // argument.
 func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req RunnerStartRequest, idemKey string) (StartResponse, *APIError) {
+	if err := a.runtimeTargetProblem(ctx, req.Runtime, req.RuntimeTargetID); err != nil {
+		return StartResponse{}, err
+	}
+	if req.RuntimeTargetID != "" && req.Runtime == "" {
+		req.Runtime = "cluster"
+	}
 	ctx = withDesktopViewer(ctx, desktopViewer(ctx, principal.spawningAccountID()))
 	ctx = withFilingProject(withCoreProof(ctx, principal.proof()), principal.Project)
 	// A title reaches people and other agents: stored one line, nothing invisible (session_rename.go).
 	req.Title = cleanSessionTitle(req.Title)
+	workerKind := req.WorkerKind
+	var kindErr error
+	if !req.workerKindResolved {
+		workerKind, kindErr = resolveWorkerKind(req.WorkerKind, req.Title)
+	}
+	if kindErr != nil {
+		log.Printf("runner start: invalid worker kind")
+		return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity, "%s", kindErr)
+	}
+	if problem := contractRepositoriesProblem(req, principal); problem != nil {
+		return StartResponse{}, problem
+	}
+	if len(req.Repositories) > 0 {
+		req.Repo = req.Repositories[0].Repo
+	}
 	if req.TargetDaemonID != "" {
 		if req.Runtime != runnerRuntimeDaemon && req.Runtime != runnerRuntimeDocker {
 			return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity, "daemon_id requires an explicit daemon or docker runtime")
@@ -589,6 +640,10 @@ func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req R
 	}
 	// Checked here, before the idempotency claim; applied only after the request is hashed, so
 	// a request that does not state a mode hashes as it did before the field existed.
+	verbosity, verbosityErr := a.resolveVerbosity(ctx, req.Verbosity, principal.spawningAccountID(), principal.Kind == sessionDelegateKind)
+	if verbosityErr != nil {
+		return StartResponse{}, verbosityErr
+	}
 	interaction, apiErr := resolveInteraction(req.Interaction, false, req.CronID != "")
 	if apiErr != nil {
 		return StartResponse{}, apiErr
@@ -645,7 +700,7 @@ func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req R
 	// The session id is minted here, before anything is started, because the
 	// idempotency record has to name it: a retry that arrives while the first
 	// start is still in flight must be answered with the SAME id.
-	if req.Workspace == nil && !req.NoRepo && req.GitURL == "" && principal.Kind != sessionDelegateKind && a.hub.JobManager() != nil && (req.Runtime == "" || req.Runtime == runnerRuntimeCluster) {
+	if len(req.Repositories) == 0 && req.Workspace == nil && !req.NoRepo && req.GitURL == "" && principal.Kind != sessionDelegateKind && a.hub.JobManager() != nil && (req.Runtime == "" || req.Runtime == runnerRuntimeCluster) {
 		repo, provider, problem := a.resolveClusterRepo(ctx, req.Repo, req.Provider, req.DaemonID, principal.spawningAccountID())
 		if problem != "" {
 			return StartResponse{}, apiErrorf(http.StatusUnprocessableEntity, "%s", problem)
@@ -675,6 +730,10 @@ func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req R
 		case !claimed && existing.RequestHash != hash:
 			return StartResponse{}, apiErrorf(http.StatusConflict, "%s", idempotencyConflictMessage)
 		case !claimed:
+			if existing.RefusalCode != "" {
+				refusal := &clusterAuthorizationRefusal{code: existing.RefusalCode}
+				return StartResponse{}, apiErrorCause(422, refusal, "%s", refusal.Error())
+			}
 			return StartResponse{SessionID: existing.SessionID, Replayed: true}, nil
 		}
 		// Claimed. Sweep expired records while we are already writing here —
@@ -684,9 +743,20 @@ func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req R
 		}
 	}
 
+	req.WorkerKind = workerKind
 	req.Interaction = interaction
+	req.Verbosity = verbosity
 	if apiErr := a.startRunnerSession(ctx, req, principal, sessionID); apiErr != nil {
 		if idemKey != "" && a.dbPool != nil {
+			// A refusal receipt stops an interactive or delegated caller retrying into a pile of
+			// failed workers (BLG-531). A cron run instead fails cleanly and leaves nothing behind,
+			// so its next attempt can succeed once the person fixes the cause.
+			if refusal := clusterRefusal(apiErr); refusal != nil && req.CronID == "" {
+				if err := db.RefuseIdempotencyKey(context.WithoutCancel(ctx), a.dbPool, scope, idemKey, sessionID, refusal.code, req.DelegationVia); err != nil {
+					logLaunchFailure("authorization", &jobSubmissionError{reason: "InternalError"})
+				}
+				return StartResponse{}, apiErr
+			}
 			// Nothing runs under this key, so it must not answer a retry with
 			// a session that never existed.
 			if err := db.ReleaseIdempotencyKey(context.WithoutCancel(ctx), a.dbPool, scope, idemKey, sessionID); err != nil {
@@ -701,7 +771,7 @@ func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req R
 	if principal.Kind == sessionDelegateKind {
 		parentID = principal.Sub
 	}
-	if a.dbPool != nil && (parentID != "" || req.Env["BLERG_BOARD_BOARD"] != "") {
+	if !req.personChannel && a.dbPool != nil && (parentID != "" || req.Env["BLERG_BOARD_BOARD"] != "") {
 		boardID, title, prompt := req.Env["BLERG_BOARD_BOARD"], req.Title, req.Prompt
 		func() {
 			// Assign the child before the start reply can let the parent end its turn.
@@ -721,6 +791,15 @@ func (a *API) StartSession(ctx context.Context, principal RunnerPrincipal, req R
 // unknown fields in what the caller sent. It is what decides whether a reused
 // Idempotency-Key is a retry or a different request.
 func startRequestHash(req runnerStartRequest) (string, error) {
+	// An inferred purpose must preserve pre-upgrade retry hashes.
+	if req.workerKindInferred {
+		req.WorkerKind = ""
+	}
+	// The explicit default and a legacy omission select the same target. Keep
+	// stored pre-upgrade hashes valid when migrated crons retry their start.
+	if req.RuntimeTargetID == db.DefaultRuntimeTargetID {
+		req.RuntimeTargetID = ""
+	}
 	var payload any = req
 	if req.ParentSessionID != "" {
 		// A child's in-process fields are part of what was asked (a different keep_running or way
@@ -731,9 +810,10 @@ func startRequestHash(req runnerStartRequest) (string, error) {
 			DelegationVia   string             `json:"delegation_via"`
 			KeepRunning     bool               `json:"keep_running"`
 			// Absent without boards: the hash of a start that passes none is what it was before.
-			Boards  []childBoard `json:"boards,omitempty"`
-			Members []string     `json:"workspace_members,omitempty"`
-		}{req, req.ParentSessionID, req.DelegationVia, req.KeepRunning, childBoardsHashKey(req.ChildBoards), workspaceMemberKeys(req.Workspace)}
+			Boards  []childBoard  `json:"boards,omitempty"`
+			Members []string      `json:"workspace_members,omitempty"`
+			Channel *channelStart `json:"channel,omitempty"`
+		}{req, req.ParentSessionID, req.DelegationVia, req.KeepRunning, childBoardsHashKey(req.ChildBoards), workspaceMemberKeys(req.Workspace), req.channelInput}
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -765,6 +845,13 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 	if jm == nil || req.Runtime == runnerRuntimeDaemon || req.Runtime == runnerRuntimeDocker {
 		return a.startBoardSessionOnDaemon(ctx, req, principal, sessionID)
 	}
+	if len(req.Repositories) > 0 {
+		m, problem := a.contractClusterWorkspace(ctx, principal, req)
+		if problem != nil {
+			return problem
+		}
+		req.Workspace, req.Repo = m, "workspace"
+	}
 	spawningAccount := principal.spawningAccountID()
 	tokenID := principal.tokenID()
 	// A grant is attached or the start is refused, before anything is recorded (mcpstart.go).
@@ -786,6 +873,9 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 		gitURL = firstNonEmpty(req.GitURL, jm.CloneURLFor(req.Provider, req.Repo))
 		workdir = "/workspace/" + req.Repo
 	}
+	if req.Workspace != nil {
+		gitURL, workdir = "", clusterworkspace.PublicRoot
+	}
 	if a.dbPool != nil {
 		if err := db.UpsertDaemon(ctx, a.dbPool, clusterDaemonID, "cluster", "runner", ""); err != nil {
 			log.Printf("runner: cluster daemon upsert: %v", err)
@@ -798,6 +888,8 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 		// cron id) goes in the same insert: no other account can list it before the
 		// marking below runs.
 		origin := sessionOriginFor(spawningAccount, req.Grant != nil || req.CronID != "", req.CronID)
+		origin.WorkerKind = req.WorkerKind
+		origin.RuntimeTargetID = req.RuntimeTargetID
 		a.notePrivateInsert(sessionID, origin)
 		if err := db.InsertClusterSessionAs(ctx, a.dbPool, sessionID, clusterDaemonID, "starting",
 			workdir, req.Repo, req.Title, req.Model, origin); err != nil {
@@ -843,11 +935,24 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 			}
 		}
 		recordInteraction(ctx, a.dbPool, sessionID, req.Interaction)
+		if err := recordVerbosity(ctx, a.dbPool, sessionID, req.Verbosity); err != nil {
+			log.Printf("record verbosity: %v", err)
+		}
 	}
 	// A cron's session is marked (cron_id) and made private, after its account is recorded.
 	if apiErr := a.markCronSession(ctx, req, sessionID); apiErr != nil {
 		a.abortGrantSession(ctx, sessionID)
 		return apiErr
+	}
+	if req.Workspace != nil {
+		if err := db.SetSessionNoOperatorFallback(ctx, a.dbPool, sessionID); err != nil {
+			a.markClusterStartFailed(ctx, sessionID, "workspace preparation failed")
+			return apiErrorf(503, "workspace preparation failed")
+		}
+		if err := db.InsertSessionWorkspace(ctx, a.dbPool, sessionID, *req.Workspace); err != nil {
+			a.markClusterStartFailed(ctx, sessionID, "workspace preparation failed")
+			return apiErrorf(503, "workspace preparation failed")
+		}
 	}
 	// The spawning account is recorded above; the session is made private after it, and the
 	// tokens go only into the per-session Secret.
@@ -861,17 +966,19 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 	}
 	// Unattended: every cron session and every board-started grant session runs restricted
 	// (mcpstart.go). Recorded so a resume rebuilds the same Job.
-	restricted := req.Grant != nil || req.CronID != ""
+	restricted := (req.Grant != nil && !req.personChannel) || req.CronID != "" || req.channelRestricted
 	if restricted && a.dbPool != nil {
 		if err := db.SetSessionRestrictTools(ctx, a.dbPool, sessionID); err != nil {
 			log.Printf("SetSessionRestrictTools %s: %v", sessionID, err)
 		}
 	}
 	spec := SessionJobSpec{
+		CommandSteps:         req.CommandSteps,
 		RequireRecoveryReady: principal.Kind == sessionDelegateKind,
 		MCPGateway:           gateway,
 		RestrictTools:        restricted,
 		Interaction:          req.Interaction,
+		Verbosity:            req.Verbosity,
 		SessionID:            sessionID, Repo: req.Repo, Title: req.Title,
 		Model: req.Model, Effort: req.Effort, Engine: req.Engine, InitialPrompt: req.Prompt,
 		InitialPromptSource: initialPromptSource(principal, req),
@@ -883,6 +990,19 @@ func (a *API) startRunnerSession(ctx context.Context, req runnerStartRequest, pr
 		AuthSessionID:       principal.proof().SessionID,
 		// A cron never runs on the shared operator credential (spec 7.4).
 		NoOperatorFallback: req.NoOperatorFallback,
+	}
+	if req.Workspace != nil {
+		members, err := clusterLaunchMembers(jm, *req.Workspace)
+		if err != nil {
+			a.markClusterStartFailed(ctx, sessionID, "workspace preparation failed")
+			return apiErrorf(422, "workspace preparation failed")
+		}
+		spec.Repo = ""
+		spec.Workspace, spec.WorkspaceMembers, spec.NoOperatorFallback = req.Workspace, members, true
+	}
+	if m := boardStartTitle.FindStringSubmatch(req.Title); req.Env["BLERG_BOARD_BOARD"] != "" && m != nil {
+		n, _ := strconv.Atoi(m[1])
+		_ = a.planPinStarted(ctx, sessionID, req.Env["BLERG_BOARD_BOARD"], n, m[2])
 	}
 	jm.ResolvePlugins(ctx, &spec)
 	announceClusterStart(ctx, a.hub, a.dbPool, sessionID, req.Repo, false, pluginStage(spec.Plugins, spec.PluginsNote))
@@ -1006,12 +1126,19 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 		// repository it names on the desktop.
 		return apiErrorf(409, "Select an existing repository using fresh source references.")
 	}
+	if len(req.Repositories) > 0 && dc.DiscoveryVersion != 1 {
+		return apiErrorf(409, "Update the desktop before starting a session with several repositories.")
+	}
 	if dc.DiscoveryVersion == 1 && req.Workspace == nil && !req.NoRepo {
-		m, apiErr := a.contractRepoWorkspace(ctx, principal.spawningAccountID(), dc, req.Repo, req.Provider, resolveDaemonRuntime(req.Runtime, dc.SandboxAvailable()))
+		repos := req.Repositories
+		if len(repos) == 0 {
+			repos = []ContractRepository{{Repo: req.Repo, Provider: req.Provider}}
+		}
+		m, apiErr := a.contractReposWorkspace(ctx, principal.spawningAccountID(), dc, repos, resolveDaemonRuntime(req.Runtime, dc.SandboxAvailable()))
 		if apiErr != nil {
 			return apiErr
 		}
-		req.Workspace, req.Repo, req.Prompt = m, "workspace", workspacePrompt(req.Prompt, m)
+		req.Workspace, req.Repo = m, "workspace"
 		bound := dc
 		defer func() {
 			if !dispatched {
@@ -1045,7 +1172,7 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 		if apiErr := a.checkGrant(req.Grant, grantTarget{Runtime: runtime, Engine: req.Engine, Kind: "agent", Daemon: dc}); apiErr != nil {
 			return apiErr
 		}
-	} else if req.CronID != "" {
+	} else if req.CronID != "" || req.channelRestricted {
 		// A cron session with no connections is still restricted: the daemon must be able to.
 		if apiErr := checkRestrictTarget(runtime, dc, req.Engine); apiErr != nil {
 			return apiErr
@@ -1061,7 +1188,8 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 	if apiErr != nil {
 		return apiErr
 	}
-	origin := sessionOriginFor(principal.spawningAccountID(), req.Grant != nil || req.CronID != "" || parentPrivate, req.CronID)
+	origin := sessionOriginFor(principal.spawningAccountID(), req.Grant != nil || req.CronID != "" || parentPrivate || req.channelPrivate, req.CronID)
+	origin.WorkerKind = req.WorkerKind
 	origin.ParentSessionID, origin.DelegationVia, origin.KeepRunning = req.ParentSessionID, req.DelegationVia, req.KeepRunning
 	origin.RequireParentEpoch = principal.Kind == sessionDelegateKind
 	origin.ParentEpoch = req.ParentEpoch
@@ -1089,7 +1217,7 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 				log.Printf("runner start: SetSessionTokenID %s: %v", sessionID, err)
 			}
 		}
-		if principal.Kind != sessionDelegateKind {
+		if principal.Kind != sessionDelegateKind || req.personChannel {
 			// A person's start records their sign-in, as a browser launch does (a desktop
 			// child records none: its delegate carries no proof).
 			recordLaunchAuthSession(ctx, a.dbPool, sessionID, principal.proof().SessionID)
@@ -1101,7 +1229,7 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 				abortSpawnSessionToken(ctx, a.dbPool, sessionID)
 				return apiErrorCause(http.StatusServiceUnavailable, errDaemonUnavailable, "the session's origin could not be recorded — retry")
 			}
-		} else {
+		} else if !req.personChannel {
 			// Must land: it is one of the marks that keep a child a child (isChildSession).
 			if err := db.SetSessionStartedBy(ctx, a.dbPool, sessionID, "session", a.parentLabel(ctx, principal.Sub)); err != nil {
 				log.Printf("runner start: child started_by %s: %v", sessionID, err)
@@ -1130,6 +1258,15 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 			}
 		}
 		recordInteraction(ctx, a.dbPool, sessionID, req.Interaction)
+		if err := recordVerbosity(ctx, a.dbPool, sessionID, req.Verbosity); err != nil {
+			log.Printf("record verbosity: %v", err)
+		}
+	}
+	if req.channelRestricted {
+		if err := db.SetSessionRestrictTools(ctx, a.dbPool, sessionID); err != nil {
+			abortSpawnSessionToken(ctx, a.dbPool, sessionID)
+			return apiErrorf(503, "could not record channel permissions")
+		}
 	}
 	if req.Workspace != nil {
 		if sessionToken == "" || req.Workspace.OwnerID != principal.spawningAccountID() || dc.WorkspaceCapabilities.Require(*req.Workspace, false) != nil || db.InsertSessionWorkspace(ctx, a.dbPool, sessionID, *req.Workspace) != nil {
@@ -1157,7 +1294,7 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 		}
 		gateway = a.forDaemon(ctx, sessionID, gateway, dc)
 	}
-	restricted := req.Grant != nil || req.CronID != ""
+	restricted := (req.Grant != nil && !req.personChannel) || req.CronID != "" || req.channelRestricted
 	// Always-on plugins for a board-started Claude session on a daemon, as for a launch-sheet one.
 	// A child has no liveness proof of its own to load the owner's plugins with: none, and the start
 	// panel says why.
@@ -1166,16 +1303,42 @@ func (a *API) startBoardSessionOnDaemon(ctx context.Context, req runnerStartRequ
 	if principal.Kind != sessionDelegateKind {
 		plugins, pluginNote = a.daemonPlugins(ctx, dc, principal.spawningAccountID(), principal.proof(), "agent", req.Engine, restricted)
 	}
+
+	// Pin a board launch before branch resolution so {card} captures its key.
+	if m := boardStartTitle.FindStringSubmatch(req.Title); boardID != "" && m != nil {
+		n, _ := strconv.Atoi(m[1])
+		_ = a.planPinStarted(ctx, sessionID, boardID, n, m[2])
+	}
+	branch, customBranch, branchErr := a.daemonWorkBranch(ctx, sessionID, dc)
+	if branchErr != nil {
+		abortSpawnSessionToken(ctx, a.dbPool, sessionID)
+		return apiErrorf(503, "Could not record the session work branch.")
+	}
+	if runtime == runnerRuntimeDocker && !req.NoRepo {
+		if problem := workBranchDaemonProblem(dc, sessionID, branch, customBranch); problem != "" {
+			abortSpawnSessionToken(ctx, a.dbPool, sessionID)
+			return apiErrorf(http.StatusConflict, "%s", problem)
+		}
+	}
+	skillPolicy, skillErr := sessionSkills(ctx, a.dbPool, sessionID)
+	if skillErr != nil {
+		abortSpawnSessionToken(ctx, a.dbPool, sessionID)
+		return apiErrorf(503, "could not resolve session skills")
+	}
 	raw, err := json.Marshal(protocol.SpawnSession{ //nolint:gosec // the spawn message must carry the session token (and any MCP gateway grant) to the daemon over the authenticated websocket; never logged
+		SkillPolicy:           skillPolicy,
+		CommandSteps:          req.CommandSteps,
+		WorkBranch:            branch,
 		Workspace:             req.Workspace,
 		WorkspaceCapabilities: dc.WorkspaceCapabilities,
 		RequireRecoveryReady:  principal.Kind == sessionDelegateKind,
 		MCPGateway:            gateway,
 		Plugins:               plugins,
 		// Every cron session and every grant session runs restricted (mcpstart.go).
-		RestrictTools: req.Grant != nil || req.CronID != "",
+		RestrictTools: (req.Grant != nil && !req.personChannel) || req.CronID != "" || req.channelRestricted,
 		// Unattended unless the caller said a person is reading (interaction.go).
 		Interaction: req.Interaction,
+		Verbosity:   req.Verbosity,
 		Type:        "spawn_session", SessionID: sessionID, Repo: req.Repo, Title: req.Title,
 		// DaemonForRepo picked a daemon that already has the folder, so no
 		// clone is needed; the provider lets it refuse a checkout whose
@@ -1341,6 +1504,8 @@ func (a *API) SessionStatus(ctx context.Context, principal RunnerPrincipal, sess
 	return map[string]any{
 		"lifecycle":          lifecycle,
 		"runtime":            runtime,
+		"runtime_target_id":  derefOrEmpty(row.RuntimeTargetID),
+		"worker_kind":        row.WorkerKind,
 		"resumable":          resumable,
 		"resume_mode":        resumeMode,
 		"resume_reason":      resumeReason,
@@ -1355,6 +1520,7 @@ func (a *API) SessionStatus(ctx context.Context, principal RunnerPrincipal, sess
 		// Whether a person is reading the session's chat as it works ("interactive") or
 		// nobody is ("unattended"): what the engine was told at start.
 		"interaction":  effectiveInteraction(row),
+		"verbosity":    effectiveVerbosity(row),
 		"error_reason": errorReason,
 		"end_reason":   endReason,
 		"ended_by":     endedBy,
@@ -1393,7 +1559,7 @@ func (a *API) HandleRunnerMessage(w http.ResponseWriter, r *http.Request) {
 // relays go through sendRelay.
 func reservedMessageSource(source string) bool {
 	switch source {
-	case "review", "proposal", "system", "ask_answer", "note_reply", "limit_resume", childTurnSource, questionAnswerSource, planDriftSource, usageNoticeSource:
+	case markCapacitySource, "page_result", "review", "proposal", "system", "ask_answer", "note_reply", "limit_resume", "process_limit", childTurnSource, questionAnswerSource, questionThreadSource, planDriftSource, usageNoticeSource, membershipSource, blackboardSetupSource:
 		return true
 	}
 	return false
@@ -1403,7 +1569,7 @@ func reservedMessageSource(source string) bool {
 // or dismissal, a review's or a proposal's outcome, a child's turn, a board-access change). A caller
 // may not use one: the outbox keeps one row per id, so a message under "question-<id>" would stand
 // in for the owner's answer, which would then never be sent, and the chat would draw it as a relay.
-var reservedClientIDPrefixes = []string{"question-", "review-", "proposal-", "child-turn-", "board-access-", "usage-notice-"}
+var reservedClientIDPrefixes = []string{"page-result-", "question-", "review-", "proposal-", "child-turn-", "child-note-", "board-access-", "usage-notice-", "membership-", "blackboard-setup-"}
 
 // reservedClientID reports whether id is one the server keeps for its own relays.
 func reservedClientID(id string) bool {
@@ -1418,7 +1584,10 @@ func reservedClientID(id string) bool {
 // sendRelay is SendMessage for a note Blerg relays in its own voice (source "review", "proposal",
 // childTurnSource or questionAnswerSource): the server's own paths only, never a caller's.
 func (a *API) sendRelay(ctx context.Context, principal RunnerPrincipal, sessionID, text, source string, clientIDs ...string) *APIError {
-	if source != "review" && source != "proposal" && source != childTurnSource && source != questionAnswerSource && source != planDriftSource && source != usageNoticeSource {
+	if source == childTurnSource && ctx.Value(workerNoticeKey{}) != true {
+		return apiErrorf(http.StatusInternalServerError, "worker relays require sendWorkerNotice")
+	}
+	if source != markCapacitySource && source != "page_result" && source != "review" && source != "proposal" && source != childTurnSource && source != questionAnswerSource && source != questionThreadSource && source != planDriftSource && source != usageNoticeSource && source != membershipSource && source != blackboardSetupSource {
 		return apiErrorf(http.StatusInternalServerError, "not a relay source")
 	}
 	_, apiErr := a.deliverMessage(ctx, principal, sessionID, text, source, clientIDs...)
@@ -1430,11 +1599,8 @@ func (a *API) sendRelay(ctx context.Context, principal RunnerPrincipal, sessionI
 // send_message tool. source "" defaults to "runner". A reserved source (reservedMessageSource)
 // is refused: no caller, an agent included, can write in Blerg's voice.
 //
-// A message from a person or an API caller (source human, runner or chat) sent while a
-// `blerg-runner ask` of the session is open answers that ask, as a message typed in the runner's
-// chat does: the engine is blocked inside the ask and would read the message only once the ask
-// timed out. The reply then carries "answered_ask": true. A board's automation (blerg-board) never
-// answers an ask.
+// Ordinary messages stay conversational while a question is open. Only an explicit
+// answer naming that question can resolve it; thread replies never carry that authority.
 func (a *API) SendMessage(ctx context.Context, principal RunnerPrincipal, sessionID, text, source string, clientIDs ...string) (map[string]any, *APIError) {
 	if reservedMessageSource(source) {
 		return nil, apiErrorf(http.StatusUnprocessableEntity, "source %s is reserved for text Blerg writes itself", source)
@@ -1457,7 +1623,7 @@ func (a *API) SendMessage(ctx context.Context, principal RunnerPrincipal, sessio
 func (a *API) deliverMessage(ctx context.Context, principal RunnerPrincipal, sessionID, text, source string, clientIDs ...string) (map[string]any, *APIError) {
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
-	if text == "" {
+	if strings.TrimSpace(text) == "" {
 		return nil, apiErrorf(http.StatusBadRequest, "text required")
 	}
 	if _, e := a.requireSessionAccess(ctx, principal, sessionID); e != nil {
@@ -1506,10 +1672,13 @@ func (a *API) deliverMessage(ctx context.Context, principal RunnerPrincipal, ses
 }
 
 func (a *API) sendMessage(ctx context.Context, principal RunnerPrincipal, sessionID, text, source string, cancelPending func() error, clientIDs ...string) (map[string]any, *APIError) {
+	if source == childTurnSource && ctx.Value(workerNoticeKey{}) != true {
+		return nil, apiErrorf(http.StatusInternalServerError, "worker relays require sendWorkerNotice")
+	}
 	if problem := parentResumeProblem(ctx, a.dbPool, sessionID); problem != nil {
 		return nil, problem
 	}
-	if text == "" {
+	if strings.TrimSpace(text) == "" {
 		return nil, apiErrorf(http.StatusBadRequest, "text required")
 	}
 	if source == "" {
@@ -1518,6 +1687,17 @@ func (a *API) sendMessage(ctx context.Context, principal RunnerPrincipal, sessio
 	row, apiErr := a.requireSessionAccess(ctx, principal, sessionID)
 	if apiErr != nil {
 		return nil, apiErr
+	}
+	// Parent driving pauses while a person-only question is open. The parent gets
+	// a resolution notice before it resends; ordinary loop inputs only queue.
+	if principal.Kind == sessionDelegateKind && a.dbPool != nil {
+		var blocked bool
+		if err := a.dbPool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM messages WHERE session_id=$1 AND kind='ask' AND status='open' AND (NOT no_wait OR waiter_ended) AND (person_required OR child_escalated))`, sessionID).Scan(&blocked); err != nil {
+			return nil, apiErrorf(http.StatusServiceUnavailable, "question state unavailable; retry shortly")
+		}
+		if blocked {
+			return nil, apiErrorf(http.StatusConflict, "the child is waiting on the person; send this message after the question is resolved")
+		}
 	}
 	clientID := ""
 	if len(clientIDs) > 0 {
@@ -1528,7 +1708,20 @@ func (a *API) sendMessage(ctx context.Context, principal RunnerPrincipal, sessio
 	}
 	// Only while the session's daemon is connected: with it away (a restart) the `ask` that would
 	// read the answer is dead, and the message must reach the session instead.
+	if handled, err := a.answerBoundAsk(ctx, protocol.AgentUserMessage{SessionID: sessionID, Text: text, ClientID: clientID}, identity.Principal{Claims: identity.Claims{Kind: principal.Kind, Sub: principal.Sub, Sid: principal.Sid, OnBehalfOf: principal.OnBehalfOf}}); handled {
+		if err != nil && !errors.Is(err, errBoundConversation) {
+			return nil, apiErrorf(http.StatusConflict, "%s", boundReplyMessage(err))
+		}
+		if err == nil {
+			return map[string]any{"ok": true, "answered_ask": true}, nil
+		}
+	}
 	dc := a.hub.FindDaemonForSession(sessionID)
+	// Completion relays wait for reconnect; they must never launch a cluster
+	// runtime just because its coordinator's socket disappeared.
+	if source == childTurnSource && dc == nil && derefOrEmpty(row.Runtime) == runnerRuntimeCluster {
+		return nil, apiErrorf(http.StatusConflict, "coordinator is disconnected; retry after reconnect")
+	}
 	if clientID != "" {
 		if row.Kind != "agent" {
 			return nil, apiErrorf(http.StatusConflict, "durable messages require an agent session")
@@ -1589,13 +1782,6 @@ func (a *API) sendMessage(ctx context.Context, principal RunnerPrincipal, sessio
 	if err := cancelPending(); err != nil {
 		return nil, apiErrorf(http.StatusServiceUnavailable, "continuation is busy; retry shortly")
 	}
-	answerer := "" // only a person signed in as themselves may answer an owner-only ask
-	if principal.Kind == "human" && principal.OnBehalfOf == "" {
-		answerer = principal.Sub
-	}
-	if dc != nil && answersAsk(source) && answerAskFrom(ctx, a.hub, a.dbPool, sessionID, text, clientID, "", answerer, source) {
-		return map[string]any{"ok": true, "answered_ask": true, "client_id": clientID}, nil
-	}
 	if dc != nil {
 		raw, err := json.Marshal(protocol.AgentUserMessage{
 			Type: "agent_user_message", SessionID: sessionID, Text: text, Source: source, ClientID: clientID,
@@ -1603,12 +1789,21 @@ func (a *API) sendMessage(ctx context.Context, principal RunnerPrincipal, sessio
 		if err != nil {
 			return nil, apiErrorf(http.StatusInternalServerError, "marshal error")
 		}
-		if a.hub.trySendToDaemon(dc, raw) {
+		sent := false
+		if source == childTurnSource {
+			sent = sendWorkerFrame(ctx, a.hub, a.dbPool, dc, protocol.AgentUserMessage{SessionID: sessionID, Text: text, ClientID: clientID}, raw)
+		} else {
+			sent = a.hub.trySendToDaemon(dc, raw)
+		}
+		if sent {
 			clearPausedOnMessage(ctx, a.hub, a.dbPool, sessionID)
 			return map[string]any{"ok": true, "client_id": clientID}, nil
 		}
 		if clientID != "" {
 			return map[string]any{"ok": true, "client_id": clientID, "queued": true}, nil
+		}
+		if source == childTurnSource {
+			return nil, apiErrorf(http.StatusTooManyRequests, "worker notice pending; retry delivery")
 		}
 		return nil, apiErrorf(http.StatusServiceUnavailable, "daemon send buffer full — retry")
 	}
@@ -1686,6 +1881,8 @@ func (a *API) HandleRunnerStop(w http.ResponseWriter, r *http.Request) {
 // if a concurrent automatic continuation cannot be cancelled, it returns a
 // retryable failure instead of claiming the session was stopped.
 func (a *API) Stop(ctx context.Context, principal RunnerPrincipal, sessionID string) (map[string]string, *APIError) {
+	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
+	defer cancel()
 	// A session nobody has heard of cannot be stopped, and a session that is
 	// not this principal's is answered as if it did not exist.
 	if _, apiErr := a.requireSessionAccess(ctx, principal, sessionID); apiErr != nil {
@@ -1699,6 +1896,9 @@ func (a *API) Stop(ctx context.Context, principal RunnerPrincipal, sessionID str
 		var pending bool
 		if err := a.dbPool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM local_workspace_authority WHERE session_id=$1 AND stop_requested AND final_digest IS NULL AND NOT aborted)`, sessionID).Scan(&pending); err == nil && pending {
 			status = "stopping"
+			if reason := pausedStopReason(ctx, a.dbPool, sessionID); reason != "" {
+				return map[string]string{"status": status, "message": reason}, nil
+			}
 		}
 	}
 	return map[string]string{"status": status}, nil
@@ -1727,6 +1927,8 @@ func (a *API) stopSessionUnlocked(ctx context.Context, sessionID string, end db.
 // Discard requires successful stop delivery before the session may leave the worker lists.
 // Ordinary stop retains its existing best-effort cleanup behavior.
 func (a *API) stopSessionWithDelivery(ctx context.Context, sessionID string, end db.SessionEnd, strict bool) error {
+	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
+	defer cancel()
 	if a.dbPool != nil {
 		w, err := db.GetSessionWorkspace(ctx, a.dbPool, sessionID)
 		if err != nil {
@@ -1847,7 +2049,17 @@ func (a *API) HandleRunnerInterrupt(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	body, apiErr := a.Interrupt(r.Context(), principal, r.PathValue("id"))
+	var request struct {
+		TargetEventID string `json:"target_event_id"`
+	}
+	if r.Body != nil {
+		err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&request)
+		if err != nil && !errors.Is(err, io.EOF) {
+			writeAPIError(w, apiErrorf(http.StatusBadRequest, "invalid interrupt request"))
+			return
+		}
+	}
+	body, apiErr := a.Interrupt(r.Context(), principal, r.PathValue("id"), request.TargetEventID)
 	if apiErr != nil {
 		writeAPIError(w, apiErr)
 		return
@@ -1859,28 +2071,37 @@ func (a *API) HandleRunnerInterrupt(w http.ResponseWriter, r *http.Request) {
 // interrupt_session tool. A session with nothing live to interrupt is a
 // conflict, not a success — but a session this principal may not see is a 404
 // first, so the conflict never becomes an existence oracle.
-func (a *API) Interrupt(ctx context.Context, principal RunnerPrincipal, sessionID string) (map[string]bool, *APIError) {
+func (a *API) Interrupt(ctx context.Context, principal RunnerPrincipal, sessionID string, targetEventID ...string) (map[string]bool, *APIError) {
+	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
+	defer cancel()
 	if _, e := a.requireSessionAccess(ctx, principal, sessionID); e != nil {
 		return nil, e
 	}
 	var body map[string]bool
 	var problem *APIError
-	err := withCancelledLimitResume(ctx, a.dbPool, sessionID, func() error { body, problem = a.interrupt(ctx, principal, sessionID); return nil })
+	err := withCancelledLimitResume(ctx, a.dbPool, sessionID, func() error { body, problem = a.interrupt(ctx, principal, sessionID, targetEventID...); return nil })
 	if err != nil {
 		return nil, apiErrorf(http.StatusServiceUnavailable, "continuation is busy; retry shortly")
 	}
 	return body, problem
 }
 
-func (a *API) interrupt(ctx context.Context, principal RunnerPrincipal, sessionID string) (map[string]bool, *APIError) {
+func (a *API) interrupt(ctx context.Context, principal RunnerPrincipal, sessionID string, targetEventID ...string) (map[string]bool, *APIError) {
 	if _, apiErr := a.requireSessionAccess(ctx, principal, sessionID); apiErr != nil {
 		return nil, apiErr
+	}
+	if reason := pausedStopReason(ctx, a.dbPool, sessionID); reason != "" {
+		return nil, apiErrorf(http.StatusConflict, "%s", reason)
 	}
 	dc := a.hub.FindDaemonForSession(sessionID)
 	if dc == nil {
 		return nil, apiErrorf(http.StatusConflict, "no live runtime for this session")
 	}
-	raw, err := json.Marshal(protocol.InterruptSession{Type: "interrupt_session", SessionID: sessionID})
+	target := ""
+	if len(targetEventID) > 0 {
+		target = targetEventID[0]
+	}
+	raw, err := json.Marshal(protocol.InterruptSession{Type: "interrupt_session", SessionID: sessionID, TargetEventID: target})
 	if err != nil {
 		return nil, apiErrorf(http.StatusInternalServerError, "marshal error")
 	}

@@ -124,7 +124,10 @@ with fixed `-i`, never login argv, a request command or `$SHELL`. The child gets
 HOME/USER/LOGNAME, vetted PATH, TERM and locale. Provider, Blerg, bridge, preload and
 SSH-agent environment variables do not transfer. Startup files and ordinary user
 permissions remain part of executing as that OS account. Privilege gain through
-setuid executables is suppressed by tracing/no-new-privileges.
+setuid executables is suppressed by tracing/no-new-privileges, unless a desktop
+offers an explicitly chosen privileged host shell in a cgroup, so that sudo works. Ordinary shells
+retain the tracer. Privileged shells are not frozen at turn end and copies carry an in-flight-writes note: see
+[sudo in host shells](design/host-shell-cgroup.md), off by default.
 
 The containment implementation is Linux-specific. Other platforms fail closed;
 no process-group-only fallback is advertised. The filter permits the helper's

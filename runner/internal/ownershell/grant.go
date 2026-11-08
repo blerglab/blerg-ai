@@ -47,12 +47,18 @@ func SignGrant(key ed25519.PrivateKey, g protocol.ShellGrant) SignedGrant {
 // expected comes from trusted runtime launch state, never from the incoming envelope.
 func VerifyGrant(key ed25519.PublicKey, signed SignedGrant, expected protocol.ShellGrant, revision uint64, now time.Time) error {
 	g := signed.Grant
+	if g.Privileged != expected.Privileged || g.Privileged && g.Runtime != "host" {
+		return ErrDenied
+	}
 	b, _ := json.Marshal(g)
 	sig, err := base64.RawURLEncoding.DecodeString(signed.Signature)
 	if err != nil || len(key) != ed25519.PublicKeySize || !ed25519.Verify(key, b, sig) {
 		return ErrDenied
 	}
-	if g.Version != 1 || g.PolicyRevision != revision || revision == 0 || g.IssuedAt <= 0 || g.ExpiresAt <= g.IssuedAt || g.ExpiresAt-g.IssuedAt > protocol.ShellGrantSeconds {
+	if g.Version != expected.Version || (g.Version != 1 && g.Version != 2) || g.PolicyRevision != revision || revision == 0 || g.IssuedAt <= 0 || g.ExpiresAt <= g.IssuedAt || g.ExpiresAt-g.IssuedAt > protocol.ShellGrantSeconds {
+		return ErrDenied
+	}
+	if g.Version == 1 && (g.CustodyID != "" || g.AccessEpoch != 0) || g.Version == 2 && (g.CustodyID == "" || g.AccessEpoch == 0 || g.Runtime == "cluster") || g.CustodyID != expected.CustodyID || g.AccessEpoch != expected.AccessEpoch {
 		return ErrDenied
 	}
 	if g.Audience == "" || g.OwnerID == "" || g.LoginID == "" || g.SessionID == "" || g.LaunchGeneration == "" || g.ConnectionID == "" || g.ShellGeneration == "" {

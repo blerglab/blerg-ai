@@ -2,11 +2,12 @@ import { useShallow } from 'zustand/react/shallow'
 import type { SessionInfo } from '../types'
 import { useSessionStore } from '../hooks/useSessionStore'
 import { hasLiveParent } from './sessionTree'
+import { sessionRole } from './sessionRole'
 import { displayLabel, displayState, pausedByRestart, PAUSED_WORDS, type DisplayState } from './displayState'
 
 /** Sidebar cards and tiles describe the entire session tree, independent of list filters or
- *  collapsed children. Descendants contribute work; only a root’s own state asks the person.
- *  Child questions and pauses belong to their parent agent; background work keeps its quieter glyph. */
+ *  collapsed children. Descendants contribute work; roots and person-started channels ask the person.
+ *  Worker questions and pauses belong to their parent agent; background work keeps its quieter glyph. */
 export function selectSessionAggregate(session: SessionInfo, sessions: readonly SessionInfo[]) {
   const children = new Map<string, SessionInfo[]>()
   for (const child of sessions) {
@@ -25,7 +26,7 @@ export function selectSessionAggregate(session: SessionInfo, sessions: readonly 
     tree.push(current)
     pending.push(...(children.get(current.id) ?? []))
   }
-  const root = !hasLiveParent(session, sessions)
+  const root = sessionRole(session) === 'channel' || !hasLiveParent(session, sessions)
   const waiting = root && session.status === 'waiting' && !pausedByRestart(session)
   const paused = root && pausedByRestart(session)
   const running = tree.some(s => s.status === 'running')
@@ -33,7 +34,9 @@ export function selectSessionAggregate(session: SessionInfo, sessions: readonly 
   const tasks = tree.reduce((n, s) => n + (['idle', 'running', 'waiting', 'starting'].includes(s.status) ? s.background_tasks ?? 0 : 0), 0)
   const ownState = displayState(session)
   const state: DisplayState | 'waiting-parent' = waiting || paused ? 'waiting' : !root && ownState === 'waiting' ? 'waiting-parent' : running ? 'running' : starting ? 'starting' : tasks > 0 ? 'background' : ownState
-  return { state, paused, tasks, label: paused ? PAUSED_WORDS : state === 'waiting-parent' ? 'Waiting for its parent session' : displayLabel(state, tasks) }
+  const coordinator = sessions.find(s => s.id === session.parent_session_id)
+  const coordinatorName = coordinator && sessionRole(coordinator) !== 'workspace' ? coordinator.title || 'Untitled chat' : 'Main'
+  return { state, paused, tasks, label: paused ? PAUSED_WORDS : state === 'waiting-parent' ? `Waiting for ${coordinatorName}` : displayLabel(state, tasks) }
 }
 
 export function useSessionAggregate(session: SessionInfo) {

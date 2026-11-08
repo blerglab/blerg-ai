@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/blerglab/blerg-ai/runner/internal/clusterworkspace"
+	"github.com/blerglab/blerg-ai/runner/internal/daemon"
 )
 
 // Only launcher-created support directories are transferred. Runtime snapshots,
@@ -27,6 +28,10 @@ func projectClusterLaunchFiles(cmd *exec.Cmd) error {
 	for _, path := range paths {
 		var root string
 		switch {
+		case path == daemon.PodSkillStateDir("/workspace") || strings.HasPrefix(path, daemon.PodSkillStateDir("/workspace")+"/"):
+			// Skills stay supervisor-owned and group-readable, never writable
+			// launch support transferred to the agent.
+			continue
 		case strings.HasPrefix(path, "/tmp/blerg-"):
 			tail := strings.TrimPrefix(path, "/tmp/")
 			root = "/tmp/" + strings.Split(tail, "/")[0]

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import Transcript, { WINDOW, type TranscriptProps } from './Transcript'
 import { installIntersectionObserver, intersect } from '../test/intersection'
 import { inputClock } from '../model/clock'
@@ -55,10 +55,12 @@ const drawn = (c: HTMLElement) => c.querySelectorAll('.agent-card.user').length
 
 // The reader scrolls up from where they are to `top` (following stops on an upward scroll).
 function scrollUpTo(timeline: HTMLElement, top: number) {
+  fireEvent.pointerDown(timeline, { button: 0 })
   timeline.scrollTop = timeline.scrollHeight - timeline.clientHeight
   act(() => { timeline.dispatchEvent(new Event('scroll', { bubbles: true })) })
   timeline.scrollTop = top
   act(() => { timeline.dispatchEvent(new Event('scroll', { bubbles: true })) })
+  fireEvent.pointerUp(window)
 }
 
 // jsdom has no layout, so a timeline reads as scrolled to its end; this one is scrolled to its top.
@@ -305,7 +307,7 @@ describe('Transcript draws a window of the newest rows', () => {
     expect(screen.queryByTestId('history-start')).toBeNull()
     act(() => intersect())
     const start = screen.getByTestId('history-start')
-    expect(start).toHaveTextContent('Beginning of the session')
+    expect(start).toHaveTextContent('Beginning of the workspace')
     expect(container.querySelector('.agent-timeline')!.firstElementChild).toBe(start)
     rerender(<Transcript {...p} loadingOlder />)
     expect(screen.queryByTestId('history-start')).toBeNull()
@@ -506,11 +508,12 @@ describe('Transcript keeps the reader in place as rows are revealed above', () =
     }
   })
 
-  it('a scroll just after a landing counts once its window has passed', async () => {
+  it.each(['scrollbar', 'selection'])('a %s scroll after a landing still asks for older rows', async kind => {
     try {
       const { onLoadOlder, clock } = await gatedLanding()
       // A scroll the input listeners did not see (the scrollbar), 50 ms after the landing.
       clock.t += 50
+      fireEvent.pointerDown(kind === 'selection' ? timeline.querySelector('.agent-card')! : timeline, { button: 0 })
       timeline.scrollTop -= 100
       act(() => { timeline.dispatchEvent(new Event('scroll', { bubbles: true })) })
       expect(onLoadOlder).toHaveBeenCalledTimes(1)

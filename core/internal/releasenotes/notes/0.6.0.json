@@ -1,0 +1,14 @@
+{
+  "version": "0.6.0",
+  "title": "More room for your work",
+  "items": [
+    "Work in a workspace with Main, named channels, and workers grouped in the dock.",
+    "Follow worker progress and failures, and answer decisions that stay in Needs you.",
+    "Keep your plan in the blackboard, with milestones, linked cards, and changes Main asks you to approve.",
+    "Read charts and diagrams in your workspace, including board release progress charts.",
+    "Save named layouts in this browser and restore your tabs, splits, and panel sizes.",
+    "Print viewer content and download messages as Markdown.",
+    "Get back to work faster with quicker startup connections and smoother workspace switching.",
+    "Open live ticket details beside the board, with a full-content view on phones."
+  ]
+}

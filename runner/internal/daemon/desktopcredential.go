@@ -16,6 +16,19 @@ type DesktopCredential struct {
 	Token             string `json:"token"`
 }
 
+// currentDesktopToken is the credential the next connection would present: enrollment can
+// replace the one the daemon started with. "" when there is none.
+func (c Config) currentDesktopToken() string {
+	if c.CredentialStateDir == "" || c.DaemonMode == "runner" {
+		return ""
+	}
+	credential, err := LoadDesktopCredential(c.CredentialStateDir)
+	if err != nil || credential == nil {
+		return ""
+	}
+	return credential.Token
+}
+
 // LoadDesktopCredential refuses links, shared files and oversized data. The
 // installer writes atomically in the user's private daemon state directory.
 func LoadDesktopCredential(stateDir string) (*DesktopCredential, error) {

@@ -51,6 +51,24 @@ afterEach(async () => {
 })
 
 describe('the viewer uses the screen', () => {
+  it.each([[390, 844, 1], [1280, 900, 0.5], [3840, 2160, 0.5]] as const)('frames Markdown in a split group at %i × %i', async (width, height, fraction) => {
+    await page.viewport(width, height)
+    render(<div style={{ width: width * fraction, height: height / 2 }}>
+      <ChatContext.Provider value={context}>
+        <ArtifactViewer sessionId="viewer-space" files={files(MARKDOWN)} artifact={md} embedded onClose={() => {}} />
+      </ChatContext.Provider>
+    </div>)
+    await waitFor(() => expect(document.querySelector('.artifact-markdown')).not.toBeNull())
+    await frame()
+    const prose = document.querySelector<HTMLElement>('.artifact-markdown')!
+    const style = getComputedStyle(prose)
+    expect(parseFloat(style.paddingLeft)).toBe(32)
+    expect(parseFloat(style.paddingRight)).toBe(32)
+    expect(parseFloat(style.borderLeftWidth)).toBe(1)
+    expect(prose.getBoundingClientRect().width).toBeLessThanOrEqual(width * fraction)
+    expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(innerWidth)
+  })
+
   it.each(SIZES)('review takes about 96 × 92 percent of a %i × %i viewport and splits its panes', async (width, height) => {
     await page.viewport(width, height)
     const { findByRole, getByRole } = open(md, MARKDOWN, true)
@@ -161,7 +179,7 @@ describe('the viewer uses the screen', () => {
     const dialog = rect('.ticket-modal')
     if (width < 900) expect(dialog.width).toBeCloseTo(width, 0)
     else {
-      expect(dialog.width).toBeCloseTo(Math.min(1400, 0.94 * width), 0)
+      expect(dialog.width).toBeCloseTo(Math.min(1120, 0.90 * width), 0)
       expect(dialog.height).toBeLessThanOrEqual(height * 0.9 + 1)
     }
     // The text keeps a reading width, centered in the dialog.

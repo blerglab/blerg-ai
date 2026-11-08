@@ -44,6 +44,7 @@ type Service struct {
 }
 
 type AgentTokenInput struct {
+	PersonBehind                           bool
 	Sub, Aud, Project, OnBehalfOf, Lineage string
 	Caps                                   []string
 
@@ -122,7 +123,7 @@ func (s *Service) MintAgentToken(ctx context.Context, in AgentTokenInput) (strin
 	}
 	return s.signer.Sign(cid.Claims{
 		Sub: in.Sub, Aud: in.Aud, Project: in.Project, Kind: string(cid.Agent),
-		Caps: in.Caps, OnBehalfOf: in.OnBehalfOf, Lineage: in.Lineage,
+		PersonBehind: in.PersonBehind, Caps: in.Caps, OnBehalfOf: in.OnBehalfOf, Lineage: in.Lineage,
 		IssuedAt: now.Unix(), ExpiresAt: exp.Unix(),
 	})
 }

@@ -11,3 +11,8 @@ export function tabDragSpeed(x: number, left: number, right: number) {
   if (edge <= 0) return 0
   return x < left + edge ? -900 * Math.min(1, (left + edge - x) / edge) : x > right - edge ? 900 * Math.min(1, (x - right + edge) / edge) : 0
 }
+
+/** Arrow navigation is shared by fixed tool tabs and workspace views. */
+export function nextTabIndex(key: string, index: number, count: number): number | null {
+  return key === 'Home' ? 0 : key === 'End' ? count - 1 : key === 'ArrowRight' ? (index + 1) % count : key === 'ArrowLeft' ? (index + count - 1) % count : null
+}

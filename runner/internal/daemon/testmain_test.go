@@ -18,6 +18,9 @@ import (
 // ignores stdin, so the package runs with the kill switch on. The steering tests build their driver with
 // newSteeringDriver, which turns the streaming engine on for that one driver.
 func TestMain(m *testing.M) {
+	if workspaceCopyDockerMain() {
+		os.Exit(0)
+	}
 	if workspaceRound2CrashMain(os.Args[1:]) {
 		os.Exit(0)
 	}
@@ -50,6 +53,10 @@ func TestMain(m *testing.M) {
 	// The periodic look at a sandbox container would add `docker inspect` calls to every fake
 	// docker log; the tests of that watch turn it on themselves.
 	sandboxWatchInterval = 0
+	// Spawn tests must not start the daemon-lifetime login workers: those would outlive
+	// their fixtures and read engineRegistry while later tests replace registrations.
+	// Refresh tests call the refresh functions directly and join their own goroutines.
+	sandboxLoginOnce.Do(func() {})
 	// A second "gone" look comes at once, and no fake docker log gains a `docker context show`; the
 	// real-Docker tests put the real context lookup back (realDockerContext).
 	sandboxGoneConfirm = 10 * time.Millisecond

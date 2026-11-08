@@ -44,7 +44,7 @@ describe('a diagram makes no network request', () => {
     ['a class diagram style with a CSS image', () => 'classDiagram\n  class A\n  style A fill:red,mask-image:url(/__beacon/frame-class.png)', 'frame-class'],
   ])('with the validator skipped, %s drawn in the frame makes no request', async (_name, make, tag) => {
     // renderInFrame is the renderer itself, without validateMermaid in front of it.
-    const svg = await renderInFrame(make(location.origin), CONFIG).catch((error: Error) => error.message)
+    const svg = await renderInFrame(make(location.origin), CONFIG).then(r => r.svg, (error: Error) => error.message)
     expect(typeof svg).toBe('string')
     await settle()
     expect(await hits(tag)).toEqual([])
@@ -94,7 +94,7 @@ describe('the renderer frame', () => {
     try {
       first.srcdoc = '<script>addEventListener("message", e => parent.postMessage({ leak: e.data }, "*"))</script>'
       await waitFor(() => expect(first.isConnected).toBe(false), { timeout: 10_000 })
-      const svg = await renderInFrame('flowchart LR\n  SecretSource --> B', CONFIG)
+      const { svg } = await renderInFrame('flowchart LR\n  SecretSource --> B', CONFIG)
       expect(svg).toContain('SecretSource')
       const [second] = frames()
       expect(second).toBeDefined()
@@ -108,7 +108,7 @@ describe('the renderer frame', () => {
     await renderInFrame('flowchart LR\n  A --> B', CONFIG)
     const pending = renderInFrame('flowchart LR\n  Real --> Answer', CONFIG)
     for (let id = 0; id < 50; id++) window.postMessage({ type: 'rendered', id, svg: '<svg>forged</svg>' }, '*')
-    const svg = await pending
+    const { svg } = await pending
     expect(svg).toContain('Real')
     expect(svg).not.toContain('forged')
   }, 60_000)
@@ -121,7 +121,7 @@ describe('the renderer frame', () => {
       await expect(renderInFrame('flowchart LR\n  Slow --> Diagram', CONFIG)).rejects.toThrow('the diagram took too long to draw')
     } finally { setMermaidFrameTimeouts({ render: 60_000 }) }
     expect(first.isConnected).toBe(false)
-    const svg = await renderInFrame('flowchart LR\n  Fresh --> Frame', CONFIG)
+    const { svg } = await renderInFrame('flowchart LR\n  Fresh --> Frame', CONFIG)
     expect(svg).toContain('Fresh')
     expect(frames()).toHaveLength(1)
     expect(frames()[0]).not.toBe(first)

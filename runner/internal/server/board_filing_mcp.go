@@ -10,7 +10,7 @@ import (
 
 func filingToolDefinition() any {
 	stringField := map[string]string{"type": "string"}
-	return map[string]any{"name": "blerg_ticket_file", "description": "Search before filing a ticket on any Board available to your person. list_boards lists targets; search finds duplicates and returns next_cursor (repeat with cursor until empty); propose queues an exact draft for human approval and never writes before approval.", "inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"action"}, "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"list_boards", "search", "propose"}}, "board": stringField, "query": stringField, "cursor": stringField, "title": stringField, "body": stringField, "type": stringField, "sensitive": map[string]string{"type": "boolean"}, "repos": map[string]any{"type": "array", "items": stringField, "maxItems": 20}}}}
+	return map[string]any{"name": "blerg_ticket_file", "description": "Search before filing a ticket on any Board available to your person. list_boards lists targets; search finds duplicates and returns next_cursor (repeat with cursor until empty); propose queues an exact draft for human approval and never writes before approval.", "inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"action"}, "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"list_boards", "search", "propose"}}, "board": stringField, "query": stringField, "cursor": stringField, "title": stringField, "size": stringField, "risk": stringField, "complexity": stringField, "body": stringField, "type": stringField, "sensitive": map[string]string{"type": "boolean"}, "repos": map[string]any{"type": "array", "items": stringField, "maxItems": 20}}}}
 }
 
 func pluginRequestToolDefinition() any {
@@ -105,15 +105,18 @@ func (a *API) HandleFilingTools(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var args struct {
-			Action    string   `json:"action"`
-			Board     string   `json:"board"`
-			Query     string   `json:"query"`
-			Cursor    string   `json:"cursor"`
-			Title     string   `json:"title"`
-			Body      string   `json:"body"`
-			Type      string   `json:"type"`
-			Sensitive bool     `json:"sensitive"`
-			Repos     []string `json:"repos"`
+			Action     string   `json:"action"`
+			Board      string   `json:"board"`
+			Query      string   `json:"query"`
+			Cursor     string   `json:"cursor"`
+			Size       string   `json:"size"`
+			Risk       string   `json:"risk"`
+			Complexity string   `json:"complexity"`
+			Title      string   `json:"title"`
+			Body       string   `json:"body"`
+			Type       string   `json:"type"`
+			Sensitive  bool     `json:"sensitive"`
+			Repos      []string `json:"repos"`
 		}
 		if filingDecode(params.Arguments, &args) != nil {
 			respond(nil, map[string]any{"code": -32602, "message": "Invalid filing arguments."})
@@ -133,7 +136,7 @@ func (a *API) HandleFilingTools(w http.ResponseWriter, r *http.Request) {
 			a.HandleFilingSearch(capture, inner)
 		case "propose":
 			inner.Method = "POST"
-			data, _ := json.Marshal(map[string]any{"board": args.Board, "title": args.Title, "body": args.Body, "type": args.Type, "sensitive": args.Sensitive, "repos": args.Repos})
+			data, _ := json.Marshal(map[string]any{"board": args.Board, "title": args.Title, "size": args.Size, "risk": args.Risk, "complexity": args.Complexity, "body": args.Body, "type": args.Type, "sensitive": args.Sensitive, "repos": args.Repos})
 			inner.Body = io.NopCloser(bytes.NewReader(data))
 			a.HandleFileTicket(capture, inner)
 		default:
@@ -172,6 +175,19 @@ func (a *API) boardToolResult(r *http.Request, arguments json.RawMessage) any {
 		inner.Method = http.MethodGet
 		inner.Body = http.NoBody
 		a.HandleSessionBoardAccess(capture, inner)
+		return text(capture.status >= 400, capture.body.String())
+	}
+	if args.Tool == "propose_metadata" {
+		var patch map[string]json.RawMessage
+		if json.Unmarshal(args.Arguments, &patch) != nil || patch == nil {
+			return text(true, "Provide metadata arguments.")
+		}
+		boardJSON, _ := json.Marshal(args.Board)
+		patch["board"] = boardJSON
+		data, _ := json.Marshal(patch)
+		inner.Method = http.MethodPost
+		inner.Body = io.NopCloser(bytes.NewReader(data))
+		a.HandleProposeBoardMetadata(capture, inner)
 		return text(capture.status >= 400, capture.body.String())
 	}
 	data, _ := json.Marshal(boardToolRequest{Board: args.Board, Tool: args.Tool, Arguments: args.Arguments})

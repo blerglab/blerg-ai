@@ -14,7 +14,7 @@ export interface RunDaemon {
 }
 
 export type RunRuntime = 'cluster' | 'docker' | 'daemon'
-export type RunKind = 'agent' | 'tmux'
+export type RunKind = 'agent'
 export type RunEngine = string
 
 // Short launch summaries, with longer runtime details available on demand.
@@ -29,7 +29,7 @@ export const RUNTIME_CARDS: { id: RunRuntime; title: string; body: string; detai
     id: 'docker',
     title: 'Local sandbox',
     body: 'Works in a separate clone on this desktop.',
-    details: 'A container on the connected daemon, working in a clone of your repo: never your checkout or its .git. Its commits land on the branch wip/<session-id> in your repo (uncommitted work is committed for it when it stops); nothing is merged or pushed. Your ~/.claude and ~/.codex are mounted so the engine can use them; the rest of the machine is not.',
+    details: 'A container on the connected daemon, working in a clone of your repo: never your checkout or its .git. Its commits land on the branch returned by blerg-runner session result <id> in your repo (uncommitted work is committed for it when it stops); nothing is merged or pushed. Your ~/.claude and ~/.codex are mounted so the engine can use them; the rest of the machine is not.',
   },
   {
     id: 'daemon',
@@ -45,12 +45,9 @@ export const RUNTIME_LABELS: Record<string, string> = {
   daemon: 'This machine',
 }
 
-export const TERMINAL_NEEDS_DAEMON = 'Terminal sessions run on a daemon.'
 export const AGENT_NO_PROMPTS = 'No prompts'
 export const ACK_AGENT =
   'I understand this runs unsandboxed on this machine, as me, with no permission prompts'
-export const ACK_TERMINAL =
-  'I understand this runs unsandboxed on this machine, as me, with full filesystem access'
 // The daemon's own refusal, word for word (sandboxOpenclawRefusal in
 // internal/daemon/agentsession.go): a person who ignores the disabled card and
 // gets the error from the server must not read two different sentences.
@@ -86,11 +83,10 @@ export function runtimeDisabledReason(
   rt: RunRuntime,
   opts: { clusterConfigured: boolean; daemons: RunDaemon[]; engine: RunEngine; kind: RunKind },
 ): string | null {
-  const { clusterConfigured, daemons, engine, kind } = opts
+  const { clusterConfigured, daemons, engine } = opts
   if (rt !== 'daemon' && engine === 'openclaw') return OPENCLAW_HOST_ONLY
   if (rt === 'cluster') {
     if (!clusterConfigured) return NO_CLUSTER_REASON
-    if (kind === 'tmux') return TERMINAL_NEEDS_DAEMON
     return null
   }
   if (daemons.length === 0) return NO_DAEMON_REASON

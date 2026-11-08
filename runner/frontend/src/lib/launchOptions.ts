@@ -8,11 +8,11 @@ export interface LaunchEngine {
   id: string
   name: string
   runtimes: string[]
-  terminal: boolean
   restricted: boolean
   plugins: boolean
   credential_import: boolean
   daemon_id?: string
+  runtime_target_id?: string
   runtime?: string
   models: ModelList & { refreshing?: boolean; error?: string }
 }
@@ -25,14 +25,15 @@ interface Snapshot {
   error?: string
   refreshing?: boolean
 }
-interface Target { runtime: string; daemonId?: string; kind?: string; restricted?: boolean; personalOnly?: boolean; enabled?: boolean }
+interface Target { runtime: string; runtimeTargetId?: string; daemonId?: string; kind?: string; restricted?: boolean; personalOnly?: boolean; enabled?: boolean }
 const ID = /^[a-z][a-z0-9_-]{0,63}$/
 
 /** Available engines for this principal and target, not the install's global brand inventory.
  * Target changes synchronously hide the prior result; bounded requests and generation cleanup
  * prevent a dead service or late response from leaving stale launch choices enabled. */
-export function useLaunchOptions({ runtime, daemonId, kind = 'agent', restricted = false, personalOnly = false, enabled = true }: Target) {
+export function useLaunchOptions({ runtime, runtimeTargetId, daemonId, kind = 'agent', restricted = false, personalOnly = false, enabled = true }: Target) {
   const query = new URLSearchParams({ runtime, kind })
+  if (runtime === 'cluster' && runtimeTargetId) query.set('runtime_target_id', runtimeTargetId)
   if (daemonId && runtime !== 'cluster') query.set('daemon_id', daemonId)
   if (restricted) query.set('restricted', '1')
   if (personalOnly) query.set('personal_only', '1')

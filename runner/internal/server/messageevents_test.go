@@ -31,6 +31,9 @@ func TestMessagesAreRecordedInTheAgentTranscript(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if _, err := pool.Exec(ctx, `UPDATE sessions SET spawning_account_id='transcript-owner' WHERE id=$1`, agentSess); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.SetSessionKind(ctx, pool, agentSess, "agent"); err != nil {
 		t.Fatal(err)
 	}
@@ -139,18 +142,18 @@ func TestMessagesAreRecordedInTheAgentTranscript(t *testing.T) {
 		t.Fatalf("after the reply: %+v", got)
 	}
 
-	// The native loop's ask (still open) is the loop's: a chat message is not taken for it...
+	// An unauthenticated ordinary message cannot answer the native ask...
 	if answerAskFromChat(ctx, hub, pool, agentSess, "hello", "cl-0", "") {
 		t.Fatal("a chat message answered the native loop's ask")
 	}
 	// ...but a chat message typed while a blerg-runner ask waits answers it, with its client id
 	// (a harness command is never taken for an answer).
 	ask2 := post(agentTok, agentSess, "ask", "ship it?")
-	if answerAskFromChat(ctx, hub, pool, agentSess, "/model claude-opus-5", "cl-m", "") ||
-		answerAskFromChat(ctx, hub, pool, agentSess, " /effort high", "cl-e", "") {
+	if answerAskFromChatAs(ctx, hub, pool, agentSess, "/model claude-opus-5", "cl-m", "", "transcript-owner") ||
+		answerAskFromChatAs(ctx, hub, pool, agentSess, " /effort high", "cl-e", "", "transcript-owner") {
 		t.Fatal("a /model or /effort command answered the ask")
 	}
-	if !answerAskFromChat(ctx, hub, pool, agentSess, "yes", "cl-1", "") {
+	if !answerAskFromChatAs(ctx, hub, pool, agentSess, "yes", "cl-1", ask2, "transcript-owner") {
 		t.Fatal("the chat message did not answer the open ask")
 	}
 	row, _ := db.GetMessage(ctx, pool, ask2)
@@ -182,36 +185,51 @@ func TestMessagesAreRecordedInTheAgentTranscript(t *testing.T) {
 		}
 	}
 	if answerAskFromChat(ctx, hub, pool, agentSess, "and another", "cl-2", "") {
-		t.Fatal("a chat message with no open ask was taken as an answer")
+		t.Fatal("an unknown sender answered the remaining native ask")
 	}
 
-	// Named explicitly (the card's reply box over the websocket), the native ask is answered too —
-	// its own poll delivers it to the loop, which records it — so nothing is recorded here.
+	// Named explicitly by the owner, the native ask is recorded by the server too;
+	// its poll delivers the committed answer and the loop echo shares the event ID.
 	before := len(transcript(agentSess))
-	if !answerAskFromChat(ctx, hub, pool, agentSess, "green", "cl-3", native) {
+	if !answerAskFromChatAs(ctx, hub, pool, agentSess, "green", "cl-3", native, "transcript-owner") {
 		t.Fatal("the named ask was not answered")
 	}
 	if row, _ := db.GetMessage(ctx, pool, native); row == nil || row.Status != "answered" {
 		t.Fatalf("native ask = %+v, want answered", row)
 	}
-	if n := len(transcript(agentSess)); n != before {
-		t.Fatalf("the native ask's answer was recorded by the server (%d → %d events)", before, n)
+	if n := len(transcript(agentSess)); n != before+1 {
+		t.Fatalf("native ask needs exactly one committed answer (%d → %d events)", before, n)
+	}
+
+	if answerAskFromChatAs(ctx, hub, pool, agentSess, "and another", "cl-4", "", "transcript-owner") {
+		t.Fatal("owner input with no open ask was taken as an answer")
 	}
 
 	// A message through the runner API (the board's composer, an API caller, MCP send_message)
 	// answers an open blerg-runner ask the same way while the session's daemon is connected; a
 	// board's automation never does.
 	key := runnerPrincipal{Kind: runnerKeyPrincipalKind}
-	hub.Register(&DaemonConn{ID: daemonID, Name: "d", send: make(chan []byte, 8)})
+	current := &DaemonConn{ID: daemonID, Name: "d", send: make(chan []byte, 8)}
+	current.SetAuthoritativeAnswers(true)
+	hub.Register(current)
 	hub.SetSessionOwner(agentSess, daemonID)
 	ask3 := post(agentTok, agentSess, "ask", "merge now?")
 	_, _ = api.SendMessage(ctx, key, agentSess, "review found two problems", "blerg-board")
 	if row, _ := db.GetMessage(ctx, pool, ask3); row == nil || row.Status != "open" {
 		t.Fatalf("a blerg-board message answered the ask: %+v", row)
 	}
-	body, apiErr := api.SendMessage(ctx, key, agentSess, "yes, merge", "human")
-	if apiErr != nil || body["answered_ask"] != true {
-		t.Fatalf("SendMessage = %v, %v; want the ask answered", body, apiErr)
+	if _, apiErr := api.SendMessage(ctx, key, agentSess, "automation claiming human source", "human"); apiErr != nil {
+		t.Fatal(apiErr)
+	}
+	if row, _ := db.GetMessage(ctx, pool, ask3); row == nil || row.Status != "open" {
+		t.Fatal("runner key answered by claiming a human source")
+	}
+	body, apiErr := api.SendMessage(ctx, runnerPrincipal{Kind: "human", Sub: "transcript-owner"}, agentSess, "yes, merge", "human")
+	if apiErr != nil || body["answered_ask"] == true {
+		t.Fatalf("ordinary chat answered: %v %v", body, apiErr)
+	}
+	if !answerAskFromChatAs(ctx, hub, pool, agentSess, "yes, merge", "", ask3, "transcript-owner") {
+		t.Fatal("explicit answer failed")
 	}
 	if row, _ := db.GetMessage(ctx, pool, ask3); row == nil || row.Status != "answered" || row.Answer == nil || *row.Answer != "yes, merge" {
 		t.Fatalf("ask3 = %+v, want answered", row)

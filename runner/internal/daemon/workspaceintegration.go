@@ -60,6 +60,15 @@ func NewIntegratedWorkspaceService(client *WSClient, manager func() *Manager) *L
 		}
 		return sources, "", nil
 	}
+	service.Discovery = func() membershipDiscovery {
+		if manager() == nil || manager().discovery == nil {
+			return nil
+		}
+		return manager().discovery
+	}
+	service.TurnIdle = func(id string) bool {
+		return manager() != nil && manager().agents != nil && manager().agents.turnIdle(id)
+	}
 	service.AuthorizeChild = func(ctx context.Context, parent, child string) error {
 		_, err := authority.call(ctx, protocol.LocalWorkspaceControl{SessionID: child, ParentSessionID: parent, Operation: "authorize_child"})
 		return err

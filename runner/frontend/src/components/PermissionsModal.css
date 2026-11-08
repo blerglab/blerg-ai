@@ -4,7 +4,7 @@
   position: fixed;
   inset: 0;
   z-index: 1100; /* above the launch sheet and the panel's drawer it opens from */
-  background: rgba(5, 4, 3, 0.72);
+  background: var(--permissions-backdrop);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -131,7 +131,7 @@
 }
 .pm-button:hover:not(:disabled) { border-color: var(--fog-dim); }
 .pm-button:focus-visible, .pm-link:focus-visible, .pm-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.pm-primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.pm-primary { background: var(--accent); border-color: var(--accent); color: var(--primary-white-fg, #fff); font-weight: 600; }
 .pm-primary:hover:not(:disabled) { border-color: var(--accent); filter: brightness(1.08); }
 .pm-button:disabled { opacity: 0.45; cursor: default; }
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi, onTestFinished } from 'vitest'
-import { act, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import ChatView from './ChatView'
 import { useTranscriptStore } from '../hooks/useTranscriptStore'
 import { absoluteLabel } from '../model/timeLabel'
@@ -74,8 +74,9 @@ describe('ChatView timestamps', () => {
         ev('error', { message: 'boom' }, at),
         turnDone(at),
       )
-      const { container } = mount()
-      const times = Array.from(container.querySelectorAll<HTMLTimeElement>('.agent-timeline time.card-time'))
+      mount()
+      fireEvent.click(within(screen.getByTestId('ask-card')).getByRole('button', { name: /which one/ }))
+      const times = Array.from(document.querySelectorAll<HTMLTimeElement>('.agent-timeline time.card-time, [role="dialog"] time.card-time'))
       expect(times).toHaveLength(8)
       for (const t of times) {
         expect(t.textContent).toContain('4 min ago')

@@ -1,8 +1,9 @@
+import type {DatasetReference, DatasetRow, DatasetSample} from '../visual/datasets'
 // The transport contract: what a chat needs from a session — what the runner's view actually reads
 // today, no more (docs/design/chat-package.md, "The transport contract"). Two adapters ship with
 // the package (blerg.ts over the runner's own websocket and routes, proxy.ts over an app's proxy
 // of the runner's v1 contract); an app with a backend of its own shape writes a third.
-import type { AgentEvent, DelegationChoice, DelegationDecidedPayload, EndedBy, ProposalDetail, ReviewRequestPayload, SessionStatus } from '../types'
+import type { AgentEvent, ArtifactPayload, DelegationChoice, DelegationDecidedPayload, EndedBy, ProposalDetail, ReviewRequestPayload, SessionStatus } from '../types'
 import type { ArtifactInfo } from '../model/artifacts'
 import type { UploadedFile } from '../model/attachments'
 
@@ -67,6 +68,18 @@ export interface SubscribeHandlers {
   onEvents?: (events: AgentEvent[]) => void
   /** A typing delta: the assistant's text so far this turn, never persisted. */
   onStreaming: (text: string) => void
+  /** Optional: a live file's republish (BLG-470) — never persisted, applied to the one artifact
+   *  id named, instead of becoming a transcript event (an in-place update is not history). A
+   *  transport without it drops these silently: a live card then only catches up the next time
+   *  its session's file list is read some other way. */
+  onArtifactUpdated?: (payload: ArtifactPayload) => void
+  /** Optional: this browser may have missed a live file's republish — a gap-driven backfill of
+   *  persisted events just ran (BLG-470 round 2 #3), which a live push never triggers on its own
+   *  since it is never persisted. A reconnect after having been disconnected means the same thing
+   *  and is covered separately through onConnection; this fires for a gap found while the
+   *  connection never dropped (a slow consumer's buffer overflowed). The caller should re-read
+   *  the file list. A transport without a gap concept (proxy.ts) never calls it. */
+  onArtifactsStale?: () => void
   onReplayDone: (done: ReplayDone) => void
   onStatus: (status: SessionStatus) => void
   /** The link to the session came up or went down. Down locks the composer; up means the
@@ -74,8 +87,8 @@ export interface SubscribeHandlers {
   onConnection: (connected: boolean) => void
   /** Optional: the server says one of the session's asks was answered or closed (its messages
    *  API id, and the answer: '' when it closed without one, an expiry; dismissed: the person
-   *  dismissed it from Needs you). */
-  onAskClosed?: (messageId: string, answer: string, dismissed?: boolean, dismissedBy?: 'you' | 'other') => void
+   *  dismissed it from Needs you; withdrawn: discard closed it without an answer). */
+  onAskClosed?: (messageId: string, answer: string, dismissed?: boolean, dismissedBy?: 'you' | 'other', withdrawn?: boolean) => void
   /** Optional: the transport gave up replaying forward from what is held (too far behind) and is
    *  loading the transcript again from its end, as on a first visit. Drop the events held; the
    *  newest page follows with an `older` onReplayDone, and older pages come through loadOlder.
@@ -144,7 +157,19 @@ export interface FileSpace {
   can_increase?: boolean
 }
 
+export interface AnswerRequest {
+ request_id: string; artifact_id: string; artifact_name: string; ask: string; schema: unknown; result?: unknown; delivered: boolean
+}
+
 export interface TransportFiles {
+ onDatasetInvalidated?(listener: () => void): () => void
+ reportVisualFailure?(sessionId: string, cause: 'invalid_document' | 'sample_expired'): void
+ subscribeDataset?(sessionId: string, data: DatasetReference, receive: (sample: DatasetSample & {rows: DatasetRow[]}) => void): () => void
+ commitRepositories?(sessionId: string): Promise<{ name: string; ref: WorkspaceGitRef }[]>
+ commitFile?(sessionId: string, sha: string, path: string, side: 'original' | 'changed', signal?: AbortSignal, member?: WorkspaceGitRef): Promise<WorkspaceFile>
+ /** Owner-only answer bridge, absent on transports without published answer pages. */
+ answerRequest?(sessionId: string, artifactId: string): Promise<AnswerRequest | null>
+ submitAnswer?(sessionId: string, artifactId: string, result: string): Promise<void>
   /** Stable account/server namespace for local queued bytes. Absent: memory only. Never a token. */
   queueScope?(): string
   /** A commit by sha (7 to 64 hex digits), read from the session's workspace; null when it cannot be
@@ -162,6 +187,9 @@ export interface TransportFiles {
    *  adapters). Throws a FileRequestError with a readable message when refused. */
   increaseStorage?(sessionId: string): Promise<void>
   list(sessionId: string): Promise<ArtifactInfo[]>
+  /** Saves a live file's current content as a normal versioned file, named with the time.
+   *  Absent: a live file's tab shows no Snapshot action. */
+  snapshot?(sessionId: string, id: string): Promise<ArtifactInfo>
   /** The bytes through the authenticated route, never a bare URL. */
   raw(sessionId: string, id: string): Promise<Blob>
   /** The bytes, only when they are at most `max`: null when the file is larger (its Content-Length
@@ -206,10 +234,15 @@ export interface Transport {
    *  queued bubble is matched); one that cannot ignores it and bubbles are matched by text. */
   send(sessionId: string, text: string, opts?: SendOptions): Promise<{ queued: boolean }>
   /** Ends the session for good (the Stop in the start panel). */
+  channelRecommendation?(sessionId: string, id: string): Promise<ChannelRecommendation>
+  decideChannelRecommendation?(sessionId: string, id: string, action: 'approve' | 'keep'): Promise<ChannelRecommendation>
+  /** The workspace's one blackboard recommendation card (BLG-454), by id. */
+  blackboardRecommendation?(sessionId: string, id: string): Promise<BlackboardRecommendation>
+  decideBlackboardRecommendation?(sessionId: string, id: string, action: 'setup_with_main' | 'setup_myself' | 'not_now'): Promise<BlackboardRecommendation>
   stop(sessionId: string): Promise<void>
   /** Optional: cuts the turn that is running short (the toolbar's Stop, Esc); the session goes on.
    *  Absent: ChatView shows no Stop while a turn runs. */
-  interrupt?(sessionId: string): Promise<void>
+  interrupt?(sessionId: string, targetEventId?: string): Promise<void>
   /** Optional: the composer's /model and /effort. Either may be omitted to keep the current one. */
   setModel?(sessionId: string, model?: string, effort?: string): Promise<void>
   connected(): boolean
@@ -237,4 +270,17 @@ export interface Transport {
   /** Approves a review request or asks for changes (the session's owner only). Rejects with
    *  { status } and the server's message. */
   decideReview?(requestId: string, decision: 'approve' | 'request_changes', note?: string): Promise<ReviewRequestPayload>
+}
+
+export interface ChannelRecommendation {
+  id: string
+  topic: string
+  state: 'pending' | 'kept' | 'approved'
+  channel_id?: string
+}
+
+export interface BlackboardRecommendation {
+  id: string
+  reason: string
+  state: 'pending' | 'setup_with_main' | 'setup_myself' | 'not_now'
 }

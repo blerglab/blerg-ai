@@ -23,10 +23,11 @@ func TestEmbeddedTokensMatchBrand(t *testing.T) {
 		t.Fatal("core/internal/landing/static/tokens.css differs from brand/tokens.css: copy brand/tokens.css over it")
 	}
 	// The selected-state family is in every palette block: dark default, light media query,
-	// [data-theme="light"] and [data-theme="dark"].
+	// [data-theme="light"], [data-theme="dark"], the three accessibility presets and the five
+	// bundled open-source schemes (BLG-474).
 	for _, tok := range []string{"--selected-border:", "--selected-bg:", "--selected-text:"} {
-		if n := strings.Count(string(brand), tok); n != 4 {
-			t.Errorf("brand/tokens.css declares %s %d times, want 4 (one per palette block)", tok, n)
+		if n := strings.Count(string(brand), tok); n != 12 {
+			t.Errorf("brand/tokens.css declares %s %d times, want 12 (one per palette block)", tok, n)
 		}
 	}
 }

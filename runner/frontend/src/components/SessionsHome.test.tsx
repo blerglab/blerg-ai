@@ -6,8 +6,8 @@ describe('SessionsHome', () => {
   it('tells the person nothing is selected and offers to start a session', () => {
     const onNew = vi.fn()
     render(<SessionsHome onNewSession={onNew} />)
-    expect(screen.getByText(/no session selected/i)).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: /new session/i }))
+    expect(screen.getByText(/no workspace selected/i)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /new workspace/i }))
     expect(onNew).toHaveBeenCalledTimes(1)
   })
 })

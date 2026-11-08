@@ -16,6 +16,7 @@ import (
 func TestSetRepoRemotesSanitizes(t *testing.T) {
 	dc := &DaemonConn{}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	if _, ok := dc.RepoRemote("x"); ok {
 		t.Fatal("zero-value DaemonConn must know no remotes")
 	}
@@ -90,6 +91,7 @@ func TestHandleGetReposLocalFolderUsesReportedRemote(t *testing.T) {
 	hub := NewHub()
 	d1 := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006b", Name: "desk"}
 	d1.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	d1.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	d1.SetCheckedOutRepos([]string{"entertainment", "scratch", "shared", "split"})
 	d1.SetRepoRemotes(map[string]string{
 		"entertainment": "example-org/example-repo",
@@ -99,6 +101,7 @@ func TestHandleGetReposLocalFolderUsesReportedRemote(t *testing.T) {
 	hub.Register(d1)
 	d2 := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006c", Name: "laptop"}
 	d2.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	d2.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	d2.SetCheckedOutRepos([]string{"shared", "split"})
 	d2.SetRepoRemotes(map[string]string{
 		"shared": "example-org/shared",
@@ -139,6 +142,7 @@ func TestHandleGetReposWithoutRemoteReport(t *testing.T) {
 	hub := NewHub()
 	d := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006b", Name: "desk"}
 	d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	d.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	d.SetCheckedOutRepos([]string{"example-repo"})
 	hub.Register(d)
 	api := ownedInventoryAPI(t, hub, "", nil, "")
@@ -159,6 +163,7 @@ func TestPostSessionsClusterResolvesBareRepoViaRequestedDaemon(t *testing.T) {
 	hub.SetJobManager(jm)
 	d := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006b", Name: "desk", send: make(chan []byte, 8)}
 	d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	d.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	d.SetCheckedOutRepos([]string{"entertainment"})
 	d.SetRepoRemotes(map[string]string{"entertainment": "example-org/example-repo"})
 	hub.Register(d)
@@ -186,11 +191,13 @@ func TestPostSessionsClusterBackstopOnlyUsesRequestedDaemon(t *testing.T) {
 	hub.SetJobManager(jm)
 	other := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006c", Name: "laptop", send: make(chan []byte, 8)}
 	other.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	other.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	other.SetCheckedOutRepos([]string{"entertainment"})
 	other.SetRepoRemotes(map[string]string{"entertainment": "example-org/example-repo"})
 	hub.Register(other)
 	asked := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006b", Name: "desk", send: make(chan []byte, 8)}
 	asked.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	asked.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	asked.SetCheckedOutRepos([]string{"entertainment"})
 	hub.Register(asked)
 	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
@@ -219,6 +226,7 @@ func TestPostSessionsClusterDefaultOrgWinsOverRequestedDaemon(t *testing.T) {
 	hub.SetJobManager(jm)
 	d := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006b", Name: "desk", send: make(chan []byte, 8)}
 	d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	d.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	d.SetCheckedOutRepos([]string{"entertainment"})
 	d.SetRepoRemotes(map[string]string{"entertainment": "example-org/example-repo"})
 	hub.Register(d)

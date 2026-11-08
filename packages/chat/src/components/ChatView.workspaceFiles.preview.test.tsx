@@ -28,7 +28,7 @@ describe('file links preview', () => {
     render(<ChatView session={SESSION} transport={t.transport} meta={meta()} canOpenWorkspaceFiles />)
     await screen.findByText(/The list is served/)
     const chat = document.body.innerHTML
-    fireEvent.click(screen.getAllByTitle('Open from the session’s folder')[0])
+    fireEvent.click(screen.getAllByTitle('Open from the workspace’s folder')[0])
     await screen.findByTestId('workspace-line')
     await new Promise(r => setTimeout(r, 300))
     const viewer = document.querySelector('[data-testid="workspace-viewer-overlay"]')!.outerHTML

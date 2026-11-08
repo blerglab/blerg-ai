@@ -5,15 +5,18 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"github.com/blerglab/blerg-ai/contracts/desktopauth"
-	"github.com/blerglab/blerg-ai/contracts/pluginspec"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/blerglab/blerg-ai/contracts/desktopauth"
+	"github.com/blerglab/blerg-ai/contracts/identity"
+	ld "github.com/blerglab/blerg-ai/contracts/livedata"
+	"github.com/blerglab/blerg-ai/contracts/pluginspec"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/gitprovider"
@@ -25,7 +28,8 @@ import (
 
 // BrowserConn represents a connected browser client.
 type BrowserConn struct {
-	ID string
+	verified identity.Principal
+	ID       string
 	// AccountID is the verified account id (identity.Principal.Sub) of the
 	// human behind this socket, captured at upgrade time from the same token
 	// that authorized it. Empty only for call sites with no identity gate
@@ -42,32 +46,37 @@ type BrowserConn struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
 
-	subMu sync.Mutex
-	subs  map[string]context.CancelFunc // sessionID → cancel func for forwarder goroutine
+	subMu       sync.Mutex
+	datasetSubs map[string]*datasetSubscription
+	subs        map[string]context.CancelFunc // sessionID → cancel func for forwarder goroutine
 }
 
 // DaemonConn represents a connected daemon.
 type DaemonConn struct {
+	refreshedShellLink atomic.Pointer[protocol.ShellLinkWelcome]
+	FixedCommandSteps  bool // immutable negotiated capability
+	ShellLink          *protocol.ShellLinkWelcome
 	// Immutable hello details; source and time are captured by this server.
-	Hostname              string
-	OSUser                string
-	ConnectedSince        time.Time
-	SourceAddress         string
-	clusterStopMu         sync.Mutex
-	clusterStop           *clusterStopWaiter
-	inventoryLimited      bool
-	DiscoveryVersion      int
-	WorkspaceCapabilities protocol.WorkspaceCapabilities
-	desktopToken          string
-	DesktopBinding        *desktopauth.Binding
-	DesktopGeneration     string
-	DesktopEnrollment     bool
-	Compatibility         bool
-	LegacyDesktop         bool
-	LegacyRevision        int64
-	desktopClose          func()
-	desktopDone           chan struct{}
-	desktopDoneOnce       sync.Once
+	Hostname               string
+	OSUser                 string
+	ConnectedSince         time.Time
+	SourceAddress          string
+	clusterStopMu          sync.Mutex
+	clusterStop            *clusterStopWaiter
+	inventoryLimited       bool
+	DiscoveryVersion       int
+	RepositoryCloneVersion int
+	WorkspaceCapabilities  protocol.WorkspaceCapabilities
+	desktopToken           string
+	DesktopBinding         *desktopauth.Binding
+	DesktopGeneration      string
+	DesktopEnrollment      bool
+	Compatibility          bool
+	LegacyDesktop          bool
+	LegacyRevision         int64
+	desktopClose           func()
+	desktopDone            chan struct{}
+	desktopDoneOnce        sync.Once
 
 	// BoundSessionID and RuntimeTokenID are immutable server-verified pod authority.
 	BoundSessionID   string
@@ -106,12 +115,14 @@ type DaemonConn struct {
 	mcpGateway           bool                           // honours SpawnSession.MCPGateway (hello mcp_gateway)
 	mcpGatewayViaServer  bool                           // honours MCPGatewayConfig.ViaServer (hello mcp_gateway_via_server)
 	inputReceipts        bool
+	authoritativeAnswers bool
 	sessionTokenFile     bool        // handles SessionToken and answers it (hello session_token_file)
 	tokenHealSkipLogged  atomic.Bool // the "too old for a token heal" line was logged for this connection
 	planNudges           bool
 	usageNotices         bool
 	restrictTools        bool // honours SpawnSession.RestrictTools (hello restrict_tools)
 	codexRestricted      bool // isolated Codex file/MCP runtime (hello codex_restricted)
+	workBranches         bool // honors recorded session branch names
 	sandboxClones        bool // every sandboxed session in its own clone (hello sandbox_clones)
 	plugins              bool // honours SpawnSession.Plugins (hello plugins)
 	sessionPluginEngines []string
@@ -440,13 +451,22 @@ func (dc *DaemonConn) AvailableEngines() []string {
 // Hub holds maps of connected daemons and browsers and serialises access to
 // those maps.
 type Hub struct {
-	marketplacePolicy   *pluginspec.LivePolicy
-	runtimeShellReady   atomic.Bool
-	shellPhase          func(shellruntime.RPC) bool
-	shellRPC            shellRPCState
-	desktopAuthenticate func(context.Context, string) (desktopauth.Binding, error)
-	discoveryReqs       discoveryRequests
-	desktopPool         *pgxpool.Pool
+	datasets               datasetService
+	liveDataAuthority      *ld.ServiceClient
+	mcpAuthority           mcpAuthorityCache
+	liveDataPollingEnabled atomic.Bool
+	datasetCardAccess      func(context.Context, string, string, map[string]string) string
+	boundAnswer            func(context.Context, protocol.AgentUserMessage, identity.Principal) (bool, error)
+	shellCustodyReady      atomic.Bool
+	shellCustodian         string
+	marketplacePolicy      *pluginspec.LivePolicy
+	runtimeShellReady      atomic.Bool
+	shellPhase             func(shellruntime.RPC) bool
+	shellRPC               shellRPCState
+	desktopAuthenticate    func(context.Context, string) (desktopauth.Binding, error)
+	discoveryReqs          discoveryRequests
+	cloneReqs              discoveryRequests
+	desktopPool            *pgxpool.Pool
 
 	reasoning reasoningCache
 	// daemonWorkFences is guarded by mu. Never wait for a fence while holding mu.
@@ -460,7 +480,7 @@ type Hub struct {
 	sessionActiveBrowser map[string]string                 // sessionID → active browserID
 	sessionPTYCols       map[string]int                    // sessionID → current PTY cols
 	boardSubs            map[string]map[string]bool        // boardID → set[browserID]
-	lastActivity         time.Time                         // last time any browser reported user interaction
+	activityByAccount    map[string]time.Time
 	serverVersion        string
 	latestRelease        func() (string, string) // newer public release core knows of; nil reports none
 	serverRelease        string                  // the VERSION file the build was cut from; "" when unstamped
@@ -471,8 +491,10 @@ type Hub struct {
 	// why every call goes through NotifyCompletion rather than the field.
 	completionNotifier func(sessionID string)
 	usageNotices       func(*DaemonConn, string)
+	usageSample        func(*DaemonConn) // records a weekly-window sample for Insights' burndown (usage_window_history.go)
 	childActivity      func(string)
 	childTurn          func(sessionID, kind, detail string) // child_turn_notes.go
+	membershipNotice   func(sessionID, text, clientID string)
 	planInitialInput   func(*DaemonConn, []byte) ([]byte, func(bool))
 	planInput          func(*DaemonConn, []byte) ([]byte, func(bool))
 	planTurn           func(sessionID string, seq int64, at time.Time, stopReason string) // plansync.go
@@ -480,6 +502,10 @@ type Hub struct {
 	delegationPaused   func(sessionID string)
 	delegationHello    func(context.Context, string) error
 	delegationInput    func(context.Context, string, func() error) error
+
+	// Nil preserves the detached upgrade context; tests may advance its deadline.
+	desktopAttachContext func(context.Context) context.Context
+
 	// autoStopper ends a one-shot session whose turn has just finished
 	// (autostop.go). Registered by NewAPI for the same reason as the notifier
 	// above: the daemon message path holds a Hub, not an API.
@@ -490,6 +516,7 @@ type Hub struct {
 	// reposRootReqs are set_repos_root requests waiting for their daemon's
 	// answer (reposroot.go).
 	reposRootReqs      reposRootRequests
+	workerPriorityReqs workerPriorityRequests
 	engineCheckReqs    engineCheckRequests
 	workspaceFileReqs  workspaceFileRequests
 	explorerReqs       workspaceExplorerRequests
@@ -675,23 +702,25 @@ func (h *Hub) IsActiveBrowser(sessionID, browserID string) bool {
 	return h.sessionActiveBrowser[sessionID] == browserID
 }
 
-// MarkActivity records that a browser reported user interaction. The browser
-// sends a throttled "activity" message on real input, letting the server tell
-// whether anyone is engaged right now.
-func (h *Hub) MarkActivity() {
+// MarkActivity records real input for the authenticated browser's account.
+func (h *Hub) MarkActivity(account string) {
+	if account == "" {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.lastActivity = time.Now()
+	if h.activityByAccount == nil {
+		h.activityByAccount = map[string]time.Time{}
+	}
+	h.activityByAccount[account] = time.Now()
 }
 
-// ActiveWithin reports whether a browser reported user interaction within d.
-// Used to suppress OS push notifications when the user is engaged — the client
-// shows an in-app toast for those instead. When no one has interacted within d
-// (the app is closed, or left open but idle), this is false and a push is sent.
-func (h *Hub) ActiveWithin(d time.Duration) bool {
+// ActiveWithin suppresses push only for the account that reported activity.
+func (h *Hub) ActiveWithin(account string, d time.Duration) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return !h.lastActivity.IsZero() && time.Since(h.lastActivity) < d
+	at := h.activityByAccount[account]
+	return account != "" && !at.IsZero() && time.Since(at) < d
 }
 
 // ReleaseActiveBrowser clears the active browser for sessionID when the
@@ -866,6 +895,7 @@ func (h *Hub) UnregisterBrowser(id string) {
 // that owns it; see privacy.go. Every broadcast helper below funnels through
 // here, so no call site has to remember to filter.
 func (h *Hub) BroadcastToBrowsers(msg []byte) {
+	h.notifyDatasetBroadcast(msg)
 	scope := h.scopeOf(msg)
 	h.mu.RLock()
 	browsers := make([]*BrowserConn, 0, len(h.browsers))
@@ -1197,20 +1227,6 @@ func (h *Hub) DaemonForScratch(runtime string, requirements ...HostSelection) *D
 		}
 	}
 	return h.daemons[ids[0]]
-}
-
-// AnyDaemon returns any single connected DaemonConn, or nil if none are
-// registered. Used by HandlePostAssist as a fallback when the board has no
-// default_daemon_id configured.
-func (h *Hub) AnyDaemon() *DaemonConn {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	for _, d := range h.daemons {
-		if isHostDaemon(d) {
-			return d
-		}
-	}
-	return nil
 }
 
 // GetAllDaemons returns a snapshot of all currently connected DaemonConns.

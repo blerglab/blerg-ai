@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { disconnectOwned, openShell, ShellRateGroup, WebSocketShell } from './shellTransport'
+import { acceptHostShell, disconnectOwned, openShell, ShellRateGroup, WebSocketShell } from './shellTransport'
 vi.mock('./apiFetch', () => ({ apiFetch: vi.fn() }))
 const auth = vi.hoisted(() => ({ token: 'fixture-token', renewal: async () => true as boolean }))
 vi.mock('./authClient', () => ({ ensureFreshToken: () => auth.renewal(), getAccessToken: () => auth.token }))
@@ -24,6 +24,14 @@ class Socket {
 beforeEach(() => { auth.token = 'fixture-token'; auth.renewal = async () => true; vi.useFakeTimers(); Socket.instances = []; vi.stubGlobal('WebSocket', Socket) })
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
 const info = (id: string) => ({ handle: id, shell_id: id, runtime: 'sandbox' as const, folder: 'project' })
+it('sends privileged mode only for an explicit per-shell choice', async () => {
+  const { apiFetch } = await import('./apiFetch')
+  vi.mocked(apiFetch).mockResolvedValue({ ok: false, status: 403, json: async () => ({}) } as Response)
+  await expect(openShell('privileged-choice', new ShellRateGroup(), undefined, undefined, true)).rejects.toThrow()
+  expect(JSON.parse(vi.mocked(apiFetch).mock.calls.at(-1)![1]!.body as string)).toEqual({ privileged: true })
+  await expect(openShell('ordinary-choice', new ShellRateGroup())).rejects.toThrow()
+  expect(vi.mocked(apiFetch).mock.calls.at(-1)![1]!.body).toBeUndefined()
+})
 it('shares a bounded input scheduler across shells and keeps control frames independent', async () => {
   const group = new ShellRateGroup(); const first = new WebSocketShell(info('first'), group); const second = new WebSocketShell(info('second'), group)
   await first.reconnect(); await second.reconnect(); Socket.instances.forEach(s => s.onopen?.())
@@ -110,9 +118,9 @@ it('treats syncing as control state and refuses input until running resumes', as
 it.each([
  ['runtime_consent_refused', 'Consent no longer matches this launch. Open the shell again to review the current machine and account.'],
  ['runtime_start_refused', 'The desktop could not start the contained shell. Check the desktop daemon log, then reconnect the desktop and try again.'],
- ['runtime_binding_refused', 'The session runtime changed. Reconnect the desktop, then open the shell again.'],
- ['runtime_fenced', 'The shell is paused after a failed start or while the session recovers. Wait a few seconds and try again. If it keeps failing, reconnect the desktop or resume the session.'],
- ['runtime_busy', 'The desktop is busy opening other session workspaces. Try again in a moment.'],
+ ['runtime_binding_refused', 'The workspace runtime changed. Reconnect the desktop, then open the shell again.'],
+ ['runtime_fenced', 'The shell is paused after a failed start or while the workspace recovers. Wait a few seconds and try again. If it keeps failing, reconnect the desktop or resume the workspace.'],
+ ['runtime_busy', 'The desktop is busy opening other workspaces. Try again in a moment.'],
  ['untrusted-private-error', 'Shell is unavailable. Check the desktop daemon log, then reconnect the desktop and try again.'],
 ])('explains %s without exposing runtime text', async (code, message) => {
  const { apiFetch } = await import('./apiFetch')
@@ -147,7 +155,7 @@ it.each([
 
 const stageMessages = [
  ['helper_start', 'The shell helper could not be launched. Check the service process permissions and restrictions.'],
- ['workspace_admission', 'The session workspace could not authorize this shell launch. Reconnect the desktop.'],
+ ['workspace_admission', 'The workspace could not authorize this shell launch. Reconnect the desktop.'],
  ['bootstrap_read', 'The shell helper could not read its launch request.'],
  ['bootstrap_validate', 'The shell helper rejected its launch request.'],
  ['resolve_root', 'The shell project directory could not be resolved.'],
@@ -166,6 +174,8 @@ const stageMessages = [
  ['lease_create', 'The shell authorization expired during startup. Try opening the shell again.'],
  ['helper_ready', 'The shell helper could not confirm startup.'],
  ['helper_stopped', 'The shell helper stopped.'],
+ ['keeper_unavailable', 'Host shells are reconnecting. Try again shortly; agents keep running.'],
+ ['keeper_incompatible', 'The shell keeper is incompatible with this daemon. Restart the keeper service, then reopen shells. This ends its old shells; agents keep running.'],
  ['helper_input_pipe', "The shell helper's input channel could not be opened."],
  ['helper_output_pipe', "The shell helper's output channel could not be opened."],
  ['helper_record', "The shell helper's ownership could not be recorded."],
@@ -834,4 +844,55 @@ it('a disconnect while publishing running installs no heartbeat and never restar
   expect(Socket.instances[0].frames).toEqual([])
   expect(states.at(-1)).toBe('disconnected')
   expect(shell.reconnecting()).toBe(false)
+})
+
+it('withdraws persistent host consent while disconnected and reports pending cleanup', async () => {
+  const { apiFetch } = await import('./apiFetch')
+  vi.mocked(apiFetch).mockResolvedValueOnce(new Response(JSON.stringify({ withdrawn: true, cleanup_pending: true }), { status: 200 }))
+  const shell = new WebSocketShell({ ...info('withdraw'), runtime: 'host', persistent: true, consent_id: 'affirmation' }, new ShellRateGroup(), undefined, 'session')
+  const pending = await shell.withdrawConsent()
+  expect(pending).toBe(true)
+  expect(apiFetch).toHaveBeenCalledWith('/api/sessions/session/shell-consent/withdraw', expect.objectContaining({ method: 'POST', body: JSON.stringify({ consent_id: 'affirmation' }) }))
+  expect(shell.endedMessage()).toContain('Cleanup is pending')
+  expect(Socket.instances).toHaveLength(0)
+})
+
+it('keeps an explicit replay gap separate from terminal bytes', async () => {
+  const shell = new WebSocketShell(info('gap'), new ShellRateGroup())
+  const output: number[][] = []
+  shell.subscribe(bytes => output.push([...bytes]), () => {})
+  await shell.reconnect(); const socket = Socket.instances[0]; socket.onopen?.()
+  socket.onmessage?.({ data: JSON.stringify({ type: 'replay', bytes: 1, seq: 400000, gap: true }) })
+  socket.onmessage?.({ data: new Uint8Array([120]).buffer })
+  expect(shell.outputGap()).toBe(true)
+  expect(output.at(-1)).toEqual([120])
+  expect(Socket.instances[0].frames.filter(frame => JSON.parse(frame).type === 'input')).toEqual([])
+  shell.disconnect()
+})
+
+it('explicitly acknowledges persistent host consent without changing legacy acceptance', async () => {
+  const { apiFetch } = await import('./apiFetch')
+  vi.mocked(apiFetch).mockReset()
+  vi.mocked(apiFetch).mockResolvedValue(new Response('{}', { status: 200 }))
+  await acceptHostShell('session', 'persistent', 2)
+  expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls.at(-1)?.[1]?.body))).toEqual({ challenge_id: 'persistent', accept: true, version: 2 })
+  await acceptHostShell('session', 'legacy')
+  expect(JSON.parse(String(vi.mocked(apiFetch).mock.calls.at(-1)?.[1]?.body))).toEqual({ challenge_id: 'legacy', accept: true })
+})
+
+it('keeps a taken-over shell available to take back and reports no input or output', async () => {
+ const shell = new WebSocketShell({ ...info('report'), name: 'Test watcher' }, new ShellRateGroup())
+ const state = vi.fn()
+ shell.subscribe(() => {}, state)
+ await shell.reconnect(); const socket = Socket.instances[0]; socket.onopen?.()
+ socket.onmessage?.({ data: new Uint8Array([...new TextEncoder().encode('SCREEN_SECRET')]).buffer })
+ shell.input(new TextEncoder().encode('ENV_SECRET'))
+ socket.onmessage?.({ data: JSON.stringify({ type: 'control', reason: 'taken_over', token: 'TOKEN_SECRET' }) })
+ expect(state).toHaveBeenLastCalledWith('disconnected')
+ expect(shell.disconnectedReason()).toBe('elsewhere')
+ expect(shell.report.text()).toContain('taken_over')
+ for (const value of ['SCREEN_SECRET','ENV_SECRET','TOKEN_SECRET','fixture-token']) expect(shell.report.text()).not.toContain(value)
+ await shell.reconnect(true)
+ expect(String(Socket.instances[1].url)).toContain('takeover=true')
+ shell.disconnect()
 })

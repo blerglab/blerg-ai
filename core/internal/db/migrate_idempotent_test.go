@@ -63,3 +63,33 @@ func TestMigrationsCanBeReapplied(t *testing.T) {
 		t.Fatalf("re-applied only %d of the 015-017 migrations", reapplied)
 	}
 }
+
+// Reapplying the upgrade must not revoke approvals created after the upgrade.
+func TestLiveDataMigrationPreservesApprovedGrant(t *testing.T) {
+	pool := testsupport.Pool(t, Migrate)
+	ctx := t.Context()
+	_, err := pool.Exec(ctx, `
+ INSERT INTO accounts(id,provider,provider_subject,email,role) VALUES('00000000-0000-4000-8000-000000000001','local','migration-live','migration@example.com','member');
+ INSERT INTO mcp_connections(id,account_id,name,url,auth_kind) VALUES('00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000001','market','https://market.example/mcp','none');
+ INSERT INTO live_data_grants(binding_id,revision,owner_id,connection_id,scope,arguments,approved_sid,approved_at,expires_at,approved_configuration,runner_committed)
+ VALUES('00000000-0000-4000-8000-000000000003',1,'00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002','{}','{}','fixture',clock_timestamp(),clock_timestamp()+interval '1 day',decode('01','hex'),true);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := migrationsFS.ReadFile("migrations/155_live_data_approved_configuration.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := pool.Exec(ctx, string(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var active bool
+	if err := pool.QueryRow(ctx, `SELECT revoked_at IS NULL AND runner_committed AND approved_configuration=decode('01','hex') FROM live_data_grants WHERE binding_id='00000000-0000-4000-8000-000000000003'`).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if !active {
+		t.Fatal("migration invalidated a complete approved grant")
+	}
+}

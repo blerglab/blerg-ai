@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/blerglab/blerg-ai/contracts/identity"
@@ -13,7 +14,8 @@ import (
 // Intent commits before enumeration so in-flight starts and recovery cannot
 // create another worker while a partial operation awaits a retry.
 func (a *API) handleSessionDiscard(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
+	defer cancel()
 	viewer, ok := a.verifyBrowserToken(a.rawBearer(r))
 	if !ok || viewer.Kind != string(identity.Human) || viewer.OnBehalfOf != "" || viewer.Sid == "" {
 		writeError(w, 403, "forbidden")
@@ -75,6 +77,14 @@ func (a *API) handleSessionDiscard(w http.ResponseWriter, r *http.Request) {
 				if row.ArchivedAt != nil {
 					return nil
 				}
+				questions, err := db.ListOpenAsks(ctx, a.dbPool, member)
+				if err != nil {
+					return err
+				}
+				questionIDs := make([]string, 0, len(questions))
+				for _, question := range questions {
+					questionIDs = append(questionIDs, question.ID)
+				}
 				// Intent is never termination evidence. Even an ended row whose daemon
 				// still claims ownership receives Stop before it may disappear from Live.
 				connected := a.hub.FindDaemonForSession(member) != nil
@@ -91,6 +101,9 @@ func (a *API) handleSessionDiscard(w http.ResponseWriter, r *http.Request) {
 				}
 				if member == id && len(problems) > 0 {
 					return fmt.Errorf("children remain unarchived")
+				}
+				if err := a.withdrawDiscardQuestions(ctx, member, questionIDs); err != nil {
+					return err
 				}
 				archived, err := db.ArchiveDiscardedSession(ctx, a.dbPool, member, viewer.Sub)
 				if err != nil {

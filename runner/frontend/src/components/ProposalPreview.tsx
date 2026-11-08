@@ -38,27 +38,30 @@ function BoardProposalPreview({ proposal: p }: { proposal: ProposalInfo }) {
       <dd>{repos.length ? <ol className="proposal-board-repos">{repos.map((r, i) => <li key={r}><code>{r}</code>{i === 0 && repos.length > 1 ? <span className="proposal-board-primary"> primary</span> : null}</li>)}</ol> : 'None'}</dd>
       <dt>{template ? 'Template' : 'Columns'}</dt>
       <dd>{template ? <code>{template}</code> : columns.length ? columns.join(' · ') : 'The default columns (inbox, ready, in progress, done)'}</dd>
-      <dt>Access the session asks for</dt>
-      <dd data-testid={`proposal-board-access-${p.id}`}>{BOARD_LEVEL_LABELS[requestedBoardAccess(p)]}, for this session only</dd>
+      <dt>Access the workspace asks for</dt>
+      <dd data-testid={`proposal-board-access-${p.id}`}>{BOARD_LEVEL_LABELS[requestedBoardAccess(p)]}, for this workspace only</dd>
     </dl>
   </article>
 }
 
-export default function ProposalPreview({ proposal: p, complete = false }: { proposal: ProposalInfo; complete?: boolean }) {
+export default function ProposalPreview({ proposal: p, complete = false, showAction = true }: { proposal: ProposalInfo; complete?: boolean; showAction?: boolean }) {
   const board = p.kind === 'board_file'
   const title = agentTitle(p)
   return <div className="proposal-preview">
-    <ProposalAction proposal={p} />
+    {showAction && <ProposalAction proposal={p} />}
     {p.kind === 'board_create' ? <BoardProposalPreview proposal={p} /> : board ? <article className="proposal-card-preview" aria-label="Card the agent proposes">
       <p className="proposal-agent-label">Card the agent wrote</p>
       <h3>{title || 'Untitled card'}</h3>
-      <dl><dt>Type</dt><dd>{text(p.arguments.type) || 'issue'}</dd>
+      <dl><dt>Size</dt><dd>{text(p.arguments.size) || 'Not estimated'}</dd>
+        <dt>Risk</dt><dd>{text(p.arguments.risk) || 'Not estimated'}</dd>
+        <dt>Complexity</dt><dd>{text(p.arguments.complexity) || 'Not estimated'}</dd>
+        <dt>Type</dt><dd>{text(p.arguments.type) || 'issue'}</dd>
         <dt>Board</dt><dd>{text(p.arguments.board_name) || text(p.arguments.board_id)}</dd>
         <dt>Repository</dt><dd>{Array.isArray(p.arguments.repos) ? p.arguments.repos.map(String).join(', ') || 'None selected' : text(p.arguments.repo) || 'None selected'}</dd></dl>
       <div className="proposal-readable-body" role="region" aria-label="Proposed card body" tabIndex={0}><Markdown text={text(p.arguments.body)} /></div>
     </article> : <div className="proposal-tool-preview" role="region" aria-label="Tool request preview" tabIndex={0}>
       {title && <p className="proposal-agent-title" data-testid={`proposal-agent-title-${p.id}`}><span className="proposal-agent-label">Title in the agent’s request:</span> {title}</p>}
-      <dl>{Object.entries(p.arguments).map(([key, value]) => <div key={key}>
+      <dl>{Object.entries(p.arguments).filter(([key]) => !title || key !== (text(p.arguments.title) ? 'title' : 'subject')).map(([key, value]) => <div key={key}>
         <dt>{key.replaceAll('_', ' ')}</dt>
         <dd>{typeof value === 'string'
           ? /^(body|description|content|message|text)$/i.test(key) ? <Markdown text={value} /> : value

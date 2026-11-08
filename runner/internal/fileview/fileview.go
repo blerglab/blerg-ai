@@ -1,6 +1,7 @@
 package fileview
 
 import (
+	"bytes"
 	"net/http"
 	"path"
 	"strings"
@@ -45,7 +46,29 @@ const (
 	// MaxSniffText is the largest file of an unrecognised extension that is
 	// offered as text when its bytes look like text.
 	MaxSniffText = 2 << 20
+
+	// GitBundle (BLG-460/BLG-479) is a result bundle a cluster worker published. Recognized by
+	// its own bytes (the "# v2/v3 git bundle" header a real `git bundle create` always writes),
+	// never by a `.bundle` extension alone — a name proves nothing a publisher couldn't fake.
+	// No preview view: it's binary, download/import only.
+	GitBundle = "application/x-git-bundle"
 )
+
+// gitBundleHeaders are the exact first-line signatures `git bundle create` writes for the
+// bundle formats git actually produces (v2: no capability lines; v3: possible "@..." capability
+// lines after the same first line). Either is enough to classify the whole file as GitBundle;
+// deeper structural validation (one head, prerequisites, a valid pack) is `session import`'s job,
+// not classification's.
+var gitBundleHeaders = [][]byte{[]byte("# v2 git bundle\n"), []byte("# v3 git bundle\n")}
+
+func looksLikeGitBundle(head []byte) bool {
+	for _, h := range gitBundleHeaders {
+		if bytes.HasPrefix(head, h) {
+			return true
+		}
+	}
+	return false
+}
 
 type artifactType struct{ contentType, view string }
 
@@ -84,6 +107,7 @@ func buildArtifactExts() map[string]artifactType {
 	add(artifactType{"video/webm", Video}, "webm")
 	add(artifactType{"text/html; charset=utf-8", HTML}, "html", "htm")
 	add(artifactType{"application/zip", None}, "zip")
+	add(artifactType{GitBundle, None}, "bundle")
 	add(artifactType{"application/vnd.openxmlformats-officedocument.wordprocessingml.document", None}, "docx")
 	add(artifactType{"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", None}, "xlsx")
 	add(artifactType{"application/vnd.openxmlformats-officedocument.presentationml.presentation", None}, "pptx")
@@ -118,6 +142,12 @@ func Classify(name string, head []byte, size int64) (contentType, view string) {
 				return OctetStream, None
 			}
 		}
+		if t.contentType == GitBundle && !looksLikeGitBundle(head) {
+			// A ".bundle" name proves nothing on its own (BLG-460/BLG-479): only a real git
+			// bundle header earns this content type, since `session import` and the publish
+			// path both key off it.
+			return OctetStream, None
+		}
 		return t.contentType, t.view
 	}
 	switch {
@@ -126,6 +156,10 @@ func Classify(name string, head []byte, size int64) (contentType, view string) {
 		return strings.SplitN(sniffed, ";", 2)[0], Image
 	case sniffed == "application/pdf":
 		return sniffed, PDF
+	case looksLikeGitBundle(head):
+		// Recognized from its own bytes even without a ".bundle" name, matching the design's
+		// "sniffed from bytes, not the publisher's claim" rule.
+		return GitBundle, None
 	case strings.HasPrefix(sniffed, "text/") && size <= MaxSniffText && utf8.Valid(head):
 		// Even HTML that arrives without a telling name is shown as text.
 		return "text/plain; charset=utf-8", Text

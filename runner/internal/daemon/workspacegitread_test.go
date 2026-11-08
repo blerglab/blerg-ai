@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,12 +25,14 @@ func TestP6GitMembersOverDesktopTransport(t *testing.T) {
 	one, _ := commitFixture(t)
 	two, _ := commitFixture(t)
 	headOne := commitFile(t, one, "one.txt", "first member\n", "First")
+	originGit(t, one, "branch", "local-one")
 	baseTwo := commitFile(t, two, "two.txt", "second member base\n", "Second base")
 	child := "12345678-1234-4234-8234-123456789abc"
 	originGit(t, two, "checkout", "-qb", "wip/"+child)
 	headTwo := commitFile(t, two, "two.txt", "second member changed\n", "Second changed")
 	originGit(t, two, "checkout", "main")
 	originGit(t, two, "merge", "--ff-only", "wip/"+child)
+	originGit(t, two, "branch", "local-two")
 	namespace := t.TempDir()
 	info, _ := os.Stat(namespace)
 	manifest := protocol.WorkspaceManifest{Version: 2, Kind: "folder", Runtime: "host", OwnerID: "owner", LaunchGeneration: "launch", Digest: "digest", Members: []protocol.WorkspaceMember{
@@ -61,11 +66,12 @@ func TestP6GitMembersOverDesktopTransport(t *testing.T) {
 	client := NewWSClient(Config{})
 	client.conn = conn
 	manager := newManagerWithSender(client, ManagerConfig{})
-	manager.BindWorkspaceExplorer("session", wrapper)
 	// Leave a real legacy scalar binding pointing at the first source: a removed
 	// v2 dispatch guard would read it and leak the ambiguous first member.
-	manager.sessions["session"] = &Session{workspace: one, workspaceInfo: a, done: make(chan struct{})}
-	manager.sessions["legacy"] = &Session{workspace: one, workspaceInfo: a, done: make(chan struct{})}
+	bindLegacyAgentFixture(t, manager, "session", one, a, false, make(chan struct{}))
+	bindLegacyAgentFixture(t, manager, "legacy", one, a, false, make(chan struct{}))
+	manager.agents.BindWorkspaceExplorer("session", wrapper)
+	defer manager.agents.explorer.Close()
 	client.OnMessage("read_commit", manager.handleReadCommit)
 	client.OnMessage("read_session_origin", manager.handleReadSessionOrigin)
 	pump := make(chan struct{})
@@ -130,10 +136,38 @@ func TestP6GitMembersOverDesktopTransport(t *testing.T) {
 		if !res.OK || res.Commit.SHA != test.head {
 			t.Fatal("origin selected cwd instead of member")
 		}
+
+		graphResult := call(protocol.ReadCommit{WorkspaceGitRef: ref(test.id), Graph: true, Depth: 50}, false)
+		if !graphResult.OK || graphResult.Graph == nil || len(graphResult.Graph.Commits) == 0 || graphResult.Graph.Commits[0].SHA != test.head {
+			t.Fatalf("graph selected cwd instead of member: %+v", graphResult)
+		}
+		for _, c := range graphResult.Graph.Commits {
+			if test.id == "one" && c.SHA == headTwo || test.id == "two" && c.SHA == headOne {
+				t.Fatal("graph leaked another member")
+			}
+		}
+		historyResult := call(protocol.ReadCommit{WorkspaceGitRef: ref(test.id), BoardHistory: true, SHA: test.head}, false)
+		if !historyResult.OK || historyResult.CodeHistory == nil || historyResult.CodeHistory.Tip != test.head || len(historyResult.CodeHistory.Commits) == 0 || !historyResult.CodeHistory.Commits[0].Deployed {
+			t.Fatalf("board history selected wrong member: %+v", historyResult)
+		}
+		branchReq := protocol.ReadCommit{WorkspaceGitRef: ref(test.id), Branch: "local-" + test.id, Base: "main"}
+		branchResult := call(branchReq, false)
+		if !branchResult.OK || branchResult.Branch == nil || branchResult.Branch.Name != branchReq.Branch {
+			t.Fatalf("branch selected cwd instead of member: %+v", branchResult)
+		}
+		branchReq.Patch = true
+		if result := call(branchReq, false); !result.OK || result.PatchB64 != "" {
+			t.Fatalf("empty member branch diff: %+v", result)
+		}
 	}
 	for _, req := range []protocol.ReadCommit{{SHA: headOne}, {SHA: headOne, WorkspaceGitRef: ref("unknown")}, {SHA: headOne, WorkspaceGitRef: protocol.WorkspaceGitRef{WorkspaceRuntimeRef: protocol.WorkspaceRuntimeRef{LaunchGeneration: "launch", Generation: 6}, MemberID: "one"}}, {SHA: headOne, WorkspaceGitRef: protocol.WorkspaceGitRef{WorkspaceRuntimeRef: protocol.WorkspaceRuntimeRef{LaunchGeneration: "old", Generation: 7}, MemberID: "one"}}} {
 		if res := call(req, false); res.OK {
 			t.Fatal("unqualified/stale commit accepted")
+		}
+		req.Graph = true
+		req.Depth = 50
+		if res := call(req, false); res.OK {
+			t.Fatal("unqualified/stale graph accepted")
 		}
 		if res := call(req, true); res.OK {
 			t.Fatal("unqualified/stale origin accepted")
@@ -149,13 +183,13 @@ func TestP6GitMembersOverDesktopTransport(t *testing.T) {
 	if res := call(protocol.ReadCommit{SessionID: "legacy"}, true); !res.OK || res.Commit.SHA != headOne {
 		t.Fatal("legacy origin changed")
 	}
-	if err := manager.explorer.Suspend(context.Background(), "session"); err != nil {
+	if err := manager.agents.explorer.Suspend(context.Background(), "session"); err != nil {
 		t.Fatal(err)
 	}
 	if res := call(protocol.ReadCommit{WorkspaceGitRef: ref("one"), SHA: headOne}, false); res.OK {
 		t.Fatal("suspended reader accepted")
 	}
-	if err := manager.explorer.Resume("session"); err != nil {
+	if err := manager.agents.explorer.Resume("session"); err != nil {
 		t.Fatal(err)
 	}
 	// Replacing the current authority fences reads without changing the socket.
@@ -165,7 +199,7 @@ func TestP6GitMembersOverDesktopTransport(t *testing.T) {
 	if res := call(protocol.ReadCommit{WorkspaceGitRef: ref("one"), SHA: headOne}, false); res.OK {
 		t.Fatal("revoked reader accepted")
 	}
-	manager.explorer.Unbind("session")
+	manager.agents.explorer.Unbind("session")
 	if res := call(protocol.ReadCommit{SHA: headOne}, false); res.OK {
 		t.Fatal("retired v2 reader downgraded to scalar")
 	}
@@ -187,6 +221,12 @@ func TestP6SandboxGitUsesBoundMemberSource(t *testing.T) {
 		res := reader.readGit(t.Context(), req, false)
 		if !res.OK || res.Commit == nil || res.Commit.SHA != sha {
 			t.Fatalf("bound source commit: %+v", res)
+		}
+		graphReq := req
+		graphReq.SHA, graphReq.Graph, graphReq.Depth = "", true, 50
+		graph := reader.readGit(t.Context(), graphReq, false)
+		if !graph.OK || graph.Graph == nil || len(graph.Graph.Commits) == 0 {
+			t.Fatalf("bound sandbox graph: %+v", graph)
 		}
 		req.Patch = true
 		if res := reader.readGit(t.Context(), req, false); !res.OK || res.PatchB64 == "" {
@@ -213,5 +253,18 @@ func TestP6SandboxGitUsesBoundMemberSource(t *testing.T) {
 	member := w.state.Members[0]
 	if res := reader.readGit(t.Context(), protocol.ReadCommit{SessionID: w.state.Session, SHA: originGit(t, member.Source.Repo, "rev-parse", "HEAD"), WorkspaceGitRef: protocol.WorkspaceGitRef{WorkspaceRuntimeRef: b.WorkspaceRuntimeRef, MemberID: member.Member.ID}}, false); res.OK {
 		t.Fatal("stale authority returned commit")
+	}
+}
+
+func TestGitReadRefusalNamesSafetyCheck(t *testing.T) {
+	var logs bytes.Buffer
+	old := failurelog.Default
+	failurelog.Default = failurelog.New(slog.New(slog.NewJSONHandler(&logs, nil)))
+	defer func() { failurelog.Default = old }()
+	router := &WorkspaceExplorerRouter{}
+	defer router.Close()
+	_, handled := router.readGit(t.Context(), protocol.ReadCommit{SessionID: "PRIVATE_CANARY", WorkspaceGitRef: protocol.WorkspaceGitRef{MemberID: "member"}}, false)
+	if !handled || !strings.Contains(logs.String(), "reader_not_registered") || strings.Contains(logs.String(), "PRIVATE_CANARY") {
+		t.Fatalf("missing safe refusal cause: %s", logs.String())
 	}
 }

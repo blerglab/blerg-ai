@@ -226,13 +226,19 @@ class Run:
             self.turn(child)
         with self.scenario("discard children"):
             # Ask the parent to discard through its authenticated child API.
+            child_branches = {}
+            for sid in ids:
+                _, result = self.api("GET", f"/api/runner/sessions/{sid}/result")
+                child_branches[sid] = [member["branch"] for member in result["workspace_results"]]
+                assert child_branches[sid] and all(child_branches[sid]), "child branch missing"
             self.message(parent, "Run blerg-runner session discard for each of these children: " + " ".join(ids) + ". Report command results. Do not change files.")
             self.turn(parent)
             for sid in ids:
                 _, status = self.api("GET", f"/api/runner/sessions/{sid}")
                 assert status["lifecycle"] == "ended", "discard did not end child"
                 worktrees = subprocess.check_output(["git", "-C", str(self.repo), "worktree", "list", "--porcelain"]).decode()
-                assert "refs/heads/wip/" + sid not in worktrees, "discard left child worktree"
+                for branch in child_branches[sid]:
+                    assert "branch refs/heads/" + branch + "\n" not in worktrees, "discard left child worktree"
                 _, live = self.api("GET", f"/api/sessions/{parent}/live", human=True)
                 assert not any(c.get("session_id", c.get("id")) == sid for c in live.get("children", [])), "discard did not archive child"
         if self.args.smoke:

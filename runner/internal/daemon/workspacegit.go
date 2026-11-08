@@ -34,23 +34,28 @@ type pinnedGitDir struct {
 func pinGitDir(path string, expected os.FileInfo) (*pinnedGitDir, bool) {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
+		logDaemonFailure("commit pin resolve workspace", err)
 		return nil, false
 	}
 	root, err := os.OpenRoot(resolved)
 	if err != nil {
+		logDaemonFailure("commit pin open workspace", err)
 		return nil, false
 	}
 	if expected != nil && !workspaceRootUnchanged(root, resolved, expected) {
+		logDaemonFailure("commit pin workspace identity changed", nil)
 		_ = root.Close()
 		return nil, false
 	}
 	directory, err := root.Open(".")
 	if err != nil {
+		logDaemonFailure("commit pin open directory", err)
 		_ = root.Close()
 		return nil, false
 	}
 	info, err := directory.Stat()
 	if err != nil || !info.IsDir() || (expected != nil && !os.SameFile(expected, info)) {
+		logDaemonFailure("commit pin stat or identity", err)
 		_ = directory.Close()
 		_ = root.Close()
 		return nil, false
@@ -212,7 +217,13 @@ func (p *pinnedGitDir) workspaceGitDir() (string, bool) {
 // workspace, the git directory must be the one workspaceGitDir accepted. The repository a
 // sandboxed session's clone was made from is the person's own (trusted is true): its git
 // directory is not constrained, its top still is.
-func (p *pinnedGitDir) vet(ctx context.Context, trusted bool) bool {
+func (p *pinnedGitDir) vet(ctx context.Context, trusted bool) (ok bool) {
+	stage := "metadata authority"
+	defer func() {
+		if !ok {
+			logDaemonFailure("commit vet: "+stage, nil)
+		}
+	}()
 	want := ""
 	if !trusted {
 		dir, ok := p.workspaceGitDir()
@@ -221,6 +232,7 @@ func (p *pinnedGitDir) vet(ctx context.Context, trusted bool) bool {
 		}
 		want = dir
 	}
+	stage = "repository identity"
 	out := &cappedOutput{max: 2 * gitFileMax, strict: true}
 	if err := p.git(ctx, out, "rev-parse", "--show-toplevel", "--absolute-git-dir"); err != nil {
 		return false

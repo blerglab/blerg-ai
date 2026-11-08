@@ -7,13 +7,10 @@ package daemon
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -285,28 +282,14 @@ func TestEnsureClonedTargetFallbackAndFailure(t *testing.T) {
 	assertNoCloneLeftovers(t, root)
 }
 
-// The spawn path end to end, on a real (private) tmux server: the repository
-// is cloned into the folder, the session starts there, and the token is in
-// none of what outlives the clone — the recovery record, the session's own
-// environment, the clone's config, the messages sent to the server, the log.
+// Agent clone credentials must not outlive cloning in disk records, runtime
+// environment, repository config, server messages or logs.
 func TestSpawnCloneFromNeverKeepsTheToken(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
-	}
-	var rb [4]byte
-	_, _ = rand.Read(rb[:])
-	sock := "blerg-test-" + hex.EncodeToString(rb[:])
-	restore := setTmuxSocketArgs([]string{"-L", sock})
-	t.Cleanup(func() {
-		_ = exec.Command("tmux", "-L", sock, "kill-server").Run()
-		restore()
-	})
-
 	calls := installFakeGit(t)
 	const token = "ghp_SPAWNSECRET0123456789"
 	t.Setenv("FAKE_GIT_WANT_HEADER", basicHeader("x-access-token", token))
 	envOut := filepath.Join(t.TempDir(), "session.env")
-	claudeDir := writeScript(t, "claude", "printenv > "+envOut+"\nsleep 60\n")
+	claudeDir := fakeEngineDumpingEnv(t, envOut, "")
 	t.Setenv("PATH", claudeDir+":"+os.Getenv("PATH"))
 
 	var logBuf syncBuffer
@@ -316,16 +299,19 @@ func TestSpawnCloneFromNeverKeepsTheToken(t *testing.T) {
 	root := t.TempDir()
 	sender := newRecordingSender(64)
 	mgr := newManagerWithSender(sender, ManagerConfig{ReposRoot: root, AllowHostCredentialClone: true})
+	records := t.TempDir()
+	mgr.agents = NewAgentHost(sender, AgentHostConfig{ReposRoot: root, HomeDir: t.TempDir(), RecordsDir: records})
 	raw, _ := json.Marshal(protocol.SpawnSession{
-		Type: "spawn_session", SessionID: "s-clone-" + sock, Repo: "private-app",
-		Provider: "github", CloneFrom: "acme/private-app", GitToken: token, Cols: 80, Rows: 24,
+		Type: "spawn_session", SessionID: "s-clone-agent", Repo: "private-app",
+		Provider: "github", CloneFrom: "acme/private-app", GitToken: token, Kind: "agent", Engine: "codex", InitialPrompt: "hello",
 	})
 	mgr.handleSpawnSession(raw)
 	t.Cleanup(func() {
-		mgr.handleKillSession(mustJSON(t, protocol.KillSession{Type: "kill_session", SessionID: "s-clone-" + sock}))
-		waitManagerLifecycle(t, mgr, "s-clone-"+sock)
+		mgr.killSession("s-clone-agent")
+		waitManagerLifecycle(t, mgr, "s-clone-agent")
 	})
 
+	waitRecord(t, records, "s-clone-agent", "agent clone turn", func(r AgentRecord) bool { return r.CodexThreadID != "" && !r.TurnActive })
 	var started bool
 	for _, m := range sender.messages() {
 		if strings.Contains(m, `"session_started"`) && strings.Contains(m, `"repo":"private-app"`) {
@@ -339,7 +325,7 @@ func TestSpawnCloneFromNeverKeepsTheToken(t *testing.T) {
 		t.Fatalf("no session_started for the cloned folder: %v\ngit calls:\n%s", sender.messages(), readCalls(t, calls))
 	}
 
-	rec, err := os.ReadFile(recordPath(root, "s-clone-"+sock))
+	rec, err := os.ReadFile(agentRecordPath(records, "s-clone-agent"))
 	if err != nil {
 		t.Fatalf("recovery record: %v", err)
 	}
@@ -350,10 +336,10 @@ func TestSpawnCloneFromNeverKeepsTheToken(t *testing.T) {
 	if strings.Contains(string(cfg), token) {
 		t.Errorf("the token was written into .git/config: %s", cfg)
 	}
-	env := waitForEnvFile(t, envOut)
+	env := readEnvDump(t, envOut)
 	for k, v := range env {
 		if strings.Contains(v, token) || strings.HasPrefix(k, "GIT_CONFIG") {
-			t.Errorf("the session's environment carries the clone's credential: %s=%s", k, v)
+			t.Errorf("the session environment carries clone credentials in %s", k)
 		}
 	}
 	if strings.Contains(logBuf.String(), token) {
@@ -398,13 +384,4 @@ func TestSpawnCloneFromFailureReportsWithoutToken(t *testing.T) {
 	if strings.Contains(msgs[0], token) || strings.Contains(logBuf.String(), token) {
 		t.Errorf("the token leaked:\nmessage: %s\nlog: %s", msgs[0], logBuf.String())
 	}
-}
-
-func mustJSON(t *testing.T, v any) []byte {
-	t.Helper()
-	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b
 }

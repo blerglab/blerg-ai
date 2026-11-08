@@ -80,6 +80,8 @@ describe('attachment preview adversarial Chromium cases',()=>{
   const transport=files();const initial=new File(['OLDEST_PREVIEW'],'oldest.md',{type:'text/markdown'})
   const view=render(<Harness sid="oldest-session" transport={transport} chosen={[initial]}/>)
   fireEvent.click(view.getByRole('button',{name:'Attach fixture'}));await view.findByText('OLDEST_PREVIEW')
+  // Local preview completion does not imply that the independent upload has completed.
+  await waitFor(()=>expect(view.getByTestId('attached-ids')).toHaveTextContent('oldest-session/oldest.md'))
   for(let index=0;index<18;index++){
    const sid=`later-${index}`,text=`LATER_PREVIEW_${index}`,chosen=[new File([text],`later-${index}.md`,{type:'text/markdown'})]
    view.rerender(<Harness sid={sid} transport={transport} chosen={chosen}/>)

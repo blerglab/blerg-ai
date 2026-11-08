@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	ld "github.com/blerglab/blerg-ai/contracts/livedata"
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 
 	"github.com/blerglab/blerg-ai/contracts/identity"
@@ -93,8 +95,17 @@ func validateRepoNames(repos []string) error {
 
 // API groups the dependencies shared by all REST handlers.
 type API struct {
-	clusterStopTimeout time.Duration
-	workspaceCluster   WorkspaceClusterConsumer
+	boardCodeSince         time.Time
+	liveDataDesktop        bool
+	liveDataPollingEnabled bool   // Disabled by default; no production activation wiring.
+	liveDataCoreIdentity   string // Expected dedicated Core certificate URI; empty refuses metadata callbacks.
+	liveDataCoreURL        string
+	liveDataAuthority      *ld.ServiceClient
+	liveDataPeerVerifier   func(*http.Request) error
+	liveDataClient         *http.Client // Dedicated mTLS identity; never supplied by a request.
+	releaseCutWake         chan struct{}
+	clusterStopTimeout     time.Duration
+	workspaceCluster       WorkspaceClusterConsumer
 
 	shells            *ownershell.Manager
 	shellRuntime      *remoteShell
@@ -107,6 +118,15 @@ type API struct {
 	delegationPush func(heading, body, link string)
 	// reviewPush is the same seam for a review request (reviewrequests.go).
 	reviewPush func(heading, body, link string)
+	// resolveBaseRef is a test seam for the "resolve_base" daemon round trip BLG-501's
+	// hostClusterChildWorkspace uses to get Main's own local commit for --base (design §10:
+	// the daemon only ever reads a ref); nil uses the real requestWorkspaceDiscovery RPC
+	// (cluster_host_workspace.go).
+	resolveBaseRef func(ctx context.Context, owner string, dc *DaemonConn, launchGeneration, folderPath, sourceIdentity, branch string) (sha string, err error)
+	// baseSHAPushed is a test seam for the provider compare-API check (design §10) that
+	// replaces the daemon's own rev-list; nil uses the real GitHub compare API call
+	// (cluster_base_check.go).
+	baseSHAPushed func(ctx context.Context, provider, cloneURL, branch, sha, token string) (pushed bool, aheadCount int, aheadUnknown bool, err error)
 	// childLimits holds environment defaults, then the last valid core settings.
 	childLimitsMu sync.Mutex
 	childLimits   childStartLimits
@@ -125,18 +145,28 @@ type API struct {
 	// delegationWaiters wakes long polls on a delegation request (delegation_requests.go).
 	delegationWaiters *delegationWaiters
 	// reviewWaiters wakes long polls on a review request (reviewrequests.go).
-	reviewWaiters      *delegationWaiters
-	delegationLife     delegationLifecycle
-	children           childrenNotifier
-	usageNoticesMu     sync.Mutex
-	usageNoticeTimeout time.Duration // zero uses childTurnNoteTimeout
-	childTurns         childTurnSeen // child-turn notes already relayed (child_turn_notes.go)
+	reviewWaiters       *delegationWaiters
+	delegationLife      delegationLifecycle
+	children            childrenNotifier
+	usageNoticesMu      sync.Mutex
+	usageNoticeTimeout  time.Duration // zero uses childTurnNoteTimeout
+	childTurnDeliveryMu sync.Mutex
+	// childTurnRetry holds one scheduled recheck per held 'finished'/'failed' notice
+	// (childTurnFinishedReadiness, BLG-447 review): a repeat hold replaces its own timer rather
+	// than piling another one up.
+	childTurnRetry       childTurnRetryTimers
+	membershipSweepEvery time.Duration    // repository-change retries; zero is the default
+	membershipCloneNow   func() time.Time // test clock for persisted recovery deadlines
+	childTurns           childTurnSeen    // child-turn notes already relayed (child_turn_notes.go)
 	// planTurns deduplicates turn checks; planMovedHook reports completed move/start rules in tests.
-	planFlights   planFlightState
-	planMergeScan planMergeScan
-	planReads     planReadCache
-	planTurns     childTurnSeen
-	planMovedHook func(sessionID string)
+	planFlights      planFlightState
+	planMergeScan    planMergeScan
+	planReads        planReadCache
+	invariantEvents  boardInvariantQueue
+	boardDetails     boardDetailProgress
+	structureDetails boardDetailProgress
+	planTurns        childTurnSeen
+	planMovedHook    func(sessionID string)
 	// planChildMerged replaces the daemon read of whether a child's branch is merged (tests).
 	planChildMerged func(ctx context.Context, row *db.SessionRow, child string) (bool, time.Time)
 	// questionAttempts counts failed deliveries of each question's answer (questions.go).
@@ -158,9 +188,10 @@ type API struct {
 	// Deliberately the API's own copy rather than the JobManager's: the
 	// JobManager exists only in-cluster with an agent image configured,
 	// while this endpoint must answer on every deployment shape.
-	coreURL         string           // BLERG_CORE_URL
-	coreInternalKey string           // BLERG_RUNNER_CORE_INTERNAL_KEY
-	siteBoard       siteBoardCache   // GET /api/site-board: core's browser-facing Board URL (site_board.go)
+	coreURL         string         // BLERG_CORE_URL
+	coreInternalKey string         // BLERG_RUNNER_CORE_INTERNAL_KEY
+	siteBoard       siteBoardCache // GET /api/site-board: core's browser-facing Board URL (site_board.go)
+	reveals         revealLimits
 	boardLimits     boardLimitsCache // the session board call limits core's settings set (board_limits.go)
 
 	// ssePollInterval/sseKeepaliveInterval pace the agent-contract SSE stream
@@ -275,6 +306,9 @@ func (a *API) authBrowser(w http.ResponseWriter, r *http.Request) (identity.Prin
 		return identity.Principal{}, false
 	}
 	*r = *r.WithContext(withDesktopViewer(r.Context(), a.desktopRecipient(r, runnerPrincipalFromIdentity(p).spawningAccountID())))
+	if p.Kind == "human" {
+		*r = *r.WithContext(withLivePersonToken(r.Context(), raw))
+	}
 	return p, true
 }
 
@@ -299,23 +333,21 @@ func (a *API) verifyBrowserToken(raw string) (identity.Principal, bool) {
 // the token reaches a request that cannot carry custom headers. It returns the
 // verified account id alongside the verdict so the socket can attribute the
 // commands it accepts to the human who opened it.
-func (a *API) AuthorizeBrowserWS(r *http.Request) (accountID, sessionID string, ok bool) {
-	p, ok := a.verifyBrowserToken(wsBearerToken(r))
-	if !ok {
-		return "", "", false
-	}
-	return p.Sub, p.Sid, true
+func (a *API) AuthorizeBrowserWS(r *http.Request) (identity.Principal, bool) {
+	return a.verifyBrowserToken(wsBearerToken(r))
 }
 
 // NewAPI creates an API handler group.
 func NewAPI(hub *Hub, dbPool *pgxpool.Pool, daemonToken string, repos *RepoLister, vapidPublicKey string) *API {
 	api := &API{
+		boardCodeSince: boardCodeCutoverFromEnv(time.Now()),
 		hub:            hub,
 		dbPool:         dbPool,
 		daemonToken:    daemonToken,
 		repos:          repos,
 		vapidPublicKey: vapidPublicKey,
 		waiters:        newMessageWaiters(),
+		releaseCutWake: make(chan struct{}, 1),
 
 		delegationWaiters: newDelegationWaiters(),
 		reviewWaiters:     newDelegationWaiters(),
@@ -324,6 +356,7 @@ func NewAPI(hub *Hub, dbPool *pgxpool.Pool, daemonToken string, repos *RepoListe
 	if hub != nil {
 		hub.desktopAuthenticate = api.authenticateDesktop
 		hub.desktopPool = dbPool
+		hub.datasetCardAccess = api.datasetCardAccess
 	}
 	api.pluginAllow, _ = pluginAllowlistFromEnv()
 	api.marketplacePolicy = &pluginspec.LivePolicy{}
@@ -341,14 +374,17 @@ func NewAPI(hub *Hub, dbPool *pgxpool.Pool, daemonToken string, repos *RepoListe
 	if hub != nil {
 		if jm := hub.JobManager(); jm != nil {
 			jm.historyPool = dbPool
+			jm.resolveWorkBranch = api.sessionWorkBranch
 		}
 		hub.SetPrivacyPool(dbPool) // lets every broadcast withhold private sessions (privacy.go)
 		hub.SetCompletionNotifier(api.notifyCompletion)
 		hub.SetDelegationHooks(api.onParentTerminalEnd, api.onParentPaused)
 		hub.SetChildActivityHook(api.noteChildActivity)
 		hub.SetChildTurnHook(api.onChildTurnEnded)
+		hub.SetMembershipNoticeHook(api.membershipNotify)
 		hub.mu.Lock()
 		hub.usageNotices = api.onUsageNotices
+		hub.usageSample = api.onUsageSample
 		hub.mu.Unlock()
 		hub.SetPlanTurnHook(api.onPlanTurnEnded)
 		hub.planInput = api.preparePlanNudge
@@ -363,6 +399,7 @@ func NewAPI(hub *Hub, dbPool *pgxpool.Pool, daemonToken string, repos *RepoListe
 		hub.SetAutoStopper(api.autoStopOnTurnDone)
 		hub.setModelController(api.SetSessionModel)
 		hub.SetAskSignal(api.waiters.signal)
+		hub.boundAnswer = api.answerBoundAsk
 		hub.SetQuestionAnswered(api.deliverQuestionAnswer)
 		hub.SetQuestionSessionEnded(api.questionAttempts.forgetSession)
 	}
@@ -389,6 +426,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 func sessionRowToInfo(row db.SessionRow, viewer string) protocol.SessionInfo {
 	info := protocol.SessionInfo{
 		ParentSessionID:      row.ParentSessionID,
+		WorkerKind:           row.WorkerKind,
 		SteeringSupported:    engineSteeringSupported(derefOrEmpty(row.Engine), row.Kind),
 		LimitResumeSupported: row.Kind == "agent" && engineLimitResumeSupported(derefOrEmpty(row.Engine)),
 		ID:                   row.ID,
@@ -399,6 +437,8 @@ func sessionRowToInfo(row db.SessionRow, viewer string) protocol.SessionInfo {
 		StartedAt:            row.StartedAt.UTC().Format(time.RFC3339),
 		Unread:               row.Unread,
 		Starred:              row.Starred,
+		Color:                row.Color,
+		Emoji:                row.Emoji,
 	}
 	if row.Title != nil {
 		info.Title = *row.Title
@@ -418,6 +458,7 @@ func sessionRowToInfo(row db.SessionRow, viewer string) protocol.SessionInfo {
 	}
 	if row.Runtime != nil {
 		info.Runtime = *row.Runtime
+		info.RuntimeTargetID = derefOrEmpty(row.RuntimeTargetID)
 	}
 	info.Kind = row.Kind
 	info.SkipPermissions = row.SkipPermissions
@@ -430,6 +471,7 @@ func sessionRowToInfo(row db.SessionRow, viewer string) protocol.SessionInfo {
 	}
 	info.StartedBy = startedByOf(&row)
 	info.Interaction = effectiveInteraction(&row)
+	info.Verbosity = effectiveVerbosity(&row)
 	if row.ArchivedAt != nil {
 		archived := row.ArchivedAt.UTC().Format(time.RFC3339Nano)
 		info.ArchivedAt = &archived
@@ -442,6 +484,7 @@ func sessionRowToInfo(row db.SessionRow, viewer string) protocol.SessionInfo {
 	// Only a session waiting for a message is paused (migration 043).
 	if row.Status == "idle" || row.Status == "waiting" {
 		info.PausedReason = row.PausedReason
+		info.PausedDetail = row.PausedDetail
 	}
 	return info
 }
@@ -450,16 +493,21 @@ func sessionRowToInfo(row db.SessionRow, viewer string) protocol.SessionInfo {
 // answer/answered_at (answer may be nil for an update).
 func messageRowToInfo(row db.MessageRow) protocol.MessageInfo {
 	info := protocol.MessageInfo{
-		ID:          row.ID,
-		SessionID:   row.SessionID,
-		Kind:        row.Kind,
-		Body:        row.Body,
-		Status:      row.Status,
-		Answer:      row.Answer,
-		CreatedAt:   row.CreatedAt.UTC().Format(time.RFC3339),
-		NoWait:      row.NoWait,
-		Dismissed:   row.Dismissed,
-		DismissedBy: row.DismissedBy,
+		QuestionTurn:     row.QuestionTurn,
+		QuestionRevision: row.QuestionRevision,
+		Decision:         row.Decision,
+		ID:               row.ID,
+		SessionID:        row.SessionID,
+		Kind:             row.Kind,
+		Body:             row.Body,
+		Status:           row.Status,
+		Answer:           row.Answer,
+		CreatedAt:        row.CreatedAt.UTC().Format(time.RFC3339),
+		NoWait:           row.NoWait,
+		WaiterEnded:      row.WaiterEnded,
+		OwnerOnly:        row.OwnerOnly,
+		Dismissed:        row.Dismissed,
+		DismissedBy:      row.DismissedBy,
 	}
 	if row.AnsweredAt != nil {
 		s := row.AnsweredAt.UTC().Format(time.RFC3339)
@@ -539,6 +587,13 @@ func (a *API) HandleGetClusterStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := jm.Status() //nolint:contextcheck // cluster calls are bounded by the JobManager client timeout and deliberately not tied to the caller: a Job or Secret half-made because the caller went away would be orphaned
+	target, err := a.defaultRuntimeTarget(r.Context())
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	status.RuntimeTargetID = target.ID
+	status.RuntimeTargetName = target.Name
 	status.SandboxClusterChildren = sandboxClusterChildren()
 	writeJSON(w, http.StatusOK, status)
 }
@@ -641,13 +696,13 @@ func (a *API) listPersonalCredentialKinds(ctx context.Context, accountID string)
 	if err != nil {
 		return nil, false, false
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.coreURL+"/internal/credentials/list", bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.coreURL+"/internal/credentials/list", bytes.NewReader(raw)) // #nosec G704 -- Target is the operator-configured Core URL; caller fields are JSON data and redirects are disabled.
 	if err != nil {
 		return nil, false, false
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-Key", a.coreInternalKey)
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- Target is the operator-configured Core URL; redirects are disabled.
 	if err != nil {
 		log.Printf("api me/credentials: request to core failed: %v", err)
 		return nil, false, false
@@ -748,6 +803,7 @@ func (a *API) HandleGetSessions(w http.ResponseWriter, r *http.Request) {
 				result[i].Repo = ""
 				result[i].Workspace = nil
 				result[i].WorkspaceResults = nil
+				result[i].RepositoryRequest = nil
 			}
 		}
 		w.Header().Set("Cache-Control", "private, no-store")
@@ -761,8 +817,9 @@ func (a *API) HandleGetSessions(w http.ResponseWriter, r *http.Request) {
 // ─── POST /api/sessions ───────────────────────────────────────────────────────
 
 type spawnSessionRequest struct {
-	InitializeGit bool            `json:"initialize_git,omitempty"`
-	Permissions   json.RawMessage `json:"permissions,omitempty"`
+	RuntimeTargetID string          `json:"runtime_target_id,omitempty"`
+	InitializeGit   bool            `json:"initialize_git,omitempty"`
+	Permissions     json.RawMessage `json:"permissions,omitempty"`
 
 	Selection *protocol.WorkspaceSelectionRequest `json:"selection,omitempty"`
 	workspace *protocol.WorkspaceManifest
@@ -820,6 +877,7 @@ type spawnSessionRequest struct {
 	// "interactive" (the default here: the launch sheet is a person) or "unattended".
 	// Anything else is a 400 (interaction.go).
 	Interaction string `json:"interaction,omitempty"`
+	Verbosity   string `json:"verbosity,omitempty"`
 }
 
 // noRepoProblem is what is wrong with a no_repo start that also names a
@@ -862,6 +920,21 @@ func (a *API) HandlePostSessions(w http.ResponseWriter, r *http.Request) {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if err := a.runtimeTargetProblem(ctx, req.Runtime, req.RuntimeTargetID); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	if req.RuntimeTargetID != "" && req.DaemonID != "" {
+		writeError(w, http.StatusUnprocessableEntity, "daemon_id does not apply to a runtime target")
+		return
+	}
+	if req.RuntimeTargetID != "" && req.Runtime == "" {
+		req.Runtime = "cluster"
+	}
+	if problem := launchPermissionsJSONProblem(req.Permissions, req.Kind); problem != "" {
+		writeError(w, http.StatusUnprocessableEntity, problem)
 		return
 	}
 	if req.Selection != nil {
@@ -955,6 +1028,12 @@ func (a *API) postSessions(w http.ResponseWriter, r *http.Request, principal ide
 		return
 	}
 	req.Interaction = interaction
+	verbosity, verbosityErr := a.resolveVerbosity(ctx, req.Verbosity, principal.Sub, false)
+	if verbosityErr != nil {
+		writeAPIError(w, verbosityErr)
+		return
+	}
+	req.Verbosity = verbosity
 	// model and effort end up as engine CLI arguments on every runtime, so
 	// both are checked here, before anything is recorded or sent.
 	// A daemon's reported model list only applies to a session on it.
@@ -966,14 +1045,8 @@ func (a *API) postSessions(w http.ResponseWriter, r *http.Request, principal ide
 		writeError(w, http.StatusUnprocessableEntity, msg)
 		return
 	}
-	// Cluster runtime: the server creates a runner Job instead of forwarding
-	// to a daemon. Agent-kind only — a terminal session needs a PTY someone
-	// can attach to, which a Job pod does not offer.
+	// Cluster runtime creates a runner Job instead of forwarding to a daemon.
 	if req.Runtime == "cluster" {
-		if req.Kind != "agent" {
-			writeError(w, http.StatusUnprocessableEntity, "terminal sessions run on a daemon")
-			return
-		}
 		// Fail closed BEFORE anything is recorded: when personal credentials
 		// are wired, core will only hand them over against a named live
 		// session, and a token without a session id names none.
@@ -1077,6 +1150,7 @@ func (a *API) postSessions(w http.ResponseWriter, r *http.Request, principal ide
 			// A start that carries a grant goes in private, with its owner, in this same
 			// insert: no other account can list it before attachGrant marks it.
 			origin := sessionOriginFor(principal.Sub, grant != nil, "")
+			origin.RuntimeTargetID = req.RuntimeTargetID
 			a.notePrivateInsert(sessionID, origin)
 			if err := db.InsertClusterSessionAs(ctx, a.dbPool, sessionID, clusterDaemonID, "starting",
 				"/workspace/"+req.Repo, req.Repo, req.Title, req.Model, origin); err != nil {
@@ -1108,6 +1182,9 @@ func (a *API) postSessions(w http.ResponseWriter, r *http.Request, principal ide
 				}
 			}
 			recordInteraction(ctx, a.dbPool, sessionID, req.Interaction)
+			if err := recordVerbosity(ctx, a.dbPool, sessionID, req.Verbosity); err != nil {
+				log.Printf("record verbosity: %v", err)
+			}
 			recordLaunchAuthSession(ctx, a.dbPool, sessionID, proofFromPrincipal(principal).SessionID)
 		}
 		if a.dbPool != nil {
@@ -1132,6 +1209,7 @@ func (a *API) postSessions(w http.ResponseWriter, r *http.Request, principal ide
 			// connections or not (docs/design/interactive-mcp-sessions.md).
 			RestrictTools: false,
 			Interaction:   req.Interaction,
+			Verbosity:     req.Verbosity,
 			SessionID:     sessionID, Repo: req.Repo, Title: req.Title,
 			Model: req.Model, Effort: req.Effort, Engine: req.Engine, InitialPrompt: req.InitialPrompt,
 			ExtraEnv: sessionBoardEnv(withClusterSessionToken(ctx, a.dbPool, sessionID, nil), req.BoardID, gateway),
@@ -1298,7 +1376,7 @@ func (a *API) postSessions(w http.ResponseWriter, r *http.Request, principal ide
 		Title:                      req.Title,
 		Cols:                       80,
 		Rows:                       24,
-		InitialPrompt:              workspacePrompt(req.InitialPrompt, req.workspace),
+		InitialPrompt:              req.InitialPrompt,
 		Model:                      req.Model,
 		Effort:                     req.Effort,
 		DangerouslySkipPermissions: req.DangerouslySkipPermissions,
@@ -1314,6 +1392,7 @@ func (a *API) postSessions(w http.ResponseWriter, r *http.Request, principal ide
 		Engine:  req.Engine,
 		// Interactive unless the caller said nobody is reading (interaction.go).
 		Interaction: req.Interaction,
+		Verbosity:   req.Verbosity,
 		SessionToken: a.spawnSessionToken(ctx, sessionID, daemon, folder, req.Title, req.Model,
 			sessionOriginFor(principal.Sub, grant != nil, "")),
 	}
@@ -1324,6 +1403,9 @@ func (a *API) postSessions(w http.ResponseWriter, r *http.Request, principal ide
 		}
 		recordLaunchEffort(ctx, a.dbPool, sessionID, req.Effort)
 		recordInteraction(ctx, a.dbPool, sessionID, req.Interaction)
+		if err := recordVerbosity(ctx, a.dbPool, sessionID, req.Verbosity); err != nil {
+			log.Printf("record verbosity: %v", err)
+		}
 		// The engine too, as the cluster and v1 paths already do: the
 		// in-session model switcher asks for the session engine's model list.
 		if req.Engine != "" {
@@ -1378,6 +1460,28 @@ func (a *API) postSessions(w http.ResponseWriter, r *http.Request, principal ide
 	var pluginNote string
 	msg.Plugins, pluginNote = a.daemonPlugins(ctx, daemon, principal.Sub, proofFromPrincipal(principal), req.Kind, req.Engine, msg.RestrictTools)
 
+	branch, customBranch, branchErr := a.daemonWorkBranch(ctx, sessionID, daemon)
+	if branchErr != nil {
+		abortSpawnSessionToken(ctx, a.dbPool, sessionID)
+		writeError(w, 503, "Could not record the session work branch.")
+		return
+	}
+	if msg.Sandbox && !req.NoRepo {
+		if problem := workBranchDaemonProblem(daemon, sessionID, branch, customBranch); problem != "" {
+			abortSpawnSessionToken(ctx, a.dbPool, sessionID)
+			writeError(w, http.StatusConflict, problem)
+			return
+		}
+	}
+	msg.WorkBranch = branch
+
+	skillPolicy, skillErr := sessionSkills(ctx, a.dbPool, sessionID)
+	msg.SkillPolicy = skillPolicy
+	if skillErr != nil {
+		abortSpawnSessionToken(ctx, a.dbPool, sessionID)
+		writeError(w, 503, "could not resolve session skills")
+		return
+	}
 	data, err := json.Marshal(msg) //nolint:gosec // the spawn message must carry the session token (and any MCP gateway grant) to the daemon over the authenticated websocket; never logged
 	if err != nil {
 		if grant != nil {
@@ -1423,6 +1527,7 @@ func (a *API) startClusterNoRepo(w http.ResponseWriter, r *http.Request, account
 		}
 		// Private, with its owner, in the insert itself when a grant is attached (see above).
 		origin := sessionOriginFor(accountID, grant != nil, "")
+		origin.RuntimeTargetID = req.RuntimeTargetID
 		a.notePrivateInsert(sessionID, origin)
 		if err := db.InsertClusterSessionAs(r.Context(), a.dbPool, sessionID, clusterDaemonID, "starting",
 			clusterNoRepoWorkdir, "", req.Title, req.Model, origin); err != nil {
@@ -1440,6 +1545,9 @@ func (a *API) startClusterNoRepo(w http.ResponseWriter, r *http.Request, account
 		}
 		recordLaunchEffort(r.Context(), a.dbPool, sessionID, req.Effort)
 		recordInteraction(r.Context(), a.dbPool, sessionID, req.Interaction)
+		if err := recordVerbosity(r.Context(), a.dbPool, sessionID, req.Verbosity); err != nil {
+			log.Printf("record verbosity: %v", err)
+		}
 		recordLaunchAuthSession(r.Context(), a.dbPool, sessionID, proof.SessionID)
 	}
 	var gateway *protocol.MCPGatewayConfig
@@ -1455,6 +1563,7 @@ func (a *API) startClusterNoRepo(w http.ResponseWriter, r *http.Request, account
 		// A launch-sheet session is watched: not restricted (docs/design/interactive-mcp-sessions.md).
 		RestrictTools: false,
 		Interaction:   req.Interaction,
+		Verbosity:     req.Verbosity,
 		SessionID:     sessionID, NoRepo: true, Title: req.Title,
 		Model: req.Model, Effort: req.Effort, Engine: req.Engine, InitialPrompt: req.InitialPrompt,
 		ExtraEnv:          sessionBoardEnv(withClusterSessionToken(r.Context(), a.dbPool, sessionID, nil), req.BoardID, gateway),
@@ -1660,14 +1769,19 @@ func (a *API) deleteSessionUnlocked(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "workspace state unavailable; retry shortly")
 			return
 		}
-		if workspace != nil && workspace.Manifest != nil && workspace.Manifest.Runtime == "cluster" {
+		if workspace != nil && workspace.Manifest != nil && (workspace.Manifest.Runtime == "cluster" || pausedStopReason(r.Context(), a.dbPool, sessionID) != "") {
 			if err := a.stopSessionWithDelivery(r.Context(), sessionID, end, true); err != nil {
-				writeError(w, http.StatusServiceUnavailable, "stop cleanup is incomplete; retry shortly")
+				writeError(w, http.StatusServiceUnavailable, "Workspace cleanup is incomplete. The workspace and all work are retained. Reconnect its daemon and retry End; if cleanup still fails, the retained workspace needs inspection.")
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+	}
+
+	if reason := pausedStopReason(r.Context(), a.dbPool, sessionID); reason != "" {
+		writeError(w, http.StatusConflict, "End cannot verify workspace cleanup because its recovery journal is unavailable. The workspace and all work are retained; reconnect the daemon and retry End, or inspect the retained workspace.")
+		return
 	}
 
 	daemon := a.hub.FindDaemonForSession(sessionID)
@@ -1831,7 +1945,9 @@ func (a *API) pauseSessionUnlocked(w http.ResponseWriter, r *http.Request) {
 // ─── PATCH /api/sessions/{id} ─────────────────────────────────────────────────
 
 type patchSessionRequest struct {
-	Title string `json:"title"`
+	Emoji *string `json:"emoji"`
+	Color *string `json:"color"`
+	Title string  `json:"title"`
 }
 
 // ─── GET /api/push/vapid-public-key ──────────────────────────────────────────
@@ -1853,7 +1969,12 @@ type pushSubscribeRequest struct {
 
 // HandlePostPushSubscribe stores a browser push subscription.
 func (a *API) HandlePostPushSubscribe(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.authBrowser(w, r); !ok {
+	principal, ok := a.authBrowser(w, r)
+	if !ok {
+		return
+	}
+	if principal.Sub == "" || principal.Sid == "" {
+		writeError(w, http.StatusUnauthorized, "sign in again to enable push notifications")
 		return
 	}
 	var req pushSubscribeRequest
@@ -1865,11 +1986,19 @@ func (a *API) HandlePostPushSubscribe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "endpoint, keys.p256dh, and keys.auth are required")
 		return
 	}
+	if !validPushEndpoint(req.Endpoint) {
+		writeError(w, http.StatusUnprocessableEntity, "use an HTTPS browser push service endpoint")
+		return
+	}
 	if a.dbPool == nil {
 		writeError(w, http.StatusServiceUnavailable, "database not available")
 		return
 	}
-	if err := db.UpsertPushSubscription(r.Context(), a.dbPool, req.Endpoint, req.Keys.P256DH, req.Keys.Auth); err != nil {
+	if err := db.UpsertPushSubscription(r.Context(), a.dbPool, req.Endpoint, req.Keys.P256DH, req.Keys.Auth, principal.Sub, principal.Sid); err != nil {
+		if errors.Is(err, db.ErrPushSubscriptionConflict) {
+			writeError(w, http.StatusConflict, "subscription keys do not match")
+			return
+		}
 		log.Printf("UpsertPushSubscription: %v", err)
 		writeError(w, http.StatusInternalServerError, "failed to save subscription")
 		return
@@ -1881,9 +2010,10 @@ func (a *API) HandlePostPushSubscribe(w http.ResponseWriter, r *http.Request) {
 
 // HandleDeletePushSubscribe removes a browser push subscription by its endpoint: the browser
 // turned push off (the bell's Push notifications setting). The endpoint is the subscription's
-// unguessable URL; an unknown one is a no-op.
+// URL; a foreign or unknown one is a no-op. Only caller-owned rows are removed.
 func (a *API) HandleDeletePushSubscribe(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.authBrowser(w, r); !ok {
+	principal, ok := a.authBrowser(w, r)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -1901,7 +2031,7 @@ func (a *API) HandleDeletePushSubscribe(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusServiceUnavailable, "database not available")
 		return
 	}
-	if err := db.DeletePushSubscription(r.Context(), a.dbPool, req.Endpoint); err != nil {
+	if err := db.DeletePushSubscription(r.Context(), a.dbPool, req.Endpoint, principal.Sub); err != nil {
 		log.Printf("DeletePushSubscription: %v", err)
 		writeError(w, http.StatusInternalServerError, "failed to remove subscription")
 		return

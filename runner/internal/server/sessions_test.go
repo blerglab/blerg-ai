@@ -309,15 +309,26 @@ func connectSrvTestDB(t *testing.T) *pgxpool.Pool {
 			return err
 		}
 		defer pool.Close()
-		return db.RunMigrations(ctx, pool)
+		if err := db.RunMigrations(ctx, pool); err != nil {
+			return err
+		}
+		// Built CONCURRENTLY in production (cmd/server/main.go); server tests that rely on its
+		// constraint (newArtFx's live-artifact fixtures) need it in their own template too.
+		return db.EnsureLiveArtifactIndex(ctx, pool)
 	})
+	phase := testsupport.Phase(t, "server_pool_connect")
 	cfg := base.Config()
 	cfg.ConnConfig.RuntimeParams["search_path"] = "test_blerg_runner_srv"
 	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		t.Fatal("open isolated server test database")
 	}
-	t.Cleanup(pool.Close)
+	phase.End()
+	t.Cleanup(func() {
+		phase := testsupport.Phase(t, "server_close")
+		pool.Close()
+		phase.End()
+	})
 	return pool
 }
 
@@ -544,6 +555,7 @@ func TestErrorReasonIsPersistedAndOrphanDeletable(t *testing.T) {
 	hub := NewHub()
 	dc := &DaemonConn{ID: daemonID, Name: "err-daemon", send: make(chan []byte, 4)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	hub.Register(dc)
 	hub.SetSessionOwner(sessionID, daemonID)
 
@@ -599,6 +611,7 @@ func TestErrorReasonClearedOnRevival(t *testing.T) {
 	hub := NewHub()
 	dc := &DaemonConn{ID: daemonID, Name: "revive-daemon", send: make(chan []byte, 4)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	hub.Register(dc)
 	hub.SetSessionOwner(sessionID, daemonID)
 
@@ -642,6 +655,7 @@ func TestDeleteSessionWithConnectedDaemonForwardsKill(t *testing.T) {
 	sessionID := "00000000-0000-4000-8000-00000000e007"
 	dc := &DaemonConn{ID: daemonID, Name: "live-daemon", send: make(chan []byte, 4)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	hub.Register(dc)
 	hub.SetSessionOwner(sessionID, daemonID)
 

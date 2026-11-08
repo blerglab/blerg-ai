@@ -777,6 +777,7 @@ export default function DiffReview({
         )}
         <DiffView
           text={text}
+          fileContext={chat?.files ? { sessionId: chat.sessionId, files: chat.files } : undefined}
           commit={commitTarget}
           selection={selection}
           onSelection={setSelection}

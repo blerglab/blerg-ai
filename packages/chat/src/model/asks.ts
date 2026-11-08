@@ -15,6 +15,9 @@ import type { AgentEvent, MessagingPayload, ToolCallPayload, ToolResultPayload, 
 import { automationAuthor, isBlergRelaySource } from './userMessages'
 
 export interface AskState {
+  question?: string
+  turn?: 'person' | 'main'
+  note?: string
   open: boolean
   /** The answer, when it is known (empty: closed without one). */
   answer: string
@@ -23,9 +26,14 @@ export interface AskState {
   by?: 'you' | 'parent' | 'other'
   /** When it was answered (the answer's event time), when known. */
   at?: string
+  /** Discard withdrew it without an answer. */
+  withdrawn?: boolean
   /** The person dismissed it from Needs you (they may have answered in the chat). */
   dismissed?: boolean
 }
+
+/** In the closed-asks map: discard withdrew it without an answer. */
+export const WITHDRAWN_ASK = '\u0000withdrawn'
 
 /** In the closed-asks map: a person dismissed it (no answer); who, when known, follows (dismissedAsk). */
 export const DISMISSED_ASK = '\u0000dismissed'
@@ -86,9 +94,9 @@ function readAsks(events: AgentEvent[], closed: ReadonlyMap<string, string>, end
   const asking: string[] = []
   const nativeCalls = new Set<string>()
   // Whether a call returning, or the turn ending, closes the ask: never for one the server holds.
-  const endsWithCall = (a: { id: string; native: boolean }) => a.id === '' || a.native
+  const endsWithCall = (a: { id: string; native: boolean }) => a.id === ''
   const close = (a: { state: AskState }, answer: string, by?: AskState['by'], at?: string) => {
-    a.state = { open: false, answer, ...(by ? { by } : {}), ...(at ? { at } : {}) }
+    a.state = { ...a.state, open: false, answer, ...(by ? { by } : {}), ...(at ? { at } : {}) }
   }
   const newestOpen = (pred: (a: { id: string; noWait: boolean }) => boolean) => {
     for (let i = asks.length - 1; i >= 0; i--) if (asks[i].state.open && pred(asks[i])) return asks[i]
@@ -105,7 +113,7 @@ function readAsks(events: AgentEvent[], closed: ReadonlyMap<string, string>, end
         call,
         native: call !== '' && nativeCalls.has(call),
         // Only a question the server holds can be one the agent does not wait on.
-        noWait: p.no_wait === true && id !== '',
+        noWait: (p.no_wait === true || p.bound === true) && id !== '',
         state: { open: true, answer: '' },
       })
     } else if (ev.kind === 'tool_call') {
@@ -121,6 +129,17 @@ function readAsks(events: AgentEvent[], closed: ReadonlyMap<string, string>, end
         asking.splice(i, 1)
         for (const a of asks) if (a.state.open && a.call === id && endsWithCall(a)) close(a, '')
       }
+    } else if (ev.kind === 'question_thread') {
+      const p = ev.payload as {message_id?: string; kind?: string; body?: string; question_turn?: 'person' | 'main'}
+      const a = asks.find(x => x.id === p.message_id)
+      if (a) {
+        if (p.kind === 'revision' && typeof p.body === 'string') a.state.question = p.body
+        if (p.question_turn) a.state.turn = p.question_turn
+      }
+    } else if (ev.kind === 'bound_ask_note') {
+      const p = ev.payload as {message_id?: string; text?: string}
+      const a = asks.find(x => x.id === p.message_id)
+      if (a && typeof p.text === 'string') a.state.note = p.text
     } else if (ev.kind === 'user_message') {
       const p = (ev.payload ?? {}) as Partial<UserMessagePayload>
       if (p.source === 'ask_answer') {
@@ -141,7 +160,9 @@ function readAsks(events: AgentEvent[], closed: ReadonlyMap<string, string>, end
   for (const a of asks) {
     if (a.state.open && (ended || (a.id && closed.has(a.id)))) {
       const answer = a.id ? closed.get(a.id) ?? '' : ''
-      if (answer.startsWith(DISMISSED_ASK)) {
+      if (answer === WITHDRAWN_ASK) {
+        a.state = { open: false, answer: '', withdrawn: true }
+      } else if (answer.startsWith(DISMISSED_ASK)) {
         const by = answer.slice(DISMISSED_ASK.length + 1)
         a.state = { open: false, answer: '', dismissed: true, ...(by === 'you' || by === 'other' ? { by } : {}) }
       }

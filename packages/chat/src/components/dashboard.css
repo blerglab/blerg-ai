@@ -1,0 +1,39 @@
+.dashboard-block { container-type: inline-size; width: 100%; min-width: 0; color: var(--chat-fg); font-family: var(--chat-font); padding: 12px; box-sizing: border-box; }
+.dashboard-toolbar { display: flex; justify-content: flex-end; }
+.dashboard-title { font-size: calc(var(--chat-text-sm) * 1.4); margin: 0 0 16px; overflow-wrap: anywhere; }
+.dashboard-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: stretch; }
+.dashboard-card { min-width: 0; padding: 18px; border: 1px solid var(--chat-border); border-radius: var(--chat-radius); background: var(--chat-surface-2); overflow-wrap: anywhere; }
+.dashboard-card h3 { margin: 0 0 12px; font-size: var(--chat-text-sm); color: var(--chat-muted); font-weight: 500; }
+.dashboard-value { margin: 0; font-size: 36px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.dashboard-unit { font-size: var(--chat-text-sm); color: var(--chat-muted); font-weight: 400; }
+.dashboard-detail { color: var(--chat-muted); font-size: var(--chat-text-sm); margin: 8px 0 0; }
+.dashboard-text { margin: 0; font-size: var(--chat-text-sm); line-height: 1.6; white-space: pre-wrap; }
+.dashboard-sparkline { width: 100%; height: 48px; margin-top: 16px; overflow: visible; }
+.dashboard-sparkline line { stroke: var(--chat-accent); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.dashboard-sparkline circle { fill: var(--chat-accent); }
+.dashboard-meter { height: 12px; border-radius: var(--chat-radius); background: var(--chat-border); position: relative; margin-top: 18px; }
+.dashboard-meter-fill { display: block; height: 100%; border-radius: inherit; background: var(--chat-accent); }
+.dashboard-meter i { position: absolute; top: -3px; bottom: -3px; border-left: 2px solid var(--chat-fg); }
+.dashboard-range { display: flex; justify-content: space-between; }
+.dashboard-chart { height: 280px; min-width: 0; }
+.dashboard-chart .visual-block { height: 100%; margin: 0; border: 0; display: flex; flex-direction: column; }
+.dashboard-chart .visual-surface-wrap { flex: 1; min-height: 0; }
+.artifact-body:has(> .dashboard-block) { overflow: auto; }
+.dashboard-chart .visual-actions { display: none; }
+@container (min-width: 496px) {
+  .dashboard-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dashboard-card { grid-column: span min(var(--chat-dashboard-span), 2); }
+}
+@container (min-width: 1000px) {
+  .dashboard-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .dashboard-card { grid-column: span var(--chat-dashboard-span); }
+}
+
+/* A chart shares the card's surface, including the renderer's token snapshot. */
+.dashboard-chart { --chat-surface: var(--chat-surface-2); }
+.dashboard-chart .visual-block { background: transparent; border-radius: 0; }
+.dashboard-chart .visual-surface { padding: 0; }
+.dashboard-meter-fill { transition: width calc(var(--chat-data-transition-ms) * 1ms) ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .dashboard-meter-fill { transition: none; }
+}

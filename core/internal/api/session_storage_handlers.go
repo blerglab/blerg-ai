@@ -107,11 +107,13 @@ func (d Deps) handleInternalSessionStorage(w http.ResponseWriter, r *http.Reques
 
 // accountStanding is what the runner learns about a person a broker (the board) names on a file
 // change: whether the account exists and is active, and whether it is an administrator. The
-// runner never takes the broker's word for either (#231).
+// runner never takes the broker's word for either (#231). An internal caller may
+// request the sign-in username for account branch templates; it is otherwise omitted.
 type accountStanding struct {
-	Exists bool `json:"exists"`
-	Active bool `json:"active"`
-	Admin  bool `json:"admin"`
+	Username string `json:"username,omitempty"`
+	Exists   bool   `json:"exists"`
+	Active   bool   `json:"active"`
+	Admin    bool   `json:"admin"`
 }
 
 // handleInternalAccountStanding is POST /internal/accounts/standing {"account": "<id>"}. The
@@ -127,7 +129,8 @@ func (d Deps) handleInternalAccountStanding(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var body struct {
-		Account string `json:"account"`
+		Account         string `json:"account"`
+		IncludeUsername bool   `json:"include_username,omitempty"`
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
 	dec.DisallowUnknownFields()
@@ -136,9 +139,9 @@ func (d Deps) handleInternalAccountStanding(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var st accountStanding
-	var role string
+	var role, username string
 	var disabled bool
-	err := d.Store.Pool().QueryRow(r.Context(), `SELECT role, disabled_at IS NOT NULL FROM accounts WHERE id::text = $1`, body.Account).Scan(&role, &disabled)
+	err := d.Store.Pool().QueryRow(r.Context(), `SELECT role, disabled_at IS NOT NULL, CASE WHEN provider='github' THEN COALESCE(NULLIF(email,''),provider_subject) ELSE provider_subject END FROM accounts WHERE id::text = $1`, body.Account).Scan(&role, &disabled, &username)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:
@@ -146,6 +149,9 @@ func (d Deps) handleInternalAccountStanding(w http.ResponseWriter, r *http.Reque
 		return
 	default:
 		st = accountStanding{Exists: true, Active: !disabled, Admin: !disabled && role == "admin"}
+		if body.IncludeUsername && !disabled {
+			st.Username = username
+		}
 	}
 	writeJSON(w, st)
 }

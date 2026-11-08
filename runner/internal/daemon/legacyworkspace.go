@@ -108,15 +108,20 @@ func (l *legacySessionWorkspace) Close() error { return l.closeContext(context.B
 func (l *legacySessionWorkspace) closeContext(ctx context.Context) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.shellRegistered && l.shells.HasHostBridge() {
+		if err := l.shells.BeginWorkspaceRetirement(l.session); err != nil {
+			return err
+		}
+	}
 	l.closed = true
 	var err error
 	if l.shellRegistered {
-		b, e := l.shells.Binding(l.session)
+		b, e := l.shells.WorkspaceBinding(l.session)
 		if e != nil {
 			err = e
 		} else {
 			ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-			_, err = l.shells.Retire(ctx, ownershell.SupervisorIdentity(b, ownershell.SignedGrant{}).Launch)
+			err = l.shells.RetireWorkspace(ctx, ownershell.SupervisorIdentity(b, ownershell.SignedGrant{}).Launch)
 			cancel()
 			if err == nil {
 				l.shellRegistered = false
@@ -186,6 +191,8 @@ func (m *Manager) attachLegacyWorkspaceWith(ctx context.Context, id string, caps
 	if source.live == nil || !source.live() {
 		return errLegacyProjectMissing
 	}
+	memoryLive := source.live
+	source.observe = func() (bool, bool) { return memoryLive(), true }
 	runtime := "host"
 	if source.inRuntimeOnly {
 		runtime = "sandbox"
@@ -270,6 +277,16 @@ func (m *Manager) attachLegacyWorkspaceWith(ctx context.Context, id string, caps
 			return errLegacyProjectChanged
 		}
 		live, pinned := source.live, source.info
+		source.observe = func() (bool, bool) {
+			if !live() {
+				return false, true
+			}
+			current, err := os.Stat(alias)
+			if err != nil {
+				return false, os.IsNotExist(err)
+			}
+			return current.IsDir() && os.SameFile(pinned, current), true
+		}
 		source.root, source.alias = canonical, alias
 		source.live = func() bool {
 			if !live() {
@@ -376,6 +393,7 @@ func (m *Manager) legacyShellCommand(ctx context.Context, id string, source work
 		command.Args = append([]string{"--context", remote.dockerContext}, command.Args...)
 		command.PublicRoot, command.Root = sandboxWorkdir, reply.Binding.Root
 		command.SourceLive = source.live
+		command.SourceState = source.observe
 		physical := &DockerWorkspaceContainer{Context: remote.dockerContext, ID: remote.container}
 		reconcile = func(ctx context.Context) error {
 			if err := shells.ProveRecordedShellsEmpty(id); err != nil {
@@ -439,6 +457,7 @@ func (m *Manager) legacyShellCommand(ctx context.Context, id string, source work
 	// Describe revalidates the canonical root; this also rechecks the alias the
 	// session was attached through, so a retargeted alias fences a running shell.
 	command.SourceLive = source.live
+	command.SourceState = source.observe
 	command.OwnedStarted = func(pid int) error {
 		helper, err := hostHelperIdentityFor(pid)
 		if err != nil {
@@ -459,11 +478,6 @@ func (m *Manager) legacyShellCommand(ctx context.Context, id string, source work
 // the dock/capability endpoint retry anything that was not ready at this point.
 func (m *Manager) attachLegacyWorkspaces() {
 	ids := []string{}
-	m.mu.Lock()
-	for id := range m.sessions {
-		ids = append(ids, id)
-	}
-	m.mu.Unlock()
 	if m.agents != nil {
 		ids = append(ids, m.agents.ActiveIDs()...)
 	}

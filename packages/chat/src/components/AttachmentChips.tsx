@@ -42,7 +42,7 @@ function waitingAnnouncement(waiting: AttachmentItem[]): string {
   const n = waiting.length
   const files = n === 1 ? `${waiting[0]!.name} is` : `${n} files are`
   if (waiting.every(i => i.wait === 'offline')) return `${files} waiting to reach the server. They upload by themselves when it answers.`
-  return `${files} waiting for space in this session. They upload by themselves when there is room.`
+  return `${files} waiting for space in this workspace. They upload by themselves when there is room.`
 }
 
 /** The chips under the message box. Waiting files share one set of actions (`waitingActions`),

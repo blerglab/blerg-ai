@@ -11,6 +11,7 @@ import '@blerglab/chat/blerg.css'
 
 const read = vi.hoisted(() => vi.fn())
 vi.mock('../apiFetch', () => ({ apiFetch: read }))
+vi.mock('../ws', () => import('../test/wsMock'))
 vi.mock('../lib/chatTransport', () => ({ blergTransport: () => ({ files: null }) }))
 
 const server = { added: [] as string[], changed: 1 }

@@ -18,6 +18,7 @@ import (
 )
 
 var errDiscoveryUnavailable = errors.New("workspace discovery unavailable or changed")
+var errMembershipCloneTimeout = errors.New("repository clone reply timed out")
 
 type discoveryWaiter struct {
 	dc          *DaemonConn
@@ -29,6 +30,13 @@ type discoveryRequests struct {
 	pending map[string]discoveryWaiter
 }
 
+func (h *Hub) workspaceRequestChannel(operation string) *discoveryRequests {
+	if operation == "clone_addition" {
+		return &h.cloneReqs
+	}
+	return &h.discoveryReqs
+}
+
 // Ownership is checked before slots or metadata. Per-person and per-connection
 // bounds prevent one browser from occupying every discovery worker.
 func (h *Hub) requestWorkspaceDiscovery(ctx context.Context, owner string, dc *DaemonConn, req protocol.DiscoverWorkspace) (protocol.WorkspaceDiscoveryResult, error) {
@@ -37,7 +45,8 @@ func (h *Hub) requestWorkspaceDiscovery(ctx context.Context, owner string, dc *D
 		return zero, errDiscoveryUnavailable
 	}
 	root := dc.CurrentReposRoot()
-	r := &h.discoveryReqs
+	r := h.workspaceRequestChannel(req.Operation)
+	clone := req.Operation == "clone_addition"
 	r.Lock()
 	if len(r.pending) >= 2 {
 		r.Unlock()
@@ -53,6 +62,9 @@ func (h *Hub) requestWorkspaceDiscovery(ctx context.Context, owner string, dc *D
 		r.pending = map[string]discoveryWaiter{}
 	}
 	req.Type = "discover_workspace"
+	if clone {
+		req.Type = "clone_repository"
+	}
 	req.RequestID = newUUID()
 	w := discoveryWaiter{dc: dc, owner: owner, root: root, ch: make(chan protocol.WorkspaceDiscoveryResult, 1)}
 	r.pending[req.RequestID] = w
@@ -62,8 +74,13 @@ func (h *Hub) requestWorkspaceDiscovery(ctx context.Context, owner string, dc *D
 	if err != nil || len(raw) > 256<<10 || !h.trySendToDaemon(dc, raw) {
 		return zero, errDiscoveryUnavailable
 	}
-	timer := time.NewTimer(4 * time.Second)
+	wait := 4 * time.Second
+	if clone {
+		wait = 31 * time.Minute
+	}
+	timer := time.NewTimer(wait)
 	defer timer.Stop()
+	waitErr := errDiscoveryUnavailable
 	select {
 	case res, ok := <-w.ch:
 		if !ok || h.ownedHostDaemon(ctx, owner, dc.ID) != dc || dc.CurrentReposRoot() != root || !validDiscoveryResult(res) {
@@ -71,14 +88,20 @@ func (h *Hub) requestWorkspaceDiscovery(ctx context.Context, owner string, dc *D
 		}
 		return res, nil
 	case <-timer.C:
+		if clone {
+			waitErr = errMembershipCloneTimeout
+		}
 	case <-ctx.Done():
 	}
 	cancel, _ := json.Marshal(protocol.DiscoverWorkspace{Type: "discover_workspace", RequestID: req.RequestID, Operation: "cancel"})
 	h.trySendToDaemon(dc, cancel)
-	return zero, errDiscoveryUnavailable
+	return zero, waitErr
 }
 func (h *Hub) deliverWorkspaceDiscovery(dc *DaemonConn, res protocol.WorkspaceDiscoveryResult) {
-	r := &h.discoveryReqs
+	h.deliverDiscoveryResult(&h.discoveryReqs, dc, res)
+	h.deliverDiscoveryResult(&h.cloneReqs, dc, res)
+}
+func (h *Hub) deliverDiscoveryResult(r *discoveryRequests, dc *DaemonConn, res protocol.WorkspaceDiscoveryResult) {
 	r.Lock()
 	defer r.Unlock()
 	w, ok := r.pending[res.RequestID]
@@ -89,7 +112,10 @@ func (h *Hub) deliverWorkspaceDiscovery(dc *DaemonConn, res protocol.WorkspaceDi
 	w.ch <- res
 }
 func (h *Hub) abandonWorkspaceDiscoveryRequests(dc *DaemonConn) {
-	r := &h.discoveryReqs
+	h.abandonDiscoveryRequests(&h.discoveryReqs, dc)
+	h.abandonDiscoveryRequests(&h.cloneReqs, dc)
+}
+func (h *Hub) abandonDiscoveryRequests(r *discoveryRequests, dc *DaemonConn) {
 	r.Lock()
 	defer r.Unlock()
 	for id, w := range r.pending {
@@ -105,7 +131,7 @@ func validDiscoveryPath(p string) bool {
 func validDiscoveryResult(res protocol.WorkspaceDiscoveryResult) bool {
 	if !res.OK {
 		switch res.ErrorCode {
-		case "unavailable", "stale", "invalid_selection", "too_many_members", "overlapping_repositories", "submodule", "discovery_limit":
+		case "unavailable", "binding_pending", "clone_environment", "clone_failed", "local_storage", "destination_unavailable", "destination_exists", "stale", "invalid_selection", "too_many_members", "overlapping_repositories", "submodule", "discovery_limit", "outside_folder":
 			return res.Page == nil && res.Resolved == nil
 		}
 		return false

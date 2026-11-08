@@ -7,7 +7,7 @@ import { resetKeptAttachments } from '../hooks/useAttachments'
 import { clearPreviewCache } from '../model/artifactPreview'
 import { COMPACT_KEY, localStorageChatStorage, type ChatStorage } from '../model/storage'
 import type { SessionMeta } from '../transport/types'
-import type { AgentEvent } from '../types'
+import type { AgentEvent, ArtifactPayload } from '../types'
 
 export const SESSION = 's1'
 export const COMPACT = COMPACT_KEY
@@ -41,6 +41,12 @@ export function seed(...events: AgentEvent[]) {
     last = Math.max(last, e.seq ?? 0)
   }
   s.ingestReplayDone(SESSION, { lastSeq: last, hasMore: false })
+}
+
+/** A live file's republish (BLG-470), as the transport's onArtifactUpdated would apply it: never
+ *  a transcript event, straight into the store's liveArtifacts patch for useArtifacts to merge. */
+export function pushLiveArtifact(payload: ArtifactPayload) {
+  useTranscriptStore.getState().applyLiveArtifact(SESSION, payload)
 }
 
 /** Like seed, but leaves the replay open (the skeleton stays up). */

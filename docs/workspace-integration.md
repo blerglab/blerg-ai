@@ -117,15 +117,23 @@ builds have no environment, administrator or linker-variable enablement override
 
 The enabled production-stack regression lives in
 `runner/internal/server/workspace_enablement_integration_test.go`. Build the normal
-production daemon and supply its path as `BLERG_HOST_HELPER_TEST_BINARY`. Use a
-disposable sandbox image with current fixed explorer/shell helpers and the test's
-scripted CLI fixture, selected by `BLERG_RUNNER_SANDBOX_IMAGE`. These are test
-artifact selectors, not enablement overrides. Run the server test with
+production daemon and supply its path as `BLERG_HOST_HELPER_TEST_BINARY`. The test
+builds a disposable image from the locally installed `blerg-runner-sandbox:latest`
+(or the base selected by `BLERG_RUNNER_SANDBOX_IMAGE`), with explorer/shell helpers
+compiled from this checkout and the test's scripted CLI fixture. It removes its
+own image and temporary base tag afterward; it never replaces the installed tag.
+This requires Go and Docker build access and does not use engine credentials or
+call a model. Host PATH alone cannot replace a CLI inside a container. These are
+test artifact selectors, not enablement overrides. Run the server test with
 `-race -run '^TestP6EnabledProductionStack$'` and the isolated test DB. Tests isolate
-HOME, daemon state, repositories and tmux sockets; they exercise the real daemon
+HOME, daemon state, and repositories; they exercise the real daemon
 entry point, enrolled connection, welcome, P1 folder selection, host/Docker launches,
 explorer list/search/status, consent/P5 open and close, member sync and durable stop
-receipts. The ordinary pod image test exercises computed cluster hello/welcome
+receipts. The scripted engine waits for each input message before committing or
+emitting a turn result, so startup cannot race shell setup against unsolicited
+turn-end sync. `TestP6EngineWaitsForMessage` checks that ordering without Docker;
+`TestP6SandboxEngineFixture` verifies the image contains the exact script.
+The ordinary pod image test exercises computed cluster hello/welcome
 negotiation and shell open/close under its verified UID/storage/capability setup.
 The concrete cluster-consumer regression launches parent and subset-child Jobs
 without a capability override. Ordinary builds retain macOS-host OFF-runtime
@@ -144,9 +152,10 @@ Slow freezes log at most 32 unheld tasks after two seconds and on failure, with 
 bookkeeping and kernel status fields; these diagnostics never supply containment proof.
 The tracer reconciles a creator's fork/clone event with its child's own reports in
 either order, counting reports per TID, so a child reaped before that event is never
-tracked again. A new task that reuses the TID of a thread whose exec is still to be
-reported is recognized by its auto-attach stop (SI_USER from PID 0) and recorded as a
-birth; that exec then drops only the stale entry. A lost
+tracked again. The tree is seized, so a new task is held by a job-control trap that
+SIGCONT cannot clear, and a freeze uses `PTRACE_INTERRUPT`. A non-leader thread's exec
+runs alone in a paused tree, so a freed TID cannot be reused before its exec is
+collected (see the [design](design/sound-process-freeze.md)). A lost
 host helper's tree is proven gone through its pidfd ledger (see
 [cluster workspaces](cluster-workspace.md)); the next engine then starts under a
 fresh helper, and a thaw never keeps admission closed for a dead helper.

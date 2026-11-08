@@ -6,17 +6,22 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"github.com/blerglab/blerg-ai/runner/internal/models"
 	"os/exec"
 	"slices"
 	"sync"
 	"time"
 
+	"github.com/blerglab/blerg-ai/runner/internal/models"
+
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	workflow "github.com/blerglab/blerg-ai/runner/skills"
 )
 
 type codexDriver struct {
+	agent.InputClockSource
+	skillPack         *skillPack
+	SkillPolicy       *workflow.Policy
 	startCommand      func(*exec.Cmd) error
 	CredentialSource  EngineCredentialSource
 	managedCredential codexCredentialState
@@ -49,8 +54,8 @@ type codexDriver struct {
 	observedTools   map[string]bool
 	caps            capEmitter
 	heardFromPerson bool
-	interruptNext   bool
 	stopped         bool
+	startFailure    string
 	activeTurn      bool
 	lastLimitTurn   string
 	usageTurnID     string
@@ -63,6 +68,7 @@ type codexDriver struct {
 	NativeStateHome       string // trusted pod conversation-only SQLite directory
 	CodexHome             string // private managed-plugin home; never used for restricted sessions
 	DeveloperInstructions string
+	Verbosity             string
 	app                   *codexApp
 	cmd                   *exec.Cmd // persistent app-server, for process ownership.
 	mcpGeneration         uint64
@@ -112,6 +118,7 @@ func (d *codexDriver) Enqueue(text, source string) {
 }
 
 func (d *codexDriver) EnqueueInput(in agent.Input) {
+	in = d.WithPersonTime(in)
 	if in.Source == "" {
 		in.Source = "chat"
 	}
@@ -176,9 +183,6 @@ func (d *codexDriver) SetModel(model, effort, source string) {
 func (d *codexDriver) Interrupt() {
 	d.mu.Lock()
 	cmd, prefix, app := d.cmd, d.prefix, d.app
-	if app == nil && (len(d.queue) > 0 || d.retryInput != nil) {
-		d.interruptNext = true
-	}
 	d.mu.Unlock()
 	if app != nil {
 		app.interrupt()
@@ -191,7 +195,11 @@ func (d *codexDriver) Run(ctx context.Context) {
 	failures := 0
 	for ctx.Err() == nil {
 		start := time.Now()
-		d.runApp(ctx)
+		stopped := d.runApp(ctx)
+		if stopped && ctx.Err() == nil {
+			failures = 0 // the person ended a turn; this is not an engine failure
+			continue
+		}
 		if d.rollbackSessionPlugins(ctx) {
 			failures = 0
 			continue
@@ -225,7 +233,14 @@ func (d *codexDriver) Run(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	d.stopRuntime("Codex app-server repeatedly failed; update Codex and start a new session")
+	d.mu.Lock()
+	cause := d.startFailure
+	d.mu.Unlock()
+	if cause != "" {
+		d.stopRuntime("The worker could not restart: " + cause)
+	} else {
+		d.stopRuntime("Codex app-server repeatedly failed; update Codex and start a new session")
+	}
 }
 
 // stopRuntime marks the runtime stopped for good, refuses the messages still waiting for it, and
@@ -275,7 +290,7 @@ func (d *codexDriver) continueAdopted(prompt, shown string) bool {
 		return false
 	}
 	select {
-	case d.queue <- queuedMsg{Input: agent.Input{Text: prompt, Shown: shown, Source: "system"}, adoptionContinue: true}:
+	case d.queue <- queuedMsg{Input: d.WithPersonTime(agent.Input{Text: prompt, Shown: shown, Source: "system"}), adoptionContinue: true}:
 		return true
 	default:
 		return false
@@ -305,3 +320,16 @@ func (d *codexDriver) codexToolsRestricted() bool {
 }
 
 func (d *codexDriver) useCommandBoundary(f func(*exec.Cmd) error) { d.startCommand = f }
+
+func (d *codexDriver) HasInterruptibleWork() bool {
+	d.mu.Lock()
+	app := d.app
+	active := d.activeTurn
+	d.mu.Unlock()
+	if app == nil {
+		return active
+	}
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	return app.turn != "" || app.starting || len(app.childTurns) > 0 || len(app.dynamicCalls) > 0
+}

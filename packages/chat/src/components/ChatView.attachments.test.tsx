@@ -357,9 +357,9 @@ describe('files waiting for space (#231)', () => {
     expect(screen.getAllByRole('button', {name: 'Free up space…'})).toHaveLength(1)
     expect(screen.getByTestId('attach-space-panel')).toHaveTextContent('You can delete older attachments to make room')
     expect(screen.getByTestId('attach-waiting-status')).toHaveTextContent('3 files are waiting for space')
-    expect(screen.queryByRole('button', {name: /Ask the session/})).toBeNull()
+    expect(screen.queryByRole('button', {name: /Ask the workspace/})).toBeNull()
     // Not an administrator: the person is told whom to ask.
-    expect(screen.getByTestId('attach-space-panel')).toHaveTextContent('Ask an admin to increase this session’s storage.')
+    expect(screen.getByTestId('attach-space-panel')).toHaveTextContent('Ask an admin to increase this workspace’s storage.')
     expect(screen.queryByRole('button', {name: 'Increase storage'})).toBeNull()
   })
 
@@ -394,7 +394,7 @@ describe('files waiting for space (#231)', () => {
     await waitFor(() => expect(chips()[0]).toHaveTextContent('Waiting for space'))
     view.rerender(<ChatView session={SESSION} transport={t.transport} meta={{...idle, status: 'stopped'}} />)
     act(() => t.setStatus('stopped'))
-    await waitFor(() => expect(chips()[0]).toHaveTextContent('session has ended'))
+    await waitFor(() => expect(chips()[0]).toHaveTextContent('workspace has ended'))
     const after = checks
     await act(async () => {window.dispatchEvent(new Event('focus')); await new Promise(r => setTimeout(r, 30))})
     expect(checks).toBe(after)

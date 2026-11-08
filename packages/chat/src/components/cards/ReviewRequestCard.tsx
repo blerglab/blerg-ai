@@ -22,7 +22,7 @@ export default function ReviewRequestCard({ ev }: { ev: AgentEvent }) {
         <TimeLabel ts={ev.ts} className="card-time-end" />
       </div>
       {r.ask && <div className="delegation-prompt review-request-ask" data-testid="review-request-ask">{r.ask}</div>}
-      {r.state === 'pending' && !ctx?.decide && <div className="delegation-readonly">Waiting for the session owner's review.</div>}
+      {r.state === 'pending' && !ctx?.decide && <div className="delegation-readonly">Waiting for the workspace owner's review.</div>}
       {line && (
         <div className="delegation-decided" data-testid="review-request-outcome">
           <span>{line}</span>

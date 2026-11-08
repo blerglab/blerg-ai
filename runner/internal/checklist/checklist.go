@@ -1,8 +1,7 @@
 // Package checklist is a session's checklist: a short list of the work the agent will do, which it
 // ticks off as it finishes (`blerg-runner checklist`, POST /api/sessions/{id}/checklist). It is
-// pure: the server reads the newest checklist event, hands its items and the request to Apply, and
-// records the payload Apply returns as the next event. Every event carries the FULL list after the
-// change and the change itself, so the transcript replays without state and the chat never diffs.
+// pure: Apply returns the next state and the change. Storage keeps the current state separately,
+// writes Compact changes to the transcript, and uses Replay for historical and legacy reads.
 package checklist
 
 import (
@@ -68,9 +67,14 @@ type Change struct {
 // Payload is a checklist event's payload (kind "checklist"): the list after the change, the
 // operation, and the item it touched (absent for set and clear).
 type Payload struct {
-	Items   []Item  `json:"items"`
-	Op      string  `json:"op"`
-	Changed *Change `json:"changed,omitempty"`
+	Delta     bool     `json:"delta,omitempty"`
+	Total     int      `json:"total,omitempty"`
+	Completed int      `json:"completed,omitempty"`
+	Updates   []Item   `json:"updates,omitempty"`
+	Removed   []string `json:"removed,omitempty"`
+	Items     []Item   `json:"items"`
+	Op        string   `json:"op"`
+	Changed   *Change  `json:"changed,omitempty"`
 	// Note says why Blerg made the change itself (e.g. "ticked: #127 done" when the session moved
 	// card #127 to a done column); empty for the agent's own changes.
 	Note string `json:"note,omitempty"`

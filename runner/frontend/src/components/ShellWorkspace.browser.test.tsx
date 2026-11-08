@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { createRef } from 'react'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -15,8 +16,9 @@ import { useShellCapability } from '../hooks/useShellCapability'
 import '../index.css'
 const apiFetch = vi.hoisted(() => vi.fn())
 vi.mock('../apiFetch', () => ({ apiFetch }))
+vi.mock('../ws', () => import('../test/wsMock'))
 const auth = vi.hoisted(() => ({ renewal: async () => true as boolean }))
-vi.mock('../authClient', () => ({ ensureFreshToken: () => auth.renewal(), getAccessToken: () => 'fixture-token' }))
+vi.mock('../authClient', async original => ({ ...await original<typeof import('../authClient')>(), ensureFreshToken: () => auth.renewal(), getAccessToken: () => 'fixture-token' }))
 afterEach(() => { auth.renewal = async () => true; vi.restoreAllMocks(); vi.unstubAllGlobals(); document.documentElement.removeAttribute('data-theme') })
 const luminance = (hex: string) => {
   const c = [1,3,5].map(i => parseInt(hex.slice(i,i+2),16)/255).map(v => v <= .04045 ? v/12.92 : ((v+.055)/1.055)**2.4)
@@ -48,26 +50,28 @@ function dragShell(label: string, edge: 'right' | 'bottom') {
   expect(screen.getByTestId('drop-overlay')).toBeTruthy()
   fireEvent(group, new DragEvent('drop', { bubbles: true, cancelable: true, ...position }))
 }
-it.each([390, 3840])('opens, focuses, backgrounds and closes shell tabs at %i px', async width => {
+it.each(browserWidths([390, 3840]))('opens, focuses, backgrounds and closes shell tabs at %i px', async width => {
   await page.viewport(width, width === 390 ? 844 : 2160)
   const { shells, ref, view } = mount()
   await open()
   if (width === 390) expect(view.container.querySelector('.xterm-helper-textarea')).not.toHaveFocus()
   else await waitFor(() => expect(view.container.querySelector('.xterm-helper-textarea')).toHaveFocus())
-  expect(screen.queryByText(/^(Disconnected\.|Controlled in another tab\.)$/)).toBeNull()
+  expect(screen.queryByText(/^(Disconnected\.|This shell was opened in another tab with the same browser sign-in\.)$/)).toBeNull()
   expect(screen.getByRole('tab', { name: 'Shell' }).title).toBe('Shell · sandbox · project-1')
   expect(screen.queryByLabelText('Dock shell')).toBeNull()
   expect(document.querySelectorAll('.shell-tabs, .shell-pane-title')).toHaveLength(0)
   shells[0].emit('project $ printf "Shell tab ready\\n"\r\nShell tab ready\r\nproject $ ')
   const shots = import.meta.env.VITE_CHROME_SHOTS_DIR
   if (shots) await page.screenshot({ path: `${shots}/shell-tab-${width}.png` })
-  await userEvent.click(width === 390 ? screen.getByRole('button', { name: /← Chat/ }) : screen.getByRole('tab', { name: /Chat/ }))
+  await userEvent.click(width === 390 ? screen.getByRole('button', { name: /← Main/ }) : screen.getByRole('tab', { name: /Main/ }))
   expect(shells[0].disconnected).toBe(false)
   shells[0].emit('output while hidden\r\n')
   await act(async () => { ref.current?.toggle() })
   await waitFor(() => expect(document.querySelector('.xterm-screen')).toHaveTextContent('output while hidden'))
   expect(shells[0].ended).toBe(false)
   await userEvent.click(screen.getByRole('button', { name: 'Close Shell' }))
+  expect(shells[0].ended).toBe(false)
+  act(() => window.dispatchEvent(new Event('pagehide')))
   await waitFor(() => expect(shells[0].ended).toBe(true))
   expect(screen.queryByRole('tab', { name: 'Shell' })).toBeNull()
 })
@@ -78,7 +82,7 @@ it('reorders, drops shells into the split overlay, refits and restores positions
   const terminal = document.querySelector('[data-shell-id="1"] .xterm-helper-textarea')
   const shell3 = screen.getByRole('tab', { name: 'Shell 3' })
   shell3.focus(); await userEvent.keyboard('{Alt>}{Shift>}{ArrowLeft}{/Shift}{/Alt}')
-  expect(screen.getAllByRole('tab').map(t => t.textContent?.trim())).toEqual(['Chat', '›_ Shell', '›_ Shell 3', '›_ Shell 2'])
+  expect(screen.getAllByRole('tab').map(t => t.textContent?.trim())).toEqual(['Main', '›_ Shell', '›_ Shell 3', '›_ Shell 2'])
   await userEvent.click(screen.getByRole('tab', { name: 'Shell' }))
   await waitFor(() => expect(first.shells[0].resizes.length).toBeGreaterThan(0))
   const cols = first.shells[0].resizes.at(-1)![0]
@@ -91,16 +95,23 @@ it('reorders, drops shells into the split overlay, refits and restores positions
   divider.focus(); await userEvent.keyboard('{ArrowLeft}')
   await waitFor(() => expect(first.shells[0].resizes.at(-1)![0]).toBeGreaterThan(splitCols))
   expect(first.shells.every(s => !s.disconnected)).toBe(true)
-  const saved = JSON.parse(localStorage.getItem(sessionTabsKey('owner', 'session'))!)
+  // ResizeObserver delivery precedes React's layout persistence effect. Wait for
+  // the saved ratio rather than snapshotting whichever effect won this frame.
+  await waitFor(() => {
+    const saved = JSON.parse(localStorage.getItem(sessionTabsKey('owner', 'session'))!)
+    expect(saved.layout.ratio).toBeLessThan(0.5)
+  })
   first.view.unmount()
+  const saved = JSON.parse(localStorage.getItem(sessionTabsKey('owner', 'session'))!)
   const restored = ['1', '2', '3'].map(id => new FakeShell(id))
   mount({ restoreShells: async () => restored })
+  await waitFor(() => expect(document.querySelector('[data-shells-restored="true"]')).toBeTruthy())
   await waitFor(() => expect(document.querySelectorAll('[data-shell-id]')).toHaveLength(3))
   expect(JSON.parse(localStorage.getItem(sessionTabsKey('owner', 'session'))!).layout).toEqual(saved.layout)
   expect(screen.getByRole('tab', { name: 'Shell' })).toHaveAttribute('aria-selected', 'true')
   expect(document.querySelectorAll('[data-group-id]')).toHaveLength(2)
 })
-it.each([390, 3840])('anchors launch errors to the initiating button and closes dead shells at %i px', async width => {
+it.each(browserWidths([390, 3840]))('anchors launch errors to the initiating button and closes dead shells at %i px', async width => {
   await page.viewport(width, 900)
   const shell = new FakeShell('dead'); shell.end = vi.fn().mockRejectedValue(new Error('offline'))
   mount({ restoreShells: async () => [shell], createShell: async () => { throw new Error('Shell unavailable.') } })
@@ -117,14 +128,16 @@ it.each([390, 3840])('anchors launch errors to the initiating button and closes 
   else await userEvent.click(screen.getByRole('tab', { name: 'Shell' }))
   shell.reason = 'elsewhere'
   act(() => shell.state?.('disconnected'))
-  expect(screen.getByText('Controlled in another tab.')).toBeTruthy()
-  expect(screen.getByRole('button', { name: 'Take over' })).toBeTruthy()
+  expect(screen.getByText('This shell was opened in another tab with the same browser sign-in.')).toBeTruthy()
+  expect(screen.getByRole('button', { name: 'Take back control' })).toBeTruthy()
   await userEvent.click(screen.getByRole('button', { name: 'Close Shell' }))
   expect(screen.queryByRole('tab', { name: 'Shell' })).toBeNull()
+  expect(shell.end).not.toHaveBeenCalled()
+  act(() => window.dispatchEvent(new Event('pagehide')))
   expect(shell.end).toHaveBeenCalledOnce()
   expect(screen.queryByRole('alertdialog')).toBeNull()
 })
-it.each([390, 3840])('applies live dark/light tokens and keeps app shortcuts out of terminal input at %i px', async width => {
+it.each(browserWidths([390, 3840]))('applies live dark/light tokens and keeps app shortcuts out of terminal input at %i px', async width => {
   await page.viewport(width, 900)
   document.documentElement.dataset.theme = 'dark'
   const { shells } = mount()
@@ -142,6 +155,9 @@ it.each([390, 3840])('applies live dark/light tokens and keeps app shortcuts out
   expect(shellTheme(input).theme.red).toBe('#b83636')
   await userEvent.keyboard('echo hello')
   expect(new TextDecoder().decode(Uint8Array.from(shells[0].inputs.flatMap(b => [...b])))).toBe('echo hello')
+  await userEvent.keyboard('x{Control>}{Shift>}e{/Shift}{/Control}y{Control>}b{/Control}{Meta>}b{/Meta}')
+  expect(input).toHaveFocus()
+  expect(document.querySelector('[data-shell-id]')!.closest('[hidden]')).toBeNull()
   const count = shells[0].inputs.length
   for (const modifier of [/Mac|iPhone|iPad|iPod/.test(navigator.platform) ? 'Meta' : 'Control']) {
     input.focus()
@@ -163,7 +179,7 @@ it('explains the four-shell limit in the button and palette', async () => {
   expect(button).toHaveAttribute('aria-description', expect.stringContaining('four shells')); expect(button.title).toContain('four shells')
   await userEvent.keyboard('{Control>}k{/Control}')
   fireEvent.change(screen.getByRole('combobox'), { target: { value: '>New shell' } })
-  expect(screen.getByRole('option')).toHaveTextContent('four shells')
+  expect(screen.getByRole('option', { name: /^New shell\b/ })).toHaveTextContent('four shells')
   expect(create).toHaveBeenCalledTimes(4)
 })
 it('keeps a fresh real transport connected during initial fit and repeated resize notifications', async () => {
@@ -195,12 +211,12 @@ it('keeps a fresh real transport connected during initial fit and repeated resiz
   await open()
   await waitFor(() => expect(Socket.instance.frames.some(f => f.type === 'resize')).toBe(true))
   for (let i = 0; i < 40; i++) await act(async () => { notify?.(); await new Promise(requestAnimationFrame) })
-  expect(screen.queryByText(/^(Disconnected\.|Controlled in another tab\.)$/)).toBeNull()
+  expect(screen.queryByText(/^(Disconnected\.|This shell was opened in another tab with the same browser sign-in\.)$/)).toBeNull()
   const resizes = Socket.instance.frames.filter(f => f.type === 'resize')
   expect(resizes.length).toBeLessThanOrEqual(3) // The connecting banner can change the initial row count.
   expect(new Set(resizes.map(f => `${f.cols}:${f.rows}`)).size).toBe(resizes.length)
 })
-it.each([390, 3840])('keeps consent above a running shell and preserves it when canceled at %i', async width => {
+it.each(browserWidths([390, 3840]))('keeps consent above a running shell and preserves it when canceled at %i', async width => {
   await page.viewport(width, 900)
   const shell = new FakeShell('retained')
   const challenge = { challenge_id: 'fresh', machine_id: 'machine', account: 'user', uid: 1000, shell: '/bin/bash', cwd: '/project' }
@@ -225,7 +241,7 @@ it.each([390, 3840])('keeps consent above a running shell and preserves it when 
   expect(screen.getByRole('button', { name: 'New shell' })).toHaveFocus()
   expect(shell.ended).toBe(false); expect(shell.disconnected).toBe(false)
 })
-it.each([390, 3840])('anchors a live shell error to its tab while terminal input owns focus at %i', async width => {
+it.each(browserWidths([390, 3840]))('anchors a live shell error to its tab while terminal input owns focus at %i', async width => {
   await page.viewport(width, 900)
   const shell = new FakeShell('error')
   let fail: ((message: string) => void) | undefined
@@ -263,7 +279,7 @@ it('retains all three owned transports across capability refresh instead of repl
   await act(async () => { view.rerender(ui(true, false)) })
   await waitFor(() => expect(restore).toHaveBeenCalledTimes(2))
   expect([...document.querySelectorAll('.xterm-helper-textarea')]).toEqual(terminals)
-  expect(screen.queryByText(/^(Disconnected\.|Controlled in another tab\.)$/)).toBeNull()
+  expect(screen.queryByText(/^(Disconnected\.|This shell was opened in another tab with the same browser sign-in\.)$/)).toBeNull()
   expect(shells.every(shell => !shell.disconnected)).toBe(true)
   shells[2].emit('still owned\r\n')
   await waitFor(() => expect(document.querySelector('[data-shell-id="three"] .xterm-screen')).toHaveTextContent('still owned'))
@@ -294,7 +310,7 @@ it.each(['MacIntel', 'Linux x86_64'])('H3/M2: terminal keys never close or switc
     await userEvent.keyboard('{Escape}')
   }
 })
-it.each([390, 3840])('L1: restore never steals focus and phone selection never focuses input at %i', async width => {
+it.each(browserWidths([390, 3840]))('L1: restore never steals focus and phone selection never focuses input at %i', async width => {
   await page.viewport(width, 900)
   const first = mount(); await open(); first.view.unmount()
   const outside = document.createElement('input'); document.body.append(outside); outside.focus()
@@ -305,6 +321,7 @@ it.each([390, 3840])('L1: restore never steals focus and phone selection never f
     await new Promise(requestAnimationFrame)
     expect(outside).toHaveFocus()
     await act(async () => { next.ref.current?.toggle() })
+    await waitFor(() => expect(document.querySelector('.xterm-helper-textarea')).toBeTruthy())
     const input = document.querySelector<HTMLTextAreaElement>('.xterm-helper-textarea')!
     if (width === 390) expect(input).not.toHaveFocus()
     else await waitFor(() => expect(input).toHaveFocus())
@@ -334,7 +351,7 @@ it.each(['k', 'p'])('M2: macOS Ctrl+%s reaches the shell', async key => {
   expect(screen.queryByRole('dialog')).toBeNull()
   expect(new TextDecoder().decode(Uint8Array.from(shells[0].inputs.flatMap(bytes => [...bytes])))).toBe(key === 'k' ? '\x0b' : '\x10')
 })
-it.each([390, 3840])('L3: keyboard and touch can reveal the anchored limit reason at %i', async width => {
+it.each(browserWidths([390, 3840]))('L3: keyboard and touch can reveal the anchored limit reason at %i', async width => {
   await page.viewport(width, 900)
   const { create } = mount()
   for (let n = 0; n < 4; n++) await open()
@@ -383,7 +400,7 @@ it.each(['Linux x86_64', 'MacIntel'])('reserves tab focus inside terminals on %s
   expect(shells[0].inputs).toHaveLength(0)
   await userEvent.keyboard(`{${modifier}>}{Shift>}{Enter}{/Shift}{/${modifier}}`)
   expect(screen.queryByRole('button', { name: 'Exit tab focus' })).toBeNull()
-  await userEvent.dblClick(screen.getByRole('tab', { name: /Chat/ }))
+  await userEvent.dblClick(screen.getByRole('tab', { name: /Main/ }))
   expect(input.closest('.session-group')).not.toBeVisible()
   expect(input.isConnected).toBe(true)
   shells[0].emit('retained output while another tab is focused\r\n')
@@ -397,7 +414,7 @@ it.each(['Linux x86_64', 'MacIntel'])('reserves tab focus inside terminals on %s
 
 // Card #257: leaving a session unmounts its workspace; coming back must find the same
 // shell running, reattach it and show the scrollback it displayed, at phone and 4K widths.
-it.each([390, 3840])('keeps a shell across leaving and returning to its session at %i px', async width => {
+it.each(browserWidths([390, 3840]))('keeps a shell across leaving and returning to its session at %i px', async width => {
   await page.viewport(width, width === 390 ? 844 : 2160)
   class Socket {
     static OPEN = 1
@@ -444,14 +461,14 @@ it.each([390, 3840])('keeps a shell across leaving and returning to its session 
   await waitFor(() => expect(Socket.instances).toHaveLength(2))
   await show()
   await waitFor(() => expect(document.querySelector('.xterm-screen')).toHaveTextContent('echo kept'))
-  expect(screen.queryByText(/^(Disconnected\.|Controlled in another tab\.)$/)).toBeNull()
+  expect(screen.queryByText(/^(Disconnected\.|This shell was opened in another tab with the same browser sign-in\.)$/)).toBeNull()
   expect(apiFetch.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false)
 })
 
 // #257 review: return while the token renewal is pending, leave, and return again. The
 // abandoned view and the current one share the kept transport and the renewal; the
 // abandoned one must not disconnect the view the person is looking at.
-it.each([390, 3840])('stays connected after a rapid leave and return during token renewal at %i px', async width => {
+it.each(browserWidths([390, 3840]))('stays connected after a rapid leave and return during token renewal at %i px', async width => {
   await page.viewport(width, width === 390 ? 844 : 2160)
   class Socket {
     static OPEN = 1
@@ -506,7 +523,7 @@ it.each([390, 3840])('stays connected after a rapid leave and return during toke
   await waitFor(() => expect(document.querySelector('.xterm-screen')).toHaveTextContent('echo rapid'))
   await new Promise(resolve => setTimeout(resolve, 50))
   expect(Socket.instances[1].closed).toBe(false)
-  expect(screen.queryByText(/^(Disconnected\.|Controlled in another tab\.)$/)).toBeNull()
+  expect(screen.queryByText(/^(Disconnected\.|This shell was opened in another tab with the same browser sign-in\.)$/)).toBeNull()
   expect(apiFetch.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false)
 })
 
@@ -515,12 +532,14 @@ class LiveSocket {
   static instances: LiveSocket[] = []
   readyState = 1; bufferedAmount = 0; binaryType = ''
   closed = false
+  frames: string[] = []
   onopen?: () => void
   onmessage?: (event: { data: ArrayBuffer | string }) => void
   onclose?: () => void
-  constructor() { LiveSocket.instances.push(this); queueMicrotask(() => this.onopen?.()) }
-  send() {}
-  close() { this.closed = true }
+  readonly url: string | URL
+  constructor(url: string | URL) { this.url = url; LiveSocket.instances.push(this); queueMicrotask(() => this.onopen?.()) }
+  send(frame: string) { this.frames.push(frame) }
+  close() { this.closed = true; this.readyState = 3 }
 }
 const pending = <T,>() => { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r }); return { promise, resolve } }
 // The production relationship: SessionDetail passes enabled and capabilityPending from useShellCapability.
@@ -533,18 +552,33 @@ function CapabilityWorkspace({ session }: { session: string }) {
 // #257 round 2: return with the token renewal pending, then a window focus refreshes the
 // shell capability. The same mounted view restores twice with one rate group and one
 // shared renewal; the abandoned restore must not close the newer restore's socket.
-it.each([390, 3840])('keeps the newer restore connected when a capability refresh restarts it during renewal at %i px', async width => {
+it.each(browserWidths([390, 3840]).flatMap(width => (['capability-first', 'renewal-first'] as const).map(order => [width, order] as const)))('keeps the newer restore connected when a capability refresh restarts it during renewal at %i px (%s)', async (width, order) => {
   await page.viewport(width, width === 390 ? 844 : 2160)
   LiveSocket.instances = []
   vi.stubGlobal('WebSocket', LiveSocket)
-  const session = `focus-${width}`
-  const listed = { handle: `focus-handle-${width}`, shell_id: `focus-shell-${width}`, runtime: 'host', folder: 'project', attached: false }
-  const inventories = () => apiFetch.mock.calls.filter(([url, init]) => url === `/api/sessions/${session}/shells` && !init?.method).length
-  const capability: { reply?: Promise<Response> } = {}
+  const reconnect = vi.spyOn(WebSocketShell.prototype, 'reconnect')
+  const adopt = vi.spyOn(WebSocketShell.prototype, 'adopt')
+  const session = `focus-${width}-${order}`
+  const listed = { handle: `${session}-handle`, shell_id: `${session}-shell`, runtime: 'host', folder: 'project', attached: false }
+  const capability: { reply?: Promise<void> } = {}
+  const inventoryBody = pending<void>()
+  const readingInventory = pending<void>()
+  let holdInventory = false
   apiFetch.mockImplementation(async (url: string, init?: RequestInit) => {
     if (init?.method === 'DELETE') return new Response(null, { status: 204 })
-    if (url === `/api/sessions/${session}/shell-capability`) return capability.reply ? await capability.reply : new Response(JSON.stringify({ available: true }))
-    if (url === `/api/sessions/${session}/shells`) return new Response(JSON.stringify([listed]))
+    if (url === `/api/sessions/${session}/shell-capability`) { await capability.reply; return new Response(JSON.stringify({ available: true })) }
+    if (url === `/api/sessions/${session}/shells`) {
+      const response = new Response(JSON.stringify([listed]))
+      if (holdInventory) {
+        holdInventory = false
+        vi.spyOn(response, 'json').mockImplementation(async () => {
+          readingInventory.resolve()
+          await inventoryBody.promise
+          return [listed]
+        })
+      }
+      return response
+    }
     return new Response('{}', { status: 404 })
   })
   const show = async () => {
@@ -557,34 +591,70 @@ it.each([390, 3840])('keeps the newer restore connected when a capability refres
   await waitFor(() => expect(document.querySelector('.xterm-screen')).toBeTruthy())
   act(() => { LiveSocket.instances[0].onmessage?.({ data: new TextEncoder().encode('project $ echo focus\r\nfocus\r\n').buffer }) })
   await waitFor(() => expect(document.querySelector('.xterm-screen')).toHaveTextContent('echo focus'))
+  await waitFor(() => expect(document.querySelector('[data-shells-restored="true"]')).toBeTruthy())
   first.unmount()
   // Return while the renewal is pending.
   const renewal = pending<boolean>()
-  auth.renewal = () => renewal.promise
+  const renewing = vi.fn(() => renewal.promise)
+  auth.renewal = renewing
   render(<CapabilityWorkspace session={session} />)
-  await waitFor(() => expect(inventories()).toBe(2))
-  await new Promise(resolve => setTimeout(resolve, 20))
-  // Focus refreshes capability: pending (the restore effect is abandoned), then available again.
-  const reply = pending<Response>()
+  // An inventory request is earlier than body decoding and reconnect. Observe the
+  // real token-renewal call before abandoning this restore, rather than sleeping.
+  await waitFor(() => expect(renewing).toHaveBeenCalledTimes(1))
+  const abandoned = reconnect.mock.results.at(-1)!.value
+  const abandonedSignal = reconnect.mock.calls.at(-1)![1]!
+  const abandonedLease = adopt.mock.calls.at(-1)![1]!
+  const reply = pending<void>()
   capability.reply = reply.promise
   await act(async () => { window.dispatchEvent(new Event('focus')) })
-  await new Promise(resolve => setTimeout(resolve, 20))
-  await act(async () => { reply.resolve(new Response(JSON.stringify({ available: true }))) })
-  await waitFor(() => expect(inventories()).toBeGreaterThanOrEqual(3))
-  await new Promise(resolve => setTimeout(resolve, 20))
-  await act(async () => { renewal.resolve(true); await renewal.promise })
-  await waitFor(() => expect(LiveSocket.instances).toHaveLength(2))
-  await new Promise(resolve => setTimeout(resolve, 50))
+  expect(abandonedSignal.aborted).toBe(true)
+  if (order === 'renewal-first') {
+    // The canceled attempt finishes before capability permits the replacement.
+    await act(async () => { renewal.resolve(true); await abandoned })
+    expect(LiveSocket.instances).toHaveLength(1)
+  }
+  holdInventory = true
+  await act(async () => { reply.resolve() })
+  await readingInventory.promise
+  // Model a slow hosted response body: neither a counted request nor a delay can
+  // establish that the newer restore has entered renewal yet.
+  expect(renewing).toHaveBeenCalledTimes(1)
+  // Foreground recovery of the unrelated app bus must not join this shell fixture.
+  act(() => { window.dispatchEvent(new Event('online')) })
+  expect(LiveSocket.instances.map(socket => new URL(socket.url).pathname)).toEqual([`/api/shells/${listed.handle}/socket`])
+  expect(LiveSocket.instances).toHaveLength(1)
+  await act(async () => { inventoryBody.resolve() })
+  await waitFor(() => expect(renewing).toHaveBeenCalledTimes(2))
+  const newest = reconnect.mock.contexts.at(-1)! as WebSocketShell
+  const newestLease = adopt.mock.calls.at(-1)![1]!
+  await act(async () => {
+    renewal.resolve(true)
+    await Promise.all(reconnect.mock.results.map(result => result.value))
+  })
+  await waitFor(() => expect(document.querySelector('[data-shells-restored="true"]')).toBeTruthy())
+  expect(LiveSocket.instances).toHaveLength(2)
+  expect(LiveSocket.instances.filter(socket => !socket.closed)).toEqual([LiveSocket.instances[1]])
+  expect(LiveSocket.instances.filter(socket => socket.readyState === LiveSocket.OPEN)).toEqual([LiveSocket.instances[1]])
+  expect(LiveSocket.instances[0].closed).toBe(true)
   expect(LiveSocket.instances[1].closed).toBe(false)
+  expect(newest.ownedBy(newestLease)).toBe(true)
+  expect(newest.ownedBy(abandonedLease)).toBe(false)
+  const oldFrames = LiveSocket.instances[0].frames.length
+  act(() => { newest.resize(97, 29) })
+  expect(JSON.parse(LiveSocket.instances[1].frames.at(-1)!)).toMatchObject({type: 'resize', cols: 97, rows: 29})
+  expect(LiveSocket.instances[0].frames).toHaveLength(oldFrames)
   await show()
   await waitFor(() => expect(document.querySelector('.xterm-screen')).toHaveTextContent('echo focus'))
-  expect(screen.queryByText(/^(Disconnected\.|Controlled in another tab\.)$/)).toBeNull()
+  expect(screen.queryByText(/^(Disconnected\.|This shell was opened in another tab with the same browser sign-in\.)$/)).toBeNull()
   expect(apiFetch.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false)
+  expect(LiveSocket.instances).toHaveLength(2)
+  expect(LiveSocket.instances.filter(socket => !socket.closed)).toEqual([LiveSocket.instances[1]])
+  expect(LiveSocket.instances.filter(socket => socket.readyState === LiveSocket.OPEN)).toEqual([LiveSocket.instances[1]])
 })
 // #257 round 2: the person opens a shell and leaves while its token renewal is pending.
 // The returning view adopts the same kept transport and connects it; when the old open
 // finally completes in the view that went away, it must not close the returning view's socket.
-it.each([390, 3840])('an abandoned open never disconnects the shell the returning view adopted at %i px', async width => {
+it.each(browserWidths([390, 3840]))('an abandoned open never disconnects the shell the returning view adopted at %i px', async width => {
   await page.viewport(width, width === 390 ? 844 : 2160)
   LiveSocket.instances = []
   vi.stubGlobal('WebSocket', LiveSocket)
@@ -617,6 +687,146 @@ it.each([390, 3840])('an abandoned open never disconnects the shell the returnin
   await new Promise(resolve => setTimeout(resolve, 50))
   expect(LiveSocket.instances).toHaveLength(1)
   expect(LiveSocket.instances[0].closed).toBe(false)
-  expect(screen.queryByText(/^(Disconnected\.|Controlled in another tab\.)$/)).toBeNull()
+  expect(screen.queryByText(/^(Disconnected\.|This shell was opened in another tab with the same browser sign-in\.)$/)).toBeNull()
   expect(apiFetch.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false)
+})
+
+// BLG-446: the server can record a new shell before its own POST response reaches the
+// client that asked for it. A returning view's inventory can then see the shell and
+// connect it before the abandoned open's slow POST response arrives. That late response
+// must adopt the same transport, never open a second connection to it.
+it.each(browserWidths([390, 3840]))('a slow open response adopts the shell the inventory already found, instead of a second connection at %i px', async width => {
+  await page.viewport(width, width === 390 ? 844 : 2160)
+  LiveSocket.instances = []
+  vi.stubGlobal('WebSocket', LiveSocket)
+  const session = `race-${width}`
+  const info = { handle: `race-handle-${width}`, shell_id: `race-shell-${width}`, runtime: 'host', folder: 'project' }
+  const postResponse = pending<Response>()
+  let posted = false
+  apiFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+    if (init?.method === 'DELETE') return new Response(null, { status: 204 })
+    if (url === `/api/sessions/${session}/shells` && init?.method === 'POST') { posted = true; return postResponse.promise }
+    if (url === `/api/sessions/${session}/shells`) return new Response(JSON.stringify(posted ? [{ ...info, attached: false }] : []))
+    return new Response('{}', { status: 404 })
+  })
+  const ui = () => <MemoryRouter initialEntries={[`/sessions/${session}`]}><CommandPaletteProvider><div style={{ height: '100dvh' }}>
+    <ShellWorkspace sessionId={session} accountId="owner"><div className="agent-composer"><textarea aria-label="Composer" /></div></ShellWorkspace>
+  </div></CommandPaletteProvider></MemoryRouter>
+  const first = render(ui())
+  await waitFor(() => expect(document.querySelector('[data-shells-restored="true"]')).toBeTruthy())
+  fireEvent.click(screen.getByRole('button', { name: 'New shell' }))
+  await waitFor(() => expect(posted).toBe(true))
+  // Leave while the open's response is still in flight, and return: the inventory
+  // now lists the shell the server already recorded.
+  first.unmount()
+  render(ui())
+  await waitFor(() => expect(LiveSocket.instances).toHaveLength(1))
+  await new Promise(resolve => setTimeout(resolve, 20))
+  // The slow open's response finally arrives, in the view that went away.
+  await act(async () => { postResponse.resolve(new Response(JSON.stringify(info))); await postResponse.promise })
+  await new Promise(resolve => setTimeout(resolve, 50))
+  expect(LiveSocket.instances).toHaveLength(1)
+  expect(LiveSocket.instances[0].closed).toBe(false)
+  expect(screen.queryByText(/^(Disconnected\.|This shell was opened in another tab with the same browser sign-in\.)$/)).toBeNull()
+  expect(apiFetch.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false)
+})
+
+it.each(browserWidths([390, 3840]))('can withdraw offline host consent without any restored shell tab at %i px', async width => {
+  await page.viewport(width, 900)
+  apiFetch.mockImplementation(async (url: string) => url.endsWith('/shell-consents')
+    ? new Response(JSON.stringify({ consents: [{ id: 'offline-acceptance', account: 'person', folder: '/project' }], next: '' }), { status: 200 })
+    : new Response(JSON.stringify({ withdrawn: true, cleanup_pending: true }), { status: 200 }))
+  const { create, view } = mount({ enabled: false })
+  const button = await screen.findByRole('button', { name: 'Withdraw consent' }, { timeout: 3000 })
+  const bounds = button.getBoundingClientRect()
+  expect(bounds.left).toBeGreaterThanOrEqual(0); expect(bounds.right).toBeLessThanOrEqual(width)
+  await userEvent.click(button)
+  await waitFor(() => expect(screen.getByText('Consent withdrawn. Cleanup is pending.')).toBeVisible())
+  expect(create).not.toHaveBeenCalled()
+  expect(apiFetch).toHaveBeenCalledWith('/api/sessions/session/shell-consent/withdraw', expect.objectContaining({ method: 'POST', body: JSON.stringify({ consent_id: 'offline-acceptance' }) }))
+  view.unmount(); apiFetch.mockReset()
+})
+
+it.each(browserWidths([390, 3840]))('acknowledges the persistent lifetime from the v2 consent dialog at %i px', async width => {
+  await page.viewport(width, 900)
+  apiFetch.mockReset()
+  apiFetch.mockResolvedValue(new Response('{}', { status: 200 }))
+  let opens = 0
+  const challenge = { version: 2, challenge_id: 'persistent-affirmation', machine_id: 'machine', account: 'person', uid: 1000, shell: '/bin/sh', cwd: '/project' }
+  mount({ createShell: async () => {
+    if (++opens === 1) throw new HostShellConsentRequired(challenge)
+    return new FakeShell('persistent-approved')
+  } })
+  await userEvent.click(screen.getByRole('button', { name: 'New shell' }))
+  const dialog = await screen.findByRole('dialog', { name: 'Allow a shell on this machine?' })
+  expect(within(dialog).getByText(/seven days/)).toBeTruthy()
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Allow this shell' }))
+  await waitFor(() => expect(opens).toBe(2))
+  const request = apiFetch.mock.calls.find(([url]) => String(url).endsWith('/shell-consent/accept'))
+  expect(JSON.parse(String(request?.[1]?.body))).toEqual({ challenge_id: 'persistent-affirmation', accept: true, version: 2 })
+})
+
+for (const width of browserWidths([390, 3840])) it(`renames a shell through its label at ${width}px`, async () => {
+  await page.viewport(width, 900)
+  const named = 'Test watcher with a long descriptive name '.repeat(2).trim()
+  apiFetch.mockResolvedValue({ ok: true, json: async () => ({ name: named }) })
+  mount()
+  await open()
+  await userEvent.dblClick(screen.getByRole('tab', { name: 'Shell' }))
+  const input = screen.getByRole('textbox', { name: 'Shell name' })
+  fireEvent.change(input, { target: { value: named } })
+  fireEvent.submit(input.closest('form')!)
+  await waitFor(() => expect(screen.getByRole('tab', { name: named })).toBeTruthy())
+  expect(screen.getByRole('tab', { name: named }).title).toContain(named)
+  expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
+  expect(screen.queryByRole('button', { name: `Shell actions for ${named}` })).toBeNull()
+  fireEvent.contextMenu(screen.getByRole('tab', { name: named }), { clientX: 100, clientY: 100 })
+  await userEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+  fireEvent.change(screen.getByRole('textbox', { name: 'Shell name' }), { target: { value: 'Canceled' } })
+  await userEvent.keyboard('{Escape}')
+  expect(screen.getByRole('tab', { name: named })).toBeTruthy()
+  await userEvent.keyboard('{Control>}k{/Control}')
+  const palette = await screen.findByRole('dialog', { name: 'Command palette' })
+  fireEvent.change(within(palette).getByRole('combobox'), { target: { value: 'Rename shell' } })
+  await userEvent.keyboard('{Enter}')
+  const reset = await screen.findByRole('textbox', { name: 'Shell name' })
+  fireEvent.change(reset, { target: { value: '' } })
+  apiFetch.mockResolvedValue({ ok: true, json: async () => ({ name: '' }) })
+  await userEvent.keyboard('{Enter}')
+  await waitFor(() => expect(screen.getByRole('tab', { name: 'Shell' })).toBeTruthy())
+})
+
+it('keeps the server name when New shell replaces an ended named shell', async () => {
+  await page.viewport(1200, 900)
+  const names: (string | undefined)[] = [], shells: FakeShell[] = []
+  const create = async (_session: string, _group: ShellRateGroup, _lease?: unknown, name?: string) => {
+    names.push(name)
+    const transport = new FakeShell(String(shells.length + 1)); transport.info.name = name; shells.push(transport)
+    return transport
+  }
+  apiFetch.mockResolvedValue({ ok: true, json: async () => ({ name: 'Test watcher' }) })
+  mount({ createShell: create })
+  await open()
+  await userEvent.dblClick(screen.getByRole('tab', { name: 'Shell' }))
+  fireEvent.change(screen.getByRole('textbox', { name: 'Shell name' }), { target: { value: 'Test watcher' } })
+  await userEvent.keyboard('{Enter}')
+  await waitFor(() => expect(screen.getByRole('tab', { name: 'Test watcher' })).toBeTruthy())
+  act(() => shells[0].state?.('closed'))
+  await userEvent.click(within(document.querySelector<HTMLElement>('.shell-connection')!).getByRole('button', { name: 'New shell' }))
+  await waitFor(() => expect(names).toEqual([undefined, 'Test watcher']))
+  expect(screen.getByRole('tab', { name: 'Test watcher' })).toBeTruthy()
+})
+
+it('Undo reopens the same live terminal and receives new output', async () => {
+  await page.viewport(1440, 900)
+  const { shells } = mount()
+  await open()
+  await userEvent.click(screen.getByRole('button', { name: 'Close Shell' }))
+  expect(shells[0].ended).toBe(false)
+  fireEvent.keyDown(window, { key: 'T', ctrlKey: true, shiftKey: true })
+  expect(await screen.findByRole('tab', { name: 'Shell' })).toBeVisible()
+  expect(shells[0].ended).toBe(false)
+  expect(shells[0].disconnected).toBe(false)
+  act(() => shells[0].emit('live after Undo\r\n'))
+  await waitFor(() => expect(document.querySelector('.xterm-screen')).toHaveTextContent('live after Undo'))
 })

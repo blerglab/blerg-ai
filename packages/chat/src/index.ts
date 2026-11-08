@@ -97,7 +97,7 @@ export type { BackgroundTask } from './model/backgroundTasks'
 export { isHarnessText } from './model/harnessText'
 export { markRowText, topicDividerText } from './model/topicMarker'
 export {
-  checklistFromEvents, checklistRowText, doneCount, foldTicketEvent, pinnedFromEvents, planLabel, progressText,
+  applyChecklistDelta, checklistFromEvents, checklistRowText, doneCount, foldTicketEvent, pinnedFromEvents, planLabel, progressText,
   checklistAssignment, safeChecklistAssignments, priorityGlyph, readChecklist, readTicket, readTicketEvent, sourceLabel, statusTone, ticketChanges, ticketHref, ticketMeta,
   bareStatus, pinStateOfStatus, PIN_STATE_GLYPH,
 } from './model/worklist'
@@ -108,7 +108,7 @@ export type { McpHold, McpLive, McpReleased, McpServer, McpServerStatus, McpSumm
 export { CommitChips, type CommitRef } from './components/CommitChips'
 export { ChecklistItems, ChecklistRow, TicketCard } from './components/cards/WorkCards'
 export { SourceBadge, StatusChip, TicketChips, TicketDetailChips, TicketDetails, TicketHead, TicketKey, TicketModal, TicketSummary } from './components/TicketView'
-export { automationAuthor, firstPersonMessage, isFromParentSession, isShownUserMessage, userMessageShape } from './model/userMessages'
+export { automationAuthor, firstPersonMessage, isFromParentSession, isShownUserMessage, parseWorkerNotice, userMessageShape } from './model/userMessages'
 export type { UserMessageShape } from './model/userMessages'
 export { droppedMessageId, isRetryNotice, isTurnError } from './model/notices'
 export { askStates } from './model/asks'
@@ -221,7 +221,7 @@ export { default as WorkingIndicator } from './components/WorkingIndicator'
 export { KIND_ICON, KIND_NAME, KindIcon, StatusGlyph, commandOf, elapsedOf, isShell, stateClass, titleOf } from './components/BackgroundParts'
 export { default as AskReply } from './components/AskReply'
 export type { AskReplyProps } from './components/AskReply'
-export { FLASH_MS, scrollToCall, scrollToEvent } from './components/scrollToCall'
+export { FLASH_MS, scrollToCall, scrollToEvent, jumpToElement } from './components/scrollToCall'
 export { TimeLabel, DayDivider } from './components/TimeLabel'
 export { ChatContext, useChat } from './components/context'
 export type { ChatContextValue } from './components/context'
@@ -284,3 +284,23 @@ export { ReferenceText, ReferenceScope } from './components/RefLinks'
 export { VIEW_CACHE_BYTES, VIEW_CACHE_ENTRY_BYTES, VIEW_CACHE_LISTS, clearViewCache, forgetViewCacheSession, viewCacheBytes } from './model/viewCache'
 export { useKeptScroll } from './hooks/useKeptScroll'
 export { WrapScopeContext, isWrapShortcut, lineWrap, resetLineWrap, setLineWrap, toggleWrapIn, useLineWrap, wrapKind, wrapKindOf, type WrapKind } from './model/lineWrap'
+
+export { createWorkspaceAnchor, projectWorkspaceAnchor, workspaceContentHash } from './model/workspaceAnchor'
+export type { WorkspaceAnchor } from './model/workspaceAnchor'
+
+export { proposalNeedsConfirmation } from './model/proposalApproval'
+export { IconButton } from './components/IconButton'
+export { default as QuestionCard } from './components/QuestionCard'
+
+export { questionPresentation } from './model/questionPresentation'
+export { POP_OUT_CHOICES, readPopOutChoice, writePopOutChoice, usePopOutChoice, type PopOutChoice } from './model/popOutPref'
+
+export type {DatasetReference, DatasetSample, DatasetRow} from './visual/datasets'
+
+export { default as InboxArrivalCard } from './components/cards/InboxArrivalCard'
+
+export {VISUAL_TEMPLATES,templateDashboard} from './visual/templates'
+export type {VisualTemplate} from './visual/templates'
+
+export { QuestionThreadsProvider, QuestionPanel } from './components/questionThreads'
+export type { QuestionThreadsClient, QuestionThreadPage, QuestionThreadEntry, ThreadQuestion } from './components/questionThreads'

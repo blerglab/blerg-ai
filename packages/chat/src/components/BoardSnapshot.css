@@ -1,0 +1,11 @@
+.board-snapshot { min-width: 0; width: 100%; }
+.board-snapshot header { margin-block-end: 10px; overflow-wrap: anywhere; }
+.board-snapshot-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 12px; align-items: start; }
+.board-snapshot-column { min-width: 0; padding: 8px; border: 1px solid var(--chat-border); border-radius: 8px; }
+.board-snapshot-tiles { display: grid; gap: 6px; margin-block: 8px; max-height: 600px; overflow-y: auto; }
+.board-snapshot-tile { display: grid; gap: 4px; width: 100%; min-width: 0; padding: 10px; text-align: start; color: var(--chat-fg); background: var(--chat-bg); border: 1px solid var(--chat-border); border-radius: 6px; font: inherit; overflow-wrap: anywhere; cursor: pointer; }
+.board-snapshot-tile:disabled { color: inherit; cursor: default; opacity: 1; }
+.board-snapshot-meta { font-size: 12px; color: var(--chat-muted); }
+.board-snapshot-cards .board-snapshot-columns { grid-template-columns: 1fr; }
+.board-snapshot-cards .board-snapshot-tiles { grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); }
+@media (max-width: 600px) { .board-snapshot-columns { grid-template-columns: 1fr; } }

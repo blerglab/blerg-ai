@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"github.com/blerglab/blerg-ai/runner/skills"
 	"os"
 	"path/filepath"
 	"strings"
@@ -393,7 +394,7 @@ func TestPrependPathInEnv(t *testing.T) {
 func TestEnsureSkillSymlink_Creates(t *testing.T) {
 	home, repoRoot, skillDir := setupSkillDirs(t)
 
-	changed, err := ensureSkillSymlink(repoRoot, home)
+	changed, err := ensureSkillSymlink(repoRoot, home, skills.Resolve(true))
 	if err != nil {
 		t.Fatalf("ensureSkillSymlink: %v", err)
 	}
@@ -429,10 +430,10 @@ func TestEnsureSkillSymlink_Creates(t *testing.T) {
 func TestEnsureSkillSymlink_Idempotent(t *testing.T) {
 	home, repoRoot, _ := setupSkillDirs(t)
 
-	if _, err := ensureSkillSymlink(repoRoot, home); err != nil {
+	if _, err := ensureSkillSymlink(repoRoot, home, skills.Resolve(true)); err != nil {
 		t.Fatalf("first ensureSkillSymlink: %v", err)
 	}
-	changed, err := ensureSkillSymlink(repoRoot, home)
+	changed, err := ensureSkillSymlink(repoRoot, home, skills.Resolve(true))
 	if err != nil {
 		t.Fatalf("second ensureSkillSymlink: %v", err)
 	}
@@ -455,7 +456,7 @@ func TestEnsureSkillSymlink_FixesWrongTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changed, err := ensureSkillSymlink(repoRoot, home)
+	changed, err := ensureSkillSymlink(repoRoot, home, skills.Resolve(true))
 	if err != nil {
 		t.Fatalf("ensureSkillSymlink: %v", err)
 	}
@@ -487,7 +488,7 @@ func TestEnsureSkillSymlink_UnrelatedSkillUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := ensureSkillSymlink(repoRoot, home); err != nil {
+	if _, err := ensureSkillSymlink(repoRoot, home, skills.Resolve(true)); err != nil {
 		t.Fatalf("ensureSkillSymlink: %v", err)
 	}
 
@@ -517,7 +518,7 @@ func TestEnsureSkillSymlink_NonSymlinkBlocksLink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := ensureSkillSymlink(repoRoot, home)
+	_, err := ensureSkillSymlink(repoRoot, home, skills.Resolve(true))
 	if err == nil {
 		t.Fatal("expected an error when a regular file blocks the link path, got nil")
 	}
@@ -525,6 +526,13 @@ func TestEnsureSkillSymlink_NonSymlinkBlocksLink(t *testing.T) {
 		t.Errorf("expected error to mention 'non-symlink'; got: %v", err)
 	}
 
+	for _, engine := range []string{".codex", ".agents", ".hermes"} {
+		for _, skill := range []string{"managing-tickets", "coordinating", "test-driven-development", "ux-design", "planning"} {
+			if _, err := os.Readlink(filepath.Join(home, engine, "skills", skill)); err != nil {
+				t.Errorf("other engine %s/%s was not provisioned: %v", engine, skill, err)
+			}
+		}
+	}
 	// File must not have been clobbered.
 	data, readErr := os.ReadFile(link)
 	if readErr != nil {
@@ -550,6 +558,48 @@ func setupSkillDirs(t *testing.T) (home, repoRoot, skillDir string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: managing-tickets\ndescription: stub\n---\nStub.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tdd := filepath.Join(repoRoot, "runner", "skills", "test-driven-development")
+	ux := filepath.Join(repoRoot, "runner", "skills", "ux-design")
+	planning := filepath.Join(repoRoot, "runner", "skills", "planning")
+	if err := os.MkdirAll(planning, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(planning, "SKILL.md"), []byte("Planning from the record"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(ux, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ux, "SKILL.md"), []byte("UX design"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(tdd, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tdd, "SKILL.md"), []byte("Test-driven development"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	coord := filepath.Join(repoRoot, "runner", "skills", "coordinating")
+	if err := os.MkdirAll(coord, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(coord, "SKILL.md"), []byte("Coordinate as Main"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	visualizing := filepath.Join(repoRoot, "runner", "skills", "visualizing")
+	if err := os.MkdirAll(visualizing, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(visualizing, "SKILL.md"), []byte("Charts and diagrams"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testTiming := filepath.Join(repoRoot, "runner", "skills", "test-timing")
+	if err := os.MkdirAll(testTiming, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(testTiming, "SKILL.md"), []byte("Test timing report on demand"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	return home, repoRoot, skillDir
@@ -645,8 +695,46 @@ func TestSymlinkTargetsMatchMonorepoLayout(t *testing.T) {
 	if got, _ := os.Readlink(filepath.Join(home, ".local", "bin", "blerg-runner")); got != cli {
 		t.Fatalf("cli symlink → %q, want %q", got, cli)
 	}
-	if _, err := ensureSkillSymlink(repo, home); err != nil {
+	tdd := filepath.Join(repo, "runner", "skills", "test-driven-development")
+	ux := filepath.Join(repo, "runner", "skills", "ux-design")
+	planning := filepath.Join(repo, "runner", "skills", "planning")
+	if err := os.MkdirAll(planning, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(planning, "SKILL.md"), []byte("Planning from the record"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(ux, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(tdd, 0755); err != nil {
+		t.Fatal(err)
+	}
+	coordinating := filepath.Join(repo, "runner", "skills", "coordinating")
+	if err := os.MkdirAll(coordinating, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(coordinating, "SKILL.md"), []byte("Coordinate as Main"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	visualizing := filepath.Join(repo, "runner", "skills", "visualizing")
+	if err := os.MkdirAll(visualizing, 0755); err != nil {
+		t.Fatal(err)
+	}
+	testTiming := filepath.Join(repo, "runner", "skills", "test-timing")
+	if err := os.MkdirAll(testTiming, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureSkillSymlink(repo, home, skills.Resolve(true)); err != nil {
 		t.Fatalf("ensureSkillSymlink: %v", err)
+	}
+	for _, engine := range []string{".claude", ".codex", ".agents", ".hermes"} {
+		if got, err := os.Readlink(filepath.Join(home, engine, "skills", "ux-design")); err != nil || got != ux {
+			t.Fatalf("%s UX target: %q %v", engine, got, err)
+		}
+	}
+	if got, err := os.Readlink(filepath.Join(home, ".claude", "skills", "coordinating")); err != nil || got != coordinating {
+		t.Fatalf("coordinating target: %q %v", got, err)
 	}
 	if got, _ := os.Readlink(filepath.Join(home, ".claude", "skills", "managing-tickets")); got != skill {
 		t.Fatalf("skill symlink → %q, want %q", got, skill)
@@ -764,5 +852,80 @@ func TestGuideNamesDiff(t *testing.T) {
 	}
 	if !strings.Contains(string(cli), `DIFF_LINE = "`+diffGuideLine+`"`) {
 		t.Errorf("the CLI's DIFF_LINE differs from diffGuideLine")
+	}
+}
+
+func TestTicketSkillReachesEveryEngine(t *testing.T) {
+	home, repo, _ := setupSkillDirs(t)
+	if _, err := ensureSkillSymlink(repo, home, skills.Resolve(true)); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{".claude", ".codex", ".agents", ".hermes"} {
+		if _, err := os.ReadFile(filepath.Join(home, dir, "skills", "managing-tickets", "SKILL.md")); err != nil {
+			t.Errorf("%s: %v", dir, err)
+		}
+	}
+}
+
+func TestCoordinatingSkillReachesEveryEngine(t *testing.T) {
+	home, repo, _ := setupSkillDirs(t)
+	path := filepath.Join(repo, "runner", "skills", "coordinating")
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte("Coordinate as Main"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureSkillSymlink(repo, home, skills.Resolve(true)); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{".claude", ".codex", ".agents", ".hermes"} {
+		if _, err := os.ReadFile(filepath.Join(home, dir, "skills", "coordinating", "SKILL.md")); err != nil {
+			t.Errorf("%s: %v", dir, err)
+		}
+	}
+	if !strings.Contains(sessionWorkGuidePrompt(), "Coordinate as Main") || strings.Contains(managedBlock, "Coordinate as Main") {
+		t.Fatal("coordinating missing from native/sandbox/cluster/shared guide")
+	}
+}
+
+func TestSharedProvisioningRemovesScopedSkillLinks(t *testing.T) {
+	home, repo, _ := setupSkillDirs(t)
+	if _, err := ensureSkillSymlink(repo, home, skills.Resolve(true)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureSkillSymlink(repo, home); err != nil {
+		t.Fatal(err)
+	}
+	for _, engine := range []string{".claude", ".codex", ".agents", ".hermes"} {
+		for _, name := range []string{"coordinating", "test-driven-development", "ux-design", "planning", "visualizing"} {
+			if _, err := os.Lstat(filepath.Join(home, engine, "skills", name)); !os.IsNotExist(err) {
+				t.Errorf("shared %s/%s remains: %v", engine, name, err)
+			}
+		}
+	}
+	for _, marker := range []string{"Coordinate as Main", "# Test-driven development", "# UX design", "# Planning from the record"} {
+		if strings.Contains(managedBlock, marker) {
+			t.Errorf("shared managed instructions contain %s", marker)
+		}
+	}
+}
+
+func TestProvisionRefreshesExistingManagedSkillsWithoutOptIn(t *testing.T) {
+	home, repo, _ := setupSkillDirs(t)
+	dir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "CLAUDE.md")
+	before := "# Personal instructions\n\n"
+	old := managedBlockStart + "\n- Blerg ux-design skill — Old unconditional UX guide\n" + managedBlockEnd
+	if err := os.WriteFile(path, []byte(before+old), 0600); err != nil {
+		t.Fatal(err)
+	}
+	Provision(repo, home, false)
+	raw, err := os.ReadFile(path)
+	if err != nil || string(raw) != before+managedBlock {
+		t.Fatalf("managed upgrade did not preserve user text: %v", err)
 	}
 }

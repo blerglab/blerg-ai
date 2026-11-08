@@ -67,6 +67,17 @@ describe("board filter chips", () => {
     expect(list.filter((c) => c.facet === "priority").map((c) => c.value)).toEqual(["urgent", "high", "medium", "low"]);
     expect(list.filter((c) => c.facet === "tag").map((c) => [c.value, c.count])).toEqual([["0.4.5", 2], ["docs", 1], ["mobile", 1]]);
   });
+  it("lists size, risk and complexity in their natural order, not alphabetically", () => {
+    const sized = [
+      card(1, { size: "L" }), card(2, { size: "M" }), card(3, { size: "S" }), card(4, { size: "XL" }),
+      card(5, { risk: "high" }), card(6, { risk: "low" }), card(7, { risk: "medium" }),
+      card(8, { complexity: "high" }), card(9, { complexity: "low" }), card(10, { complexity: "medium" }),
+    ];
+    const list = chipsFor(sized, emptyFilter);
+    expect(list.filter((c) => c.facet === "size").map((c) => c.value)).toEqual(["S", "M", "L", "XL"]);
+    expect(list.filter((c) => c.facet === "risk").map((c) => c.value)).toEqual(["low", "medium", "high"]);
+    expect(list.filter((c) => c.facet === "complexity").map((c) => c.value)).toEqual(["low", "medium", "high"]);
+  });
   it("counts each chip against the search and the other groups, not its own", () => {
     const f = toggleChip(emptyFilter, "type", "bug");
     expect(chip(f, "type", "feature")?.count).toBe(1); // picking bug does not zero the other types
@@ -152,4 +163,9 @@ describe("toolbar helpers (#141)", () => {
     expect(searchHits(cards, "board", 1).map((c) => c.number)).toEqual([1]);
     expect(searchHits(cards, "  ")).toEqual([]);
   });
+});
+
+it("filters estimates independently of custom fields", () => {
+  const estimated = card(5, { size: "M", risk: "high", complexity: "low" } as Partial<Card>);
+  expect(matchesFilter(estimated, { ...emptyFilter, risk: ["low"] } as typeof emptyFilter)).toBe(false);
 });

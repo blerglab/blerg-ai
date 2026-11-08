@@ -1,3 +1,4 @@
+import { IconButton } from '@blerglab/chat'
 // CronForm: create or edit a cron (spec 7.7, 8). The schedule is a preset (every day, weekdays or
 // one weekday, at one or several times) or an advanced five-field expression; the server checks
 // it and its message is shown as it comes. The MCP section is the tool picker with every tool's
@@ -10,7 +11,7 @@ import { buildExpression, describeSchedule, hasFiveFields, parseExpression, DAY_
 import type { PresetKind } from '../lib/cronSchedule'
 import { launchEngineModels, useLaunchOptions } from '../lib/launchOptions'
 import { FOCUS_BOARD_PROMPT } from '../lib/focusPrompt'
-import type { CronInfo, CronRuntime, McpSelectionEntry } from '../types'
+import type { CronInfo, CronRuntime, McpSelectionEntry, CronCommandStep } from '../types'
 import type { RunDaemon } from '../lib/runtimes'
 import McpPicker from './McpPicker'
 import ModelPicker from './ModelPicker'
@@ -88,6 +89,9 @@ function initialSchedule(cron?: CronInfo): { kind: Kind; times: string[]; dow: n
 
 export default function CronForm({ cron, onSaved, onCancel }: Props) {
   const initial = useMemo(() => initialSchedule(cron), [cron])
+  const originalCommands = JSON.stringify(cron?.command_steps?.steps ?? [], null, 2)
+  const [commands, setCommands] = useState(originalCommands)
+  const [approvedCommands, setApprovedCommands] = useState(false)
   const [name, setName] = useState(cron?.name ?? '')
   const [prompt, setPrompt] = useState(cron?.prompt ?? '')
   const [kind, setKind] = useState<Kind>(initial.kind)
@@ -172,10 +176,19 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
     }
     if (!Number.isFinite(maxRun) || maxRun < 1 || maxRun > 24 * 60) return setError('The maximum run time must be between 1 and 1440 minutes.')
 
+    let steps: CronCommandStep[]
+    try {
+      const parsed: unknown = JSON.parse(commands)
+      if (!Array.isArray(parsed) || parsed.length > 8 || parsed.some(step => !step || !Array.isArray(step.argv) || step.argv.length < 1 || step.argv.length > 64 || step.argv.some((arg: unknown) => typeof arg !== 'string') || !Number.isInteger(step.timeout_seconds) || step.timeout_seconds < 1 || step.timeout_seconds > 300 || !Number.isInteger(step.max_output_bytes) || step.max_output_bytes < 1 || step.max_output_bytes > 65536)) throw new Error()
+      steps = parsed
+    } catch { return setError('Use a JSON array of commands with argv, timeout_seconds (1–300) and max_output_bytes (1–65536).') }
+    const changedCommands = JSON.stringify(steps) !== JSON.stringify(cron?.command_steps?.steps ?? []) || (steps.length > 0 && (runtime !== (cron?.runtime ?? 'auto') || daemonId !== (cron?.daemon_id ?? '')))
+    if (changedCommands && !approvedCommands) return setError('Approve the exact fixed commands before saving.')
     const body: Record<string, unknown> = {
       name: name.trim(), schedule: expression, timezone, prompt, runtime, max_runtime_seconds: Math.round(maxRun * 60),
     }
-    if (engine !== 'claude' || (cron && cron.engine !== engine)) body.engine = engine
+    if (changedCommands) { body.command_steps = steps; body.approve_command_steps = approvedCommands }
+    if (engine !== 'claude'  || (cron && cron.engine !== engine)) body.engine = engine
     if (graceSeconds !== null) body.grace_seconds = graceSeconds
     // A create always names its tools (possibly none). An edit sends `mcp` only when the person
     // changed it: the server checks a sent value against the live connections, and a cron whose
@@ -323,7 +336,7 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
       <div style={field}>
         {launchOptions.state === 'loading' ? <p role="status">Checking available engines…</p>
           : launchOptions.state === 'unknown' ? <p role="status">{launchOptions.error ?? 'Engine availability is unknown.'}{' '}
-            <button type="button" className="btn small" onClick={launchOptions.retry}>Retry engines</button></p>
+            <IconButton label="Retry engines" onClick={launchOptions.retry} /></p>
           : launchOptions.engines.length === 0 ? <p role="status">No engines available for this runtime. Connect an engine in Settings or choose another runtime.</p>
           : launchOptions.engines.length > 1 ? <>
             <label style={label} htmlFor="cron-engine">Engine</label>
@@ -360,7 +373,7 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
 
       <div style={field}>
         <label style={label} htmlFor="cron-runtime">Where it runs</label>
-        <select id="cron-runtime" value={runtime} onChange={e => setRuntime(e.target.value as CronRuntime)} style={control}>
+        <select id="cron-runtime" value={runtime} onChange={e => { setRuntime(e.target.value as CronRuntime); setApprovedCommands(false) }} style={control}>
           <option value="auto">Automatic (cluster pod when there is a cluster, else the local sandbox)</option>
           <option value="cluster">Cluster pod</option>
           <option value="docker">Local sandbox (Docker on a connected daemon)</option>
@@ -369,7 +382,7 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
         {runtime !== 'cluster' && (
           <div style={{ marginTop: 10 }}>
             <label style={label} htmlFor="cron-daemon">Pin to a daemon (optional)</label>
-            <select id="cron-daemon" value={daemonId} onChange={e => setDaemonId(e.target.value)} style={control}>
+            <select id="cron-daemon" value={daemonId} onChange={e => { setDaemonId(e.target.value); setApprovedCommands(false) }} style={control}>
               <option value="">Any connected daemon</option>
               {daemons.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
               {daemonId && !daemons.some(d => d.id === daemonId) && <option value={daemonId}>{daemonId}</option>}
@@ -389,7 +402,7 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
         </>}
         {boardDiscovery.state === 'loading' && <p style={note} role="status">Checking available boards…</p>}
         {boardDiscovery.state === 'failed' && <p style={note} role="status">
-          Couldn't load boards.{' '}<button type="button" className="btn small" onClick={boardDiscovery.retry}>Retry boards</button>
+          Couldn't load boards.{' '}<IconButton label="Retry boards" onClick={boardDiscovery.retry} />
         </p>}
         {boardId && !boardKnown && boardDiscovery.state !== 'loading' && <p data-testid="cron-board-unavailable" style={note}>
           The saved board is currently unavailable. Saving keeps its ID unless you explicitly clear or change it; runs cannot use it until access is restored.
@@ -399,6 +412,14 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
         </p>}
       </div>}
 
+      <div style={field}>
+        <label style={label} htmlFor="cron-commands">Fixed command steps (JSON)</label>
+        <textarea id="cron-commands" rows={7} style={{ ...control, fontFamily: 'monospace' }} value={commands} onChange={event => { setCommands(event.target.value); setApprovedCommands(false) }} spellCheck={false} />
+        <p style={note}>Optional. Up to 8 fixed commands run in the sandbox or pod before the agent starts. Each needs argv, timeout_seconds (1–300), and max_output_bytes (1–65536). Output is untrusted data. The agent cannot add or change commands.</p>
+        <pre style={{ ...note, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{'[{"argv":["kubectl","get","pods","-A"],"timeout_seconds":30,"max_output_bytes":16384}]'}</pre>
+        {cron?.command_steps && <p style={note}>Approved by {cron.command_steps.defined_by} on {new Date(cron.command_steps.defined_at).toLocaleString()}.</p>}
+        <label htmlFor="cron-approve-commands"><input id="cron-approve-commands" type="checkbox" checked={approvedCommands} onChange={event => setApprovedCommands(event.target.checked)} /> I approve these exact commands for every run.</label>
+      </div>
       <div style={field}>
         <span style={label}>MCP tools</span>
         <div data-testid="cron-mcp">
@@ -439,7 +460,7 @@ export default function CronForm({ cron, onSaved, onCancel }: Props) {
         <span style={label}>Good to know</span>
         <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--fog)', fontSize: '0.8rem', display: 'flex', flexDirection: 'column', gap: 4 }}>
           <li>{'A cron run has no shell or web tools: it can work with files in its own scratch folder and use the MCP tools you turn on above.'}</li>
-          <li>{'Sessions started by a cron are private to you: no other account on this install can see them.'}</li>
+          <li>{'Workspaces started by a cron are private to you: no other account on this install can see them.'}</li>
           <li>{"On a desktop, a run in the local sandbox uses the host developer's own Claude login or Codex login, and can use any compatible connected daemon; every account on an install shares the connected daemons."}</li>
           <li>{'The cron holds its own access token, which expires after a year and can be renewed from the list. Deleting or pausing the cron revokes it.'}</li>
         </ul>

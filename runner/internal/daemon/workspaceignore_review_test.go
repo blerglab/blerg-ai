@@ -164,7 +164,7 @@ func TestWorkspaceSearchSharedPreparationBudget(t *testing.T) {
 	start := time.Now()
 	ctx := context.WithValue(t.Context(), workspaceIgnoreBudgetKey{}, &workspaceIgnoreBudget{remaining: 400 * time.Millisecond})
 	res := e.Explore(ctx, req)
-	if elapsed := time.Since(start); !res.OK || len(res.Entries) != 3 || elapsed > 900*time.Millisecond {
+	if elapsed := time.Since(start); res.OK || res.ErrorCode != "unavailable" || len(res.Entries) != 0 || elapsed > 900*time.Millisecond {
 		t.Fatalf("preparation budget %v: %+v", elapsed, res)
 	}
 }
@@ -367,7 +367,7 @@ func TestWorkspaceSearchVirtualSharedPreparationBudget(t *testing.T) {
 	start := time.Now()
 	ctx := context.WithValue(t.Context(), workspaceIgnoreBudgetKey{}, &workspaceIgnoreBudget{remaining: 400 * time.Millisecond})
 	res := virtual.Explore(ctx, req)
-	if elapsed := time.Since(start); !res.OK || len(res.Entries) != 3 || elapsed > 900*time.Millisecond {
+	if elapsed := time.Since(start); res.OK || res.ErrorCode != "unavailable" || len(res.Entries) != 0 || elapsed > 900*time.Millisecond {
 		t.Fatalf("virtual preparation budget %v: %+v", elapsed, res)
 	}
 }

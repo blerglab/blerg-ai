@@ -4,6 +4,7 @@ import EngineStatusSection from './EngineStatusSection'
 import { clearEngineNotes, parseEngineRows } from '../lib/engineStatus'
 const apiFetch = vi.hoisted(() => vi.fn())
 vi.mock('../apiFetch', () => ({ apiFetch }))
+vi.mock('./WorkerPrioritySetting', () => ({ default: () => null }))
 afterEach(() => { vi.resetAllMocks(); clearEngineNotes() })
 
 const desktops = [

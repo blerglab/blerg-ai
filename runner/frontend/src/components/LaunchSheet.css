@@ -6,7 +6,7 @@
   position: fixed;
   inset: 0;
   z-index: 100;
-  background: rgba(5, 4, 3, 0.75);
+  background: var(--permissions-backdrop);
   display: flex;
   align-items: flex-end;
   justify-content: center;

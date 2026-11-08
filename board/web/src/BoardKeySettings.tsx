@@ -18,7 +18,7 @@ export function BoardKeySettings({ board, onChanged }: { board: Board; onChanged
     }}>
       <label htmlFor="settings-board-key">Key (2–5 uppercase letters or digits, starting with a letter)</label>
       <input className="settings-field" id="settings-board-key" value={key} pattern="[A-Z][A-Z0-9]{1,4}" minLength={2} maxLength={5} required onChange={e => setKey(e.target.value.toUpperCase())} />
-      <button type="submit" className="settings-action btn small" disabled={busy || key === board.key}>{board.key ? "Save key" : "Confirm key"}</button>
+      <div className="row"><button type="submit" className="settings-action btn small" disabled={busy || key === board.key}>{board.key ? "Save key" : "Confirm key"}</button></div>
       {error && <p role="alert">{error}</p>}
     </form> : <p className="settings-description">A board admin can {board.key ? "rename" : "confirm"} this key.</p>}
   </section>;

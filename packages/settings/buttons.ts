@@ -44,7 +44,8 @@ const CSS_WIDE = /^(initial|unset|revert|revert-layer)$/i
 
 /** A declared value that sets the property (not a reset to the browser's default, not empty). */
 const setsValue = (value: string) => {
-  const known = value.split(UNKNOWN).join('').replace(/!important/i, '').trim()
+  if (value.includes(UNKNOWN)) return false
+  const known = value.replace(/!important/i, '').trim()
   return known !== '' && !CSS_WIDE.test(known)
 }
 const UNKNOWN = '\u0000'
@@ -57,10 +58,9 @@ function replacesNativeLook(declarations: [string, string][]): boolean {
   const all = declarations.filter(([p]) => p === 'all')
   // `all: revert` (or anything unknown) can bring the browser's look back: fail closed.
   if (all.some(([, v]) => !/^(unset|initial)$/i.test(v.trim()))) return false
-  if (all.length) return true
   const group = (match: (p: string) => boolean) => {
     const ds = declarations.filter(([p]) => match(p))
-    return ds.length > 0 && ds.every(([, v]) => setsValue(v))
+    return (all.length > 0 || ds.length > 0) && ds.every(([, v]) => setsValue(v))
   }
   return group(p => BACKGROUND.has(p)) && group(p => BORDER.test(p))
 }
@@ -226,9 +226,11 @@ export function unstyledButtons(ts: typeof TypeScript, source: string, path: str
     if (fn && !ts.isFunctionDeclaration(fn)) fn = unwrap(fn)
     if (!fn || !(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn) || ts.isFunctionDeclaration(fn)) || !fn.body || depth > 8) return null
     if (!ts.isBlock(fn.body)) return [fn.body]
+    // A fallthrough can return undefined; do not drop that alternative.
+    if (!fn.body.statements.length || !ts.isReturnStatement(fn.body.statements[fn.body.statements.length - 1])) return null
     const out: TypeScript.Node[] = []
     ;(function find(n: TypeScript.Node) {
-      if (ts.isReturnStatement(n) && n.expression) out.push(n.expression)
+      if (ts.isReturnStatement(n)) out.push(n.expression ?? n)
       if (!ts.isFunctionLike(n)) ts.forEachChild(n, find)
     })(fn.body)
     return out.length ? out : null
@@ -282,9 +284,12 @@ export function unstyledButtons(ts: typeof TypeScript, source: string, path: str
       if (!owners) return null
       const out: (TypeScript.ObjectLiteralExpression | 'empty')[] = []
       for (const owner of owners) {
-        const prop = owner === 'empty' ? undefined : [...owner.properties].reverse().find(p => p.name && ts.isIdentifier(p.name) && p.name.text === e.name.text)
-        if (!prop || !ts.isPropertyAssignment(prop)) return null
-        const inner = objects(prop.initializer, depth + 1)
+        if (owner === 'empty') return null
+        const alternatives = propsOf(owner.properties, depth + 1)
+        if (alternatives.length !== 1) return null
+        const prop = alternatives[0].known.get(e.name.text)
+        if (!prop || prop === 'true') return null
+        const inner = objects(prop, depth + 1)
         if (!inner) return null
         out.push(...inner)
       }
@@ -329,7 +334,7 @@ export function unstyledButtons(ts: typeof TypeScript, source: string, path: str
       } else if (ts.isShorthandPropertyAssignment(entry)) {
         alts.forEach(a => a.known.set(entry.name.text, entry.name))
       } else if (ts.isSpreadAssignment(entry) || ts.isJsxSpreadAttribute(entry)) {
-        const objs = depth > 8 ? null : objects(entry.expression)
+        const objs = depth > 8 ? null : objects(entry.expression, depth + 1)
         if (!objs) { alts = alts.map(() => ({ known: new Map(), open: true })); continue }
         const next: Props[] = []
         for (const a of alts) for (const o of objs) {
@@ -338,7 +343,7 @@ export function unstyledButtons(ts: typeof TypeScript, source: string, path: str
             next.push(inner.open ? { known: new Map(inner.known), open: true } : { known: new Map([...a.known, ...inner.known]), open: a.open })
           }
         }
-        alts = next.slice(0, MAX_ALTERNATIVES)
+        alts = next.length > MAX_ALTERNATIVES ? [{ known: new Map(), open: true }] : next
       } else {
         alts = alts.map(() => ({ known: new Map(), open: true }))
       }
@@ -381,11 +386,14 @@ export function unstyledButtons(ts: typeof TypeScript, source: string, path: str
       // A callback passed to a call (`items.map(i => …)`) renders in place.
       if (ts.isJsxAttribute(p) || ts.isJsxSpreadAttribute(p) || ts.isSourceFile(p)) break
       if (ts.isFunctionLike(p)) {
-        if (ts.isArrowFunction(p) || ts.isFunctionExpression(p)) { if (p.parent && ts.isCallExpression(p.parent) && p.parent.arguments.includes(p)) continue }
+        if (ts.isArrowFunction(p) || ts.isFunctionExpression(p)) {
+          const call = p.parent
+          if (call && ts.isCallExpression(call) && call.arguments.includes(p) && ts.isPropertyAccessExpression(call.expression) && ['map', 'flatMap'].includes(call.expression.name.text)) continue
+        }
         break
       }
-      // An element handed to a function (`withHover(…, <button/>)`) may be wrapped.
-      if (ts.isCallExpression(p) && p.arguments.includes(top as TypeScript.Expression) && !ts.isArrowFunction(top) && !ts.isFunctionExpression(top)) { gap = true; continue }
+      // An element handed to a function may be moved elsewhere (for example, a portal).
+      if (ts.isCallExpression(p) && p.arguments.includes(top as TypeScript.Expression) && !ts.isArrowFunction(top) && !ts.isFunctionExpression(top)) { break }
       if (!ts.isJsxElement(p) || p.openingElement === top) continue
       const tag = p.openingElement.tagName.getText(file)
       if (!/^[a-z]/.test(tag)) { gap = true; continue }
@@ -427,8 +435,8 @@ export function unstyledButtons(ts: typeof TypeScript, source: string, path: str
     if (!/^[a-z]/.test(tag)) return false
     if (tag === 'button') return true
     const role = valuesOf(props, 'role')
-    // An unreadable spread on an anchor or input may make it a button; on other elements the guard cannot tell.
-    if (role?.some(r => r === 'button' || (r.includes(UNKNOWN) && (tag === 'a' || tag === 'input')))) return true
+    // An unresolved role or spread may make any intrinsic element a button.
+    if (role?.some(r => r === 'button' || r.includes(UNKNOWN))) return true
     if (tag !== 'input') return false
     const type = valuesOf(props, 'type')
     return !!type?.some(t => /^(button|submit|reset)$/.test(t) || t.includes(UNKNOWN))
@@ -447,12 +455,12 @@ export function unstyledButtons(ts: typeof TypeScript, source: string, path: str
           const styleNode = props.known.get('style') ?? (props.open ? 'true' : undefined)
           const styleAlts = styleMaps(styleNode)
           for (const value of classValues) {
-            if (value === UNKNOWN) { reason ||= 'has a class that cannot be read statically (an unresolved spread or value may set it)'; continue }
+            if (value.includes(UNKNOWN)) { reason ||= 'has a class that cannot be read statically (an unresolved spread or value may set it)'; continue }
             const classes = new Set(tokens(value))
             const css = styles.rules.filter(r => ruleMatches(r, tag, classes, ancestors)).flatMap(r => r.declarations)
             for (const style of styleAlts) {
-              // An unreadable style object adds nothing the guard can count on; the CSS must do it alone.
-              const inline = style ?? new Map<string, string[]>()
+              if (!style) { reason ||= 'has an inline style that cannot be read statically'; continue }
+              const inline = style
               // Inline properties win over CSS, group by group; an unset or unreadable inline value fails.
               const inlineDecls = [...inline].flatMap(([p, vs]) => vs.map(v => [p, v] as [string, string]))
               const touched = (match: (p: string) => boolean) => inlineDecls.some(([p]) => match(p))
@@ -463,8 +471,7 @@ export function unstyledButtons(ts: typeof TypeScript, source: string, path: str
               if (replacesNativeLook(merged)) continue
               reason ||= inlineDecls.some(([p, v]) => (BACKGROUND.has(p) || BORDER.test(p) || p === 'all') && !setsValue(v))
                 ? 'has an inline background or border that is unset or cannot be read statically'
-                : !style ? 'has an inline style that cannot be read statically, and its class alone does not style it'
-                  : classes.size ? `has no approved button class (found "${[...classes].join(' ')}")` : 'has no class'
+                : classes.size ? `has no approved button class (found "${[...classes].join(' ')}")` : 'has no class'
             }
           }
         }

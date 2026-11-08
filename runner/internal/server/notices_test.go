@@ -36,6 +36,7 @@ type noticeFixture struct {
 func newNoticeFixture(t *testing.T) *noticeFixture {
 	t.Helper()
 	pool := connectSrvTestDB(t)
+	livePushCore(t)
 	ctx := context.Background()
 	daemonID := "00000000-0000-0000-0000-0000000000c1"
 	sid := "00000000-0000-0000-0000-0000000000c2"
@@ -47,7 +48,7 @@ func newNoticeFixture(t *testing.T) *noticeFixture {
 	}
 	t.Setenv("BLERG_RUNNER_VAPID_PUBLIC_KEY", "x")
 	t.Setenv("BLERG_RUNNER_VAPID_PRIVATE_KEY", "y")
-	if err := db.UpsertPushSubscription(ctx, pool, "http://127.0.0.1:1/never", "p", "a"); err != nil {
+	if err := db.UpsertPushSubscription(ctx, pool, "http://127.0.0.1:1/never", "p", "a", "owner", testSID); err != nil {
 		t.Fatal(err)
 	}
 	pushes := &atomic.Int32{}

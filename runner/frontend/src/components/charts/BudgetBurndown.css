@@ -1,0 +1,12 @@
+.budget-burndown svg{max-height:260px}
+.budget-burndown-key-pace,.budget-burndown-key-projection,.budget-burndown-key-over,.budget-burndown-key-previous{width:14px;height:2px;border-radius:0;background:none}
+.budget-burndown-key-pace{border-top:2px dashed var(--fog-dim)}
+.budget-burndown-key-projection{border-top:2px dashed var(--amber)}
+.budget-burndown-key-over{border-top:2px dashed var(--danger)}
+.budget-burndown-key-previous{border-top:2px solid var(--fog-dim);opacity:.4}
+.budget-burndown-pace{stroke:var(--fog-dim);stroke-width:1.5;stroke-dasharray:5 4}
+.budget-burndown-projection{stroke:var(--amber);stroke-width:2;stroke-dasharray:4 3}
+.budget-burndown-over{stroke:var(--danger);stroke-width:2;stroke-dasharray:4 3}
+.budget-burndown-over-dot{fill:var(--danger)}
+.budget-burndown-previous{stroke:var(--fog-dim);stroke-width:1.5;opacity:.35}
+.budget-burndown-previous-dot{fill:var(--fog-dim);opacity:.35}

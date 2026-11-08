@@ -10,6 +10,9 @@ import (
 )
 
 type paletteCard struct {
+	Version    int     `json:"version"`
+	Rank       string  `json:"rank"`
+	Reference  string  `json:"reference,omitempty"`
 	ID         string  `json:"id"`
 	BoardID    string  `json:"board_id"`
 	Number     int     `json:"number"`
@@ -57,7 +60,7 @@ func (a *API) HandlePaletteCards(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, apiErr)
 			return
 		}
-		cards = append(cards, paletteCard{ID: card.ID, BoardID: board, Number: card.Number, Title: card.Title, ColumnID: card.ColumnID, ColumnName: card.ColumnName})
+		cards = append(cards, paletteCard{Reference: card.Reference, ID: card.ID, BoardID: board, Number: card.Number, Title: card.Title, ColumnID: card.ColumnID, ColumnName: card.ColumnName})
 	} else {
 		args, _ := json.Marshal(map[string]any{"board_id": board, "query": query, "limit": 100})
 		raw, err := caller.CallBoard(r.Context(), mcpgw.BoardCall{Proof: proof, BoardID: board, Tool: "blerg_card_search", Arguments: args, ReadOnly: true})

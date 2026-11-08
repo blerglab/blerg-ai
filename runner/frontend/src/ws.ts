@@ -10,6 +10,7 @@ import { tokenExpired } from './claims'
 
 let socket: WebSocket | null = null
 let backoff = 2000
+let acquiringToken = false
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 const handlers = new Map<string, Set<(msg: ServerMessage) => void>>()
 const openHandlers = new Set<() => void>()
@@ -45,11 +46,24 @@ function connect(): void {
   // (see runner/internal/server/browser_conn.go).
   const token = getAccessToken()
   if (!token) {
-    // No token in memory (fresh load, or the session expired): the socket
-    // would just be refused. Go get one, the same way apiFetch does on a 401 —
-    // once per page load, so a failure to obtain one can't loop. When the bounce
-    // was already spent, bounceToRefresh says so on screen instead.
-    bounceToRefresh()
+    // A reload loses the in-memory token, not the core session. Try the
+    // existing single-flight silent renewal before spending the guarded bounce
+    // and booting this app a second time. Foreground events share this attempt.
+    if (acquiringToken) return
+    acquiringToken = true
+    void ensureFreshToken().then(ok => {
+      acquiringToken = false
+      if (ok && getAccessToken()) {
+        connect()
+        return
+      }
+      console.warn('blerg-auth: cold-load renewal failed', { cause: 'no-token' })
+      bounceToRefresh()
+    }, () => {
+      acquiringToken = false
+      console.warn('blerg-auth: cold-load renewal failed', { cause: 'renewal-rejected' })
+      bounceToRefresh()
+    })
     return
   }
 

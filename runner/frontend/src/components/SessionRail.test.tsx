@@ -98,9 +98,9 @@ function stubFetch(changes = 0, live?: LiveReply) {
 const fetchCalls = () => fetchMock.mock.calls.map(c => String(c[0]))
 
 // Renders the page and lets its first read of the live state answer.
-async function renderPage() {
+async function renderPage(sessionId = 'sess-a') {
   const r = render(
-    <MemoryRouter initialEntries={['/sessions/sess-a']}>
+    <MemoryRouter initialEntries={[`/sessions/${sessionId}`]}>
       <Routes>
         <Route path="/sessions/:id" element={<SessionDetail />} />
         <Route path="/proposals" element={<div>PROPOSALS</div>} />
@@ -112,9 +112,13 @@ async function renderPage() {
 }
 
 const toggle = () => screen.getByTestId('rail-toggle')
-// The panel toggle's counts, as shown: "?2 🤖3 ↳1" (needs you, work inside, child sessions); '' with none.
+// The panel toggle's counts, as shown: "?2 🤖3 ↳1" (needs you, work inside, workers); '' with none.
 const badges = () => ['rail-badge-inside', 'rail-badge-children'].map(id => screen.queryByTestId(id)).filter(el => el !== null)
   .map(el => el.textContent).join(' ')
+function openQuestion(row: HTMLElement) {
+ fireEvent.click(within(row).getByRole('button', { expanded: false }))
+ return screen.getAllByRole('dialog').at(-1)!
+}
 const rail = () => screen.queryByTestId('session-rail')
 const desktop = window.matchMedia
 
@@ -141,6 +145,16 @@ describe('session side panel', () => {
     window.matchMedia = desktop
     delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
     document.body.style.overflow = ''
+  })
+
+  it('applies agent panel suggestions without changing the saved tab', async () => {
+    seedSession({status:'idle'})
+    seedEvents()
+    localStorage.setItem(RAIL_TAB_KEY, 'history')
+    await renderPage()
+    act(() => window.dispatchEvent(new CustomEvent('blerg-ui-reveal-apply', {detail:{session:'sess-a',action:'panel',target:'files'}})))
+    expect(localStorage.getItem(RAIL_TAB_KEY)).toBe('history')
+    expect(screen.getByRole('tab', {name:'Shared'})).toHaveAttribute('aria-selected','true')
   })
 
   it('keeps successive pending proposals even with no proposal events in the loaded transcript', async () => {
@@ -310,7 +324,7 @@ describe('session side panel', () => {
       expect(localStorage.getItem(RAIL_PREF_KEY)).toBeNull()
       expect(rail()).toBeVisible()
       expect(toggle()).toHaveAttribute('aria-expanded', 'true')
-      expect(toggle()).toHaveAccessibleName('Session panel')
+      expect(toggle()).toHaveAccessibleName('Workspace panel')
       expect(badges()).toBe('')
       // Not a popover or a dialog: a column of the page.
       expect(rail()!.tagName).toBe('ASIDE')
@@ -323,11 +337,11 @@ describe('session side panel', () => {
       fireEvent.click(toggle())
       expect(rail()).not.toBeVisible()
       expect(toggle()).toHaveAttribute('aria-expanded', 'false')
-      expect(localStorage.getItem(RAIL_PREF_KEY)).toBe('0')
+      expect(localStorage.getItem('blerg-runner.workspace-panel..sess-a')).toBe('0')
 
       fireEvent.click(toggle())
       expect(rail()).toBeVisible()
-      expect(localStorage.getItem(RAIL_PREF_KEY)).toBe('1')
+      expect(localStorage.getItem('blerg-runner.workspace-panel..sess-a')).toBe('1')
     })
 
     it('on a wide screen the shared header chevron collapses to a rail and the header toggle reopens it', async () => {
@@ -337,9 +351,46 @@ describe('session side panel', () => {
       await renderPage()
       expect(rail()).toBeVisible()
       fireEvent.click(toggle())
-      expect(screen.queryByRole('button', { name: 'Toggle session panel' })).toBeNull()
+      expect(screen.queryByRole('button', { name: 'Toggle workspace panel' })).toBeNull()
       expect(rail()).not.toBeVisible()
-      expect(localStorage.getItem(RAIL_PREF_KEY)).toBe('0')
+      expect(localStorage.getItem('blerg-runner.workspace-panel..sess-a')).toBe('0')
+    })
+
+    it('captures and restores panel visibility and width without changing other workspaces', async () => {
+      seedSession({ status: 'idle' })
+      seedEvents(user())
+      await renderPage()
+      const panels: Record<string, { open: boolean; width: number }> = {}
+      act(() => window.dispatchEvent(new CustomEvent('blerg-layout-capture', { detail: { scope: 'sess-a', panels } })))
+      expect(panels['session-panel'].open).toBe(true)
+      act(() => window.dispatchEvent(new CustomEvent('blerg-layout-apply', { detail: { scope: 'sess-b', panels: { 'session-panel': { open: false, width: 300 } } } })))
+      expect(rail()).toBeVisible()
+      act(() => window.dispatchEvent(new CustomEvent('blerg-layout-apply', { detail: { scope: 'sess-a', panels: { 'session-panel': { open: false, width: 300 } } } })))
+      expect(rail()).not.toBeVisible()
+      expect(rail()).toHaveStyle({ width: '300px' })
+      act(() => window.dispatchEvent(new CustomEvent('blerg-layout-apply', { detail: { scope: 'sess-a', panels } })))
+      expect(rail()).toBeVisible()
+      expect(rail()).toHaveStyle({ width: `${panels['session-panel'].width}px` })
+      expect(localStorage.getItem(RAIL_PREF_KEY)).toBeNull()
+    })
+
+    it('remembers a close only in its workspace, including after a remount', async () => {
+      seedSession({ status: 'idle' })
+      seedEvents(user())
+      const first = await renderPage()
+      fireEvent.click(toggle())
+      expect(rail()).not.toBeVisible()
+      first.unmount()
+
+      seedSession({ id: 'sess-b', status: 'idle' })
+      const second = await renderPage('sess-b')
+      expect(rail()).toBeVisible()
+      second.unmount()
+
+      seedSession({ status: 'idle' })
+      await renderPage()
+      expect(rail()).not.toBeVisible()
+      expect(localStorage.getItem(RAIL_PREF_KEY)).toBeNull()
     })
 
     it('is open when something runs and no choice was made; a closed choice wins', async () => {
@@ -354,7 +405,7 @@ describe('session side panel', () => {
       expect(rail()).not.toBeVisible()
       // The toggle still says what runs.
       expect(badges()).toBe('🤖1')
-      expect(toggle()).toHaveAccessibleName('Session panel: 1 subagent or background task')
+      expect(toggle()).toHaveAccessibleName('Workspace panel: 1 subagent or background task')
     })
 
     it('once closed by hand, opens by itself again only for something new that needs you, once', async () => {
@@ -378,7 +429,7 @@ describe('session side panel', () => {
       expect(rail()).not.toBeVisible()
       act(() => { useTranscriptStore.getState().ingest(ev('assistant_text', { text: 'Waiting for you.', done: true }, 0)) })
       expect(rail()).not.toBeVisible()
-      expect(localStorage.getItem(RAIL_PREF_KEY)).toBe('0')
+      expect(localStorage.getItem('blerg-runner.workspace-panel..sess-a')).toBe('0')
       vi.useRealTimers()
     })
 
@@ -471,12 +522,12 @@ describe('session side panel', () => {
       await renderPage()
       const live = screen.getByTestId('rail-announce')
       expect(live).toHaveAttribute('aria-live', 'polite')
-      expect(live).toHaveTextContent(/^Session panel$/)
+      expect(live).toHaveTextContent(/^Workspace panel$/)
       // A question is not a toggle count (it shows on Needs you); work inside the session is.
       act(() => { useTranscriptStore.getState().ingest(ev('ask', { body: 'Merge now?', message_id: 'm9' }, 0)) })
-      expect(live).toHaveTextContent(/^Session panel$/)
+      expect(live).toHaveTextContent(/^Workspace panel$/)
       act(() => { useTranscriptStore.getState().ingest(ev('subagent_started', { child_id: 'A7', agent_type: 'Explore', summary: 'Survey' }, 0)) })
-      expect(live).toHaveTextContent('Session panel: 1 subagent or background task')
+      expect(live).toHaveTextContent('Workspace panel: 1 subagent or background task')
     })
 
     it('lists what needs you and what runs, with counts, and the badge adds them up', async () => {
@@ -492,12 +543,12 @@ describe('session side panel', () => {
       expect(within(panel).getByTestId('rail-main')).toHaveAttribute('data-state', 'working')
       expect(badges()).toBe('🤖2')
       expect(screen.getByTestId('rail-badge-inside')).not.toHaveClass('attention')
-      expect(toggle()).toHaveAccessibleName('Session panel: 2 subagents and background tasks')
-      expect(screen.getByTestId('rail-announce')).toHaveTextContent('Session panel: 2 subagents and background tasks')
+      expect(toggle()).toHaveAccessibleName('Workspace panel: 2 subagents and background tasks')
+      expect(screen.getByTestId('rail-announce')).toHaveTextContent('Workspace panel: 2 subagents and background tasks')
 
-      const askRow = within(panel).getByTestId('rail-ask')
+      const askRow = openQuestion(within(panel).getByTestId('rail-ask'))
       expect(askRow).toHaveTextContent('Deploy to staging first?')
-      expect(within(askRow).getByTestId('rail-ask-wait')).toHaveTextContent('waiting 3 min')
+      expect(within(askRow).getByTitle(/waiting 3 min/)).toBeInTheDocument()
       expect(within(askRow).getByLabelText('Your answer')).toBeInTheDocument()
 
       const changes = within(panel).getByTestId('rail-tool-changes')
@@ -563,7 +614,7 @@ describe('session side panel', () => {
       // The panel toggle's work-inside count carries the same robot face as this row (owner, #245).
       expect(screen.getByTestId('rail-badge-inside').querySelector('.icon-btn-count-glyph')!.textContent).toBe(within(sub).getByRole('img', { name: 'Subagent' }).textContent)
       // It reports no effort of its own: it runs at the session's, which is said, never "unknown".
-      expect(within(sub).getByTestId('rail-show').getAttribute('title')).toContain("effort: high (session's)")
+      expect(within(sub).getByTestId('rail-show').getAttribute('title')).toContain("effort: high (workspace's)")
     })
 
     it('an older start with only a description shows that as the command line', async () => {
@@ -645,7 +696,7 @@ describe('session side panel', () => {
       expect((scrolled.mock.contexts.at(-1) as HTMLElement).dataset.testid).toBe('subagent-card')
       fireEvent.click(within(within(panel).getByTestId('rail-task')).getByTestId('rail-show'))
       expect((scrolled.mock.contexts.at(-1) as HTMLElement).dataset.callId).toBe('c1')
-      fireEvent.click(within(within(panel).getByTestId('rail-ask')).getByTestId('rail-show'))
+      fireEvent.click(within(openQuestion(within(panel).getByTestId('rail-ask'))).getByTestId('rail-show'))
       expect((scrolled.mock.contexts.at(-1) as HTMLElement).dataset.testid).toBe('ask-card')
       expect(rail()).toBeVisible()
     })
@@ -700,9 +751,9 @@ describe('session side panel', () => {
       seedSession({ status: 'running' })
       seedEvents(user(), ev('ask', { body: 'Ship blue?', message_id: 'q1', owner_only: true, no_wait: true }, 2 * MIN))
       await renderPage()
-      const row = within(rail()!).getByTestId('rail-ask')
-      expect(row).toHaveTextContent('not blocking')
-      expect(row).not.toHaveTextContent('Only the session owner')
+      const row = openQuestion(within(rail()!).getByTestId('rail-ask'))
+      expect(within(row).getByTitle(/Main keeps working/)).toBeInTheDocument()
+      expect(row).not.toHaveTextContent('Only the workspace owner')
       expect(within(row).getByLabelText('Your answer')).toBeInTheDocument()
     })
 
@@ -710,15 +761,14 @@ describe('session side panel', () => {
       seedSession({ status: 'waiting' })
       seedEvents(user(), ask())
       await renderPage()
-      const row = within(rail()!).getByTestId('rail-ask')
+      const row = openQuestion(within(rail()!).getByTestId('rail-ask'))
       fireEvent.change(within(row).getByLabelText('Your answer'), { target: { value: 'yes, staging' } })
       wsMock.send.mockClear()
       await act(async () => { fireEvent.click(within(row).getByRole('button', { name: 'Answer' })) })
-      const sent = wsMock.send.mock.calls.map(c => c[0]).find(m => m.type === 'agent_user_message') as { text: string; answer_message_id?: string } | undefined
-      expect(sent?.text).toBe('yes, staging')
-      expect(sent?.answer_message_id).toBe('m1')
+      expect(fetchMock).toHaveBeenCalledWith('/api/messages/m1/reply', expect.objectContaining({ method: 'POST', body: JSON.stringify({ answer: 'yes, staging', revision_seq: 0 }) }))
+      expect(wsMock.send.mock.calls.some(c => c[0].type === 'agent_user_message')).toBe(false)
       // The answer's echo closes the ask: it leaves the panel.
-      const clientId = (sent as unknown as { client_id: string }).client_id
+      const clientId = 'answer-echo'
       act(() => { useTranscriptStore.getState().ingest(ev('user_message', { text: 'yes, staging', source: 'ask_answer', message_id: 'm1', client_id: clientId }, 0)) })
       expect(within(rail()!).queryByTestId('rail-ask')).toBeNull()
       expect(within(rail()!).getByTestId('rail-needs')).toHaveTextContent('Nothing needs you.')
@@ -811,8 +861,8 @@ describe('session side panel', () => {
         ] }))
         await renderPage()
         await waitFor(() => expect(within(rail()!).getAllByTestId('rail-ask')).toHaveLength(2))
-        expect(within(rail()!).queryByRole('button', { name: /^Dismiss question: Deploy to staging/ })).toBeNull()
-        expect(within(rail()!).getByRole('button', { name: /^Dismiss question: Which name\?/ })).toBeInTheDocument()
+        expect(within(rail()!).getAllByRole('button', { name: 'Dismiss' })).toHaveLength(1)
+        expect(within(openQuestion(within(rail()!).getAllByTestId('rail-ask').find(row => within(row).queryByText('Which name?'))!)).getByRole('button', { name: 'Dismiss' })).toBeInTheDocument()
       })
 
       it('offers no Dismiss on an owner-only question to someone who is not the owner', async () => {
@@ -821,7 +871,7 @@ describe('session side panel', () => {
         stubFetch(0, liveReply({ through_seq: seq, asks: [{ ...replyAsk(-3 * MIN), owner_only: true, no_wait: true }] }))
         await renderPage()
         await within(rail()!).findByTestId('rail-ask')
-        expect(within(rail()!).queryByRole('button', { name: /^Dismiss question/ })).toBeNull()
+        expect(within(rail()!).queryByRole('button', { name: 'Dismiss' })).toBeNull()
       })
 
       it('answers a question the server listed, and the answer\'s echo takes it off', async () => {
@@ -829,13 +879,13 @@ describe('session side panel', () => {
         seedEvents(user())
         stubFetch(0, liveReply({ through_seq: seq, asks: [replyAsk(-3 * MIN)] }))
         await renderPage()
-        const row = await within(rail()!).findByTestId('rail-ask')
+        const row = openQuestion(await within(rail()!).findByTestId('rail-ask'))
         fireEvent.change(within(row).getByLabelText('Your answer'), { target: { value: 'yes, staging' } })
         wsMock.send.mockClear()
         await act(async () => { fireEvent.click(within(row).getByRole('button', { name: 'Answer' })) })
-        const sent = wsMock.send.mock.calls.map(c => c[0]).find(m => m.type === 'agent_user_message') as { text: string; answer_message_id?: string; client_id: string } | undefined
-        expect(sent?.answer_message_id).toBe('m1')
-        act(() => { useTranscriptStore.getState().ingest(ev('user_message', { text: 'yes, staging', source: 'ask_answer', message_id: 'm1', client_id: sent!.client_id }, 0)) })
+        expect(fetchMock).toHaveBeenCalledWith('/api/messages/m1/reply', expect.objectContaining({ method: 'POST', body: JSON.stringify({ answer: 'yes, staging', revision_seq: 0 }) }))
+        expect(wsMock.send.mock.calls.some(c => c[0].type === 'agent_user_message')).toBe(false)
+        act(() => { useTranscriptStore.getState().ingest(ev('user_message', { text: 'yes, staging', source: 'ask_answer', message_id: 'm1', client_id: 'answer-echo' }, 0)) })
         expect(within(rail()!).queryByTestId('rail-ask')).toBeNull()
         // Nothing needs you; the main agent at work is in Running now, not a count on the toggle.
         expect(badges()).toBe('')
@@ -847,8 +897,8 @@ describe('session side panel', () => {
         const q = { ...replyAsk(-3 * MIN), no_wait: true }
         stubFetch(0, liveReply({ through_seq: seq, asks: [q], can_release_prompt: true }))
         await renderPage()
-        const row = await within(rail()!).findByTestId('rail-ask')
-        expect(row).toHaveTextContent('not blocking')
+        const row = openQuestion(await within(rail()!).findByTestId('rail-ask'))
+        expect(within(row).getByTitle(/Main keeps working/)).toBeInTheDocument()
         // The person's chat message goes to the agent: it does not take the question off.
         act(() => { useTranscriptStore.getState().ingest(ev('user_message', { text: 'also fix the footer', source: 'chat' }, 0)) })
         act(() => { useTranscriptStore.getState().ingest(ev('user_message', { text: 'Answer to your question', source: 'question_answer' }, 0)) })
@@ -856,20 +906,19 @@ describe('session side panel', () => {
         fireEvent.change(within(row).getByLabelText('Your answer'), { target: { value: 'blue' } })
         wsMock.send.mockClear()
         await act(async () => { fireEvent.click(within(row).getByRole('button', { name: 'Answer' })) })
-        const sent = wsMock.send.mock.calls.map(c => c[0]).find(m => m.type === 'agent_user_message') as { answer_message_id?: string; client_id: string } | undefined
-        expect(sent?.answer_message_id).toBe('m1')
-        act(() => { useTranscriptStore.getState().ingest(ev('user_message', { text: 'blue', source: 'ask_answer', message_id: 'm1', client_id: sent!.client_id }, 0)) })
+        expect(fetchMock).toHaveBeenCalledWith('/api/messages/m1/reply', expect.objectContaining({ method: 'POST', body: JSON.stringify({ answer: 'blue', revision_seq: 0 }) }))
+        expect(wsMock.send.mock.calls.some(c => c[0].type === 'agent_user_message')).toBe(false)
+        act(() => { useTranscriptStore.getState().ingest(ev('user_message', { text: 'blue', source: 'ask_answer', message_id: 'm1', client_id: 'answer-echo' }, 0)) })
         expect(within(rail()!).queryByTestId('rail-ask')).toBeNull()
       })
 
-      it('gives no answer box for a question the agent did not wait on to someone other than its owner', async () => {
+      it('lists no question to someone who cannot answer it (BLG-586: only answerable questions are listed)', async () => {
         seedSession({ status: 'running' })
         seedEvents(user())
         stubFetch(0, liveReply({ through_seq: seq, asks: [{ ...replyAsk(-3 * MIN), no_wait: true }], can_release_prompt: false }))
         await renderPage()
-        const row = await within(rail()!).findByTestId('rail-ask')
-        expect(within(row).queryByLabelText('Your answer')).toBeNull()
-        expect(row).toHaveTextContent('Only the session owner can answer this question.')
+        await waitFor(() => expect(within(rail()!).getByTestId('rail-needs')).toHaveTextContent('Nothing needs you.'))
+        expect(within(rail()!).queryByTestId('rail-ask')).toBeNull()
       })
 
       it('drops a question the server closed with no transcript event (it expired) at once', async () => {
@@ -921,7 +970,7 @@ describe('session side panel', () => {
       expect(rail()).toBeNull()
       toggle().focus()
       fireEvent.click(toggle())
-      const drawer = screen.getByRole('dialog', { name: 'Session panel' })
+      const drawer = screen.getByRole('dialog', { name: 'Workspace panel' })
       expect(drawer).toHaveAttribute('aria-modal', 'true')
       expect(toggle()).toHaveAttribute('aria-expanded', 'true')
       expect(document.body.style.overflow).toBe('hidden')
@@ -943,7 +992,7 @@ describe('session side panel', () => {
       seedEvents(user(), ...task())
       await renderPage()
       fireEvent.click(toggle())
-      const drawer = screen.getByRole('dialog', { name: 'Session panel' })
+      const drawer = screen.getByRole('dialog', { name: 'Workspace panel' })
       const close = within(drawer).getByRole('button', { name: 'Close' })
       // The last control on the tab on screen (Live), not one of a hidden tab.
       await within(drawer).findByRole('tabpanel', { name: /^Live/ })
@@ -969,7 +1018,7 @@ describe('session side panel', () => {
       seedEvents(user())
       await renderPage()
       fireEvent.click(toggle())
-      const drawer = screen.getByRole('dialog', { name: 'Session panel' })
+      const drawer = screen.getByRole('dialog', { name: 'Workspace panel' })
       fireEvent.pointerDown(drawer)
       fireEvent.click(drawer)
       expect(rail()).not.toBeNull()
@@ -984,7 +1033,7 @@ describe('session side panel', () => {
       seedEvents(user(), ...task())
       await renderPage()
       fireEvent.click(toggle())
-      fireEvent.click(within(screen.getByRole('dialog', { name: 'Session panel' })).getByTestId('rail-show'))
+      fireEvent.click(within(screen.getByRole('dialog', { name: 'Workspace panel' })).getByTestId('rail-show'))
       expect((scrolled.mock.contexts.at(-1) as HTMLElement).dataset.callId).toBe('c1')
       expect(rail()).toBeNull()
     })
@@ -994,7 +1043,7 @@ describe('session side panel', () => {
       seedEvents(user(), ev('background_task_started', { task_id: 'b9', call_id: 'gone', kind: 'monitor', description: 'Watch the log', started_at: new Date(Date.now() - MIN).toISOString() }, MIN))
       await renderPage()
       fireEvent.click(toggle())
-      const drawer = screen.getByRole('dialog', { name: 'Session panel' })
+      const drawer = screen.getByRole('dialog', { name: 'Workspace panel' })
       fireEvent.click(within(drawer).getByTestId('rail-show'))
       expect(rail()).toBe(drawer)
       expect(within(drawer).getByRole('status')).toHaveTextContent('Not in the part of the conversation the chat has drawn. Scroll up in the chat to reach it.')
@@ -1005,16 +1054,17 @@ describe('session side panel', () => {
       seedEvents(user(), ask())
       await renderPage()
       fireEvent.click(toggle())
-      let box = within(screen.getByRole('dialog', { name: 'Session panel' })).getByLabelText('Your answer')
+      let box = within(openQuestion(within(rail()!).getByTestId('rail-ask'))).getByLabelText('Your answer')
       fireEvent.change(box, { target: { value: 'yes, staging' } })
       fireEvent.keyDown(box, { key: 'Escape' })
+      fireEvent.keyDown(screen.getByRole('dialog', { name: 'Workspace panel' }), { key: 'Escape' })
       expect(rail()).toBeNull()
       fireEvent.click(toggle())
-      box = within(screen.getByRole('dialog', { name: 'Session panel' })).getByLabelText('Your answer')
+      box = within(openQuestion(within(rail()!).getByTestId('rail-ask'))).getByLabelText('Your answer')
       expect(box).toHaveValue('yes, staging')
     })
   })
-  it('renders root progress alongside child sessions and pending approvals from the whole-log live reply', async () => {
+  it('renders root progress alongside workers and pending approvals from the whole-log live reply', async () => {
     seedSession({ status: 'idle' })
     seedEvents(user())
     stubFetch(0, liveReply({ progress: { completed: 2, total: 5, label: 'Verify integration' }, children: [{ id: 'child', title: 'Codex review', engine: 'codex', model: 'fixture', effort: 'high', status: 'running', started_at: iso(-MIN), ended_at: null, asking: true, tokens: 12000 }], delegation_requests: [{ request_id: 'request', engine: 'codex', title: 'Another review', expires_at: iso(MIN) }] }))
@@ -1063,9 +1113,9 @@ describe('session side panel', () => {
       expect(within(main).getByTestId('rail-main-step-elapsed')).toHaveTextContent('4:09')
       expect(within(main).getByTestId('rail-elapsed')).toHaveTextContent(screen.getByTestId('working').querySelector('.agent-working-time')!.textContent!)
       const title = within(main).getByTestId('rail-main-show')
-      expect(title.getAttribute('title')).toContain("The agent you're talking to. Indented rows run inside it; child sessions run on their own.")
-      expect(title.getAttribute('aria-description')).toContain("The agent you're talking to. Indented rows run inside it; child sessions run on their own.")
-      expect(title.getAttribute('title')).not.toContain('This session')
+      expect(title.getAttribute('title')).toContain("The agent you're talking to. Indented rows run inside it; workers run on their own.")
+      expect(title.getAttribute('aria-description')).toContain("The agent you're talking to. Indented rows run inside it; workers run on their own.")
+      expect(title.getAttribute('title')).not.toContain('This workspace')
     })
 
     it('says "Working…" or what the agent is on when no call is named, as the working line does', async () => {
@@ -1151,9 +1201,9 @@ describe('session side panel', () => {
       // A phone, no saved choice: the drawer opens by itself only for something that needs you or runs beside the chat.
       expect(rail()).toBeNull()
       expect(badges()).toBe('')
-      expect(toggle()).toHaveAccessibleName('Session panel')
-      expect(screen.getByTestId('rail-announce')).toHaveTextContent(/^Session panel$/)
-      expect(screen.queryByRole('dialog', { name: 'Session panel' })).toBeNull()
+      expect(toggle()).toHaveAccessibleName('Workspace panel')
+      expect(screen.getByTestId('rail-announce')).toHaveTextContent(/^Workspace panel$/)
+      expect(screen.queryByRole('dialog', { name: 'Workspace panel' })).toBeNull()
     })
 
     it('says "Waiting on you." while the agent waits on an answer and nothing runs', async () => {
@@ -1166,9 +1216,9 @@ describe('session side panel', () => {
   })
 
   it.each([
-    ['only work inside', { subs: 2, kids: 0 }, '🤖2', 'Session panel: 2 subagents and background tasks'],
-    ['only a child session', { subs: 0, kids: 1 }, '↳1', 'Session panel: 1 child session'],
-    ['both', { subs: 1, kids: 3 }, '🤖1 ↳3', 'Session panel: 1 subagent or background task · 3 child sessions'],
+    ['only work inside', { subs: 2, kids: 0 }, '🤖2', 'Workspace panel: 2 subagents and background tasks'],
+    ['only a worker', { subs: 0, kids: 1 }, '↳1', 'Workspace panel: 1 worker'],
+    ['both', { subs: 1, kids: 3 }, '🤖1 ↳3', 'Workspace panel: 1 subagent or background task · 3 workers'],
   ] as const)('the toggle shows its two counts, each hidden at zero, matching Running now (%s)', async (_name, n, shown, label) => {
     seedSession({ status: 'idle' })
     seedEvents(user())
@@ -1206,7 +1256,7 @@ describe('session side panel', () => {
     await renderPage()
     await waitFor(() => expect(badges()).toBe('↳1'))
     expect(screen.getByTestId('rail-toggle').querySelector('.attention')).toBeNull()
-    expect(toggle()).toHaveAccessibleName('Session panel: 1 child session')
+    expect(toggle()).toHaveAccessibleName('Workspace panel: 1 worker')
     expect(screen.getByTestId('rail-announce')).not.toHaveTextContent(/need/)
   })
 
@@ -1217,8 +1267,8 @@ describe('session side panel', () => {
     await renderPage()
     await waitFor(() => expect(screen.getByTestId('rail-started')).toHaveTextContent('Idle child'))
     expect(badges()).toBe('')
-    expect(screen.getByTestId('rail-toggle').getAttribute('aria-label')).not.toMatch(/child session|running/)
-    expect(screen.getByTestId('rail-announce')).not.toHaveTextContent(/child session|running/)
+    expect(screen.getByTestId('rail-toggle').getAttribute('aria-label')).not.toMatch(/worker|running/)
+    expect(screen.getByTestId('rail-announce')).not.toHaveTextContent(/worker|running/)
   })
 
   it('Running now lists working children only, and a row opens the child', async () => {
@@ -1261,9 +1311,9 @@ it('keeps archived sessions free of live management controls despite stale runni
   seedEvents(user())
   stubFetch(3, liveReply({can_release_prompt:true,delegation_requests:[{request_id:'old',engine:'codex',title:'Stale approval',expires_at:iso(MIN)}],delegation_grants:[{id:'grant',engine:'codex',runtime:'docker'}]}))
   await renderPage()
-  expect(screen.queryByRole('group',{name:'Session permissions'})).toBeNull()
+  expect(screen.queryByRole('group',{name:'Workspace permissions'})).toBeNull()
   expect(screen.queryByRole('checkbox',{name:'Resume when limit resets'})).toBeNull()
-  expect(screen.queryByRole('button',{name:'End session'})).toBeNull()
+  expect(screen.queryByRole('button',{name:'End workspace'})).toBeNull()
   expect(screen.queryByRole('menuitem',{name:/Discard/,hidden:true})).toBeNull()
   expect(screen.queryByRole('button',{name:/Discard/})).toBeNull()
   expect(fetchCalls().filter(url=>url.endsWith('/limit-resume'))).toEqual([])

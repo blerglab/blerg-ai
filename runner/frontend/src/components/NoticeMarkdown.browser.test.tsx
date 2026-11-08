@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { expect, it } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import { page } from 'vitest/browser'
@@ -8,7 +9,7 @@ import '@blerglab/chat/blerg.css'
 import '../index.css'
 
 // Card #275: a Blerg notice shows inline Markdown, never raw backticks or asterisks, in one compact row.
-for (const width of [390, 3840]) {
+for (const width of browserWidths([390, 3840])) {
   it(`draws a Blerg notice as inline Markdown inside ${width}px`, async () => {
     await page.viewport(width, width === 390 ? 844 : 2160)
     resetChatState()

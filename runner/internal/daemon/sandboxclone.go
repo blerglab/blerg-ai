@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/blerglab/blerg-ai/runner/internal/activity"
 	"io"
 	"log"
 	"os"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/blerglab/blerg-ai/runner/internal/hostgit"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/workbranch"
 )
 
 // A sandboxed session never gets write access to any part of the person's repository: not its
@@ -34,10 +36,12 @@ import (
 //     That objects directory is mounted READ-ONLY at its own absolute path, so the alternates
 //     pointer resolves in the container and the session can read history but write nothing there.
 //     New objects go into the clone's own object store.
-//   - The session's work comes back by a fetch the HOST runs into the repository, for that one
+//   - The session's work comes back by a fetch the host receives from a disposable no-network
+//     pack-serving container with read-only mounts, for that one
 //     branch only (+refs/heads/wip/<id>:refs/heads/wip/<id>), at the end of each turn and when
 //     the session stops. The fetch ignores the clone's configuration and hooks as far as Git
-//     allows (hardenedGitArgs, a clean environment). The session can therefore move nothing in the
+//     allows (hardened arguments, a clean environment). The host only strictly indexes the
+//     received pack; serving-side Git never parses clone metadata on the host. The session can move nothing in the
 //     repository but its own wip/<id> branch.
 //   - When the session stops, anything it left uncommitted is committed onto wip/<id> inside the
 //     container (sandboxCloneSettle), so the last fetch brings it back too.
@@ -65,15 +69,15 @@ func sandboxCloneRoot() string {
 	return filepath.Join(state, sandboxCloneDirName)
 }
 
-// sandboxBranch names the branch a sandboxed session's commits land on.
-func sandboxBranch(sessionID string) string { return "wip/" + sessionID }
-
 // sandboxClone is the daemon's record of one session's clone (<root>/<id>.json).
 type sandboxClone struct {
 	Repo    string `json:"repo"`    // the repository's top-level directory on the host
 	Objects string `json:"objects"` // its objects directory, mounted read-only for the alternates
 	// Base is the commit the session started from; "" when the repository had no commit yet.
 	Base string `json:"base"`
+	// OwnObjects: joined a running container, which can't gain the read-only mount,
+	// so the clone holds its own objects and borrows from nowhere.
+	OwnObjects bool `json:"own_objects,omitempty"`
 }
 
 // hostGit runs git in dir through the shared hardened runner (internal/hostgit: its own
@@ -125,7 +129,7 @@ var dockerRunTimeout = func(timeout time.Duration, args ...string) error {
 // session left paused would hang with no sign of why.
 func unpauseSandbox(container, sessionID string) {
 	for attempt := 1; attempt <= 2; attempt++ {
-		if err := dockerRunTimeout(sandboxDockerTimeout, "unpause", container); err == nil {
+		if err := dockerRunTimeout(sandboxDockerTimeout, pinnedDockerArgs(container, "unpause", container)...); err == nil {
 			return
 		} else if attempt == 2 {
 			log.Printf("SANDBOX CONTAINER LEFT PAUSED: agent session %s: docker unpause %s failed twice: %v; run `docker unpause %s`", sessionID, container, err, container)
@@ -136,6 +140,9 @@ func unpauseSandbox(container, sessionID string) {
 // syncSandboxAtTurnEnd is the turn-end sync of a sandboxed session: its container must be known (fail
 // closed: a fetch never runs against a clone that could be changing).
 func syncSandboxAtTurnEnd(path, sessionID string) error {
+	return syncSandboxAtTurnEndContext(context.Background(), path, sessionID)
+}
+func syncSandboxAtTurnEndContext(ctx context.Context, path, sessionID string) error {
 	mu := workspaceLock(sessionID)
 	mu.Lock()
 	defer mu.Unlock()
@@ -146,7 +153,7 @@ func syncSandboxAtTurnEnd(path, sessionID string) error {
 	if !ok {
 		return fmt.Errorf("fetch %s refused: the session's container is not known, so it cannot be paused", sandboxBranch(sessionID))
 	}
-	_, err := syncSandboxBranch(path, sessionID, container)
+	_, err := syncSandboxBranchContext(ctx, path, sessionID, container)
 	return err
 }
 
@@ -312,7 +319,14 @@ func createSandboxClone(repoPath, sessionID, reposRoot string) (string, error) {
 
 // createSandboxCloneAt is shared by the legacy session-root allocator and the
 // private workspace allocator. Callers must supply daemon-owned unused paths.
-func createSandboxCloneAt(ctx context.Context, repoPath, sessionID, reposRoot, dir, record string, allocatedRoot bool) (string, error) {
+func createSandboxCloneAt(ctx context.Context, repoPath, sessionID, reposRoot, dir, record string, allocatedRoot bool, recorded ...string) (string, error) {
+	branch := sandboxBranch(sessionID)
+	if len(recorded) > 0 {
+		branch = workbranch.Effective(sessionID, recorded[0])
+	}
+	if !workbranch.Valid(branch) {
+		return "", errors.New("invalid session work branch")
+	}
 	refuse := func(why string) (string, error) {
 		return "", fmt.Errorf("could not give this sandboxed session its own clone of the repository: %s; the session was not started (a sandbox never works in your checkout)", why)
 	}
@@ -358,8 +372,8 @@ func createSandboxCloneAt(ctx context.Context, repoPath, sessionID, reposRoot, d
 	if err != nil {
 		base = ""
 	}
-	if _, err := git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/"+sandboxBranch(sessionID)); err == nil {
-		return refuse("the repository already has a branch " + sandboxBranch(sessionID))
+	if _, err := git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
+		return refuse("the repository already has a branch " + branch)
 	}
 	common, err := git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
@@ -386,9 +400,9 @@ func createSandboxCloneAt(ctx context.Context, repoPath, sessionID, reposRoot, d
 		log.Printf("sandbox clone %s: git clone: %v: %s", sessionID, err, out)
 		return refuse("git clone failed: " + firstLine(out))
 	}
-	branchArgs := []string{"checkout", "--quiet", "-b", sandboxBranch(sessionID), base}
+	branchArgs := []string{"checkout", "--quiet", "-b", branch, base}
 	if base == "" {
-		branchArgs = []string{"symbolic-ref", "HEAD", "refs/heads/" + sandboxBranch(sessionID)}
+		branchArgs = []string{"symbolic-ref", "HEAD", "refs/heads/" + branch}
 	}
 	if out, err := git(dir, branchArgs...); err != nil {
 		if !allocatedRoot {
@@ -401,7 +415,7 @@ func createSandboxCloneAt(ctx context.Context, repoPath, sessionID, reposRoot, d
 	// wip/<id> is one the settle probe can call clean once that branch is brought back.
 	if out, err := git(dir, "for-each-ref", "--format=%(refname)", "refs/heads/"); err == nil {
 		for _, ref := range strings.Fields(out) {
-			if ref != "refs/heads/"+sandboxBranch(sessionID) {
+			if ref != "refs/heads/"+branch {
 				_, _ = git(dir, "update-ref", "-d", ref)
 			}
 		}
@@ -508,14 +522,16 @@ func resetCloneAlternates(path string, c *sandboxClone) error {
 			return errors.New("the clone's object directories are not plain directories of this user")
 		}
 	}
-	if validCloneObjects(c.Objects) != nil {
-		return errors.New("the repository's objects directory is no longer valid")
-	}
-	if raw, err := os.ReadFile(filepath.Join(c.Objects, "info", "alternates")); err == nil && len(bytes.TrimSpace(raw)) > 0 {
-		return errors.New("the repository's objects borrow from another store (a nested alternates chain)")
-	}
-	if _, err := os.Lstat(filepath.Join(c.Objects, "info", "http-alternates")); err == nil {
-		return errors.New("the repository has objects/info/http-alternates")
+	if !c.OwnObjects {
+		if validCloneObjects(c.Objects) != nil {
+			return errors.New("the repository's objects directory is no longer valid")
+		}
+		if raw, err := os.ReadFile(filepath.Join(c.Objects, "info", "alternates")); err == nil && len(bytes.TrimSpace(raw)) > 0 {
+			return errors.New("the repository's objects borrow from another store (a nested alternates chain)")
+		}
+		if _, err := os.Lstat(filepath.Join(c.Objects, "info", "http-alternates")); err == nil {
+			return errors.New("the repository has objects/info/http-alternates")
+		}
 	}
 	root, err := os.OpenRoot(info)
 	if err != nil {
@@ -533,7 +549,11 @@ func resetCloneAlternates(path string, c *sandboxClone) error {
 	if err != nil {
 		return err
 	}
-	_, werr := f.WriteString(c.Objects + "\n")
+	line := c.Objects + "\n"
+	if c.OwnObjects {
+		line = ""
+	}
+	_, werr := f.WriteString(line)
 	cerr := f.Close()
 	if werr != nil || cerr != nil {
 		_ = root.Remove(tmp)
@@ -554,6 +574,9 @@ func resetCloneAlternates(path string, c *sandboxClone) error {
 // sequence and always unpaused after, so the clone cannot change between the checks and the fetch.
 // At stop the container is already gone ("").
 func syncSandboxBranch(path, sessionID, container string) (bool, error) {
+	return syncSandboxBranchContext(context.Background(), path, sessionID, container)
+}
+func syncSandboxBranchContext(ctx context.Context, path, sessionID, container string) (bool, error) {
 	if !isSandboxClone(path, sessionID) {
 		return false, errors.New("not a sandbox clone")
 	}
@@ -563,13 +586,19 @@ func syncSandboxBranch(path, sessionID, container string) (bool, error) {
 	}
 	deadline := time.Now().Add(sandboxSyncBudget)
 	if container != "" {
-		if err := dockerRunTimeout(sandboxDockerTimeout, "pause", container); err != nil {
+		if err := activity.Measure(ctx, "freeze", func() error {
+			return dockerRunTimeout(sandboxDockerTimeout, pinnedDockerArgs(container, "pause", container)...)
+		}); err != nil {
 			unpauseSandbox(container, sessionID) // a pause that timed out may still have happened
 			return false, fmt.Errorf("fetch %s refused: the session's container could not be paused: %w", sandboxBranch(sessionID), err)
 		}
-		defer unpauseSandbox(container, sessionID)
+		defer func() {
+			_ = activity.Measure(ctx, "thaw", func() error { unpauseSandbox(container, sessionID); return nil })
+		}()
 	}
-	return fetchSandboxClone(path, sessionID, c, deadline)
+	copyCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	return fetchSandboxCloneContext(copyCtx, path, sessionID, c)
 }
 
 // fetchSandboxClone requires the caller to own the session lifecycle mutex,
@@ -582,6 +611,11 @@ func fetchSandboxClone(path, sessionID string, c *sandboxClone, deadline time.Ti
 }
 
 func fetchSandboxCloneContext(ctx context.Context, path, sessionID string, c *sandboxClone) (bool, error) {
+	return fetchCloneContext(ctx, path, sessionID, c, fetchSandboxPack)
+}
+
+// fetchCloneContext shares validation; the caller explicitly chooses the serving boundary.
+func fetchCloneContext(ctx context.Context, path, sessionID string, c *sandboxClone, serve func(context.Context, time.Duration, string, string, *sandboxClone, string, string) (string, error)) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -617,32 +651,15 @@ func fetchSandboxCloneContext(ctx context.Context, path, sessionID string, c *sa
 	if checked {
 		target = branch + ".incoming"
 	}
-	// Fetched from <clone>/.git, never the clone's top folder (which a session could make look like
-	// a bare repository), and with upload-pack --strict, which refuses anything but that exact Git
-	// directory.
+	// The isolated server serves <clone>/.git with upload-pack --strict, never the clone's
+	// top folder (which a session could make look like a bare repository).
 	fetchTimeout := min(sandboxFetchTimeout, time.Until(deadline))
 	if fetchTimeout <= 0 {
 		return false, fmt.Errorf("fetch %s refused: the sync ran out of time", sandboxBranch(sessionID))
 	}
-	// Differs from every other host git call, on purpose: the file transport (a local fetch),
-	// fetch.fsckObjects (the objects come from the session), a 512 MiB memory limit, and
-	// --upload-pack naming a fixed `git upload-pack --strict` (serving that exact Git directory
-	// only) that carries the runner's -c overrides, the untrusted-repository ones (no
-	// commit-graph, multi-pack index or bitmaps parsed) and --no-replace-objects itself: git hands
-	// a local upload-pack none of ours, and that upload-pack and its pack-objects read the clone's
-	// configuration (the session writes it). What no override reaches (info/attributes, grafts, a
-	// configuration include) is refused before git runs (checkSandboxCloneTree). Still parsed on
-	// the host: the clone's config, refs, packed-refs, shallow, pack indexes and objects (fsck on
-	// receive checks what arrives). No auto-maintenance or commit-graph write in the repository.
-	// The clone's tree is checked and its alternates rewritten before (checkSandboxCloneTree,
-	// resetCloneAlternates), the container is paused, and the fetched objects are checked here.
-	uploadPack, err := hostgit.ServeCommand("upload-pack")
-	if err != nil {
-		return false, fmt.Errorf("fetch %s refused: %w", sandboxBranch(sessionID), err)
-	}
-	if out, err := hostGitLocalContext(ctx, fetchTimeout, c.Repo, []string{"fetch.fsckObjects=true", "transfer.fsckObjects=true"}, sandboxFetchMemoryKB,
-		"fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--no-auto-maintenance", "--no-write-commit-graph",
-		"--upload-pack="+uploadPack, filepath.Join(path, ".git"), "+"+branch+":"+target); err != nil {
+	// The clone's serving parsers run only in a disposable no-network container. The
+	// host's hardened fetch receives a pack through a byte relay and uses index-pack --strict.
+	if out, err := serve(ctx, fetchTimeout, path, sessionID, c, branch, target); err != nil {
 		return false, fmt.Errorf("fetch %s from the session's clone: %w: %s", sandboxBranch(sessionID), err, firstLine(out))
 	}
 	if target != branch {
@@ -680,7 +697,7 @@ func sandboxSettleScript(sessionID string) string {
 	return `cd /workspace || exit 3
 g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false -c status.showUntrackedFiles=all -c core.excludesFile=/dev/null "$@"; }
 untracked() { g ls-files -z --others --exclude-per-directory=.gitignore; }
-b=refs/heads/` + sandboxBranch(sessionID) + `
+b=` + shellBranch(sessionID) + `
 dirty() { [ -n "$(g status --porcelain --untracked-files=all)" ] || [ "$(untracked | wc -c)" -ne 0 ]; }
 if [ "$(g symbolic-ref -q HEAD)" = "$b" ] && dirty; then
   g add -A || exit 1
@@ -701,7 +718,7 @@ const sandboxSnapshotMessage = "Uncommitted work when the session stopped (commi
 // the host, because it reads the clone's (session-writable) configuration. ok is false when the
 // answer is unknown (no container, a timeout): the clone is then kept.
 var sandboxCloneSettle = func(container, sessionID string) (clean, ok bool) {
-	cmd := exec.Command("docker", "exec", "-w", sandboxWorkdir, container, "sh", "-c", sandboxSettleScript(sessionID)) //nolint:gosec // literal docker binary, daemon-built argv (validated session id); bounded by the timer below
+	cmd := exec.Command("docker", pinnedDockerArgs(container, "exec", "-w", sandboxWorkdir, container, "sh", "-c", sandboxSettleScript(sessionID))...) //nolint:gosec // literal docker binary, daemon-built argv (validated session id); bounded by the timer below
 	if err := cmd.Start(); err != nil {
 		return false, false
 	}
@@ -788,7 +805,15 @@ func finishSandbox(sessionID string) {
 		}
 		clean, known = sandboxCloneSettle(container, sessionID)
 	}
+	// Removal clears the runtime registry, but the final pack server must still
+	// use the context where this session ran, even if the person's default changed.
+	container := dockerContainerName(sessionID)
+	prefix := pinnedDockerArgs(container)
 	removeSandboxContainer(sessionID)
+	if len(prefix) == 2 {
+		pinSandboxContext(container, prefix[1])
+		defer forgetSandboxDeath(container)
+	}
 	if !clone {
 		return
 	}
@@ -796,7 +821,7 @@ func finishSandbox(sessionID string) {
 	// docker rm), the clone could still change under the fetch: nothing is fetched, the clone is
 	// kept, and the log says so.
 	if !sandboxContainerGone(dockerContainerName(sessionID)) {
-		log.Printf("sandbox clone %s: kept at %s, not fetched: its container %s could not be removed; remove it (docker rm -f) and the clone's wip/%s can be fetched by hand", sessionID, dir, dockerContainerName(sessionID), sessionID)
+		log.Printf("sandbox clone %s: kept at %s, not fetched: its container %s could not be removed; remove it (docker rm -f) and the clone's %s can be fetched by hand", sessionID, dir, dockerContainerName(sessionID), sandboxBranch(sessionID))
 		return
 	}
 	releaseSandboxClone(dir, sessionID, clean, known)
@@ -805,7 +830,7 @@ func finishSandbox(sessionID string) {
 // sandboxContainerGone reports whether docker says no container of that name exists (any state).
 // An error is "not known to be gone".
 var sandboxContainerGone = func(container string) bool {
-	out, err := dockerOutput("ps", "-a", "--filter", "name=^/"+container+"$", "--format", "{{.Names}}")
+	out, err := dockerOutput(pinnedDockerArgs(container, "ps", "-a", "--filter", "name=^/"+container+"$", "--format", "{{.Names}}")...)
 	return err == nil && strings.TrimSpace(string(out)) == ""
 }
 
@@ -968,4 +993,14 @@ func checkedOutAnywhereContext(ctx context.Context, repo, ref string) (bool, err
 		}
 	}
 	return false, nil
+}
+
+// dissociateClone gives a clone its own objects and stops borrowing, for a
+// container that was started without the mount of this repository's objects.
+func dissociateClone(ctx context.Context, path string, c *sandboxClone) error {
+	if out, err := hostgit.Output(ctx, hostgit.Options{Dir: path, Timeout: sandboxGitTimeout}, "repack", "-a", "-d", "-q"); err != nil {
+		return fmt.Errorf("copy the repository's objects: %w: %s", err, firstLine(out))
+	}
+	c.OwnObjects = true
+	return resetCloneAlternates(path, c)
 }

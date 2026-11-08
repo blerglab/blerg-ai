@@ -127,6 +127,10 @@ func (w *LocalWorkspace) allocateHostChild(ctx context.Context, parent workspace
 	if err != nil {
 		return nil, err
 	}
+	// A child's root member needs Git to create its own folder, so the allocation
+	// stays the namespace and the repository takes a leaf. Reserved members nest
+	// inside it, exactly as they do for the parent.
+	root = hostChildRoot(root, w.state.Launch.Members)
 	for _, member := range w.state.Launch.Members {
 		var source *WorkspaceSource
 		for i := range parent.Sources {
@@ -154,9 +158,9 @@ func (w *LocalWorkspace) allocateHostChild(ctx context.Context, parent workspace
 		if e != nil || actual != source.CommonPath {
 			return nil, errors.New("parent repository common directory changed")
 		}
-		branch, branchErr := hostChildGit(ctx, source.Path, source.RootIdentity, "rev-parse", "--verify", "--quiet", "refs/heads/"+sandboxBranch(w.state.Session))
+		branch, branchErr := hostChildGit(ctx, source.Path, source.RootIdentity, "rev-parse", "--verify", "--quiet", "refs/heads/"+w.branch())
 		if branchErr == nil || branch != "" {
-			return nil, fmt.Errorf("host child branch %s already exists for member %s; refusing to reuse it", sandboxBranch(w.state.Session), member.ID)
+			return nil, fmt.Errorf("host child branch %s already exists for member %s; refusing to reuse it", w.branch(), member.ID)
 		}
 		if !hostChildExitOne(branchErr) {
 			return nil, errors.New("host child branch availability could not be verified")
@@ -166,11 +170,6 @@ func (w *LocalWorkspace) allocateHostChild(ctx context.Context, parent workspace
 		if member.Path != "." {
 			target = filepath.Join(root, filepath.FromSlash(member.Path))
 		}
-		// A single '.' member needs Git to create the root itself. Retain the
-		// allocation directory as the namespace and use a separate repository leaf.
-		if target == root {
-			target = filepath.Join(root, "repo")
-		}
 		if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
 			return nil, err
 		}
@@ -179,7 +178,7 @@ func (w *LocalWorkspace) allocateHostChild(ctx context.Context, parent workspace
 		if err := w.save(); err != nil {
 			return nil, err
 		}
-		if _, err := hostChildGit(ctx, source.Path, source.RootIdentity, "worktree", "add", "-b", sandboxBranch(w.state.Session), "--", target, base); err != nil {
+		if _, err := hostChildGit(ctx, source.Path, source.RootIdentity, "worktree", "add", "-b", w.branch(), "--", target, base); err != nil {
 			return nil, fmt.Errorf("create host child member %s worktree: %w", member.ID, err)
 		}
 		allocation.Root, err = workspaceDirectoryIdentity(target)
@@ -215,7 +214,7 @@ func (w *LocalWorkspace) allocateHostChild(ctx context.Context, parent workspace
 		return nil, errors.New("host child requires at least one Git repository")
 	}
 	// Keep the repo layout physically accurate for file readers.
-	if len(pins.Sources) == 1 && pins.Sources[0].Member.Path == "." {
+	if pins.Sources[0].Member.Path == "." {
 		_ = pins.Anchor.Close()
 		pins.AnchorPath = pins.Sources[0].CanonicalPath
 		pins.Anchor, err = os.Open(pins.AnchorPath)
@@ -229,6 +228,15 @@ func (w *LocalWorkspace) allocateHostChild(ctx context.Context, parent workspace
 	}
 	success = true
 	return pins, nil
+}
+
+func hostChildRoot(root string, members []protocol.WorkspaceMember) string {
+	for _, member := range members {
+		if member.Path == "." {
+			return filepath.Join(root, "repo")
+		}
+	}
+	return root
 }
 
 func (a hostChildAllocation) validate(ctx context.Context) error {
@@ -263,7 +271,7 @@ func (w *LocalWorkspace) releaseHostChildren(ctx context.Context) error {
 		reason := a.validate(ctx)
 		if reason == nil {
 			branch, err := hostChildGit(ctx, a.Path, a.Root, "symbolic-ref", "--quiet", "--short", "HEAD")
-			if err != nil || branch != sandboxBranch(w.state.Session) {
+			if err != nil || branch != w.branch() {
 				reason = errors.New("worktree branch changed")
 			}
 		}
@@ -310,7 +318,7 @@ func (w *LocalWorkspace) collectHostChildren(ctx context.Context) {
 				break
 			}
 			branch, err := hostChildGit(ctx, a.Path, a.Root, "symbolic-ref", "--quiet", "--short", "HEAD")
-			if err != nil || branch != sandboxBranch(w.state.Session) {
+			if err != nil || branch != w.branch() {
 				result.SyncError = "host child worktree branch changed"
 				break
 			}
@@ -320,6 +328,12 @@ func (w *LocalWorkspace) collectHostChildren(ctx context.Context) {
 				break
 			}
 			result.Branch, result.Head = branch, head
+			if pin, ok := pinGitDir(a.Path, nil); ok {
+				if workspaceRootIdentity(pin.info) == a.Root && pin.vet(ctx, true) {
+					result.Summary = deliveredSummary(ctx, pin, result.Base, head)
+				}
+				pin.close()
+			}
 			result.Pending, result.SyncError, result.RecoveryLocation = false, "", ""
 			break
 		}

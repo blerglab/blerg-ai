@@ -149,7 +149,7 @@ export default function CronsPage() {
             <div key={c.id} data-testid={`cron-${c.id}`} style={{ background: 'var(--scree)', border: '1px solid var(--stone)', borderRadius: 8, padding: '10px 14px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                 <span style={{ fontWeight: 700 }}>{c.name}</span>
-                <span data-testid={`cron-status-${c.id}`} style={{ fontSize: '0.7rem', border: `1px solid ${pill.color}`, color: pill.color, borderRadius: 10, padding: '1px 8px' }}>{c.status}</span>
+                {c.status !== 'active' && c.status !== 'disabled' && <span data-testid={`cron-status-${c.id}`} style={{ fontSize: '0.7rem', border: `1px solid ${pill.color}`, color: pill.color, borderRadius: 10, padding: '1px 8px' }}>{c.status}</span>}
                 {paused ? (
                   // A pause revoked the access token, so getting out of it issues a new one: an
                   // explicit action of its own, not a switch.

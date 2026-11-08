@@ -35,11 +35,19 @@ type launchCreateMetadata struct {
 	DeletionTimestamp *string           `json:"deletionTimestamp"`
 }
 
+// newLaunchCreateContext bounds allocation independently of the cleanup context.
+func (j *JobManager) newLaunchCreateContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if j.launchCreateContext != nil {
+		return j.launchCreateContext(parent)
+	}
+	return context.WithTimeout(parent, launchCreateTimeout)
+}
+
 // createLaunchObject retries rejected optimistic-concurrency creates, never
 // blindly accepting AlreadyExists. Freeze the body and scheduling guard once:
 // retries retain the same name, generation, credentials and ownership marker.
 func (j *JobManager) createLaunchObject(parent context.Context, path string, body map[string]any) (response *http.Response, failure error) {
-	ctx, cancel := context.WithTimeout(parent, launchCreateTimeout)
+	ctx, cancel := j.newLaunchCreateContext(parent)
 	cancelOnReturn := true
 	defer func() {
 		if cancelOnReturn {

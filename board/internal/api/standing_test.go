@@ -18,7 +18,7 @@ func TestStandingWorkerPerCardSpawnsSession(t *testing.T) {
 	apiSrv := srvAPI
 	apiSrv.SetRunner(api.RunnerConfig{Driver: fake, PublicURL: "https://blerg-board.test", AgentURL: "http://blerg-board.svc", UIBase: "https://runner.test/sessions"})
 
-	board, err := db.CreateBoard(ctx, pool, db.BoardParams{Name: "work", Repos: []string{"blerg-board"}})
+	board, err := db.CreateBoard(ctx, pool, db.BoardParams{Name: "work", Repos: []string{"blerg-board", "web"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +34,7 @@ func TestStandingWorkerPerCardSpawnsSession(t *testing.T) {
 	}
 
 	res, err := db.CreateCard(ctx, pool, board.ID, db.CardParams{
-		Title: strPtr("needs triage"), Repos: &[]string{"blerg-board"}, ColumnID: &otherCol.ID,
+		Title: strPtr("needs triage"), Repos: &[]string{"blerg-board", "web"}, ColumnID: &otherCol.ID,
 	}, db.EventMeta{Actor: "human"})
 	if err != nil {
 		t.Fatalf("CreateCard: %v", err)
@@ -49,6 +49,9 @@ func TestStandingWorkerPerCardSpawnsSession(t *testing.T) {
 		t.Fatalf("expected 1 spawned session, got %d", len(fake.started))
 	}
 	st := fake.started[0]
+	if len(st.Repositories) != 2 || st.Repositories[0].Repo != "blerg-board" || st.Repositories[1].Repo != "web" {
+		t.Fatalf("standing agent lost repositories: %+v", st.Repositories)
+	}
 	if st.Repo != "blerg-board" || st.Env["BLERG_BOARD_TOKEN"] == "" || st.Env["BLERG_BOARD_CARD"] != res.Card.ID || st.Env["BLERG_BOARD_BOARD"] != board.ID {
 		t.Fatalf("start request wrong: %+v", st)
 	}

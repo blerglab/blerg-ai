@@ -62,7 +62,7 @@ describe('Plan tab checklist rows', () => {
     rail()
     fireEvent.click(screen.getByTestId('rail-plan-done-toggle'))
     expect(screen.getAllByRole('img', { name: 'Subagent: Audit the plan tab' })).toHaveLength(2)
-    expect(screen.getByRole('img', { name: 'Started session: Port the parser' })).toHaveAttribute('title', 'Started session: Port the parser')
+    expect(screen.getByRole('img', { name: 'Started workspace: Port the parser' })).toHaveAttribute('title', 'Started workspace: Port the parser')
     const all = everything(list())
     expect(all).not.toContain(SUB_ID)
     expect(all).not.toContain('toolu_')
@@ -71,7 +71,7 @@ describe('Plan tab checklist rows', () => {
 
   it('without recorded names falls back to the running worker, then to the kind, still no id', () => {
     rail({ childSessions: [{ id: CHILD_ID, title: 'Child from the live list', engine: 'codex', model: '', status: 'running', started_at: new Date().toISOString(), asking: false, tokens: null }] }, null)
-    expect(screen.getByRole('img', { name: 'Started session (Codex): Child from the live list' })).toBeTruthy()
+    expect(screen.getByRole('img', { name: 'Started workspace (Codex): Child from the live list' })).toBeTruthy()
     expect(screen.getByRole('img', { name: 'Subagent: a subagent' })).toBeTruthy()
     const all = everything(list())
     expect(all).not.toContain(SUB_ID)

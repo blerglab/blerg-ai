@@ -30,7 +30,8 @@ const daemonSettingsFile = "settings.json"
 // daemonSettings is the on-disk shape of the settings file. Only fields a
 // person changed from the app appear; an absent field means "use the env".
 type daemonSettings struct {
-	ReposRoot string `json:"repos_root,omitempty"`
+	ReposRoot     string `json:"repos_root,omitempty"`
+	YieldToPerson *bool  `json:"yield_to_person,omitempty"`
 }
 
 // DaemonStateDir returns where the daemon keeps its own state:
@@ -171,7 +172,15 @@ func (s *ReposRootSetting) Set(requested string, onChange func(old, next string)
 // saveReposRoot writes root into stateFile atomically (temp file + rename),
 // keeping any other settings already there. The directory is created 0700 and
 // the file 0600: it is the daemon's own state, not something for other users.
+var daemonSettingsMu sync.Mutex
+
 func saveReposRoot(stateFile, root string) error {
+	return saveDaemonSettings(stateFile, func(s *daemonSettings) { s.ReposRoot = root })
+}
+
+func saveDaemonSettings(stateFile string, update func(*daemonSettings)) error {
+	daemonSettingsMu.Lock()
+	defer daemonSettingsMu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(stateFile), 0o700); err != nil {
 		return err
 	}
@@ -180,7 +189,7 @@ func saveReposRoot(stateFile, root string) error {
 		// A corrupt existing file is simply replaced.
 		_ = json.Unmarshal(data, &s)
 	}
-	s.ReposRoot = root
+	update(&s)
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err

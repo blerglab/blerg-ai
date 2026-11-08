@@ -380,3 +380,30 @@ func TestFileCardSensitiveBodyCannotReachCuratorOrPublicRow(t *testing.T) {
 		t.Fatal("database allowed sensitive body in public row")
 	}
 }
+
+func TestFiledCardEstimatesAreBoundAndStored(t *testing.T) {
+	srv, pool := testServer(t)
+	b, err := db.CreateBoard(t.Context(), pool, db.BoardParams{Name: "Estimates", Columns: []string{"Todo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := boardfiling.Draft{Title: "Estimated", Size: "M", Risk: "high", Complexity: "low", Origin: boardfiling.Origin{SessionURL: "https://runner.example.test/sessions/fixture", Engine: "codex"}}
+	token := filingToken(t, b.ID, filingIntent, d)
+	altered := d
+	altered.Risk = "low"
+	resp := request(t, srv, "POST", "/api/boards/"+b.ID+"/file-card", token, nil, altered)
+	_ = resp.Body.Close()
+	if resp.StatusCode != 403 {
+		t.Fatalf("altered risk accepted: %d", resp.StatusCode)
+	}
+	resp = request(t, srv, "POST", "/api/boards/"+b.ID+"/file-card", token, nil, d)
+	var receipt db.FilingReceipt
+	decodeBody(t, resp, &receipt)
+	card, err := db.GetCard(t.Context(), pool, receipt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if card.Risk == nil || *card.Risk != "high" || card.Complexity == nil || *card.Complexity != "low" || card.SizeFirstSetAt == nil {
+		t.Fatalf("lost estimates: %+v", card)
+	}
+}

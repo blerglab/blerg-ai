@@ -206,6 +206,11 @@ describe('Vega-Lite refusals name the key and its path', () => {
     ['a DateTime year expression in a test', { ...base, encoding: { ...unit.encoding, color: { condition: { test: { field: 'x', equal: { year: 'length(sequence(0,100000000))' } }, value: 'red' }, value: 'blue' } } }, '"year" at $.encoding.color.condition.test.equal (must be a whole number from 0 to 9999)'],
     ['the review timed string payload', { ...base, transform: [{ filter: { field: 'x', timeUnit: 'year', equal: 'length(sequence(0,100000000))' } }] }, '"transform" at $ (data transforms are not available yet)'],
     ['a timed string operand in a test', { ...base, encoding: { ...unit.encoding, color: { condition: { test: { field: 'x', timeUnit: 'year', equal: 'length(sequence(0,100000000))' }, value: 'red' }, value: 'blue' } } }, '"equal" at $.encoding.color.condition.test (with a timeUnit, use numbers or date objects'],
+    // BLG-452 case 2b: boxplot is now a supported mark; its sub-mark override objects
+    // (box/median/outliers/rule/ticks) must still refuse expressions/signals at that depth,
+    // not just at the top level.
+    ['an expr nested in a boxplot sub-mark override', { ...base, mark: { type: 'boxplot', outliers: { tooltip: { expr: 'random()' } } } }, '"expr" at $.mark.outliers.tooltip (expressions are disabled)'],
+    ['a signal nested in a boxplot sub-mark override', { ...base, mark: { type: 'boxplot', median: { color: { signal: 'color' } } } }, '"signal" at $.mark.median.color (signals are disabled)'],
     ['a timed string range bound', { ...base, encoding: { ...unit.encoding, color: { condition: { test: { field: 'x', timeUnit: 'month', range: ['length(sequence(0,1e8))', 3] }, value: 'red' }, value: 'blue' } } }, 'at $.encoding.color.condition.test.range[0]: with a timeUnit'],
     ['a timed string oneOf', { ...base, encoding: { ...unit.encoding, color: { condition: { test: { field: 'x', timeUnit: 'day', oneOf: [1, 'length(sequence(0,1e8))'] } , value: 'red' } } } }, 'at $.encoding.color.condition.test.oneOf[1]: with a timeUnit'],
     ['a DateTime month expression in a range', { ...base, encoding: { ...unit.encoding, color: { condition: { test: { field: 'x', range: [{ month: 'length(sequence(0,1e8))' }, null] }, value: 'red' }, value: 'blue' } } }, '"month" at $.encoding.color.condition.test.range[0] (must be a whole number from 1 to 12 or a month name)'],
@@ -338,5 +343,19 @@ describe('Vega-Lite refusals name the key and its path', () => {
     expect(message).toMatch(/^Chart refused: "x{39}…" at \$\.encoding \(expressions are disabled\)$/)
     const nested = refusal({ ...base, encoding: { ...unit.encoding, ['y'.repeat(500)]: { expr: 'x' } } })
     expect(nested).toMatch(/^Chart refused: "expr" at \$\.encoding\.y{39}… \(expressions are disabled\)$/)
+  })
+})
+
+
+describe('inert chart image metadata', () => {
+  it('discards nonvisual data descriptions while preserving literal label text', () => {
+    const source = '<svg xmlns="http://www.w3.org/2000/svg"><text aria-label="https://example.com &lt;label&gt;">https://example.com &lt;label&gt;</text></svg>'
+    const clean = sanitizeSvg(source, {stripAriaLabels:true})
+    expect(clean).not.toContain('aria-label')
+    expect(clean).toContain('https://example.com &lt;label&gt;')
+  })
+  it('still refuses active attributes after stripping metadata', () => {
+    const source = '<svg xmlns="http://www.w3.org/2000/svg"><text aria-label="https://example.com" onload="alert(1)">label</text></svg>'
+    expect(() => sanitizeSvg(source, {stripAriaLabels:true})).toThrow('Unsupported SVG attribute: onload')
   })
 })

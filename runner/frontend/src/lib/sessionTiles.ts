@@ -7,6 +7,11 @@ export function sessionMonogram(title: string) {
   const words = title.trim().match(/[\p{L}\p{N}]+/gu) ?? []
   return (words.length > 1 ? [...words[0]!][0]! + [...words[1]!][0]! : words[0]?.slice(0, 2) || '??').toLocaleUpperCase('en-US')
 }
+// themecheck:allow-file BLG-473: projectTint hashes a repo path to one of 360 hues so many
+// different projects stay visually distinct; there is no fixed token list that could stand in
+// for an arbitrary hash-derived hue, only the saturation/lightness around it are fixed design
+// constants. SessionTiles.css pairs it with --runner-primary-fg, not a hardcoded white, for the
+// monogram text.
 export function projectTint(session: SessionInfo) {
   const project = !isNoRepo(session.repo) ? session.repo : session.project_path
   let hash = 0

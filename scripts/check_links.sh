@@ -109,12 +109,13 @@ while IFS= read -r md; do
   done < <(links_of "$md")
 done < <(printf '%s\n' "$files" | grep -E '\.md$' || true)
 
-# Stale references, in every text file.
+# Stale references, in every text file. BLG-368 explicitly adds one ignored
+# local telemetry file; every other retired path remains forbidden. Preserve lines.
 while IFS= read -r f; do
   grep -Iq . "$f" 2>/dev/null || continue
   while IFS=: read -r ln rest; do
     bad "$f" "$ln" "mentions a deleted path or retired term: $(printf '%s' "$rest" | cut -c1-80)"
-  done < <(grep -nE "$stale" "$f" || true)
+  done < <(sed -E 's@\.super''powers/gate-runs\.jsonl([^[:alnum:]_./-]|$)@LOCAL_GATE_RECORD\1@g' "$f" | grep -nE "$stale" || true)
 done < <(printf '%s\n' "$files" | grep -Ev "$stale_skip" || true)
 
 if [ "$fail" -ne 0 ]; then

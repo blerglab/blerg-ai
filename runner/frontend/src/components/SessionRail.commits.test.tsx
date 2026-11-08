@@ -1,7 +1,7 @@
 // A Plan chip naming one commit with no published diff opens that commit's diff, generated on demand
 // from the session's workspace, in Blerg's diff viewer (card #131).
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { act, render, screen, fireEvent, within } from '@testing-library/react'
+import { act, render, screen, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import type { TransportFiles } from '@blerglab/chat'
 import SessionRail, { type SessionRailProps } from './SessionRail'
@@ -38,7 +38,7 @@ describe('Plan: a commit chip with no published diff', () => {
     await act(async () => { fireEvent.click(chip) })
     expect(ops.commitDiff).toHaveBeenCalledWith(expect.any(String), SHA, expect.any(AbortSignal))
     const dialog = screen.getByRole('dialog', { name: 'Commit 1a2b3c4' })
-    expect(within(dialog).getByText(/From the session’s workspace · blerg/)).toBeTruthy()
+    expect(dialog.querySelector('.viewer-path')).toHaveAttribute('title', expect.stringContaining('From the workspace · blerg'))
     expect(dialog).toHaveTextContent('lookup.go')
     expect(onOpenArtifact).not.toHaveBeenCalled()
   })
@@ -55,6 +55,6 @@ describe('Plan: a commit chip with no published diff', () => {
     const toggle = screen.queryByTestId('rail-plan-done-toggle')
     if (toggle && toggle.getAttribute('aria-expanded') === 'false') fireEvent.click(toggle)
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Open the diff of commit 1a2b3c4' })) })
-    expect(screen.getByTestId('commit-none')).toHaveTextContent('can’t be read from the session’s workspace right now')
+    expect(screen.getByTestId('commit-none')).toHaveTextContent('can’t be read from the workspace right now')
   })
 })

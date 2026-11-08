@@ -45,6 +45,7 @@ type remoteWorkspaceExplorer struct {
 	output                   *os.File
 	scanner                  *bufio.Scanner
 	closed, failed           bool
+	installFailed            bool // a rebuild failed; a repeated install may retry it
 }
 
 func (r *remoteWorkspaceExplorer) startHelper(ctx context.Context) error {
@@ -101,6 +102,37 @@ func (r *remoteWorkspaceExplorer) startHelper(ctx context.Context) error {
 	}
 	r.expected = &prepared
 	r.start.GitPins = prepared.Pins
+	return nil
+}
+
+func (r *remoteWorkspaceExplorer) installMembership(ctx context.Context, start WorkspaceExplorerStart) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.failed && !r.installFailed {
+		return errors.New("explorer helper fenced")
+	}
+	r.failed, r.installFailed = false, false
+	if err := r.stopHelper(); err != nil {
+		return err
+	}
+	previous := r.expected
+	r.start, r.expected = start, nil
+	if err := r.startHelper(ctx); err != nil {
+		// Readers stay fenced; the journal retries this rebuild.
+		r.failed, r.installFailed = true, true
+		r.expected = previous
+		return err
+	}
+	if previous == nil {
+		return nil
+	}
+	for id, root := range previous.Members {
+		if next, kept := r.expected.Members[id]; kept && next != root {
+			r.failed = true
+			_ = r.stopHelper()
+			return errors.New("explorer helper root changed")
+		}
+	}
 	return nil
 }
 func equalWorkspaceRoots(a, b map[string]protocol.WorkspaceRoot) bool {
@@ -197,17 +229,23 @@ func (r *remoteWorkspaceExplorer) Explore(ctx context.Context, req protocol.Work
 	if req.SessionID != r.start.SessionID || req.WorkspaceRuntimeRef != r.start.Runtime {
 		return result
 	}
-	if r.startHelper(ctx) != nil {
+	if err := r.startHelper(ctx); err != nil {
+		logDaemonFailure("workspace helper start", err)
 		return result
 	}
 	var reply protocol.WorkspaceExplorerResult
-	if r.exchange(ctx, req, &reply) != nil {
+	if err := r.exchange(ctx, req, &reply); err != nil {
+		logDaemonFailure("workspace helper exchange", err)
 		_ = r.stopHelper()
 		return result
 	}
 	if reply.Type != result.Type || reply.RequestID != req.RequestID || reply.SessionID != req.SessionID || reply.WorkspaceRuntimeRef != req.WorkspaceRuntimeRef || reply.Operation != req.Operation {
+		logDaemonFailure("workspace helper reply identity", nil)
 		_ = r.stopHelper()
 		return result
+	}
+	if !reply.OK && protocol.ValidWorkspaceStatusReason(reply.StatusReason) {
+		logDaemonFailure("workspace helper status: "+reply.StatusReason, nil)
 	}
 	return reply
 }
@@ -218,15 +256,18 @@ func (r *remoteWorkspaceExplorer) ReadFile(ctx context.Context, req protocol.Rea
 	if req.SessionID != r.start.SessionID || req.WorkspaceRuntimeRef != r.start.Runtime {
 		return result
 	}
-	if r.startHelper(ctx) != nil {
+	if err := r.startHelper(ctx); err != nil {
+		logDaemonFailure("workspace helper start", err)
 		return result
 	}
 	var reply protocol.WorkspaceFileResult
-	if r.exchange(ctx, req, &reply) != nil {
+	if err := r.exchange(ctx, req, &reply); err != nil {
+		logDaemonFailure("workspace helper exchange", err)
 		_ = r.stopHelper()
 		return result
 	}
 	if reply.Type != result.Type || reply.RequestID != req.RequestID || reply.SessionID != req.SessionID || reply.WorkspaceRuntimeRef != req.WorkspaceRuntimeRef {
+		logDaemonFailure("workspace helper reply identity", nil)
 		_ = r.stopHelper()
 		return result
 	}

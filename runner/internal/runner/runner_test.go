@@ -172,7 +172,7 @@ func TestPrepareWorkspaceFreshCloneAndWipPush(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("commit: %v: %s", err, out)
 	}
-	PushWip(workDir, "s1")
+	PushWip(workDir, "s1", "", false)
 
 	// origin now has the wip branch
 	if out := gitT(t, bare, "branch"); !strings.Contains(out, "wip/s1") {
@@ -180,7 +180,7 @@ func TestPrepareWorkspaceFreshCloneAndWipPush(t *testing.T) {
 	}
 
 	// PushWip with no new commits is a no-op (should not error/log-fatal)
-	PushWip(workDir, "s1")
+	PushWip(workDir, "s1", "", false)
 }
 
 // A "No repository" pod gets an empty workspace directory and never touches
@@ -208,7 +208,7 @@ func TestPrepareWorkspaceNoRepoIsEmptyAndNeverClones(t *testing.T) {
 		if err != nil || len(entries) != 0 {
 			t.Errorf("resume=%v: workspace should exist and be empty: %v, %d entries", resume, err, len(entries))
 		}
-		PushWip(workDir, cfg.SessionID) // no repository: must neither fail nor create one
+		PushWip(workDir, cfg.SessionID, "", false) // no repository: must neither fail nor create one
 		if _, err := os.Stat(filepath.Join(workDir, ".git")); !os.IsNotExist(err) {
 			t.Errorf("resume=%v: a .git appeared in the no-repo workspace", resume)
 		}
@@ -243,7 +243,7 @@ func TestPrepareWorkspaceResumesFromWip(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("commit: %v: %s", err, out)
 	}
-	PushWip(work1, "s2")
+	PushWip(work1, "s2", "", false)
 
 	// Second "pod": resume — must land on the wip branch with the work.
 	cfg2 := Config{Home: t.TempDir(), Repo: "proj", SessionID: "s2", GitURL: bare, Resume: true}
@@ -340,7 +340,7 @@ func TestPrepareWorkspaceNewRepoClonesOrInitialises(t *testing.T) {
 		t.Fatalf("new repository is not clean: %q", out)
 	}
 	// Nothing to push yet: PushWip is a no-op (no HEAD).
-	PushWip(workDir, cfg.SessionID)
+	PushWip(workDir, cfg.SessionID, "", false)
 
 	// A resume of an initialised session clones once the remote exists (the
 	// repository was created in the meantime), and initialises again otherwise.
@@ -408,7 +408,7 @@ func TestNewRepoNoteAndPushProblem(t *testing.T) {
 	var reports []string
 	pushProblem = func(_, sessionID, detail string) { reports = append(reports, sessionID+": "+detail) }
 	t.Cleanup(func() { pushProblem = nil })
-	PushWip(workDir, "s-p")
+	PushWip(workDir, "s-p", "", false)
 	if len(reports) != 1 || !strings.Contains(reports[0], "s-p: the remote repository does not exist") {
 		t.Fatalf("reports = %v", reports)
 	}
@@ -440,7 +440,7 @@ func TestPrepareExistingWorkspacePinsTrustedPushDestination(t *testing.T) {
 	other := makeBareRepo(t)
 	gitT(t, dir, "remote", "set-url", "origin", other)
 	gitT(t, dir, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "--allow-empty", "-m", "existing work")
-	PushWip(dir, cfg.SessionID)
+	PushWip(dir, cfg.SessionID, "", false)
 	if got := gitT(t, bare, "rev-parse", "refs/heads/wip/existing"); got != gitT(t, dir, "rev-parse", "HEAD") {
 		t.Fatal("existing checkout did not push to launch destination")
 	}
@@ -451,5 +451,176 @@ func TestPrepareExistingWorkspacePinsTrustedPushDestination(t *testing.T) {
 	cfg.GitURL = ""
 	if _, _, err := PrepareWorkspace(cfg); err == nil {
 		t.Fatal("accepted existing checkout without trusted destination")
+	}
+}
+
+func TestPrepareWorkspaceCustomBranchPushAndResume(t *testing.T) {
+	bare := makeBareRepo(t)
+	cfg := Config{Home: t.TempDir(), Repo: "proj", SessionID: "s1", WorkBranch: "dev/person/branch-fix", WorkBranchCustom: true, GitURL: bare}
+
+	workDir, state, err := PrepareWorkspace(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != "fresh-clone" {
+		t.Fatalf("state = %q", state)
+	}
+	// fresh sessions work on the wip branch from the start
+	if br := gitT(t, workDir, "branch", "--show-current"); br != cfg.WorkBranch {
+		t.Fatalf("branch = %q", br)
+	}
+
+	// commit + push wip
+	if err := os.WriteFile(filepath.Join(workDir, "new.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, workDir, "add", ".")
+	cmd := exec.Command("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "work")
+	cmd.Dir = workDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v: %s", err, out)
+	}
+	PushWip(workDir, "s1", cfg.WorkBranch, cfg.WorkBranchCustom)
+
+	// origin now has the wip branch
+	if out := gitT(t, bare, "branch"); !strings.Contains(out, cfg.WorkBranch) {
+		t.Fatalf("wip branch not pushed: %s", out)
+	}
+
+	// PushWip with no new commits is a no-op (should not error/log-fatal)
+	PushWip(workDir, "s1", cfg.WorkBranch, cfg.WorkBranchCustom)
+	cfg.Home = t.TempDir()
+	cfg.Resume = true
+	resumed, state, err := PrepareWorkspace(cfg)
+	if err != nil || state != "resumed-from-wip" {
+		t.Fatalf("resume = %q, %v", state, err)
+	}
+	if br := gitT(t, resumed, "branch", "--show-current"); br != cfg.WorkBranch {
+		t.Fatalf("resumed branch=%q", br)
+	}
+}
+
+// A "No repository" pod gets an empty workspace directory and never touches
+// git: a GitURL that would fail any clone is ignored, a resume is the same
+// empty directory, and the per-turn wip push is a silent no-op.
+
+func TestPrepareWorkspaceCustomBranchRefusesExistingDestination(t *testing.T) {
+	bare := makeBareRepo(t)
+	cfg := Config{Home: t.TempDir(), Repo: "proj", SessionID: "first", WorkBranch: "dev/person/existing", WorkBranchCustom: true, GitURL: bare}
+	dir, _, err := PrepareWorkspace(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	PushWip(dir, cfg.SessionID, cfg.WorkBranch, cfg.WorkBranchCustom)
+	previous := gitT(t, bare, "rev-parse", "refs/heads/"+cfg.WorkBranch)
+	cfg.Home = t.TempDir()
+	cfg.SessionID = "second"
+	if _, _, err := PrepareWorkspace(cfg); err == nil {
+		t.Fatal("a fresh session reused another branch")
+	}
+	if got := gitT(t, bare, "rev-parse", "refs/heads/"+cfg.WorkBranch); got != previous {
+		t.Fatal("existing branch changed")
+	}
+}
+
+func TestCustomBranchPushDoesNotOverwriteRemoteChanges(t *testing.T) {
+	bare := makeBareRepo(t)
+	cfg := Config{Home: t.TempDir(), Repo: "proj", SessionID: "lease", WorkBranch: "dev/person/lease", WorkBranchCustom: true, GitURL: bare}
+	dir, _, err := PrepareWorkspace(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	PushWip(dir, cfg.SessionID, cfg.WorkBranch, cfg.WorkBranchCustom)
+	before := gitT(t, bare, "rev-parse", "refs/heads/"+cfg.WorkBranch)
+	tree := gitT(t, bare, "rev-parse", before+"^{tree}")
+	external := gitT(t, bare, "-c", "user.name=Example Developer", "-c", "user.email=developer@example.com", "commit-tree", tree, "-p", before, "-m", "External work")
+	gitT(t, bare, "update-ref", "refs/heads/"+cfg.WorkBranch, external, before)
+	if err := os.WriteFile(filepath.Join(dir, "local.txt"), []byte("local work"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, dir, "add", ".")
+	gitT(t, dir, "-c", "user.name=Example Developer", "-c", "user.email=developer@example.com", "commit", "-qm", "Local work")
+	PushWip(dir, cfg.SessionID, cfg.WorkBranch, cfg.WorkBranchCustom)
+	if got := gitT(t, bare, "rev-parse", "refs/heads/"+cfg.WorkBranch); got != external {
+		t.Fatal("custom branch push overwrote external work")
+	}
+	if _, err := gitServed(dir, cfg.GitURL, "upload-pack", "fetch", "--", cfg.GitURL, "+refs/heads/"+cfg.WorkBranch+":refs/remotes/origin/"+cfg.WorkBranch); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, dir, "-c", "user.name=Example Developer", "-c", "user.email=developer@example.com", "merge", "--no-edit", "origin/"+cfg.WorkBranch)
+	PushWip(dir, cfg.SessionID, cfg.WorkBranch, cfg.WorkBranchCustom)
+	if got := gitT(t, bare, "rev-parse", "refs/heads/"+cfg.WorkBranch); got != gitT(t, dir, "rev-parse", "HEAD") {
+		t.Fatal("integrated work was not delivered")
+	}
+
+}
+
+func TestReadableDefaultResumeWithoutPush(t *testing.T) {
+	bare := makeBareRepo(t)
+	cfg := Config{Home: t.TempDir(), Repo: "proj", SessionID: "default", WorkBranch: "wip/ticket-data-7d67a123", GitURL: bare, Resume: true}
+	dir, _, err := PrepareWorkspace(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gitT(t, dir, "branch", "--show-current"); got != cfg.WorkBranch {
+		t.Fatalf("branch=%q", got)
+	}
+}
+
+func TestReadableDefaultLaunchWithFailedRemoteProbe(t *testing.T) {
+	bare := makeBareRepo(t)
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	script := "#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = ls-remote ]; then exit 1; fi\ndone\nexec '" + git + "' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cfg := Config{Home: t.TempDir(), Repo: "proj", SessionID: "default", WorkBranch: "wip/ticket-data-7d67a123", GitURL: bare}
+	dir, _, err := PrepareWorkspace(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gitT(t, dir, "branch", "--show-current"); got != cfg.WorkBranch {
+		t.Fatalf("branch=%q", got)
+	}
+}
+
+func TestReadableDefaultPushAfterAgentAmend(t *testing.T) {
+	bare := makeBareRepo(t)
+	cfg := Config{Home: t.TempDir(), Repo: "proj", SessionID: "default", WorkBranch: "wip/ticket-data-7d67a123", GitURL: bare}
+	dir, _, err := PrepareWorkspace(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	PushWip(dir, cfg.SessionID, cfg.WorkBranch, cfg.WorkBranchCustom)
+	gitT(t, dir, "-c", "user.name=Example Developer", "-c", "user.email=developer@example.com", "commit", "--amend", "--no-edit", "--allow-empty")
+	if out, err := gitServed(dir, cfg.GitURL, "receive-pack", "push", "--force", "--", cfg.GitURL, "HEAD:"+cfg.WorkBranch); err != nil {
+		t.Fatalf("agent push: %v: %s", err, out)
+	}
+	gitT(t, dir, "-c", "user.name=Example Developer", "-c", "user.email=developer@example.com", "commit", "--allow-empty", "-m", "Next turn")
+	PushWip(dir, cfg.SessionID, cfg.WorkBranch, cfg.WorkBranchCustom)
+	if got := gitT(t, bare, "rev-parse", "refs/heads/"+cfg.WorkBranch); got != gitT(t, dir, "rev-parse", "HEAD") {
+		t.Fatal("later automatic push stopped after agent amend")
+	}
+}
+
+func TestConfigFromEnvBranchTemplateIntent(t *testing.T) {
+	t.Setenv("BLERG_RUNNER_WORK_BRANCH", "wip/ticket-data-7d67a123")
+	for _, value := range []string{"", "false", "true"} {
+		t.Setenv("BLERG_RUNNER_WORK_BRANCH_CUSTOM", value)
+		if cfg := ConfigFromEnv(); cfg.WorkBranchCustom != (value == "true") {
+			t.Fatalf("signal %q: %v", value, cfg.WorkBranchCustom)
+		}
+	}
+}
+
+func TestExplicitTemplateStrictWithLegacyName(t *testing.T) {
+	cfg := Config{Home: t.TempDir(), Repo: "proj", SessionID: "template", WorkBranch: "wip/template", WorkBranchCustom: true, GitURL: makeBareRepo(t), Resume: true}
+	if _, _, err := PrepareWorkspace(cfg); err == nil {
+		t.Fatal("explicit template skipped strict resume checks because its name matched the legacy default")
 	}
 }

@@ -131,6 +131,9 @@ func TestReviewDiscoveryOverActualDesktopTransport(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("real spawn did not reach desktop")
 	}
+	if parentSpawn.InitialPrompt != "Review" {
+		t.Fatalf("parent prompt includes internal instructions: %q", parentSpawn.InitialPrompt)
+	}
 	parent, err := db.GetSession(t.Context(), f.pool, parentSpawn.SessionID)
 	if err != nil {
 		t.Fatal(err)
@@ -141,6 +144,9 @@ func TestReviewDiscoveryOverActualDesktopTransport(t *testing.T) {
 	}
 	select {
 	case msg := <-spawned:
+		if msg.InitialPrompt != "Review member" {
+			t.Fatalf("child prompt includes internal instructions: %q", msg.InitialPrompt)
+		}
 		if msg.Workspace == nil || len(msg.Workspace.Members) != 1 {
 			t.Fatal("child lost immutable subset")
 		}
@@ -284,6 +290,9 @@ func TestReviewClusterChildUsesRegisteredWorkspaceConsumer(t *testing.T) {
 		child, problem := f.api.startChild(t.Context(), parent, selection, "request:review", key)
 		if problem != nil || !consumer.prepared || consumer.manifest == nil {
 			t.Fatalf("cluster subset handoff: %v", problem)
+		}
+		if consumer.prompt != "Review selected members" {
+			t.Fatalf("cluster child prompt includes internal instructions: %q", consumer.prompt)
 		}
 		expected := 1
 		if i > 0 {

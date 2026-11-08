@@ -9,6 +9,10 @@ import "net/http"
 // connection is a standing credential to a third-party server. The write handlers are
 // same-origin checked themselves. Nothing under /internal/ sets CORS headers.
 func (d Deps) registerMCPRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /api/mcp/session-oauth/preview", requireHumanPrincipal(d.handleSessionOAuthPreview, d, "card.read"))
+	mux.HandleFunc("POST /api/mcp/session-oauth/{id}/start", requireHumanPrincipal(d.handleSessionOAuthStart, d, "card.read"))
+	mux.HandleFunc("POST /api/mcp/session-oauth/{id}/cancel", requireHumanPrincipal(d.handleSessionOAuthCancel, d, "card.read"))
+	mux.HandleFunc("GET /api/mcp/session-oauth/{id}", requireHumanPrincipal(d.handleSessionOAuthStatus, d, "card.read"))
 	mux.HandleFunc("GET /api/mcp/connections", requireHumanPrincipal(d.handleListMCPConnections, d, "card.read"))
 	mux.HandleFunc("POST /api/mcp/connections", requireHumanPrincipal(d.handleCreateMCPConnection, d, "card.read"))
 	mux.HandleFunc("PATCH /api/mcp/connections/{id}", requireHumanPrincipal(d.handlePatchMCPConnection, d, "card.read"))
@@ -21,6 +25,9 @@ func (d Deps) registerMCPRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/mcp/connections/{id}/reconnect", requireHumanPrincipal(d.handleReconnectMCPConnection, d, "card.read"))
 	mux.HandleFunc("GET "+mcpOAuthCallback, d.handleMCPOAuthCallback)
 
+	mux.HandleFunc("POST /internal/mcp/session-connections/lifecycle", d.handleInternalSessionMCPLifecycle)
+	mux.HandleFunc("POST /internal/mcp/session-connections/admit", d.handleInternalSessionMCPAdmit)
+	mux.HandleFunc("POST /internal/mcp/session-connections/token", d.handleInternalSessionMCPToken)
 	mux.HandleFunc("POST /internal/mcp/connections/list", d.handleInternalListMCPConnections)
 	mux.HandleFunc("POST /internal/mcp/connections/token", d.handleInternalMCPToken)
 	mux.HandleFunc("POST /internal/mcp/connections/defaults", d.handleInternalMCPDefaults)

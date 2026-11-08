@@ -52,7 +52,7 @@ function fakeSocket(opts: { open?: boolean } = {}) {
 }
 
 // The members every subscriber gives (onEvents, onReset and onAskClosed are optional).
-type MockHandlers = { [K in keyof Omit<SubscribeHandlers, 'onEvents' | 'onReset' | 'onAskClosed'>]: Mock<SubscribeHandlers[K]> }
+type MockHandlers = { [K in keyof Omit<SubscribeHandlers, 'onEvents' | 'onReset' | 'onAskClosed' | 'onArtifactUpdated' | 'onArtifactsStale'>]: Mock<SubscribeHandlers[K]> }
 function handlers(): MockHandlers {
   return {
     onEvent: vi.fn<SubscribeHandlers['onEvent']>(),
@@ -651,6 +651,16 @@ describe('createBlergTransport messages', () => {
     expect(socket.sent).toEqual([{ type: 'agent_user_message', session_id: 's1', text: 'yes', client_id: 'q-2', answer_message_id: 'm1' }])
   })
 
+  it('preserves withdrawal on live updates and reconnect', () => {
+    const { t, socket } = make()
+    const onAskClosed = vi.fn()
+    t.subscribe('s1', {}, { ...handlers(), onAskClosed })
+    const message = { id: 'm1', session_id: 's1', kind: 'ask', status: 'withdrawn', answer: null }
+    socket.emit({ type: 'message_answered', message })
+    socket.emit({ type: 'initial_state', daemons: [], sessions: [], messages: [message] })
+    expect(onAskClosed.mock.calls).toEqual([['m1', '', false, undefined, true], ['m1', '', false, undefined, true]])
+  })
+
   it('reports the asks of its session the server closed: live, and those closed while away', () => {
     const { t, socket } = make()
     const onAskClosed = vi.fn()
@@ -692,6 +702,12 @@ describe('createBlergTransport messages', () => {
     expect(socket.sent).toEqual([{ type: 'interrupt_session', session_id: 's1' }])
     socket.drop()
     await expect(t.interrupt!('s1')).rejects.toThrow(/not connected/i)
+  })
+
+  it('interrupt carries the turn event the person pressed Stop on', async () => {
+    const { t, socket } = make()
+    await t.interrupt!('s1', 'turn-event')
+    expect(socket.sent).toEqual([{ type: 'interrupt_session', session_id: 's1', target_event_id: 'turn-event' }])
   })
 
   it('stop ends the session through the browser route with the bearer token', async () => {

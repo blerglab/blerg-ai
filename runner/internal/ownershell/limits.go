@@ -1,6 +1,9 @@
 package ownershell
 
-import "time"
+import (
+	"log"
+	"time"
+)
 
 // MinLimit is the shortest inactivity limit an administrator may set. It is also the time an
 // already-running shell keeps after an administrator shortens its limit.
@@ -108,7 +111,7 @@ const (
 	maxEnded       = 1024
 )
 
-// endedShell records why an inactivity limit ended a shell. It holds no payload.
+// endedShell records why a shell ended. It holds no payload.
 type endedShell struct {
 	actor  Actor
 	reason Reason
@@ -116,7 +119,7 @@ type endedShell struct {
 	at     time.Time
 }
 
-// recordEndedLocked remembers why a limit ended s. Called under the manager lock.
+// recordEndedLocked remembers why s ended. Called under the manager lock.
 func (m *Manager) recordEndedLocked(s *shell, reason Reason, after time.Duration) {
 	if len(m.ended) >= maxEnded {
 		oldest := ""
@@ -127,6 +130,7 @@ func (m *Manager) recordEndedLocked(s *shell, reason Reason, after time.Duration
 		}
 		delete(m.ended, oldest)
 	}
+	log.Printf("owner shell end: shell_id=%s session_id=%s reason=%s", s.signed.Grant.ShellGeneration, s.binding.Session, reason)
 	m.ended[s.handle] = endedShell{actor: s.actor, reason: reason, after: after, at: m.now()}
 }
 
@@ -142,6 +146,12 @@ func (m *Manager) pruneEndedLocked() {
 // Ended reports why an inactivity limit ended the shell behind handle, only to the same
 // human login that owned it. ok is false for any other end, an unknown handle or another actor.
 func (m *Manager) Ended(a Actor, handle string) (reason Reason, after time.Duration, ok bool) {
+	reason, after, ok = m.EndReason(a, handle)
+	return reason, after, ok && (reason == ReasonIdle || reason == ReasonDetached)
+}
+
+// EndReason exposes only bounded structural metadata to the exact original human login.
+func (m *Manager) EndReason(a Actor, handle string) (reason Reason, after time.Duration, ok bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	e, found := m.ended[handle]

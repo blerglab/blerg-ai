@@ -842,3 +842,59 @@ func TestEmptyHostFolderCannotBindChild(t *testing.T) {
 		}
 	}
 }
+
+func TestCloneDestinationFollowsFolderBeforeClone(t *testing.T) {
+	root := fixtureRoot(t)
+	fixtureRepo(t, root, "group/api", false)
+	s := NewOwned(func() string { return root }, "desktop")
+	folder := find(t, list(t, s, "."), "group")
+	expand := request("expand")
+	expand.Folder = &protocol.SelectionRef{Path: folder.Path, SourceIdentity: folder.SourceIdentity}
+	selected := s.Handle(t.Context(), expand)
+	if !selected.OK {
+		t.Fatal(selected.ErrorCode)
+	}
+	manifest := manifestForSelection(selected.Resolved, "clone-parent")
+	bind := request("bind")
+	bind.SelectionIdentity = selected.Resolved.SelectionIdentity
+	bind.Manifest = &manifest
+	if result := s.Handle(t.Context(), bind); !result.OK {
+		t.Fatal(result.ErrorCode)
+	}
+	anchor, err := s.CloneDestination(t.Context(), manifest.LaunchGeneration)
+	if err != nil || anchor != "group" {
+		t.Fatalf("destination=%q err=%v", anchor, err)
+	}
+	fixtureRepo(t, root, anchor+"/new", false)
+	addition := request("addition")
+	addition.ParentLaunchGeneration = manifest.LaunchGeneration
+	addition.Members = []protocol.SelectionRef{{Path: anchor + "/new"}}
+	result := s.Handle(t.Context(), addition)
+	if !result.OK || result.Addition.PhysicalPath != "new" {
+		t.Fatalf("addition=%+v", result)
+	}
+	if _, err := s.CloneDestination(t.Context(), "missing"); err == nil {
+		t.Fatal("unbound workspace got a destination")
+	}
+	if err := os.Rename(filepath.Join(root, "group"), filepath.Join(root, "moved")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CloneDestination(t.Context(), manifest.LaunchGeneration); err == nil {
+		t.Fatal("missing workspace got a destination")
+	}
+	if err := os.Mkdir(filepath.Join(root, "group"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CloneDestination(t.Context(), manifest.LaunchGeneration); err == nil {
+		t.Fatal("replacement workspace got a clone destination")
+	}
+}
+
+func TestCloneDestinationAwaitsResume(t *testing.T) {
+	root := fixtureRoot(t)
+	service := NewOwned(func() string { return root }, "desktop")
+	_, err := service.CloneDestination(t.Context(), "parent")
+	if err == nil || err.Error() != "binding_pending" {
+		t.Fatalf("missing restart binding must be retryable: %v", err)
+	}
+}

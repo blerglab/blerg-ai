@@ -7,14 +7,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
+
+	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 )
+
+var hermesInterruptResultAfter = 30 * time.Second
 
 type hermesQueuedMsg struct {
 	queuedMsg
@@ -22,19 +25,26 @@ type hermesQueuedMsg struct {
 }
 
 type hermesDriver struct {
+	agent.InputClockSource
 	startCommand        func(*exec.Cmd) error
 	routeFingerprint    string
 	routeBound          bool
 	restoredFingerprint string
 	permanentFailure    bool
+	startFailure        string
 	cleanupUncertain    bool
 	// runCtx is the session's context (Run's): done only when the session is being stopped.
-	runCtx     context.Context
-	loaded     chan error
-	loadOnce   sync.Once
-	resumeGate func(context.Context)
-	retryWake  chan struct{}
-	cancelAsks func()
+	runCtx                     context.Context
+	loaded                     chan error
+	loadOnce                   sync.Once
+	resumeGate                 func(context.Context)
+	retryWake                  chan struct{}
+	stopWake                   chan struct{}
+	stopTimer                  *time.Timer
+	stopFallback, stopInFlight bool
+	retryInput                 *hermesQueuedMsg
+	turnEpoch                  uint64
+	cancelAsks                 func()
 
 	mcpGeneration     uint64
 	mcpInputGate      func(context.Context)
@@ -67,7 +77,7 @@ func newHermesDriver(o AgentDriverOpts) *hermesDriver {
 	if env == nil {
 		env = sanitizedEnviron()
 	}
-	return &hermesDriver{workDir: o.WorkDir, engineModel: newEngineModel(o), sessionID: o.SessionID, emitter: o.Emitter, env: env, queue: make(chan hermesQueuedMsg, 64), settings: make(chan struct{}, 1), loaded: make(chan error, 1), retryWake: make(chan struct{}, 1)}
+	return &hermesDriver{workDir: o.WorkDir, engineModel: newEngineModel(o), sessionID: o.SessionID, emitter: o.Emitter, env: env, queue: make(chan hermesQueuedMsg, 64), settings: make(chan struct{}, 1), loaded: make(chan error, 1), retryWake: make(chan struct{}, 1), stopWake: make(chan struct{}, 1)}
 }
 func (d *hermesDriver) emit(kind string, payload any) {
 	d.emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: kind, Payload: payload})
@@ -78,6 +88,7 @@ func (d *hermesDriver) Enqueue(text, source string) {
 	d.EnqueueInput(agent.Input{Text: text, Source: source})
 }
 func (d *hermesDriver) EnqueueInput(in agent.Input) {
+	in = d.WithPersonTime(in)
 	if in.Source == "" {
 		in.Source = "chat"
 	}
@@ -117,19 +128,70 @@ func (d *hermesDriver) SetModel(model, effort, _ string) {
 }
 func (d *hermesDriver) Interrupt() {
 	d.mu.Lock()
-	rpc, sid := d.rpc, d.runtimeID
-	if d.active || d.starting || len(d.queue) > 0 {
-		d.interruptRequested = true
+	if (!d.active && !d.starting) || d.stopInFlight {
+		d.mu.Unlock()
+		return
 	}
+	d.interruptRequested = true
+	rpc, sid, cmd, epoch := d.rpc, d.runtimeID, d.cmd, d.turnEpoch
 	active := d.active
 	cancelAsks := d.cancelAsks
+	if !active || rpc == nil || sid == "" {
+		d.mu.Unlock()
+		return
+	}
+	d.stopInFlight = true
+	if d.stopTimer == nil {
+		d.stopTimer = time.AfterFunc(hermesInterruptResultAfter, func() {
+			d.mu.Lock()
+			valid := d.cmd == cmd && d.turnEpoch == epoch && d.active && d.interruptRequested
+			if valid {
+				d.stopFallback = true
+			}
+			d.mu.Unlock()
+			if !valid {
+				return
+			}
+			if err := cancelEngineCommand(cmd, true); err != nil {
+				d.mu.Lock()
+				d.stopFallback = false
+				d.stopInFlight = false
+				d.stopTimer = nil
+				d.mu.Unlock()
+				d.emit("error", agent.ErrorPayload{Message: "The worker could not stop safely: " + safeEngineCommandError(err, d.env) + ". Queued messages are still waiting; try Stop again.", Retryable: true, Code: agent.ErrorCodeStopFailed})
+			}
+			select {
+			case d.stopWake <- struct{}{}:
+			default:
+			}
+		})
+	}
 	d.mu.Unlock()
 	if cancelAsks != nil {
 		cancelAsks()
 	}
-	if active && rpc != nil && sid != "" {
-		go func() { _, _ = rpc.call(context.Background(), "session.interrupt", map[string]any{"session_id": sid}) }()
+	select {
+	case d.stopWake <- struct{}{}:
+	default:
 	}
+	go func() {
+		ctx, cancel := context.WithTimeout(d.runContext(), hermesInterruptResultAfter)
+		defer cancel()
+		_, err := rpc.call(ctx, "session.interrupt", map[string]any{"session_id": sid})
+		d.mu.Lock()
+		valid := d.cmd == cmd && d.turnEpoch == epoch && d.active && !d.stopFallback
+		if d.cmd == cmd && d.turnEpoch == epoch {
+			d.stopInFlight = false
+		}
+		d.mu.Unlock()
+		select {
+		case d.stopWake <- struct{}{}:
+		default:
+		}
+		if err != nil && valid {
+			d.emit("error", agent.ErrorPayload{Message: "Hermes did not confirm Stop; queued messages are waiting for the worker to stop.", Retryable: true})
+		}
+	}()
 }
 func (d *hermesDriver) RestoreContext(events []agent.RestoredEvent) {
 	// A native ID is authoritative: never replace missing expected history with
@@ -170,7 +232,12 @@ func (d *hermesDriver) Run(ctx context.Context) {
 		d.loadOnce.Do(func() { d.loaded <- errors.New("hermes native gateway stopped before loading its conversation") })
 		d.mu.Lock()
 		d.closed = true
+		held := d.retryInput
+		d.retryInput = nil
 		d.mu.Unlock()
+		if held != nil {
+			d.emit("error", agent.ErrorPayload{Message: "Hermes gateway stopped before accepting this input", Retryable: true, ClientID: held.ClientID})
+		}
 		for {
 			select {
 			case m := <-d.queue:
@@ -192,9 +259,15 @@ func (d *hermesDriver) Run(ctx context.Context) {
 		d.runGateway(ctx)
 		d.mu.Lock()
 		unsafe := d.cleanupUncertain || d.permanentFailure
+		stopped := d.stopFallback
+		d.stopFallback = false
 		d.mu.Unlock()
 		if ctx.Err() != nil || unsafe {
 			return
+		}
+		if stopped {
+			failures = 0
+			continue
 		}
 		// A gateway in a sandbox whose container stopped can never start again: say what Docker
 		// recorded and return, so the session ends with it instead of waiting to retry for ever.
@@ -206,6 +279,13 @@ func (d *hermesDriver) Run(ctx context.Context) {
 		}
 		failures++
 		if failures >= 3 {
+			d.mu.Lock()
+			cause := d.startFailure
+			d.mu.Unlock()
+			if cause != "" {
+				d.emit("error", agent.ErrorPayload{Message: "The worker could not restart: " + cause + ". Queued messages were not delivered.", Retryable: false, Code: agent.ErrorCodeRuntimeStopped})
+				return
+			}
 			d.loadOnce.Do(func() { d.loaded <- errors.New("hermes native conversation was not restored") })
 			for {
 				select {
@@ -265,9 +345,16 @@ func (d *hermesDriver) runGateway(ctx context.Context) {
 	d.cmd = cmd
 	d.mu.Unlock()
 	if err = startEngineCommand(cmd, d.startCommand); err != nil {
-		d.emit("error", agent.ErrorPayload{Message: "Hermes native gateway could not start", Retryable: true})
+		cause := safeEngineCommandError(err, d.env)
+		d.mu.Lock()
+		d.startFailure = cause
+		d.mu.Unlock()
+		d.emit("error", agent.ErrorPayload{Message: "The worker could not start: " + cause, Retryable: true})
 		return
 	}
+	d.mu.Lock()
+	d.startFailure = ""
+	d.mu.Unlock()
 	_ = childOut.Close()
 	waited := make(chan error, 1)
 	go func() { waited <- cmd.Wait() }()
@@ -297,6 +384,11 @@ func (d *hermesDriver) runGateway(ctx context.Context) {
 			d.onEngine(cmd.Process.Pid, false)
 		}
 		d.mu.Lock()
+		if d.stopTimer != nil {
+			d.stopTimer.Stop()
+			d.stopTimer = nil
+		}
+		d.stopInFlight = false
 		d.cmd = nil
 		d.rpc = nil
 		d.runtimeID = ""
@@ -460,6 +552,18 @@ readyLoop:
 			inventory = run.processInventory(processCtx)
 			inventoryStarted = true
 		}
+		d.mu.Lock()
+		input := (<-chan hermesQueuedMsg)(d.queue)
+		retry := d.retryInput
+		if retry != nil {
+			ready := make(chan hermesQueuedMsg, 1)
+			ready <- *retry
+			input = ready
+		}
+		if d.interruptRequested || d.stopInFlight || d.stopFallback {
+			input = nil
+		}
+		d.mu.Unlock()
 		select {
 		case raw, ok := <-inventory:
 			if ok {
@@ -476,6 +580,8 @@ readyLoop:
 			} else {
 				inventory = nil
 			}
+		case <-d.stopWake:
+			continue
 		case <-ctx.Done():
 			return
 		case <-rpc.done:
@@ -486,7 +592,10 @@ readyLoop:
 				}
 				run.handle(frame) //nolint:contextcheck // run owns the gateway process context; question lifetimes derive from it.
 			}
-			if ctx.Err() == nil {
+			d.mu.Lock()
+			fallback := d.stopFallback
+			d.mu.Unlock()
+			if ctx.Err() == nil && !fallback {
 				d.emit("error", agent.ErrorPayload{Message: "Hermes gateway disconnected; the saved native conversation will be resumed", Retryable: true})
 			}
 			return
@@ -494,7 +603,7 @@ readyLoop:
 			if !run.applySettings() {
 				return
 			}
-		case msg := <-d.queue:
+		case msg := <-input:
 			for {
 				frame, ok := rpc.pop()
 				if !ok {
@@ -515,6 +624,14 @@ readyLoop:
 			if ctx.Err() != nil {
 				return
 			}
+			d.mu.Lock()
+			if d.interruptRequested {
+				d.retryInput = &msg
+				d.mu.Unlock()
+				continue
+			}
+			d.retryInput = nil
+			d.mu.Unlock()
 			if !run.applySettings() {
 				d.emit("error", agent.ErrorPayload{Message: "Hermes did not confirm the requested provider/model; this input was not sent", Retryable: true, ClientID: msg.ClientID})
 				return
@@ -538,7 +655,7 @@ readyLoop:
 			active := d.active
 			d.starting = !active
 			d.mu.Unlock()
-			text := msg.Text
+			text := msg.PlainText()
 			if !active {
 				d.mu.Lock()
 				note := strings.TrimSpace(d.adoptionNote + "\n\n" + d.restoredContext)
@@ -555,7 +672,15 @@ readyLoop:
 			raw, err := rpc.call(ctx, method, params)
 			d.mu.Lock()
 			d.starting = false
+			rejectedStop := err != nil && !active && d.interruptRequested
+			if err != nil && !active {
+				d.interruptRequested = false
+				d.stopInFlight = false
+			}
 			d.mu.Unlock()
+			if rejectedStop {
+				d.emit("stop_result", map[string]string{"state": "idle", "message": "Nothing was running; the input was rejected."})
+			}
 			if err != nil {
 				d.emit("error", agent.ErrorPayload{Message: err.Error(), Retryable: true, ClientID: msg.ClientID})
 				var rejection hermesRejection
@@ -569,6 +694,14 @@ readyLoop:
 			}
 			_ = json.Unmarshal(raw, &ack)
 			if !active && ack.Status != "streaming" && ack.Status != "queued" && ack.Status != "steered" && ack.Status != "redirected" {
+				d.mu.Lock()
+				stopping := d.interruptRequested
+				d.interruptRequested = false
+				d.stopInFlight = false
+				d.mu.Unlock()
+				if stopping {
+					d.emit("stop_result", map[string]string{"state": "idle", "message": "Nothing was running; the input was rejected."})
+				}
 				d.emit("error", agent.ErrorPayload{Message: "Hermes did not start a new turn for this input", Retryable: true, ClientID: msg.ClientID})
 				continue
 			}
@@ -582,6 +715,7 @@ readyLoop:
 			d.mu.Lock()
 			d.active = true
 			interrupted := d.interruptRequested
+			d.stopInFlight = false
 			d.restoredContext = ""
 			d.adoptionNote = ""
 			id := d.nativeID
@@ -592,7 +726,7 @@ readyLoop:
 			d.emit("user_message", msg.Payload())
 			d.emit("status_changed", agent.StatusPayload{Status: "running", Reason: "turn"})
 			if interrupted {
-				_, _ = rpc.call(ctx, "session.interrupt", map[string]any{"session_id": run.sid})
+				d.Interrupt() //nolint:contextcheck // Interrupt derives its deadline from the gateway process context.
 			}
 		case <-rpc.wake:
 			if frame, ok := rpc.pop(); ok {
@@ -636,7 +770,7 @@ func (d *hermesDriver) continueAdopted(prompt, shown string) bool {
 		return false
 	}
 	select {
-	case d.queue <- hermesQueuedMsg{queuedMsg: queuedMsg{Input: agent.Input{Text: prompt, Shown: shown, Source: "system"}, adoptionContinue: true}, model: d.model}:
+	case d.queue <- hermesQueuedMsg{queuedMsg: queuedMsg{Input: d.WithPersonTime(agent.Input{Text: prompt, Shown: shown, Source: "system"}), adoptionContinue: true}, model: d.model}:
 		return true
 	default:
 		return false
@@ -662,3 +796,12 @@ func (d *hermesDriver) addAdoptionWork(line string) {
 }
 
 func (d *hermesDriver) useCommandBoundary(f func(*exec.Cmd) error) { d.startCommand = f }
+
+func (d *hermesDriver) runContext() context.Context {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.runCtx != nil {
+		return d.runCtx
+	}
+	return context.Background()
+}

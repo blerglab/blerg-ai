@@ -1,3 +1,5 @@
+import { ExportTable } from './ContentActions'
+import { IconButton } from './IconButton'
 // Markdown renders model- and user-authored chat text as formatted Markdown
 // (CommonMark + GFM tables/strikethrough/task lists/autolinks).
 //
@@ -33,6 +35,7 @@
 // is, a body that is not a JSON object gets the raw block and a note, and a
 // fence that has not closed yet (still streaming) is a plain code block —
 // its JSON is never parsed, complete as it may look.
+import { jumpToElement } from './scrollToCall'
 import { createContext, isValidElement, memo, useContext, useEffect, useState, type ReactElement, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown, { type Components } from 'react-markdown'
@@ -49,6 +52,7 @@ import type { WorkspaceFile } from '../transport/types'
 import './markdown.css'
 import CodeBlock, { textOf } from './CodeBlock'
 import VisualBlock from './VisualBlock'
+import BoardSnapshot, { parseBoardSnapshot } from './BoardSnapshot'
 import { visualFence } from '../model/visualKind'
 import { useChat } from './context'
 import { RefSpanFor, rehypeRefs, useRefContext } from './RefLinks'
@@ -104,6 +108,10 @@ function FencedBlock({ children, position }: { children?: ReactNode; position?: 
   const lang = langFromInfo(code?.className)
   const visual = visualFence(code?.className)
   if (code && closed && visual) return <VisualBlock kind={visual} source={code.text.replace(/\n$/, '')} />
+  if (code && closed && code.className === 'language-board-snapshot') {
+    const data = parseBoardSnapshot(code.text)
+    if (data) return <BoardSnapshot data={data} />
+  }
   const plain = <CodeBlock lang={lang} closed={closed}>{children}</CodeBlock>
   const kind = cards && code ? cardKind(code.className) : null
   if (!cards || !code || kind === null || !closed) return plain
@@ -119,7 +127,7 @@ function FencedBlock({ children, position }: { children?: ReactNode; position?: 
   )
 }
 
-const WS_TITLE = 'Open from the session’s folder'
+const WS_TITLE = 'Open from the workspace’s folder'
 
 // Opens on Enter and Space like a button; stopPropagation as every link in a clickable card does.
 function wsProps(open: () => void) {
@@ -141,14 +149,25 @@ function scrollToFragment(from: HTMLElement, href: string) {
   const id = HEADING_ID_PREFIX + frag.toLowerCase()
   const root = from.closest('.md')
   const target = root ? Array.from(root.querySelectorAll('[id]')).find(el => el.id === id) : undefined
-  target?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+  if (target) jumpToElement(target, { block: 'start', behavior: 'smooth' })
 }
 
 // A control an image inside a link needs (Retry) is drawn just after the link, never inside it: a
 // button inside an <a> is invalid and reads to a screen reader as a button in a link.
 const AfterLink = createContext<{ inLink: boolean; slot: HTMLElement | null }>({ inLink: false, slot: null })
 
-function MarkdownLink(props: { href?: string; children?: ReactNode }) {
+type LinkNode = { type: string; tagName?: string; children?: LinkNode[] }
+function containsImage(node: LinkNode | undefined): boolean {
+  return node?.tagName === 'img' || !!node?.children?.some(containsImage)
+}
+function MarkdownLink({ href, children, node }: { href?: string; children?: ReactNode; node?: LinkNode }) {
+  // Only an image can need a Retry button outside its enclosing anchor. Ordinary
+  // text links must not schedule a second commit just to register an unused slot.
+  return containsImage(node)
+    ? <MarkdownImageLink href={href}>{children}</MarkdownImageLink>
+    : <MarkdownLinkInner href={href}>{children}</MarkdownLinkInner>
+}
+function MarkdownImageLink(props: { href?: string; children?: ReactNode }) {
   const [slot, setSlot] = useState<HTMLSpanElement | null>(null)
   return (
     <>
@@ -279,7 +298,7 @@ function WorkspaceImageRead({ path, read, alt, width, height, onRetry }: { path:
   if (url) return <img className="md-img" src={url} alt={alt} width={width} height={height} data-workspace-path={path} decoding="async" />
   if (failed === 'final') return <ImagePlaceholder alt={alt} />
   if (failed === 'retry') {
-    const retry = <button type="button" className="md-img-load" title={`Read ${path} again`} aria-label={`Retry ${alt || path}`} onClick={e => { e.preventDefault(); e.stopPropagation(); onRetry() }}>Retry</button>
+    const retry = <IconButton label={`Retry ${alt || path}`} onClick={e => { e.preventDefault(); e.stopPropagation(); onRetry() }} />
     if (!inLink) return <ImagePlaceholder alt={alt}>{retry}</ImagePlaceholder>
     return <><ImagePlaceholder alt={alt} />{slot && createPortal(retry, slot)}</>
   }
@@ -334,11 +353,7 @@ const components: Components = {
   },
   // `align` comes only from raw HTML, already limited to left/center/right/justify.
   table({ children, align }) {
-    return (
-      <div className={`md-table-wrap${align === 'center' ? ' is-centered' : ''}`}>
-        <table align={align}>{children}</table>
-      </div>
-    )
+    return <ExportTable align={align}>{children}</ExportTable>
   },
 }
 
@@ -383,6 +398,8 @@ export interface MarkdownProps {
    *  italic, strikethrough, links, references). Headings, lists, quotes, tables and code blocks
    *  fall back to their plain text, images to a link, raw HTML stays literal. */
   inline?: boolean
+  /** Compact titles can omit chat reference controls while retaining the safe inline renderer. */
+  references?: boolean
 }
 
 // The inline subset: everything else is unwrapped to its text. `span` carries the reference marks.
@@ -433,10 +450,11 @@ export function forgetMarkdown(): void { forgetRendered() }
 /** Test seam: how often a text had to be parsed, and the cache's size. */
 export const markdownCacheForTest = { misses: () => misses, chars: () => renderedChars, clear: () => { forgetRendered(); misses = 0 } }
 
-function MarkdownImpl({ text, className, cards, workspaceLinks, document: doc, html = false, inline = false }: MarkdownProps) {
+function MarkdownImpl({ text, className, cards, workspaceLinks, document: doc, html = false, inline = false, references = true }: MarkdownProps) {
   const [allImages, setAllImages] = useState(false)
   // Chat text in a chat that lends references (never a document, never raw HTML).
-  const refs = !!useRefContext() && !doc && !html
+  const refContext = useRefContext()
+  const refs = references && !!refContext && !doc && !html
   return (
     <div className={`md${inline ? ' md-inline' : ''}${className ? ` ${className}` : ''}`}>
       <Fence.Provider value={{ cards, source: text, workspace: workspaceLinks, doc, allImages, showAllImages: () => setAllImages(true), refs }}>

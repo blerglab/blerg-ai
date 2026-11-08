@@ -3,7 +3,7 @@ import { useMemo } from 'react'
 import { useSessionStore } from '../hooks/useSessionStore'
 import type { SessionInfo, SessionStatus } from '../types'
 import { getFocus, setFocus } from './sidebarPrefs'
-import { nestChildren, searchTree } from './sessionTree'
+import { nestChildren, searchTree, rootSessionId } from './sessionTree'
 import { isAutomated } from './startedBy'
 
 export const ACTIVE_STATUSES = new Set<SessionStatus>(['starting', 'running', 'idle', 'waiting'])
@@ -17,6 +17,9 @@ const newest = (a: SessionInfo, b: SessionInfo) => Date.parse(b.started_at) - Da
 
 /** Both sidebar forms consume this selector; sections, search and place rules live here. */
 export function selectSessionSections(sessions: SessionInfo[], query: string, focus: string | null, current?: string) {
+  current = rootSessionId(sessions, current)
+  // Viewing finished work keeps it in its section; selection must not make it live again.
+  if (sessions.some(s => s.id === current && (s.status === 'ended' || s.status === 'stopped'))) current = undefined
   const q = query.trim().toLowerCase()
   const tree = searchTree(nestChildren(sessions), q)
   const ids = new Set(sessions.map(s => s.id))
@@ -25,7 +28,7 @@ export function selectSessionSections(sessions: SessionInfo[], query: string, fo
   const starred = own.filter(s => ACTIVE_STATUSES.has(s.status) && s.starred).sort(newest)
   const inPlace = (s: SessionInfo) => !!q || !focus || (focus === 'cluster' ? s.runtime === 'cluster' : s.runtime !== 'cluster' && s.daemon_id === focus)
   const listed = own.filter(s => ACTIVE_STATUSES.has(s.status) && !s.starred && inPlace(s))
-  const selected = sessions.find(s => s.id === current && !s.archived_at && !s.parent_session_id)
+  const selected = sessions.find(s => s.id === current && !s.archived_at && nestChildren(sessions).top.some(root => root.id === s.id))
   if (selected && !starred.some(s => s.id === current) && !listed.some(s => s.id === current)) listed.push(selected)
   listed.sort(newest)
   const done = [...own.filter(s => !ACTIVE_STATUSES.has(s.status) && s.id !== current), ...sessions.filter(s => s.archived_at && (!q || `${s.title} ${s.repo}`.toLowerCase().includes(q)))]

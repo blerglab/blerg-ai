@@ -2,10 +2,14 @@
 .child-discard-status { display: block; color: var(--fog-dim); font-size: var(--text-xs); margin-top: 4px; }
 .child-card-actions { position: relative; flex: none; }
 .child-card-menu-button { border: 0; border-radius: 4px; color: var(--fog); background: transparent; min-width: 28px; min-height: 28px; font: inherit; cursor: pointer; }
-.child-card-menu { position: absolute; top: 100%; right: 0; z-index: 20; min-width: 150px; border: 1px solid var(--stone); border-radius: 6px; background: var(--scree-2); padding: 6px; box-shadow: 0 4px 12px rgba(0,0,0,.3); }
+.child-card-menu { position: absolute; top: 100%; right: 0; z-index: 20; min-width: 150px; border: 1px solid var(--stone); border-radius: 6px; background: var(--scree-2); padding: 6px; box-shadow: 0 4px 12px var(--shadow-3); }
 .child-card-menu[hidden] { display: none; }
 .child-card-menu .child-discard-trigger { width: 100%; text-align: left; color: var(--danger); background: transparent; border: 0; padding: 6px; cursor: pointer; font: inherit; font-size: var(--text-xs); }
 
 .rail-child-item.has-discard { position: relative; padding-right: 42px; }
 .rail-child-item > .child-discard-trigger { position: absolute; top: 6px; right: 6px; width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; }
 .child-discard-trigger:disabled { opacity: .5; cursor: default; }
+/* Discard is rare and destructive: quiet until the person reaches for it. */
+.rail-child-item > .child-discard-trigger { color: var(--fog-dim); border-radius: 4px; }
+.rail-child-item > .child-discard-trigger:hover:not(:disabled),
+.rail-child-item > .child-discard-trigger:focus-visible { color: var(--danger); text-decoration: none; }

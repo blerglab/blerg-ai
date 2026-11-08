@@ -56,6 +56,7 @@ describe('foldLive', () => {
     const r = reply({ subagents: [sub('k1'), sub('k2', { background: true })] })
     expect(foldLive(r, [ev('user_message', { source: 'system', text: 'x' }, 11)], T0).subagents.map(s => s.key)).toEqual(['k1', 'k2'])
     expect(foldLive(r, [ev('user_message', { source: 'usage_limit', text: '95%' }, 11)], T0).subagents.map(s => s.key)).toEqual(['k1', 'k2'])
+    expect(foldLive(r, [ev('user_message', { source: 'process_limit', text: 'limit' }, 11)], T0).subagents.map(s => s.key)).toEqual(['k1', 'k2'])
     expect(foldLive(r, [ev('user_message', { source: 'chat', text: 'also the docs' }, 11)], T0).subagents.map(s => s.key)).toEqual(['k2'])
   })
 
@@ -107,7 +108,10 @@ describe('foldLive', () => {
     // A person's message closes only an ask with no message id; a system line closes none.
     v = foldLive(r, [ev('ask', { body: 'Old style?' }, 11), ev('user_message', { source: 'system', text: 'x' }, 12)], T0)
     expect(v.asks).toHaveLength(2)
+    expect(foldLive(r, [ev('ask', { body: 'Old style?' }, 11), ev('user_message', { source: 'page_result', text: 'Untrusted page data' }, 12)], T0).asks).toHaveLength(2)
     expect(foldLive(r, [ev('ask', { body: 'Old style?' }, 11), ev('user_message', { source: 'usage_limit', text: '95%' }, 12)], T0).asks).toHaveLength(2)
+    expect(foldLive(r, [ev('ask', { body: 'Old style?' }, 11), ev('user_message', { source: 'process_limit', text: 'limit' }, 12)], T0).asks).toHaveLength(2)
+    expect(foldLive(r, [ev('ask', { body: 'Old style?' }, 11), ev('user_message', { source: 'blackboard_setup', text: 'Set up this workspace\'s blackboard.' }, 12)], T0).asks).toHaveLength(2)
     v = foldLive(r, [ev('ask', { body: 'Old style?' }, 11), ev('user_message', { source: 'chat', text: 'yes' }, 12)], T0)
     expect(v.asks.map(a => a.messageId)).toEqual(['m1'])
   })
@@ -294,4 +298,34 @@ it('carries the names of the checklist\'s workers through a fold', () => {
   expect(foldLive(r, [], T0).checklist?.workerTitles).toEqual(titles)
   const next = ev('checklist', { items: [{ text: 'a', done: true }], op: 'tick' }, 11)
   expect(foldLive(r, [next], T0).checklist?.workerTitles).toEqual(titles)
+})
+
+it('refreshes answer requests when a page is published or its request closes', () => {
+  for (const kind of ['artifact', 'answer_closed']) expect(isLiveTrigger(ev(kind, {}))).toBe(true)
+})
+
+it.each([false, true])('keeps child questions named and routed separately from the parent transcript (no-wait %s)', noWait => {
+  const r = reply()
+  Object.assign(r, { child_asks: [{ message_id: 'child-q', session_id: 'worker', child_title: 'Question worker', question: 'Which branch?', asked_at: iso(0), no_wait: noWait, owner_only: true }] })
+  const v = foldLive(r, [ev('user_message', { text: 'Keep going', source: 'chat' }, 11), ev('user_message', { text: 'Answer the parent only', source: 'ask_answer' }, 12)], T0)
+  expect(v.asks).toHaveLength(1)
+  expect(v.asks[0]).toMatchObject({ messageId: 'child-q', childSessionId: 'worker', childTitle: 'Question worker', ...(noWait ? { noWait: true } : {}) })
+  expect(v.counts.needsYou).toBe(1)
+})
+
+ it('counts child questions and answer pages together without matching page results to questions', () => {
+  const r = reply()
+  const answer = { request_id: 'r1', artifact_id: 'a1', artifact_name: 'rank.html', ask: 'Rank these' }
+  r.child_asks = [{ message_id: 'child-q', session_id: 'worker', child_title: 'Worker', question: 'Which branch?', asked_at: iso(0) }]
+  r.answer_requests = [answer]
+  const v = foldLive(r, [ev('user_message', { text: '{}', source: 'page_result' }, 11)], T0)
+  expect(v.asks).toHaveLength(1)
+  expect(v.answerRequests).toEqual([answer])
+  expect(v.counts.needsYou).toBe(2)
+})
+
+it('folds compact checklist events over the live baseline', () => {
+ const r=reply({checklist:{items:[{id:'work',text:'Build',done:false}],event_id:'initial',updated_at:iso(0)}})
+ const change=ev('checklist',{op:'tick',delta:true,total:1,completed:1,updates:[{id:'work',text:'Build',done:true}]},11)
+ expect(foldLive(r,[change],T0).checklist?.items[0].done).toBe(true)
 })

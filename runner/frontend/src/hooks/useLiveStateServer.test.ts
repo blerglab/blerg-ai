@@ -115,6 +115,39 @@ describe('useLiveStateServer', () => {
     expect(fetchMock).toHaveBeenCalledTimes(4)
   })
 
+  // BLG-431: the staleness clock used to tick every 60 s unconditionally, re-rendering whatever
+  // calls this hook (SessionDetail, the whole session page) that often even for a hidden tab -
+  // for a threshold (STALE_RUNNING_MS) measured in hours. It now ticks every 15 min, only while
+  // visible, and catches up the moment a hidden tab becomes visible again.
+  it('ticks its staleness clock every 15 min while visible, never while hidden, and catches up on visibilitychange', async () => {
+    let visible = true
+    const prop = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState')
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => (visible ? 'visible' : 'hidden') })
+    try {
+      // A persistent (not one-shot) resolution: the pre-existing visibilitychange listener this
+      // hook already had (unrelated to BLG-431 - it re-reads /live on becoming visible) also fires
+      // on the dispatch below and must have something to resolve against.
+      fetchMock.mockResolvedValue(json(reply()))
+      let renders = 0
+      renderHook(() => { renders++; return useLiveStateServer('s1', true, '') })
+      await flush()
+      const afterRead = renders
+      await wait(14 * 60_000) // under the 15 min interval: no tick yet
+      expect(renders).toBe(afterRead)
+      await wait(1 * 60_000) // crosses 15 min: one tick, while visible
+      expect(renders).toBe(afterRead + 1)
+      visible = false
+      await wait(60 * 60_000) // an hour hidden: the interval fires, but ticks nothing
+      expect(renders).toBe(afterRead + 1)
+      visible = true
+      await act(async () => { document.dispatchEvent(new Event('visibilitychange')); await vi.advanceTimersByTimeAsync(0) })
+      // At least the staleness tick itself; the pre-existing read-on-visible may add its own.
+      expect(renders).toBeGreaterThan(afterRead + 1)
+    } finally {
+      if (prop) Object.defineProperty(document, 'visibilityState', prop)
+    }
+  })
+
   it('folds what came after the reply at once, before the next read', async () => {
     fetchMock.mockResolvedValueOnce(json(reply({ through_seq: 0 })))
     let resolve!: (r: Response) => void

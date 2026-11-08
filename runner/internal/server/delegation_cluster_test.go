@@ -68,6 +68,7 @@ func (cx *clusterDelegFx) podTakesOver(session, engine string) *DaemonConn {
 	podID := newUUID()
 	pod := &DaemonConn{ID: podID, Name: "runner-" + session, Mode: "runner", BoundSessionID: session, RuntimeTokenID: rt.ID, send: make(chan []byte, 64)}
 	pod.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	pod.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	pod.SetAvailableEngines([]string{engine})
 	cx.hub.Register(pod)
 	if err := db.UpsertDaemon(ctx, cx.pool, podID, pod.Name, "runner", ""); err != nil {
@@ -638,5 +639,66 @@ func drainFrames(dc *DaemonConn) [][]byte {
 		default:
 			return out
 		}
+	}
+}
+
+// TestParseChildStartHostWorkspaceExplicitClusterRuntime reproduces the exact live failure
+// Main hit from a real desktop Main (BLG-501's own card, after merge): "blerg-runner session
+// start --engine claude --runtime cluster --repo <member> --base <branch> --kind research ...".
+// childHost.forRuntime used to drop workspace from its returned struct literal, so a host
+// workspace parent's explicit --runtime cluster child always fell through to the legacy
+// single-repo branch (msgClusterChildBareRepo) — regardless of which member was named —
+// because parseChildStart's own dispatch switch never saw a non-nil host.workspace after
+// this call. This is the real HandlePostChildren code path (parentHost + forRuntime), not a
+// hand-built childHost that happens to already carry the right shape.
+func TestParseChildStartHostWorkspaceExplicitClusterRuntime(t *testing.T) {
+	manifest := hostWorkspaceFixture()
+	host := childHost{workspace: &manifest, clusterOn: true}
+	body := `{"repo":"app","runtime":"cluster","base":"alpha/0.6.0","engine":"claude","kind":"research","prompt":"p"}`
+
+	// parseChildStart's own pre-dispatch block (delegation_start.go) calls host.forRuntime
+	// internally whenever a desktop/host parent explicitly asks for the cluster runtime —
+	// never done here by the test, so this exercises that internal call for real.
+	cs, _, apiErr := parseChildStart([]byte(body), host)
+	if apiErr != nil {
+		t.Fatalf("refused: %v", apiErr)
+	}
+	if cs.Runtime != runnerRuntimeCluster {
+		t.Fatalf("expected runtime cluster, got %q", cs.Runtime)
+	}
+	if len(cs.Repos) != 1 || cs.Repos[0] != "m1" || cs.Repo != "" {
+		t.Fatalf("expected the workspace member path (selectHostClusterChildSelectors), got repos=%v repo=%q", cs.Repos, cs.Repo)
+	}
+	if cs.WorkspaceLaunch != manifest.LaunchGeneration {
+		t.Fatalf("expected the parent's launch generation carried through, got %q", cs.WorkspaceLaunch)
+	}
+}
+
+// Same shape, selecting by the member's own ID rather than its name/path — exactly Main's
+// second live attempt ("--repo <member-id>").
+func TestParseChildStartHostWorkspaceExplicitClusterRuntimeByMemberID(t *testing.T) {
+	manifest := hostWorkspaceFixture()
+	host := childHost{workspace: &manifest, clusterOn: true}
+	body := `{"repo":"m1","runtime":"cluster","base":"alpha/0.6.0","prompt":"p"}`
+
+	cs, _, apiErr := parseChildStart([]byte(body), host)
+	if apiErr != nil {
+		t.Fatalf("refused: %v", apiErr)
+	}
+	if len(cs.Repos) != 1 || cs.Repos[0] != "m1" {
+		t.Fatalf("expected member m1 selected, got %v", cs.Repos)
+	}
+}
+
+// Without a cluster install (clusterOn false), the pre-dispatch check still refuses before
+// ever touching workspace at all — forRuntime's own no-op branch (h unchanged) must not
+// regress this existing, unrelated refusal.
+func TestParseChildStartHostWorkspaceClusterRuntimeRefusedWithoutClusterInstall(t *testing.T) {
+	manifest := hostWorkspaceFixture()
+	host := childHost{workspace: &manifest, clusterOn: false}
+	body := `{"repo":"app","runtime":"cluster","base":"alpha/0.6.0","prompt":"p"}`
+	_, _, apiErr := parseChildStart([]byte(body), host)
+	if apiErr == nil || apiErr.Message != msgNoClusterRuntime {
+		t.Fatalf("expected %q, got %v", msgNoClusterRuntime, apiErr)
 	}
 }

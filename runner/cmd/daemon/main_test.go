@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/daemon"
 )
@@ -195,5 +197,68 @@ func TestUpdateReceiptCommandsRejected(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("unattributed receipt command wrote daemon state: %v", entries)
+	}
+}
+
+func TestScratchCleanupCommandRequiresAStoppedDaemon(t *testing.T) {
+	state, root := t.TempDir(), t.TempDir()
+	t.Setenv(daemon.DaemonStateDirEnv, state)
+	t.Setenv("BLERG_RUNNER_REPOS_ROOT", root)
+	dir := daemon.AgentRecordsDir(state)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(dir, ".lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lock.Close() }()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"cleanup-scratch"}, {"cleanup-scratch", "--apply"}} {
+		var out, errOut bytes.Buffer
+		if code := runCommand(args, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "stop the daemon") || out.Len() != 0 {
+			t.Fatalf("%v: exit %d, out %q, err %q", args, code, out.String(), errOut.String())
+		}
+	}
+	var out, errOut bytes.Buffer
+	if code := runCommand([]string{"cleanup-scratch", "--force"}, &out, &errOut); code != 2 {
+		t.Fatalf("unknown cleanup flag: %d", code)
+	}
+}
+
+func TestPrepareAgentRecordsSweepsOnlyAfterLock(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv(daemon.DaemonStateDirEnv, state)
+	t.Setenv("TMPDIR", t.TempDir())
+	makePack := func(name string) string {
+		t.Helper()
+		dir := filepath.Join(state, "skill-packs", name)
+		if err := os.MkdirAll(filepath.Join(dir, ".claude-plugin"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".claude-plugin", "plugin.json"), []byte("{\"name\":\"blerg\",\"version\":\"1.0.0\"}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-48 * time.Hour)
+		if err := os.Chtimes(dir, old, old); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	first := makePack(strings.Repeat("a", 64))
+	if got := prepareAgentRecords(); got != daemon.AgentRecordsDir(state) {
+		t.Fatal("startup did not acquire recovery ownership")
+	}
+	if _, err := os.Stat(first); !os.IsNotExist(err) {
+		t.Fatal("startup did not sweep an owned orphan pack")
+	}
+	second := makePack(strings.Repeat("b", 64))
+	if got := prepareAgentRecords(); got != "" {
+		t.Fatal("second startup acquired an already owned records directory")
+	}
+	if _, err := os.Stat(second); err != nil {
+		t.Fatal("startup swept packs without the recovery lock")
 	}
 }

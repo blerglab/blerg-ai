@@ -15,14 +15,15 @@ import (
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/shellruntime"
 	"github.com/gorilla/websocket"
 )
 
 func TestWorkspaceWireGivesUpOnAWriterThatStaysBusy(t *testing.T) {
 	c := NewWSClient(Config{})
 	c.conn = &websocket.Conn{}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+	release := holdWriter(t, c)
+	defer release()
 	start := time.Now()
 	if err := c.sendWorkspaceFileResult(protocol.WorkspaceFileResult{}, time.Second); err == nil {
 		t.Fatal("busy writer accepted")
@@ -65,10 +66,10 @@ func TestWorkspaceWireDeliversAfterABrieflyBusyWriter(t *testing.T) {
 	defer conn.Close()
 	c := NewWSClient(Config{})
 	c.conn = conn
-	c.writeMu.Lock() // another write is going out
+	release := holdWriter(t, c) // another write is going out
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		c.writeMu.Unlock()
+		release()
 	}()
 	if err := c.sendWorkspaceFileResult(protocol.WorkspaceFileResult{RequestID: "r1", Path: "docs/media/more-power.jpg"}, 10*time.Second); err != nil {
 		t.Fatalf("reply dropped behind a briefly busy writer: %v", err)
@@ -83,34 +84,18 @@ func TestWorkspaceWireDeliversAfterABrieflyBusyWriter(t *testing.T) {
 	}
 }
 func TestWorkspaceWireTimeoutClosesStalledConnection(t *testing.T) {
-	release := make(chan struct{})
-	upgrader := websocket.Upgrader{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		if tcp, ok := conn.NetConn().(*net.TCPConn); ok {
-			_ = tcp.SetReadBuffer(1024)
-		}
-		<-release // deliberately never drain the socket
-	}))
-	defer func() { close(release); srv.Close() }()
-	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	if tcp, ok := conn.NetConn().(*net.TCPConn); ok {
-		_ = tcp.SetWriteBuffer(1024)
-	}
+	conn, observed := stalledWorkspacePeer(t)
 	c := NewWSClient(Config{})
 	c.conn = conn
 	start := time.Now()
-	err = c.sendWorkspaceFileResult(protocol.WorkspaceFileResult{ContentB64: strings.Repeat("A", 8<<20)}, 20*time.Millisecond)
+	err := c.sendWorkspaceFileResult(protocol.WorkspaceFileResult{ContentB64: "QQ=="}, 20*time.Millisecond)
 	if err == nil {
 		t.Fatal("stalled transfer succeeded")
+	}
+	select {
+	case <-observed.writing:
+	default:
+		t.Fatal("transfer did not enter the stalled write")
 	}
 	if time.Since(start) > time.Second {
 		t.Fatal("stalled transfer was not bounded")
@@ -118,6 +103,30 @@ func TestWorkspaceWireTimeoutClosesStalledConnection(t *testing.T) {
 	if err = conn.WriteMessage(websocket.TextMessage, []byte("later")); err == nil {
 		t.Fatal("timed-out connection remained usable")
 	}
+}
+
+// holdWriter keeps the connection's real writer busy with an earlier frame, so
+// everything sent next queues behind it. The returned func lets it finish.
+func holdWriter(t *testing.T, c *WSClient) func() {
+	t.Helper()
+	conn := c.currentConn()
+	write := c.frameWriter(conn)
+	entered, held := make(chan struct{}), make(chan struct{})
+	writer := shellruntime.NewFairWriter(func(ctx context.Context, raw []byte) error {
+		if string(raw) == `{"type":"held"}` {
+			close(entered)
+			<-held
+			return nil
+		}
+		return write(ctx, raw)
+	})
+	c.mu.Lock()
+	c.fair, c.fairConn = writer, conn
+	c.mu.Unlock()
+	go func() { _ = writer.Send(context.Background(), []byte(`{"type":"held"}`)) }()
+	<-entered
+	var once sync.Once
+	return func() { once.Do(func() { close(held) }) }
 }
 
 // A ws server that records every message; dial returns a client connection to it.
@@ -163,10 +172,10 @@ func TestWorkspaceWireWriteDeadlineStartsWithTheWrite(t *testing.T) {
 	conn, got := recordingPeer(t)
 	c := NewWSClient(Config{})
 	c.conn = conn
-	c.writeMu.Lock()
+	release := holdWriter(t, c)
 	go func() {
 		time.Sleep(300 * time.Millisecond)
-		c.writeMu.Unlock()
+		release()
 	}()
 	// The writer is busy for longer than the write's own 200 ms budget.
 	if err := c.sendWorkspaceFileResult(protocol.WorkspaceFileResult{RequestID: "late-start"}, 200*time.Millisecond); err != nil {
@@ -193,10 +202,10 @@ func TestWorkspaceWireSkipsAReplyTheServerGaveUpOn(t *testing.T) {
 	}
 	nothingArrives(t, got, "expired reply")
 	// Expiry while waiting for a busy writer.
-	c.writeMu.Lock()
+	release := holdWriter(t, c)
 	go func() {
 		time.Sleep(300 * time.Millisecond)
-		c.writeMu.Unlock()
+		release()
 	}()
 	if err := c.SendWorkspaceFileResultBy(protocol.WorkspaceFileResult{RequestID: "stale-2"}, time.Now().Add(100*time.Millisecond)); err == nil {
 		t.Fatal("a reply that expired while waiting was sent")
@@ -211,13 +220,13 @@ func TestWorkspaceWireDropsAReplyWhenTheConnectionChanged(t *testing.T) {
 	newConn, newGot := recordingPeer(t)
 	c := NewWSClient(Config{})
 	c.conn = oldConn
-	c.writeMu.Lock()
+	release := holdWriter(t, c)
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		c.mu.Lock()
 		c.conn = newConn
 		c.mu.Unlock()
-		c.writeMu.Unlock()
+		release()
 	}()
 	if err := c.sendWorkspaceFileResult(protocol.WorkspaceFileResult{RequestID: "old"}, 5*time.Second); err == nil {
 		t.Fatal("a reply for the old connection was sent")
@@ -259,13 +268,8 @@ func TestWorkspaceWireQueuedViewerProgress(t *testing.T) {
 			c.conn = conn
 			ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
 			defer cancel()
-			c.writeMu.Lock()
-			locked := true
-			defer func() {
-				if locked {
-					c.writeMu.Unlock()
-				}
-			}()
+			release := holdWriter(t, c)
+			defer release()
 			done := make(chan error, 3)
 			go func() {
 				done <- c.SendWorkspaceExplorerResultContext(ctx, protocol.WorkspaceExplorerResult{RequestID: "first"})
@@ -303,8 +307,7 @@ func TestWorkspaceWireQueuedViewerProgress(t *testing.T) {
 			if disconnect {
 				_ = conn.Close()
 			}
-			c.writeMu.Unlock()
-			locked = false
+			release()
 			for i := 0; i < 3; i++ {
 				select {
 				case err := <-done:
@@ -337,13 +340,8 @@ func TestWorkspaceWireCancelBeforeWriterPreservesConnection(t *testing.T) {
 			conn, got := recordingPeer(t)
 			c := NewWSClient(Config{})
 			c.conn = conn
-			c.writeMu.Lock()
-			locked := true
-			defer func() {
-				if locked {
-					c.writeMu.Unlock()
-				}
-			}()
+			release := holdWriter(t, c)
+			defer release()
 			lifetime, finish := context.WithTimeout(t.Context(), 5*time.Second)
 			defer finish()
 			var first chan error
@@ -407,8 +405,7 @@ func TestWorkspaceWireCancelBeforeWriterPreservesConnection(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("unsent canceled output did not join while another writer held the lock")
 			}
-			c.writeMu.Unlock()
-			locked = false
+			release()
 			if first != nil {
 				if err := <-first; err != nil {
 					t.Fatal(err)
@@ -445,9 +442,11 @@ func TestWorkspaceWireCancelBeforeWriterPreservesConnection(t *testing.T) {
 	}
 }
 
-// Track the actual socket write, rather than assuming a large response has begun.
+// Send one byte of the frame before blocking on a deadline-aware pipe. This proves cancellation
+// poisons a partially written frame without depending on payload size or TCP buffers.
 type workspaceObservedConn struct {
 	net.Conn
+	blocked              net.Conn
 	armed                atomic.Bool
 	writing, closed      chan struct{}
 	onceWrite, onceClose sync.Once
@@ -455,15 +454,29 @@ type workspaceObservedConn struct {
 
 func (c *workspaceObservedConn) Write(p []byte) (int, error) {
 	if c.armed.Load() {
+		n, err := c.Conn.Write(p[:1])
+		if err != nil {
+			return n, err
+		}
 		c.onceWrite.Do(func() { close(c.writing) })
+		_, err = c.blocked.Write(p[n:])
+		return n, err
 	}
 	return c.Conn.Write(p)
 }
 func (c *workspaceObservedConn) Close() error {
 	c.onceClose.Do(func() { close(c.closed) })
+	_ = c.blocked.Close()
 	return c.Conn.Close()
 }
-func TestWorkspaceWireCancelActiveWritePoisonsConnection(t *testing.T) {
+func (c *workspaceObservedConn) SetWriteDeadline(deadline time.Time) error {
+	if err := c.Conn.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
+	return c.blocked.SetWriteDeadline(deadline)
+}
+func stalledWorkspacePeer(t *testing.T) (*websocket.Conn, *workspaceObservedConn) {
+	t.Helper()
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
@@ -471,37 +484,38 @@ func TestWorkspaceWireCancelActiveWritePoisonsConnection(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-		if tcp, ok := conn.NetConn().(*net.TCPConn); ok {
-			_ = tcp.SetReadBuffer(1024)
-		}
 		<-release
 	}))
-	defer func() { close(release); srv.Close() }()
+	t.Cleanup(func() { close(release); srv.Close() })
+	blocked, reader := net.Pipe()
+	t.Cleanup(func() { _ = reader.Close(); _ = blocked.Close() })
 	var observed *workspaceObservedConn
 	dialer := websocket.Dialer{NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 		conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
 		if err != nil {
 			return nil, err
 		}
-		if tcp, ok := conn.(*net.TCPConn); ok {
-			_ = tcp.SetWriteBuffer(1024)
-		}
-		observed = &workspaceObservedConn{Conn: conn, writing: make(chan struct{}), closed: make(chan struct{})}
+		observed = &workspaceObservedConn{Conn: conn, blocked: blocked, writing: make(chan struct{}), closed: make(chan struct{})}
 		return observed, nil
 	}}
 	conn, _, err := dialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	t.Cleanup(func() { _ = conn.Close() })
 	observed.armed.Store(true)
+	return conn, observed
+}
+
+func TestWorkspaceWireCancelActiveWritePoisonsConnection(t *testing.T) {
+	conn, observed := stalledWorkspacePeer(t)
 	c := NewWSClient(Config{})
 	c.conn = conn
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- c.SendWorkspaceFileResultContext(ctx, protocol.WorkspaceFileResult{ContentB64: strings.Repeat("A", 8<<20)}, time.Now().Add(8*time.Second))
+		done <- c.SendWorkspaceFileResultContext(ctx, protocol.WorkspaceFileResult{ContentB64: "QQ=="}, time.Now().Add(8*time.Second))
 	}()
 	select {
 	case <-observed.writing:

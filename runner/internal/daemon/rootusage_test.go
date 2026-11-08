@@ -168,7 +168,7 @@ func TestCodexRootCounterDropsAreNotNewAccountingEpochs(t *testing.T) {
 func TestClaudeStreamingRootUsageResetsAtEachResult(t *testing.T) {
 	em := &collectEmitter{}
 	d := newClaudeCodeDriver(t.TempDir(), "model-default", "", em, nil)
-	p := &ccProc{model: "model-default", sawInit: true, inTurn: true}
+	p := claudeTestProc(t, d, &ccProc{model: "model-default", sawInit: true, inTurn: true})
 	d.steer.proc = p
 	for turn := 0; turn < 2; turn++ {
 		d.onLine(p, []byte(`{"type":"assistant","message":{"id":"repeated-after-turn","model":"model-effective","usage":{"input_tokens":3},"content":[]}}`))
@@ -242,7 +242,7 @@ func TestCodexRootUsageManualNextModelDoesNotRelabelActiveTurn(t *testing.T) {
 func TestClaudeTurnDoneCarriesContextReading(t *testing.T) {
 	em := &collectEmitter{}
 	d := newClaudeCodeDriver(t.TempDir(), "model-default", "", em, nil)
-	p := &ccProc{model: "model-default", sawInit: true, inTurn: true}
+	p := claudeTestProc(t, d, &ccProc{model: "model-default", sawInit: true, inTurn: true})
 	d.steer.proc = p
 	result := `{"type":"result","usage":{"input_tokens":3},"modelUsage":{"model-effective":{"contextWindow":200000},"model-small":{"contextWindow":100000}}}`
 	// Turn 1: two root calls (the later one counts) and a bigger subagent call (left out).
@@ -368,7 +368,7 @@ func TestCodexTurnDoneCarriesContextReading(t *testing.T) {
 func TestClaudeCompactionThenInterruptOrExitSaysCompacted(t *testing.T) {
 	em := &collectEmitter{}
 	d := newClaudeCodeDriver(t.TempDir(), "model-default", "", em, nil)
-	p := &ccProc{model: "model-default", sawInit: true, inTurn: true, cmd: exec.Command("true")} // never started
+	p := claudeTestProc(t, d, &ccProc{model: "model-default", sawInit: true, inTurn: true, cmd: exec.Command("true")}) // never started
 	d.steer.proc = p
 	d.onLine(p, []byte(`{"type":"assistant","message":{"id":"m1","model":"model-effective","usage":{"input_tokens":170000},"content":[]}}`))
 	d.onLine(p, []byte(`{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":170000}}`))

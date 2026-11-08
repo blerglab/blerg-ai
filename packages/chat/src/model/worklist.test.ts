@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentEvent } from '../types'
 import {
-  safeChecklistAssignments, checklistAssignment, checklistFromEvents, checklistRowText, commitsText, pinnedFromEvents, planLabel, priorityGlyph, readChecklist, readTicket,
+  createChecklistReader, safeChecklistAssignments, checklistAssignment, checklistFromEvents, checklistRowText, commitsText, pinnedFromEvents, planLabel, priorityGlyph, readChecklist, readTicket,
   readTicketEvent, sourceLabel, statusTone, ticketChanges, ticketHref, ticketMeta,
 } from './worklist'
 
@@ -231,4 +231,24 @@ describe('safe current worker associations', () => {
     const owned = [{ ...original[0], assignees: [{ kind: 'child_session' as const, id: 'call-a' }] }]
     expect(safeChecklistAssignments(owned, [ev('subagent_started', { call_id: 'call-b', child_id: 'call-a' })])).toBe(owned)
   })
+})
+
+it('replays compact checklist changes alongside legacy lists', () => {
+ const first = ev('checklist', { op: 'set', items: [{id:'item-a',text:'Build',done:false}] })
+ const delta = ev('checklist', { op:'tick', delta:true,total:1,completed:1, changed:{id:'item-a',index:1,text:'Build',done:true},updates:[{id:'item-a',text:'Build',done:true}] })
+ expect(checklistFromEvents([first,delta])?.items[0].done).toBe(true)
+ expect(checklistRowText(readChecklist(delta.payload)!)).toBe('Checklist · 1 of 1 done · ticked “Build”')
+})
+
+it('keeps checklist context stable as unrelated events stream', () => {
+ const read=createChecklistReader()
+ const first=ev('checklist',{op:'set',items:[{id:'work',text:'Build',done:false}]})
+ const state=read([first])
+ expect(read([first,ev('assistant_text',{text:'Working'})])).toBe(state)
+ const change=ev('checklist',{op:'tick',delta:true,total:1,completed:1,updates:[{id:'work',text:'Build',done:true}]})
+ expect(read([first,change])?.items[0].done).toBe(true)
+})
+
+it('does not invent a live checklist from a delta without its baseline', () => {
+ expect(checklistFromEvents([ev('checklist', {delta:true,op:'tick',total:2,completed:1,updates:[{id:'a',text:'Build',done:true}]})])).toBeNull()
 })

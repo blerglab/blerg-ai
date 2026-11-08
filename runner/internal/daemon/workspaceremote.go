@@ -5,7 +5,6 @@ package daemon
 // parses that filesystem. Consumers mount the keeper-attested device through
 // a labelled local volume and its fixed public tree subdirectory.
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -171,6 +170,9 @@ func (s *DockerWorkspaceStorage) Allocate(ctx context.Context, session string, b
 				args = append(args, "--mount", sandboxBindMount(binary, "/usr/local/bin/blerg-workspace-worker")+",readonly")
 			}
 			args = append(args, image, "--blerg-workspace-volume")
+			if err := validateWorkspaceWorkerMounts(workspaceWorkerRequest{Action: "quota-allocate", State: workspacePrivateManifest{Root: sandboxCloneRoot(), RemoteMountSource: "volume:" + r.volume()}}, args); err != nil {
+				return "", err
+			}
 			out, err := workspaceDockerOutput(ctx, args...)
 			if err != nil {
 				return "", err
@@ -215,6 +217,13 @@ func (s *DockerWorkspaceStorage) owned(ctx context.Context, r workspaceRemoteRec
 }
 func (s *DockerWorkspaceStorage) call(ctx context.Context, r workspaceRemoteRecord, action string) (workspaceWorkerResponse, error) {
 	var response workspaceWorkerResponse
+	if _, err := workspaceWorkerSources(workspaceWorkerRequest{Action: action}); err != nil {
+		return response, err
+	}
+	key, err := workspaceManifestKey()
+	if err != nil {
+		return response, err
+	}
 	if err := s.ensureKeeper(ctx, r); err != nil {
 		return response, err
 	}
@@ -228,7 +237,7 @@ func (s *DockerWorkspaceStorage) call(ctx context.Context, r workspaceRemoteReco
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	deadline, _ := ctx.Deadline()
-	request := workspaceWorkerRequest{Action: action, Record: record, Deadline: deadline, QuotaBudget: r.Budget, QuotaUID: os.Getuid(), QuotaGID: os.Getgid(), State: workspacePrivateManifest{Session: r.Session}}
+	request := workspaceWorkerRequest{QuotaKey: key, Action: action, Record: record, Deadline: deadline, QuotaBudget: r.Budget, QuotaUID: os.Getuid(), QuotaGID: os.Getgid(), State: workspacePrivateManifest{Session: r.Session}}
 	raw, err := json.Marshal(request)
 	if err != nil {
 		return response, err
@@ -352,45 +361,8 @@ func (s *DockerWorkspaceStorage) Release(ctx context.Context, session, root stri
 	return s.save(r)
 }
 
-// The mount service needs UID 0 while the daemon key belongs to the host user.
-// Authenticate that owner before copying the same secret into a root-private
-// tmpfs keyring. Never weaken generic private-manifest ownership checks.
-func workspaceQuotaKey(record string, uid int) error {
-	if uid < 0 {
-		return errors.New("invalid quota owner")
-	}
-	source := filepath.Join(filepath.Dir(record), "workspace-integrity.key")
-	info, err := os.Lstat(source)
-	if err != nil {
-		return err
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || uint64(stat.Uid) != uint64(uid) || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Size() != 32 {
-		return errors.New("quota authority key ownership mismatch")
-	}
-	key, err := os.ReadFile(source) //nolint:gosec // fixed key below authenticated private-record directory, ownership/size checked above
-	if err != nil || len(key) != 32 {
-		return errors.New("quota authority key unavailable")
-	}
-	local := "/tmp/blerg-quota-authority"
-	if err := os.MkdirAll(filepath.Join(local, sandboxCloneDirName), 0700); err != nil {
-		return err
-	}
-	target := filepath.Join(local, sandboxCloneDirName, "workspace-integrity.key")
-	if old, err := os.ReadFile(target); err == nil { //nolint:gosec // root-private fixed tmpfs keyring, no agent access
-		if !bytes.Equal(old, key) {
-			return errors.New("quota key changed")
-		}
-	} else if os.IsNotExist(err) {
-		if err := os.WriteFile(target, key, 0600); err != nil { //nolint:gosec // fixed root-private keyring path, bytes are never a path
-			return err
-		}
-	} else {
-		return err
-	}
-	return os.Setenv(DaemonStateDirEnv, local)
-}
-
+// The public tree lives on the keeper's Linux filesystem, not a host bind
+// mount. Its chown and identity must still be verified inside the VM.
 func workspaceQuotaRootIdentity(path string, uid int) (protocol.WorkspaceRoot, error) {
 	if uid < 0 {
 		return protocol.WorkspaceRoot{}, errors.New("invalid quota owner")

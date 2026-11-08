@@ -351,3 +351,21 @@ it('uses the host current checklist over an old transcript snapshot, including e
   rerender(view([]))
   expect(within(card).queryByTestId('subagent-checklist')).toBeNull()
 })
+
+it('draws compact checklist changes as one short progress row', async () => {
+ seed(ev({seq:1,kind:'checklist',payload:{op:'set',items:[{id:'work',text:'Build',done:false}]}}),ev({seq:2,kind:'checklist',payload:{op:'tick',delta:true,total:1,completed:1,changed:{id:'work',index:1,text:'Build',done:true},updates:[{id:'work',text:'Build',done:true}]}}))
+ mount()
+ expect(await screen.findByTestId('checklist-row')).toHaveTextContent('Checklist · 1 of 1 done · ticked “Build”')
+})
+
+it('expands a delta row to the complete list at that point in history', async () => {
+ seed(ev({seq:1,kind:'checklist',payload:{op:'set',items:[{id:'a',text:'Build',done:false},{id:'b',text:'Ship',done:false}]}}),
+ ev({seq:2,kind:'assistant_text',payload:{text:'Working'}}),
+ ev({seq:3,kind:'checklist',payload:{delta:true,op:'tick',total:2,completed:1,updates:[{id:'a',text:'Build',done:true}]}}))
+ mount()
+ const rows = await screen.findAllByTestId('checklist-row')
+ fireEvent.click(within(rows[1]).getByRole('button'))
+ expect(within(rows[1]).getAllByRole('listitem').map(li=>li.textContent)).toEqual(['☑Build (done)','☐Ship (to do)'])
+ fireEvent.click(within(rows[0]).getByRole('button'))
+ expect(within(rows[0]).getAllByRole('listitem')[0]).toHaveTextContent('Build (to do)')
+})

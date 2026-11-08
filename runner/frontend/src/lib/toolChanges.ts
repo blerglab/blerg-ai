@@ -124,7 +124,7 @@ export function unsafeReason(u: string | undefined): string | null {
 export function acceptFailureMessage(status: number, serverMessage: string): string {
   switch (status) {
     case 409: return `Not accepted: ${serverMessage}`
-    case 410: return `Not accepted: ${serverMessage}. The tool stays off; a new session will list the current definition.`
+    case 410: return `Not accepted: ${serverMessage}. The tool stays off; a new workspace will list the current definition.`
     case 400: return `Not accepted: ${serverMessage}`
     case 401: return 'Your sign-in has ended. Sign in again, then accept.'
     case 503: return 'The MCP gateway is not configured on this server, so tool changes cannot be accepted.'

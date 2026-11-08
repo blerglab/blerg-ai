@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/shellruntime"
 	"os/exec"
 	"path"
 	"strconv"
@@ -221,6 +222,13 @@ func (d *DockerWorkspaceContainer) Freeze(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		var expired func() bool
+		if d.coordinator.service.HasPersistentCustody(d.Session) {
+			expired, err = shellruntime.NewPersistentWatchdog(until)
+			if err != nil {
+				return err
+			}
+		}
 		d.freezeStop = make(chan struct{})
 		d.freezeDone = make(chan error, 1)
 		stop, done := d.freezeStop, d.freezeDone
@@ -228,13 +236,27 @@ func (d *DockerWorkspaceContainer) Freeze(ctx context.Context) error {
 		go func() {
 			timer := time.NewTimer(time.Until(until))
 			defer timer.Stop()
-			select {
-			case <-stop:
-				done <- nil
-			case <-timer.C:
-				call, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-				defer cancel()
-				done <- errors.Join(errors.New("workspace freeze exceeded shell lease"), physical.fencePhysical(call))
+			if expired != nil {
+				timer.Stop()
+			}
+			tick := time.NewTicker(100 * time.Millisecond)
+			defer tick.Stop()
+			for {
+				select {
+				case <-stop:
+					done <- nil
+					return
+				case <-tick.C:
+					if expired == nil || !expired() {
+						continue
+					}
+					timer.Reset(0)
+				case <-timer.C:
+					call, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+					defer cancel()
+					done <- errors.Join(errors.New("workspace freeze exceeded shell deadline"), physical.fencePhysical(call))
+					return
+				}
 			}
 		}()
 	} else if d.Supervisor != nil {
@@ -260,8 +282,9 @@ func (d *DockerWorkspaceContainer) joinFreeze() error {
 }
 func (d *DockerWorkspaceContainer) Thaw(ctx context.Context) error {
 	_, err := d.command(ctx, "unpause", d.ID)
-	if err == nil {
-		err = d.verifyPause(ctx, false)
+	// A retry may find it running: an earlier unpause took effect and a later step failed.
+	if verified := d.verifyPause(ctx, false); err == nil || verified == nil {
+		err = verified
 	}
 	err = errors.Join(err, d.joinFreeze())
 	if err == nil && d.coordinator != nil {

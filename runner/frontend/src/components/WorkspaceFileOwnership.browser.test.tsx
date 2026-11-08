@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { page, userEvent } from 'vitest/browser'
@@ -12,10 +13,10 @@ vi.mock('../ws', () => import('../test/wsMock'))
 vi.mock('../authClient', async original => ({ ...await original<typeof import('../authClient')>(), getAccessToken: () => null, ensureFreshToken: async () => true }))
 afterEach(() => { invalidateChatTransport(); vi.unstubAllGlobals() })
 
-for (const width of [390, 3840]) {
+for (const width of browserWidths([390, 3840])) {
   it.each([
     ['desktop_ownership', 'Your desktops'],
-    ['session_ownership', 'Ask the session owner'],
+    ['session_ownership', 'Ask the workspace owner'],
   ])(`explains %s in the file viewer at ${width} px`, async (code, guidance) => {
     await page.viewport(width, 900)
     localStorage.clear()
@@ -31,7 +32,7 @@ for (const width of [390, 3840]) {
       ws.emit({ type: 'agent_events_replay_done', session_id: session.id, last_seq: 1, has_more: false })
     })
     await waitFor(() => expect(screen.queryByTestId('history-loading')).toBeNull())
-    await userEvent.click(screen.getByTitle('Open from the session’s folder'))
+    await userEvent.click(screen.getByTitle('Open from the workspace’s folder'))
     const error = await screen.findByTestId('workspace-error')
     expect(error.textContent).toContain(guidance)
     expect(error.textContent).toContain('ownership-file')

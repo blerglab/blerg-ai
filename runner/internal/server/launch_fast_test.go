@@ -242,6 +242,7 @@ func TestHandleGetReposETag(t *testing.T) {
 	hub := NewHub()
 	d := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006b", Name: "desk"}
 	d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	d.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	d.SetCheckedOutRepos([]string{"tool"})
 	hub.Register(d)
 	api := ownedInventoryAPI(t, hub, "", nil, "")

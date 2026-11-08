@@ -62,7 +62,3 @@ export const RESUME_PROMPT = 'Continue the task you were working on.'
 /** The tooltip and accessible name of a paused session's glyph. */
 export const PAUSED_WORDS = 'paused by a restart'
 
-/** The waiting banner's words: "2 sessions waiting for input". */
-export function waitingBannerText(waiting: number): string {
-  return `${waiting} session${waiting !== 1 ? 's' : ''} waiting for input`
-}

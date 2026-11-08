@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: blerg-live-data-renew
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: blerg-live-data-renew
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [blerg-live-data-core, blerg-live-data-runner]
+    verbs: [get, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: blerg-live-data-renew
+subjects:
+  - kind: ServiceAccount
+    name: blerg-live-data-renew
+    namespace: blerg
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: blerg-live-data-renew
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: blerg-live-data-renew
+spec:
+  schedule: "17 3 * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 120
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: {app: blerg-live-data-renew}
+        spec:
+          serviceAccountName: blerg-live-data-renew
+          automountServiceAccountToken: true
+          restartPolicy: Never
+          securityContext:
+            fsGroup: 65532
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile: {type: RuntimeDefault}
+          containers:
+            - name: renew
+              image: "${REGISTRY}/blerg-core:${TAG}"
+              args: [live-data-renew-job]
+              env: [{name: TMPDIR, value: /work}]
+              resources:
+                requests: {cpu: 50m, memory: 32Mi}
+                limits: {cpu: "1", memory: 128Mi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: {drop: [ALL]}
+              volumeMounts:
+                - {name: authority, mountPath: /authority, readOnly: true}
+                - {name: work, mountPath: /work}
+          volumes:
+            - name: authority
+              secret:
+                secretName: blerg-live-data-authority
+                defaultMode: 0440
+            - name: work
+              emptyDir: {medium: Memory, sizeLimit: 8Mi}

@@ -9,6 +9,7 @@ import { parseTs } from './timeLabel'
 export const DONE_LINGER_MS = 10_000
 
 export interface BackgroundTask {
+  cleared?: boolean
   taskId: string
   /** The tool call that started it (the row a jump to it scrolls to). */
   callId: string
@@ -48,6 +49,13 @@ export function backgroundTasks(events: AgentEvent[]): BackgroundTask[] {
 function readTasks(events: AgentEvent[]): BackgroundTask[] {
   const byId = new Map<string, BackgroundTask>()
   for (const ev of events) {
+    if (ev.kind === 'status_changed' && isRecord(ev.payload) && ev.payload.status === 'running') {
+      for (const task of byId.values()) if (taskFailed(task)) task.cleared = true
+    }
+    if (ev.kind === 'background_task_cleared' && isRecord(ev.payload)) {
+      const task = byId.get(str(ev.payload.task_id))
+      if (task?.done) task.cleared = true
+    }
     if (ev.kind !== 'background_task_started' && ev.kind !== 'background_task_done') continue
     if (!isRecord(ev.payload)) continue
     const id = str(ev.payload.task_id)
@@ -103,6 +111,7 @@ export function shownTasks(
   tasks: BackgroundTask[], now: number, live: boolean, openedAt: number, dismissed: ReadonlySet<string>,
 ): BackgroundTask[] {
   return tasks.filter(t => {
+    if (t.cleared) return false
     if (!t.done) return live && !staleTask(t, now)
     const at = t.done.at
     if (at === null || dismissed.has(t.taskId)) return false
@@ -124,7 +133,8 @@ export function backgroundSummary(description: string): string {
 }
 
 /** backgroundLabel: the working line's words while background tasks run. */
-export function backgroundLabel(count: number, description: string): string {
+export function backgroundLabel(count: number, description: string, stopped = false): string {
+  if (stopped) return 'Stopped; background work may still be running'
   const summary = backgroundSummary(description)
   if (count === 1) return summary ? `Waiting on a background task: ${summary}` : 'Waiting on a background task'
   return `Waiting on ${count} background tasks`
@@ -143,4 +153,17 @@ export function clockLabel(ms: number): string {
 export function truncateLabel(s: string, max: number): string {
   const chars = Array.from(s)
   return chars.length > max ? chars.slice(0, max - 1).join('') + '…' : s
+}
+
+/** Whether Stop ended the most recent turn or the idle background wait.
+ * Inventory events do not reset this; a new foreground turn does. */
+export function backgroundWaitStopped(events: AgentEvent[]): boolean {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i]
+    if (ev.kind === 'background_wait_stopped') return true
+    if (ev.kind === 'turn_done') return (ev.payload as { stop_reason?: string }).stop_reason === 'interrupted'
+    if (ev.kind === 'user_message' && (ev.payload as { source?: string }).source !== 'system') return false
+    if (ev.kind === 'status_changed' && (ev.payload as { status?: string }).status === 'running') return false
+  }
+  return false
 }

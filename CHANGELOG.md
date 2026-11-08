@@ -8,6 +8,220 @@ minor release and are called out here.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-07
+
+### Security
+
+- Document the remote MCP redirect security design and native-engine acceptance gate; redirect paste remains unavailable (#150).
+- Session launches reject unknown permission fields instead of silently dropping requested restrictions. Command and Git policies remain unavailable; the enforcement design records the remaining work (#253).
+
+### Added
+
+- Repositories show bounded local branch graphs with commit diffs and a focused graph tab (#369).
+- Name the cluster runtime target and carry its ID through launches, schedules, board defaults, workspaces, shells and audit records. Existing clients keep using the default (#273).
+- Open a live board in a workspace preview tab, with filters, card sheets and drag-to-move under Full board access.
+- Classify generated-script work with bounded process evidence and approximate fallbacks. Read compact turn rows within an independent telemetry budget, preserve plan delivery, and cap expiring external runs (#379).
+- Add per-turn time, tools, tokens and outcomes to session and card reads, with workspace metrics, registered gate intervals, compact Main snapshots and actionable telemetry nudges (#379).
+- Process telemetry stays cheap for long runs: at most a couple of rows a minute per session, out of transcript tails, on its own nonblocking pipe so it can never delay a freeze, a stop or an empty receipt. A missed turn save is recovered by the next one (#379).
+- Crons can run explicitly approved fixed command steps inside their sandbox or pod before the agent starts. Each definition is pinned and audited; exit codes, timeouts and output truncation stay visible, and results reach the restricted agent as untrusted data (#252).
+- Sessions suggest explorer, file, attachment and panel reveals in chat. Optional follow mode applies live suggestions when the workspace is safe to navigate; changed plan and explorer rows highlight with reduced-motion support (#201).
+- Sandbox turn-end packs are served from a disposable, read-only, no-network container. The host strictly indexes the received pack without running upload-pack over session-written Git metadata (#138).
+- Long Codex sandbox sessions can renew an expiring sign-in through the host CLI’s native auth-only protocol, while keeping refresh credentials out of the sandbox. Claude retains manual renewal until a supported refresh-only mechanism is available (#109).
+- Administrators can invite member accounts by a single-use link, guide them to desktop setup, disable their credentials and standing desktop connections, and reassign desktops with transactional audits from Settings → People (#208).
+- Add a local cluster workspace failure campaign with strict test receipts and explicit remaining cluster acceptance work (#180).
+- Preserve archived cards’ open history in release charts, disclose post-cut restores, and keep release details available when chart history fails. Checklist change rows expand to their full historical list.
+- Document PATH evidence to collect when desktop tools remain missing after refresh (#330).
+- `sudo` can work in explicitly privileged Linux host shells: enable `BLERG_HOST_SHELL_CGROUP=1` on the daemon, then choose and confirm **New privileged host shell** for each shell. Ordinary shells retain the tracer. Privileged tabs and consent warn that these shells are not frozen at turn end; copies carry a note that they may include in-flight writes. Only the human owner can request this mode. Task ceilings are inherited before the first exec; root tasks remain unlimited. Failed physical proofs remain unproven, and startup sweeping preserves owners whose death cannot be established and logs errors. See `docs/design/host-shell-cgroup.md` (#303).
+- Document inference hub runtime limits and an authenticated owner test plan; managed Claude/Codex gateway support remains undecided (#255).
+- Document the personal saved-response exploration, with owner choices and blackboard dependencies; no feature is implemented (#256).
+- Release and tag milestone burn-up/burn-down charts show scope, Done, confirmed Done, daily flow, size weighting, finish scenarios and accessible data tables (#286).
+- Choose Narrated, Standard, or Terse for each session, with an account default, a launch choice, and changes for subsequent turns. Children default to Terse across engines (#175).
+- Boards have releases with target dates, card assignment, filtering, grouping, progress and searchable release records. Cutting a release archives Done cards and rolls open work into the next release (#66).
+- Assign a workspace a named theme color from its menu, panel, or Set color command. Distinct glyphs and labels appear in the sidebar and header; choices sync across devices (#331).
+- Read board card commits and diffs from linked local workspaces, including private repositories on any Git host, without provider tokens. Workspace ownership checks still apply (#251).
+- Add a desktop `--upgrade [vX.Y.Z]` command with published stable release selection, private database/settings backups, local-change refusal, and persisted recovery records (#171).
+- Gate public releases on exact-SHA CI and Linux/macOS security checks, atomic tag/main publication, required upgrade notes, and accepted unchanged release candidates (#322).
+- Specify exact-commit release gates, immutable publication, release candidates, and fake-remote verification before release tooling changes (#322).
+- Document the proposed one-step upgrade flow, backup and recovery requirements, and cluster permission decision before implementation (#171).
+- Searchable keyboard shortcut help opens from the palette or ? outside typing areas, with platform keys on desktop and a plain phone list. The palette teaches its own hotkey (#200).
+- Settings has Account, Integrations, and admin-only Install sections, with desktop navigation, a phone section list, and section links (#194).
+- Agents can show board snapshots and filtered card grids in chat, with column counts, timestamps, expandable card batches, and live card dialogs (#98).
+- Explorer can collapse all folders from its header or Ctrl+K palette while keeping the selected path, and copy the selected relative path (#305).
+- Insights has section URLs, desktop navigation and a phone section picker. Workspace headers open scoped Insights with the existing owner/admin usage rules. Missing flow and review measurements say so (#378).
+- Card risk and complexity estimates, immutable first-set timestamps, editable estimate controls and filters across boards, ticket tools and the gateway.
+- Structured review marks and historical review import conversion, plus owner-scoped per-card flow, worker attribution and explicit waiting data for future reports.
+- Consistent ticket estimation and review guidance for every engine and session runtime.
+- Board retention uses explicit terminal columns and their entry time, protects stuck and keep-tagged cards, and excludes mirrored boards. Filters include older cards, older lists are paginated, and enabling retention previews its count. Archive calls require signed person-backed authority through direct routes too. (#335)
+- Add a repository to a running host or sandbox workspace, and remove one, from the Repositories tab in the dock. Main can ask with `blerg-runner repository add|remove`, and the person approves that exact change. A change waits for a safe turn boundary, shows as pending and never interrupts a turn, worker or shell. Removal refuses unfinished or undelivered work and keeps branches and checkouts. A sandbox repository in the reserved folder is deleted on removal, so files Git ignores refuse it and show on the row; **Discard files…** confirms deleting exactly those. An empty host folder that gained a repository can adopt it. A one-repository workspace can add one too: the first repository stays where it is, and the new one sits in a reserved `.workspace/<name>/` folder that its Git never sees. Cluster workspaces keep their launch selection for now (#321).
+- Workspace channels and workers can be filed into server-saved categories in the Channels dock. Create, rename, reorder, and delete categories without deleting channels; Main can organize them with `blerg-runner category`. Category summaries keep selected and blocked sessions visible; touch and keyboard row menus keep long lists compact (#355).
+- Sidebar tools use the same tab strips, drop previews, split groups and resize handles as workspace panels. Tool drags stay in the sidebar, saved layouts restore, and selecting a tab keeps its order (#372).
+- Distribute the engine-neutral coordinating skill with ticket guidance to every engine and native, sandbox and cluster sessions, with a 150-line budget guard (#284, #368).
+- After an upgrade, What’s New shows the release notes once per account across devices. New accounts start quietly; reopen the notes from the version indicator. Notes are marked seen when dismissed; blocking questions and unattended workers take precedence. The dialog scales with the viewport and offers Maximize (#367).
+- Add an engine-neutral coordinating skill with a 150-line budget guard. Shared skill installation depends on BLG-368; this checkout still provisions only managing-tickets for one engine (#284).
+- Phone workspace cards keep workers in the dock sheet, show worker failures and person questions, and explain child search matches. Worker unread dots stay quiet; channels retain unread indicators (#358).
+- Workspaces, Main, channels, workers and scheduled runs now have distinct names throughout the app and people docs. The dock emphasizes Main and collapses workers with visible blocked/failure summaries and runtime glyphs; exchanged files live in Shared, while repository Files keeps its name (`@blerglab/chat` 1.44.1) (#358).
+- Full board access backed by a person’s sign-in can archive cards through the gateway and CLI. Done columns show recent activity with an older-card expansion; board admins can opt into automatic archiving after a chosen number of inactive days (#335).
+- Rename shell tabs from their labels, actions menu, or Ctrl+K. Names survive reconnects with the same browser sign-in, with server storage in migration 104.
+- Copy safe shell details from ended and disconnected views, including recent connection events and server end reasons. Explicit handoffs offer Take back control.
+- The left dock includes a read-only Repositories window with branch and state glyphs, expandable channel and worker counts, and event-driven refreshes (#321).
+- On supported native Linux desktops, owner shells keep running through browser absence, sleep, and reconnects with the same daemon and runner. Access requires fresh authorization. Host consent applies to one shell and can be withdrawn offline, with cleanup status shown separately. Desktop shells have a seven-day lifetime, bounded by the original sign-in and enrollment deadlines; sign-out ends them. Sandbox shells keep v1 behavior. Recognized WSL and Docker Desktop kernels are refused; other guests may pass the kernel-name check, but host-paused VM sleep accounting is unverified. Restart recovery remains gated off (#269).
+- Channels and Files share a tabbed left dock. Tool tabs can stack and merge on desktop; side chats open in existing movable, closable chat tabs while Main stays pinned (#354).
+- Published HTML pages can request a schema-validated answer: the owner reviews JSON and submits it once from the viewer, with the existing no-network sandbox (`@blerglab/chat` 1.44.0) (#336).
+- Published HTML, Mermaid, and named Vega-Lite artifact tabs offer opt-in Follow latest and Pin version, with debounced reads and the previous preview retained on read or chart preflight failure. Workspace HTML and named chart tabs offer explicit Watch file through existing confined reads; viewer disclosure remains pending a product decision (`@blerglab/chat` 1.43.0) (#263).
+- Agents can propose board key, name, description, columns, tag renaming/removal, repositories, repository requirements, deployment links, component version collection, and custom field schemas through the same exact-patch approval; Full access still asks. Board metadata proposal cards hide “Allow for this channel” (`@blerglab/chat` 1.41.0) (#345).
+- Workspace file tabs can collect line-anchored change requests across files and send one review batch. Threads retain source hashes, mark moved or outdated passages, and show the agent's replies (@blerglab/chat 1.41.0) (#230).
+- Accounts can set a work-branch template in runner Settings; workspaces retain their resolved branch through recovery, delivery, and Discard (#254).
+- Agents can propose board key, name, and description changes for their owner to approve; Full access still requires approval (#345).
+- A local pre-merge gate records per-suite logs, durations and Go test counts, bounds worker use, and reports incomplete runs when host tracing or process resources prevent verification (#298).
+- Published videos play inline in chat, with native controls, an Open larger action, and card fallback on errors (#162).
+- Keep the workspace plan in a blackboard with project, milestone and thrust navigation, linked cards, and exact proposals Main asks the owner to approve.
+- Save named workspace layouts in this browser, restore the last layout, or reset the workspace while retaining tab order, splits and panel geometry.
+- Print viewer content and download messages as Markdown.
+- Open live ticket details beside the board, with full-content details on phones.
+
+### Changed
+
+- The Board Git panel requires an open linked workspace. Hosting links alone no longer trigger provider API reads; branch and base selection use local Git (#251).
+- `ask --person` and command approvals keep their protection in top-level sessions as well as in workers: only the session's owner resolves them, or any signed-in person when a runner key started the session. Timeouts, interrupts and restarts leave them in Needs you. Plain top-level asks are unchanged, and chat still answers them (#343).
+- On Codex and Hermes, an answer committed just as an interrupt wins now reaches the session as a message, once, instead of being lost (#343).
+- Host generations no longer depend on the wall clock: the daemon keeps the last one in its state folder, and a resumed pod starts above the highest one the server has seen, so a clock that steps back cannot reorder recovery (#343).
+- Session recovery after a restart can no longer remove a person-only question or one the restarted engine just asked: only the host can call it, and it reaches only earlier hostings of the session. With a daemon that predates authoritative answers, routing stays off for its sessions: worker questions go straight to the person, input behaves as in 0.5.4, and one note says that updating the daemon turns routing on. An upgrade or downgrade takes effect on the daemon's next hello. Escalated questions from sessions started with a runner key now reach signed-in people's Needs you (#343).
+- Person-only worker questions resist native-loop input and daemon-close bypasses, tell parents who must answer, and preserve answer source across native engines. Destructive-question matching uses a best-effort phrase list instead of shell-command policy (#343).
+- Child questions enforce person-only decisions, retain decision attribution, and update open browsers on escalation. Pending questions stay quiet in the parent panel; expiry, archive, and discard cannot leave stale escalations (#343).
+- Child questions go to Main first, with commands to answer or explicitly escalate them. Ordinary questions wait without a time limit, including while Main is paused or disconnected. If Main is gone, waiting stops without an answer and a plain notice names the worker. Person-required decisions still go directly to the person (#343).
+- The button guard fails closed on unresolved styles and roles, spread overrides, return alternatives, and portal ancestry (#236).
+- Cluster Codex launches show a prominent **Connect Codex** action when credentials are missing or need reconnection, with launch disabled and a direct link to Managed connections. Settings explains the device code sign-in prerequisite and shows Codex connection status in an engine card, with guidance about workstation logins and pasted credential snapshots (#308).
+- The command palette shows board cards by their board key (for example `BLG-317`), and you can search by it (#317).
+- A Markdown file in a split pane keeps its frame and inner padding at every width; on a phone and in review mode it still fills the page (`@blerglab/chat` 1.40.0) (#301).
+- The docs and installer describe agents as the only session kind (#311).
+
+### Removed
+
+- Terminal sessions and their tmux runtime, sandbox launch and recovery, and screen-state classifier. Existing Terminal history remains readable without resume; agent sessions and owner shells are unchanged (#91).
+  Upgrade note: existing host tmux sessions are left running and logged once at daemon startup. After saving any work, stop each one manually with `tmux kill-session -t '=blerg-<session-id>'`. They cannot resume in Blerg (#91).
+- Removed the unused runner tmux Assist endpoint and client (BLG-310).
+- Removed legacy browser WebSocket session spawning. New sessions use the REST launch API, which records their runtime (BLG-6).
+
+### Fixed
+
+- Signal sandboxed Claude turns inside the container after process publication, bound process-limit teardown work, and keep replay scrolling deferred until history is ready.
+- Theme image builds, upgrade preference retention, session-page synchronization, system following, and accessible chart and diff colors.
+- Add five shared account themes across Core, Runner, Board and chat, including color-blind presets and high contrast, with contrast checks and redundant usage cues (#332).
+- Decide transcript following from scroll geometry, preserve selection and navigation through saved-place restoration, and keep layout clamps and outside keyboard input following (BLG-327; @blerglab/chat 1.46.6).
+- Keep branch graph reads bounded on large repositories, preserve recent branches, retry busy reads, and load history only when expanded (#369).
+- Add credential-free host and local sandbox runtime smokes, a Go release command with explicit incomplete coverage, and optional real-engine verification (#31).
+- Preserve desktop preflight and daemon installation errors, and use the actual account when starting its systemd user session (#13).
+- Check for Python 3 before desktop builds or daemon installation, and document the enrollment prerequisite (#13).
+- Keep reveal and fixed-command cards in chat; support Show in read-only chats, preserve panel preferences during Follow, and reject bidi paths and excessive reveal requests (#201).
+- Run fixed cron commands without blocking session starts, scrub runtime tokens, display output as plain text, bind approval to placement, and audit each run with bounded prompt output (#252).
+- Refuse cluster-target-only changes on desktop crons and report runtime catalog outages as unavailable (#273).
+- Stop returns promptly throughout legacy Claude turn preparation and process startup. It cancels preparation immediately and delivers a pending interrupt once startup finishes, without racing process publication (#382).
+- Keep desktop board defaults and automatic schedules free of cluster targets, pin explicit cron targets consistently, and preserve launch compatibility during rolling upgrades (#273).
+- Bound local runtime smoke deadlines, recover stale test containers, and report limited cluster RBAC with a distinct exit code (#31).
+- Board tabs preserve concurrent card changes, retain pinned Status actions and ungranted Board links, and use bounded polling with cached metadata and visible retry errors (#261).
+- Workspace sync serves Git packs inside its existing isolated worker without requiring nested Docker. Final sandbox sync retains its Docker context; native sign-in refresh no longer delays login copies. People excludes expired invitations and retries a busy disable (#138, #109, #208).
+- Keep following live chat through layout clamps during session changes (#327).
+- Daemon recovery stops retrying unknown or reassigned sessions and replaced host launches or runtime bindings, backs off transient failures, and limits stop cleanup to the requested session (#374).
+- Session colors survive resume and remain recognizable in collapsed tiles. Ended workspaces explain why local diffs are unavailable; local Git history handles long subjects and explains missing objects and daemon updates.
+- Published files open on hosts without version listing, and diff reviews avoid a second scrollbar in split tabs.
+- Board model settings retain saved selections as the catalog loads, offer catalog effort choices, and scale to wide displays. Model popover Escape returns focus to Model.
+- File comparison resets to its labeled version pair, resolves diff request sources, and locates quotes selected from rendered Markdown. Review and Raw controls stay hidden during comparison.
+- Board automation identity returns the username without substituting an email address.
+- Board settings has a sectioned, responsive dialog for admins, a compact Model menu, and person names for automation credentials (#241).
+- Published file viewers compare any two versions with the diff viewer and offer requested-passage comparisons after review (#285).
+- Board snapshots update their access reference after React commits (#98).
+- Charts refuse repeated dash patterns that exceed the SVG budget before serialization (#334).
+- Long sessions store checklist changes with current state and sparse replay checkpoints, keep current pins separately, and replace topic/pin lifetime caps with minute rate limits (#216).
+- Restored release cards leave Done totals and detach from cut releases. Cuts honor admission checks, name active Done-card blockers, and allow idle sessions. Release tools, cut confirmation, deletion of active releases, and release attribution are available (#66).
+- Desktop upgrades refuse all active sessions, retain complete private backups, verify build commits, and restore the checkout after failures before migrations. Release dry runs leave no saved ref, and release candidates stay off public main (#171, #322).
+- A shell whose workspace root disappears tells the daemon once, and before the shell closes, so the report can't be lost as the helper ends (#298).
+- Untrusted charts compile and lay out in disposable workers with a five-second deadline and runtime data, scene, facet and output budgets; heavy charts leave the page responsive (#334).
+- Board card runs, discussions, reviews and standing agents start one workspace containing all of the card’s repositories, with independent cluster credential checks (#64).
+- Opening a large file no longer holds up or drops the desktop connection: the daemon has one writer per connection, heartbeats, session events and shell control always go ahead of file replies, and a server that offers it receives large files in small chunks. Older servers keep getting one frame. A file reply that expires mid-transfer can no longer hold up later file and explorer replies across a reconnect (#149).
+- Channels stay under the person's control: Main can read public chats but cannot answer, change, stop, or discard them. Channels cannot start workers yet, keep workspace tool restrictions, and use account limits without consuming Main's worker budget. Waiting channels count as waiting on you. Channel creation retries avoid duplicate chats, phone controls have larger touch targets, and cluster resumes retain recovery checks. (#365)
+- Insights charts now read owner-scoped card flow, reviews, failure/rerun records and measured gate/worker time. Small samples, shared attribution, missing estimates and unrecorded phase costs remain explicit (#378).
+- Insights selects reviews, failures and completions by their own dates, retains the latest cards consistently, batches timing reads, and returns partial data at deadlines. Charts preserve unknown coverage, raw small samples and risk-tagged engine observations; shared viewers get an owner-only state (#378).
+- Live pin rows stay on one line with truncated titles; cards and sheets still wrap long titles (#377).
+- The merge gate runs independent suites within CPU and memory budgets, with performance checks alone at the end. Daemon race coverage runs once per merge and three times for releases (#298).
+- Long board titles wrap within cards, sheets, and lists. Version clicks open release notes immediately; automatic notes still wait. Notifications stand out in both themes, and workspace repositories use compact rows with state tooltips and removal menus (#377).
+- Git status retries once when concurrent repository activity changes safely validated metadata during the read, retaining the original deadline and refusing persistent changes (#376).
+- Files and Repositories show “Git status unavailable” with Retry, keeping failure details in a tooltip (#376).
+- Gate failures name data races and failed tests; owned shutdown kills and generic app-server startup errors no longer stop later suites as resource failures, and resource stops include the detected cause (#298).
+- Keep Codex RPC deadlines on each app instance and legacy terminal warnings on each daemon instance so repeated race checks do not share mutable test state (#298).
+- Measure long-session typing and child-event latency with the median of 30 samples, retaining the 16 ms budget, maximum diagnostics, and render isolation assertions (#362).
+- Cover delayed child completion delivery across the next turn and require a clean-turn notice; durable event snapshots keep sync errors with their completed turn (#366).
+- Discarded sessions stop retrying local cleanup after a definitive server refusal, retaining their work without fabricating a completion receipt (#374).
+- Gate suites have hard deadlines and kill hung helper processes. Diff test fixtures no longer wait on terminal input (#298).
+- The repository dock avoids a duplicate membership request when opened on a connected session (#321).
+- Idle shutdown and model changes no longer end a session's running background work, however long it runs, including commands moved to the background mid-run. If the engine ends anyway, the agent is woken and the person is told what was running. An idle session is also woken once when a background task writes nothing for 30 minutes (#375).
+- Start a named channel from the dock with any available engine. Channels inherit workspace repositories and permissions, with options to select repositories, skip inherited permissions, or keep the chat private from Main (#365).
+- Passing the process limit no longer ends a session or shell. Only the command that tried to start one more process fails, with "Resource temporarily unavailable"; the engine and everything else keep running, the person reads "blerg: process limit reached (4096 tasks); retry with less parallelism (GOMAXPROCS, go -p, make -j, test workers)." at once and the agent with its next message, which it never starts a turn to get, and the engine keeps a small reserve for its tools and goes on starting its own threads, quickly, whatever fills the tree. A fork bomb no longer ends a session; a bomb that never exits leaves it full until it is killed or the session is stopped (BLG-326).
+- Recovery re-arms dismissed failure alerts without another user turn. Recent resolved alerts reopen quietly during flapping, and new input alone no longer counts as recovery (#359).
+- Child completion backlogs coalesce to the latest unconsumed report; unavailable cluster parents wait for reconnect and invalid coordinators retire their intents (#361).
+- Interrupted waiter notices clear terminal HTTP errors and use bounded retry batches with capped backoff before reconnect retries (#373).
+- Recovery alerts resolve with a History note when a session recovers or is discarded; repeated failure/stopped reports share one alert, and old duplicates are cleaned up (#359).
+- Child turn reports persist with the transcript, retry across server restarts, and distinguish background continuations from duplicate reports (#361).
+- Interrupted question waiters keep retrying their close notice across reconnects and restarts; their saved notices recover answers committed just before interruption (#373).
+- Default work branches resume before their first push and continue syncing after agent history rewrites. Template-only safeguards use saved template intent. Older daemons keep full-ID defaults, host launches stay compatible, and child guidance uses the branch returned by `session result` (#370).
+- New work branches default to the launch title plus a short unique suffix. Templates override the default; existing branches and renamed sessions keep their recorded names (#370).
+- Retained Bash work from an ended Claude engine stays listed without blocking plugin updates or limit resumes (#340).
+- Add touched verification with affected Go packages, related frontend tests, representative viewport matrices and shared Vitest scheduling hints. Honor worker budgets up to six with a measured two-package cap for core and board tests, reuse ordinary Go results, and retain fresh race and wire proofs (#298).
+- Repair nested gate-lock inheritance and restore the Main dock label found by the measured gate; keep authorization, recovery and UI regression checks aligned with current contracts (#298).
+- Person-started root chats are named workspaces in server alerts and frontend roles; person-started side chats remain channels (#358).
+- Server failure alerts, push notifications, worker launch requests, file recovery messages and permission explanations use channel, worker, workspace and run names (#358).
+- Gate recording uses portable, reusable locks and best-effort telemetry. Card activity reads bound event detail, flag shared attribution, and authorize structured records against the workspace card context. Approval drafts expose estimates, and legacy XS estimates survive edits. (#368)
+- Record structured ticket failures and rerun outcomes, link automatic session failure alerts, and return disjoint session/tool phase timings with card data. Record local gate cost telemetry and compare runs without charts.
+- Stop interrupts Claude input held before its next turn starts without reusing an expired deadline, and reports when work finished first. Engine exit closes Claude Monitors, subagents, and pending native calls while retaining unconfirmed Bash work. Codex child-only Stop now has a completion deadline, reports cleanup refusal, and holds queued input through replacement (#340).
+- Stop acts on current work across engines, including child work under an idle root, and reports every press. A short guard absorbs late double-clicks. Claude reports cleanup refusals and preserves engine consumption receipts through slow turn-end work; Codex and Hermes wait up to 30 seconds for completion before a safe restart. Forced Claude replacement cleans up its process group; detached shells and unconfirmed Codex tool children stay listed as possibly running. OpenClaw Stop stays with its turn during startup and reports cleanup refusal without dropping queued input (#340).
+- Stop ends a stuck background wait, preserves queued input through engine and daemon restarts, reports restart refusals, and distinguishes a stopped turn from background work that is still running (`@blerglab/chat` 1.44.3) (#340).
+- Keep stacked dock tabs in a fixed order and make repository previews dismissible as soon as they appear.
+- Workspace cards and the dock distinguish nested channels and workers, keep channel unread and all pending decisions visible, reveal linked workers on phones, and use role-specific end/discard wording. Idle state glyphs stay on one line in narrow dock rows. Technical and agent-guidance documentation retains session terminology (`@blerglab/chat` 1.44.2) (#358).
+- Push subscriptions belong to the signed-in account and browser login. Session notifications target their owner, deletion cannot remove another account’s subscription, and signing out stops delivery. Turn off waits for server deletion; legacy subscriptions restore without prompting. Sign-out keeps the opt-in for the next login. Unowned subscriptions are removed and browsers re-register silently. **Upgrade note:** subscriptions created before migration 105 cannot deliver until that browser opens the app and re-registers (#104).
+- Push for an owned public or private session goes only to its owner. Ownerless public sessions notify accounts with a live subscription. Core outages retain failure notifications for retry, and uncertain Core responses preserve subscriptions (#104).
+- A process freeze at turn end is now sound: SIGCONT cannot release a new process or undo a freeze, and a thread that execs can no longer leave a reused process ID out of the accounting. A process that stops itself now really stops, and stays stopped across a turn end, until it gets SIGCONT. A process that takes a thread's freed ID is recorded before it runs, whatever order the kernel reports it in. A process killed during a thread's exec no longer pauses the session for 30 seconds and ends it (#344).
+- Programs in a session can no longer create a seccomp notification listener: the call fails with "operation not permitted", so a nested runtime configured to use one will not start. Other seccomp filters still work (#344).
+- Repository usage and refreshes stay within Main and its workspace descendants. Main has its own label and is excluded from channel counts (#321).
+- Desktop dock chats share the file preview tab: click or Enter previews, double-click or sending a message keeps it. Phone chat tabs stay permanent. Main and channels share the speech bubble; workers share the diamond across rows and tabs (#358).
+- Dock tabs switch tools without a window collapse button. The folder toggle closes the desktop dock; phone sheets keep Back. Repositories use padded name, branch and plain state rows, with indented known active branches and hover or long-press previews. Repository state reads retry busy readers and offer Retry after a failed or incomplete read (#358).
+- Desktop dock window and sidebar collapse controls have separate hit areas in merged and stacked layouts, including the Repositories tab; phone sheets keep their existing header controls (#321).
+- Opening an ended session keeps it and its children in History instead of moving them into the live session list (#341).
+- The launch sheet keeps compatible repository selections when switching desktop runtimes, rechecks them before launch, and explains incompatible selections (#316).
+- Workspace launch errors show readable sentences and link dedicated Codex login errors to Managed connections in Settings (#307).
+- Removed obsolete remembered-board fallbacks while retaining runtime and engine checks (#304).
+- Persistent shell replies and refusals keep their wire version across the desktop connection. Withdrawal records its audit together with the durable denial (#269).
+- Local pre-merge and Linux CI now require the persistent shell real-wire test in normal and race modes; missing or skipped coverage fails the gate (#269).
+- Bare numeric card lookups fall back to a numeric title only when the card number is missing; the Board resolves the fallback and lists ambiguous matches (#289).
+- Browser channel commands check persisted privacy before acting. Read/star updates stay private for uppercase UUIDs and when the WebSocket handler is used on its own (#356).
+- Typing in the chat answers an open question again in sessions started with a runner key, on every engine. Input sent before a question opened no longer becomes its answer after a reconnect, and a clarifying question's answer reaches the engine unchanged, so it matches its option (#343).
+- A child's person-only question survives an interrupt or timeout: it stays in Needs you, marked “no longer waited on”, the parent still cannot send input past it, and the person's answer reaches the child as a message. `session watch` exits 5 only for blocking questions (#343).
+- A failed question recovery no longer stops a restarted session from being hosted. The daemon retries on its next connection, tolerates older servers, and resumed pods always recover their questions (#343).
+- Native questions resolve only from a recorded answer tied to their question ID. Messages and notices queue until afterward; restart withdraws dead blocking questions, and parents hear when a question waiting on the person resolves (#343).
+- Side chat tabs keep the keyboard closed on phones, preserve keyboard access to split tab strips, clear unread for every visible chat, and wait for restored chats before marking them read (#354).
+- Channels dock History requests are consumed once, focus stays with the intended chat, side chats do not duplicate Main’s palette commands or consume its artifact link, and merged tool tabs retain their trees and scroll. Chat labels, unread output, root selection and child search explanations stay current (#354).
+- Child questions now reach their owner's Needs you in the parent panel and notification bell, with replies routed to the child. Push notifications include `ask --no-wait` and target only the owner's registered browsers (#343).
+- Plugin-result timeout coverage also uses the deadline-aware partial-write fixture, keeping its original timeout and connection-poisoning checks independent of large-payload setup (#298).
+- Stalled-file scheduler and timeout coverage now observe a partial frame through the same deadline-aware fixture, preserving revocation, timeout, and replacement-connection checks without an 8 MiB setup race (#298).
+- Shell scrollback browser coverage waits for parsed output and replies instead of assuming xterm finishes within 150 ms, retaining the replay and query-suppression checks at phone and wide-screen widths (#298).
+- The daemon cancellation regression now blocks after writing the first frame byte, avoiding a large-payload setup timeout under the race detector while preserving the cancellation deadline (#298).
+- The pre-merge gate continues after ordinary test failures when passing Go tests log expected child-process kills, while still stopping on unproven kills and resource exhaustion (#298).
+- Workspace search keeps ignored files out under load, filters large tracked indexes in Git, and refuses results when ignore preparation cannot complete within its bounded budget (#353).
+- Empty scratch folders are removed after their workspaces end for good. Folders with work or unresolved cleanup are kept and reported; offline `cleanup-scratch` previews and safely removes old empty leftovers (#352).
+- Killed-task containment coverage waits for the kernel to report death before continuing, eliminating a test race while preserving the ESRCH recovery check (#348).
+- Discarded children retain unanswered questions as withdrawn, with a history note and a notice to the parent, instead of recording an empty answer (`@blerglab/chat` 1.41.1) (#350).
+- Watching an already idle child returns its last answer immediately, including turns ending during watch setup, while queued new work keeps it waiting; session results include the detailed status shown by the child list (#351).
+- Reference lookups stop after five attempts, so nonexistent cards and hash-like words do not keep polling (`@blerglab/chat` 1.40.2) (#346).
+- Card and commit references retry stale misses and temporary lookup failures, so newly created cards become links without reloading (`@blerglab/chat` 1.40.1) (#346).
+- The production Docker workspace regression now builds its own scripted engine and current helper image, so the gate does not accidentally run a real CLI with fixture credentials. The fixture waits for input before committing, keeping shell setup separate from turn-end sync (#298).
+- Switching workspaces no longer forces layout from the tab strip during React’s commit. The active tab stays visible when the overflow button appears, and dragging tabs keeps scrolling through short animation frames (#309).
+- Explorer Git status retries one metadata walk after a brief delay when background Git maintenance changes it, while continuing to refuse unsafe metadata (BLG-320).
+- Workspaces keep internal repository instructions out of the person’s chat bubble, including older transcripts when saved membership is available (#314).
+- Workspace cards, headers, and ready cards show repository names, with a compact count and full list for multiple repositories (#315).
+- Workspace searches on macOS sample Git memory natively, avoiding repeated process launches that could exhaust the ignore budget and return ignored files under contention (BLG-319).
+- Repeated daemon race tests use fresh sandbox fixture state and clean up synthetic engine process timers, preventing clone collisions and delayed shutdown panics (#290).
+- CLI verification shuts down its HTTP test fixtures promptly instead of waiting for the default half-second poll between tests (#298).
+- Server verification checks core authorization refusals directly instead of waiting for an HTTP timeout caused by the test's own mutex (#298).
+- Start workspace connections promptly after silent sign-in renewal, avoid reparsing warm Markdown when switching workspaces, and isolate chat typing from unrelated panel updates.
+
 ## [0.5.4] - 2026-10-30
 
 ### Fixed
@@ -1546,7 +1760,7 @@ breaking changes in later minor versions.
   is not seen as an ending by the board or by a broker, and a message typed in the browser
   meanwhile is delivered when the daemon returns.
   The first update to a daemon with this still ends the sessions running then. See
-  [`install/desktop/DAEMON.md`](install/desktop/DAEMON.md#what-a-daemon-restart-does-to-running-sessions)
+  [`install/desktop/DAEMON.md`](install/desktop/DAEMON.md#what-a-daemon-restart-does-to-running-workspaces)
   and [`docs/design/agent-session-recovery.md`](docs/design/agent-session-recovery.md).
 - **Interactive and unattended sessions.** Every agent session is started as `interactive` (a
   person is reading the chat: the agent discusses before acting, says what it is doing, asks and
@@ -1794,7 +2008,13 @@ breaking changes in later minor versions.
 - Repository hygiene: Apache-2.0 licence, a scrub check that keeps private hostnames and
   addresses out of tracked files, and an offline documentation link check.
 
-[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.5.4...HEAD
+[Unreleased]: https://github.com/blerglab/blerg-ai/compare/v0.6.0-rc.1...HEAD
+[0.6.0]: https://github.com/blerglab/blerg-ai/compare/v0.5.4...v0.6.0
+[0.5.4]: https://github.com/blerglab/blerg-ai/compare/v0.5.3...v0.5.4
+[0.5.3]: https://github.com/blerglab/blerg-ai/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/blerglab/blerg-ai/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/blerglab/blerg-ai/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/blerglab/blerg-ai/compare/v0.4.5...v0.5.0
 [0.4.5]: https://github.com/blerglab/blerg-ai/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/blerglab/blerg-ai/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/blerglab/blerg-ai/compare/v0.4.2...v0.4.3

@@ -42,6 +42,7 @@ beforeEach(() => {
   useSessionStore.setState({ daemons: [makeDaemon()], sessions: ['a', 'b'].map(x => makeSession({ id: `sess-${x}`, kind: 'agent', status: 'idle', title: `Session ${x.toUpperCase()}` })) })
   localStorage.setItem(RAIL_PREF_KEY, '1')
   localStorage.setItem(RAIL_TAB_KEY, 'files')
+  localStorage.setItem('blerg-runner.session-dock.windows', JSON.stringify({ active: 'files', panels: [], ratio: .5 }))
   localStorage.setItem(explorerPrefKey('person-a'), JSON.stringify({ open: true, width: 320 }))
   apiFetch.mockReset().mockImplementation(async (url: string) => {
     const id = /\/api\/sessions\/([^/]+)\//.exec(url)?.[1] ?? ''
@@ -98,8 +99,10 @@ for (const [width, height] of [[390, 844], [3840, 2160]] as const) {
     await screen.findByText(/sess-a message 400/)
     await frame()
     const root = timeline()
+    root.dispatchEvent(new PointerEvent('pointerdown', { button: 0 }))
     root.scrollTop = Math.round(root.scrollHeight / 2)
     root.dispatchEvent(new Event('scroll'))
+    window.dispatchEvent(new PointerEvent('pointerup'))
     await frame()
     const place = root.scrollTop, seen = firstSeen()
     expect(atEnd(root)).toBe(false)
@@ -187,7 +190,7 @@ it('each panel tab keeps its own scroll place, also when shown from the command 
   const live = body().scrollTop
   expect(live).toBeGreaterThan(0)
   expect(live).not.toBe(files)
-  fireEvent.click(tab('Files'))
+  fireEvent.click(tab('Shared'))
   await frame()
   expect(body().scrollTop).toBe(files)
   fireEvent.click(tab('Live'))
@@ -202,7 +205,7 @@ it('each panel tab keeps its own scroll place, also when shown from the command 
     await userEvent.keyboard('{Enter}')
     await frame()
   }
-  await command('Show Files panel')
+  await command('Show Shared panel')
   expect(body().scrollTop).toBe(files)
   await command('Show Live panel')
   expect(body().scrollTop).toBe(live)
@@ -214,8 +217,10 @@ it('a reading place that came back is kept on the next leaving too, across a lay
   await screen.findByText(/sess-a message 400/)
   await frame()
   const root = timeline()
+  root.dispatchEvent(new PointerEvent('pointerdown', { button: 0 }))
   root.scrollTop = Math.round(root.scrollHeight / 2)
   root.dispatchEvent(new Event('scroll'))
+  window.dispatchEvent(new PointerEvent('pointerup'))
   await frame()
   const seen = firstSeen()
   await awayAndBack()
@@ -252,26 +257,26 @@ for (const [width, height] of [[390, 844], [1440, 900]] as const) {
     const files = body().scrollTop
     expect(files).toBeGreaterThan(100)
     // ArrowRight from Files to Capabilities and back with ArrowLeft: the focused tab is in view.
-    fireEvent.keyDown(tab('Files'), { key: 'ArrowRight' })
+    fireEvent.keyDown(tab('Shared'), { key: 'ArrowRight' })
     await frame()
     expect(document.activeElement).toBe(tab('Capabilities'))
     expect(inView(document.activeElement!)).toBe(true)
     fireEvent.keyDown(tab('Capabilities'), { key: 'ArrowLeft' })
     await frame()
-    expect(document.activeElement).toBe(tab('Files'))
+    expect(document.activeElement).toBe(tab('Shared'))
     expect(body().scrollTop).toBe(files)
     expect(inView(document.activeElement!)).toBe(true)
     // The palette command too.
     {
       // On a phone the drawer is closed first; the command opens it on Files (a new body, put back).
       if (width < 1024) { await userEvent.keyboard('{Escape}'); await frame(); screen.getByTestId('rail-toggle').focus() }
-      else tab('Files').focus()
+      else tab('Shared').focus()
       await userEvent.keyboard('{Control>}k{/Control}')
       const palette = screen.getByRole('dialog', { name: 'Command palette' })
-      await userEvent.fill(within(palette).getByRole('combobox'), '>Show Files panel')
+      await userEvent.fill(within(palette).getByRole('combobox'), '>Show Shared panel')
       await userEvent.keyboard('{Enter}')
       await frame()
-      expect(document.activeElement).toBe(tab('Files'))
+      expect(document.activeElement).toBe(tab('Shared'))
       expect(body().scrollTop).toBe(files)
       expect(inView(document.activeElement!)).toBe(true)
     }

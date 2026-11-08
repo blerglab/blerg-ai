@@ -34,10 +34,10 @@ export default function SessionsHome({ onNewSession }: Props) {
           color: 'var(--chalk)',
         }}
       >
-        No session selected
+        No workspace selected
       </h1>
       <p style={{ margin: 0, maxWidth: 380, lineHeight: 1.5, fontSize: '0.92rem' }}>
-        Pick a session from the list to read it, or start a new one.
+        Pick a workspace from the list to read it, or start a new one.
       </p>
       <button
         type="button"
@@ -57,7 +57,7 @@ export default function SessionsHome({ onNewSession }: Props) {
           letterSpacing: '0.05em',
         }}
       >
-        + New session
+        + New workspace
       </button>
     </div>
   )

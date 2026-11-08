@@ -114,3 +114,14 @@ func TestRecoveryProofCannotClearDifferentIncarnation(t *testing.T) {
 		t.Fatalf("exact recovery refused: %v", err)
 	}
 }
+
+func TestRecoveryProofCannotClearUnsettledRetainedSibling(t *testing.T) {
+	f := setup(t)
+	launch := physicalLaunch(f.r.binding)
+	f.m.fenced[launch] = true
+	f.m.retainedClosing["sibling"] = &shell{binding: f.r.binding}
+	proof := protocol.SupervisorCleanup{Launch: SupervisorIdentity(f.r.binding, SignedGrant{}).Launch, ContainmentEmpty: true, PTYsClosed: true, Reaped: true}
+	if err := f.m.Recovered(t.Context(), f.actor, "session", proof); err == nil || !f.m.fenced[launch] {
+		t.Fatal("legacy recovery released unsettled retained custody")
+	}
+}

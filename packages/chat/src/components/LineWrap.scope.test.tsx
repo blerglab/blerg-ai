@@ -16,7 +16,7 @@ const fetcher: typeof fetch = async input => String(input).endsWith('/raw')
 
 async function wrapButton(files: NonNullable<ReturnType<typeof createProxyTransport>['files']>) {
   const view = render(<ArtifactViewer sessionId="s1" files={files} artifact={code} onClose={() => {}} />)
-  const button = await screen.findByRole('button', { name: 'Wrap' })
+  const button = await screen.findByRole('button', { name: 'Wrap lines' })
   return { view, button }
 }
 
@@ -53,7 +53,7 @@ describe('a published plain text file', () => {
     const text = { id: 't1', name: 'build.txt', size: 12, content_type: 'text/plain', view: 'text' as const }
     const files = createProxyTransport({ baseUrl: '/api/chat', fetch: fetcher, attachmentScope: () => 'person-a' }).files!
     const view = render(<ArtifactViewer sessionId="s1" files={files} artifact={text} onClose={() => {}} />)
-    const button = await screen.findByRole('button', { name: 'Wrap' })
+    const button = await screen.findByRole('button', { name: 'Wrap lines' })
     const box = () => screen.getByTestId('artifact-text').closest('[data-wrap]')!
     expect(box()).toHaveAttribute('data-wrap', 'on')
     fireEvent.keyDown(screen.getByRole('dialog'), { key: 'z', code: 'KeyZ', altKey: true })
@@ -61,7 +61,7 @@ describe('a published plain text file', () => {
     expect(button).toHaveAttribute('aria-pressed', 'false')
     view.unmount()
     render(<ArtifactViewer sessionId="s1" files={files} artifact={text} onClose={() => {}} />)
-    await screen.findByRole('button', { name: 'Wrap' })
+    await screen.findByRole('button', { name: 'Wrap lines' })
     expect(box()).toHaveAttribute('data-wrap', 'off')
   })
 })
@@ -69,7 +69,7 @@ describe('a published plain text file', () => {
 describe('an expanded code block', () => {
   it('has the toggle and Alt+Z, and follows the account’s code choice', () => {
     const view = render(<WrapScopeContext.Provider value="person-a"><CodeViewer text={'const a = 1\n'} lang="javascript" onClose={() => {}} /></WrapScopeContext.Provider>)
-    const button = screen.getByRole('button', { name: 'Wrap' })
+    const button = screen.getByRole('button', { name: 'Wrap lines' })
     const box = () => screen.getByTestId('code-viewer-text')
     expect(button).toHaveAttribute('aria-pressed', 'false')
     expect(box()).toHaveAttribute('data-wrap', 'off')
@@ -99,7 +99,7 @@ describe('a file over 5,000 lines', () => {
       : new Response(JSON.stringify({ artifacts: [] }), { headers: { 'Content-Type': 'application/json' } })
     const files = createProxyTransport({ baseUrl: '/api/chat', fetch: fetchLong, attachmentScope: () => 'person-a' }).files!
     render(<ArtifactViewer sessionId="s1" files={files} artifact={text} onClose={() => {}} />)
-    const button = await screen.findByRole('button', { name: 'Wrap' })
+    const button = await screen.findByRole('button', { name: 'Wrap lines' })
     const box = () => screen.getByTestId('artifact-text').closest('[data-wrap]')!
     expect(button).toBeDisabled()
     expect(button).toHaveAttribute('title', 'Wrap is off for files over 5,000 lines')
@@ -111,7 +111,7 @@ describe('a file over 5,000 lines', () => {
 
   it('does not wrap an expanded code block either', () => {
     render(<CodeViewer text={long} lang={null} title="Message" onClose={() => {}} />)
-    expect(screen.getByRole('button', { name: 'Wrap' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Wrap lines' })).toBeDisabled()
     expect(screen.getByTestId('code-viewer-text')).toHaveAttribute('data-wrap', 'off')
   })
 })

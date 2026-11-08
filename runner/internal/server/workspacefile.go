@@ -21,7 +21,11 @@ import (
 
 const workspaceFileTimeout = 10 * time.Second
 const workspaceFileMaxBytes = 25 << 20
-const workspaceFileMaxFrame = (workspaceFileMaxBytes+2)/3*4 + (64 << 10)
+
+// workspaceFileMaxContent is the base64 length of the largest allowed file.
+const workspaceFileMaxContent = (workspaceFileMaxBytes + 2) / 3 * 4
+const workspaceFileMaxFrame = workspaceFileMaxContent + (64 << 10)
+const workspaceFileMaxChunkFrame = protocol.WorkspaceFileChunkBytes + (4 << 10)
 
 var errWorkspaceUnavailable = errors.New("workspace file daemon unavailable")
 
@@ -31,9 +35,19 @@ type workspaceFileWaiter struct {
 	ch                chan protocol.WorkspaceFileResult
 	launchGeneration  string
 	runtimeGeneration int64
+	content           *workspaceFileContent
+}
+
+// workspaceFileContent holds a reply's chunks until its closing frame, bounded
+// by the largest allowed file. It lives and dies with the pending request.
+type workspaceFileContent struct {
+	text   strings.Builder
+	parts  int
+	broken bool
 }
 type workspaceFileRequests struct {
 	mu             sync.Mutex
+	changed        chan struct{}
 	pending        map[string]workspaceFileWaiter
 	active         int
 	activeByDaemon map[string]int
@@ -78,12 +92,28 @@ func (h *Hub) acquireWorkspaceFileRead(dc *DaemonConn, user string) (func(), boo
 		if r.activeByUser[user] == 0 {
 			delete(r.activeByUser, user)
 		}
+		if r.changed != nil {
+			close(r.changed)
+			r.changed = nil
+		}
 	}, true
+}
+
+// Capture before attempting admission so a release cannot be missed between
+// the failed attempt and waiting. File and explorer leases share this signal.
+func (h *Hub) workspaceReadChanged() <-chan struct{} {
+	r := &h.workspaceFileReqs
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.changed == nil {
+		r.changed = make(chan struct{})
+	}
+	return r.changed
 }
 
 func (h *Hub) requestWorkspaceFile(ctx context.Context, dc *DaemonConn, sid, name string, binding ...protocol.WorkspaceExplorerRequest) (protocol.WorkspaceFileResult, error) {
 	id := newUUID()
-	w := workspaceFileWaiter{dc: dc, sessionID: sid, ch: make(chan protocol.WorkspaceFileResult, 1)}
+	w := workspaceFileWaiter{dc: dc, sessionID: sid, ch: make(chan protocol.WorkspaceFileResult, 1), content: &workspaceFileContent{}}
 	if len(binding) > 0 {
 		w.launchGeneration = binding[0].LaunchGeneration
 		w.runtimeGeneration = binding[0].Generation
@@ -91,7 +121,7 @@ func (h *Hub) requestWorkspaceFile(ctx context.Context, dc *DaemonConn, sid, nam
 	if w.launchGeneration != "" {
 		authorized, ok := dc.authorizedWorkspaceRuntime(sid)
 		if !ok || authorized != binding[0].WorkspaceRuntimeRef {
-			return protocol.WorkspaceFileResult{}, errWorkspaceUnavailable
+			return protocol.WorkspaceFileResult{}, errWorkspaceRuntimeMismatch
 		}
 	}
 	r := &h.workspaceFileReqs
@@ -104,7 +134,7 @@ func (h *Hub) requestWorkspaceFile(ctx context.Context, dc *DaemonConn, sid, nam
 	}
 	if len(r.pending) >= workspaceReadsGlobal || count >= workspaceReadsPerDaemon {
 		r.mu.Unlock()
-		return protocol.WorkspaceFileResult{}, errWorkspaceUnavailable
+		return protocol.WorkspaceFileResult{}, errWorkspaceBusy
 	}
 	if r.pending == nil {
 		r.pending = make(map[string]workspaceFileWaiter)
@@ -121,42 +151,87 @@ func (h *Hub) requestWorkspaceFile(ctx context.Context, dc *DaemonConn, sid, nam
 			h.trySendToDaemon(dc, cancelRaw)
 		}()
 	}
-	if h.FindDaemonForSession(sid) != dc || !h.trySendToDaemon(dc, raw) {
-		return protocol.WorkspaceFileResult{}, errWorkspaceUnavailable
+	if h.FindDaemonForSession(sid) != dc {
+		return protocol.WorkspaceFileResult{}, errWorkspaceDaemonGone
+	}
+	if !h.trySendToDaemon(dc, raw) {
+		return protocol.WorkspaceFileResult{}, errWorkspaceSendFailed
 	}
 	timer := time.NewTimer(workspaceFileTimeout)
 	defer timer.Stop()
 	select {
 	case res, ok := <-w.ch:
 		if !ok || h.GetDaemon(dc.ID) != dc || h.FindDaemonForSession(sid) != dc {
-			return protocol.WorkspaceFileResult{}, errWorkspaceUnavailable
+			return protocol.WorkspaceFileResult{}, errWorkspaceDaemonGone
 		}
 		return res, nil
 	case <-timer.C:
-		return protocol.WorkspaceFileResult{}, errWorkspaceUnavailable
+		return protocol.WorkspaceFileResult{}, context.DeadlineExceeded
 	case <-ctx.Done():
 		return protocol.WorkspaceFileResult{}, ctx.Err()
 	}
 }
 
-func (h *Hub) deliverWorkspaceFileResult(dc *DaemonConn, res protocol.WorkspaceFileResult) {
-	if h.GetDaemon(dc.ID) != dc || h.FindDaemonForSession(res.SessionID) != dc || (dc.BoundSessionID != "" && dc.BoundSessionID != res.SessionID) {
-		return
+// workspaceReplyAuthorized is the authority every frame of a reply must have.
+func (h *Hub) workspaceReplyAuthorized(dc *DaemonConn, sessionID string, ref protocol.WorkspaceRuntimeRef) bool {
+	if h.GetDaemon(dc.ID) != dc || h.FindDaemonForSession(sessionID) != dc || (dc.BoundSessionID != "" && dc.BoundSessionID != sessionID) {
+		return false
 	}
-	if res.LaunchGeneration != "" {
-		authorized, ok := dc.authorizedWorkspaceRuntime(res.SessionID)
-		if !ok || authorized != res.WorkspaceRuntimeRef {
-			return
-		}
+	if ref.LaunchGeneration != "" {
+		authorized, ok := dc.authorizedWorkspaceRuntime(sessionID)
+		return ok && authorized == ref
+	}
+	return true
+}
+
+// pendingFor finds the request a frame answers; the caller holds r.mu.
+func (r *workspaceFileRequests) pendingFor(dc *DaemonConn, id, sessionID string, ref protocol.WorkspaceRuntimeRef) (workspaceFileWaiter, bool) {
+	w, ok := r.pending[id]
+	if !ok || w.dc != dc || w.sessionID != sessionID || w.launchGeneration != ref.LaunchGeneration || w.runtimeGeneration != ref.Generation {
+		return workspaceFileWaiter{}, false
+	}
+	return w, true
+}
+
+func (h *Hub) collectWorkspaceFileChunk(dc *DaemonConn, chunk protocol.WorkspaceFileChunk) {
+	if !h.workspaceReplyAuthorized(dc, chunk.SessionID, chunk.WorkspaceRuntimeRef) {
+		return
 	}
 	r := &h.workspaceFileReqs
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	w, ok := r.pending[res.RequestID]
-	if !ok || w.dc != dc || w.sessionID != res.SessionID || w.launchGeneration != res.LaunchGeneration || w.runtimeGeneration != res.Generation {
+	w, ok := r.pendingFor(dc, chunk.RequestID, chunk.SessionID, chunk.WorkspaceRuntimeRef)
+	if !ok || w.content.broken {
+		return
+	}
+	if chunk.Seq != w.content.parts || chunk.Data == "" || w.content.text.Len()+len(chunk.Data) > workspaceFileMaxContent {
+		w.content.broken = true
+		w.content.text.Reset()
+		return
+	}
+	w.content.parts++
+	w.content.text.WriteString(chunk.Data)
+}
+
+func (h *Hub) deliverWorkspaceFileResult(dc *DaemonConn, res protocol.WorkspaceFileResult) {
+	if !h.workspaceReplyAuthorized(dc, res.SessionID, res.WorkspaceRuntimeRef) {
+		return
+	}
+	r := &h.workspaceFileReqs
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	w, ok := r.pendingFor(dc, res.RequestID, res.SessionID, res.WorkspaceRuntimeRef)
+	if !ok {
 		return
 	}
 	delete(r.pending, res.RequestID)
+	if w.content.parts > 0 || w.content.broken || res.Chunks != 0 {
+		if w.content.broken || res.Chunks != w.content.parts || res.ContentB64 != "" {
+			res = protocol.WorkspaceFileResult{ErrorCode: "unavailable"}
+		} else {
+			res.ContentB64 = w.content.text.String()
+		}
+	}
 	w.ch <- res
 }
 func (h *Hub) abandonWorkspaceFileRequests(dc *DaemonConn) {
@@ -332,11 +407,15 @@ func (a *API) HandleGetWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 		viewerBinding.Generation = generation
 	}
 	res, err := a.hub.requestWorkspaceFile(ctx, dc, sid, name, viewerBinding)
+	if err != nil {
+		logWorkspaceRequestFailure(sid, dc.ID, "read", err)
+	}
 	if a.recheckWorkspaceFileAccess(ctx, w, p, sid) {
 		return
 	}
 	if err != nil {
-		workspaceFileProblem(w, 409, workspaceCodeDaemonTimeout, "The session daemon did not provide a workspace file.")
+		code, message, _ := workspaceRequestFailure(err)
+		workspaceFileProblem(w, 409, code, message)
 		return
 	}
 	// Validate authority again after waiting: a reconnect or launch replacement cannot supply data.

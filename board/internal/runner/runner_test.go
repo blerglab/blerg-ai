@@ -493,3 +493,29 @@ func TestBlergRunnerStartRefusalsOfAnyStatusAreTyped(t *testing.T) {
 		}
 	}
 }
+
+func TestBlergRunnerMultiRepositoryStart(t *testing.T) {
+	var body struct {
+		Repo         string       `json:"repo"`
+		GitURL       string       `json:"git_url"`
+		Repositories []Repository `json:"repositories"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/runner/start" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		_, _ = w.Write([]byte(`{"session_id":"fixture-session"}`))
+	}))
+	defer srv.Close()
+	driver := NewBlergRunner(srv.URL, "fixture-key", "https://github.com/example")
+	_, err := driver.Start(t.Context(), StartRequest{Repo: "example/api", Token: "fixture-start-token", Repositories: []Repository{{Repo: "example/api"}, {Repo: "example/web"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Repositories) != 2 || body.Repositories[0].GitURL != body.GitURL || body.Repositories[1].GitURL != "https://github.com/example/web.git" {
+		t.Fatalf("lost per-repository clone targets: %+v", body)
+	}
+}

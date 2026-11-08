@@ -329,6 +329,6 @@ func (s *workspaceStatusSnapshot) optionsForPlatform(p *pinnedGitDir, out io.Wri
 	}
 	return hostgit.Options{Dir: p.cwd, DirFile: p.dir, ExtraFiles: []*os.File{p.dir, s.objects}, SafeDirectory: p.resolved, Ceiling: filepath.Dir(p.resolved), MemoryLimit: true, LimitKB: 256 << 10, Untrusted: true, Stdout: out,
 		Env:    []string{"GIT_DIR=" + s.directory, "GIT_COMMON_DIR=" + s.directory, "GIT_WORK_TREE=" + worktree, "GIT_OBJECT_DIRECTORY=" + objects},
-		Config: []string{"core.bare=false", "core.fsmonitor=false", "core.hooksPath=/dev/null", "core.untrackedCache=false", "index.threads=1", "status.showUntrackedFiles=normal", "status.aheadBehind=false"},
+		Config: []string{"core.bare=false", "core.fsmonitor=false", "core.hooksPath=/dev/null", "core.untrackedCache=false", "index.threads=1", "core.preloadIndex=false", "status.showUntrackedFiles=normal", "status.aheadBehind=false"},
 	}
 }

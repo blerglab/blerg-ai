@@ -106,7 +106,7 @@ it.each([390,3840])('keeps unsupported host workspace selection unavailable at %
   await page.viewport(width,900)
   render(<MemoryRouter><LaunchSheet open onClose={()=>{}}/></MemoryRouter>)
   fireEvent.click(await screen.findByTestId('runtime-daemon'))
-  await screen.findByText('Workspace sessions and owner shells are not enabled for this runtime.')
+  await screen.findByText('Workspaces and owner shells are not enabled for this runtime.')
   expect(screen.queryByRole('region',{name:'Workspace repositories'})).toBeNull()
   expect(screen.getByTestId('launch-col-repo').getBoundingClientRect().right).toBeLessThanOrEqual(width)
 })
@@ -132,7 +132,7 @@ it.each([390,3840])('warns about host children for empty folders in the full she
   expect(note).toHaveTextContent('Host children need a Git repository.')
   const beforeToggle=screen.getByTestId('launch-footer').getBoundingClientRect().y
   fireEvent.click(initialize)
-  expect(screen.getByText('Host children won’t be available in this session.')).toBeTruthy()
+  expect(screen.getByText('Host children won’t be available in this workspace.')).toBeTruthy()
   expect(screen.getByTestId('launch-footer').getBoundingClientRect().y).toBe(beforeToggle)
   const footer=screen.getByTestId('launch-footer').getBoundingClientRect()
   const before=footer.y

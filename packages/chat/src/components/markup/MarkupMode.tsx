@@ -3,6 +3,12 @@
 // marks. Every mark is a vector shape in image pixels, redrawn from scratch on each change, so
 // undo, a resize of the stage and the flattened copy all come from one drawing routine. Send
 // composes image + marks + pins at the image's natural size, as <stem>.annotated.png.
+//
+// themecheck:allow-file BLG-473: FALLBACK (colorsOf) is the JS equivalent of a var() fallback for
+// --chat-accent/--chat-danger/--chat-info/--chat-accent-fg, all of which every theme defines
+// (packages/chat/src/theme/tokens.test.ts's CONTRACT); haloFor computes a WCAG-ish luminance
+// contrast outline for an arbitrary runtime color and can only ever answer pure black or white —
+// there is no themed "black" or "white" to point it at.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ArtifactInfo } from '../../transport/types'
 import type { Pin } from '../../model/feedback'

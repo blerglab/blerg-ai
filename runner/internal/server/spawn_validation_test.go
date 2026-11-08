@@ -6,8 +6,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
 // runtimeName is what the session row's posture claim is built from, so every
@@ -27,11 +25,12 @@ func TestRuntimeNameMapsEveryRuntimeToItself(t *testing.T) {
 }
 
 // A repo that is not a plain directory name must be refused before anything is
-// sent to the daemon, on both the REST and the browser-WS spawn paths.
+// sent to the daemon through the REST spawn path.
 func TestPostSessionsRejectsTraversalRepo(t *testing.T) {
 	hub := NewHub()
 	dc := &DaemonConn{ID: "00000000-0000-4000-8000-0000000000f1", Name: "laptop", ReposRoot: "/home/dev/repos", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	hub.Register(dc)
 	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 	mint := enableBrowserAuth(t, api)
@@ -58,6 +57,7 @@ func TestPostSessionsAcceptsPlainRepoName(t *testing.T) {
 	hub := NewHub()
 	dc := &DaemonConn{ID: "00000000-0000-4000-8000-0000000000f1", Name: "laptop", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	hub.Register(dc)
 	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 	tok := enableBrowserAuth(t, api)("session.start")
@@ -68,54 +68,6 @@ func TestPostSessionsAcceptsPlainRepoName(t *testing.T) {
 	api.HandlePostSessions(rec, req)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status %d, want 202: %s", rec.Code, rec.Body.String())
-	}
-	select {
-	case <-dc.send:
-	default:
-		t.Fatal("no spawn_session reached the daemon")
-	}
-}
-
-// The browser-WS spawn_session path must apply the same validation. The
-// "spawn_session" case in browser_conn.go's ServeBrowser read pump is not
-// callable in isolation (it's inline in a network read loop), so the
-// forwarding logic is extracted into Hub.forwardBrowserSpawn and tested
-// directly here.
-func TestForwardBrowserSpawnRejectsTraversalRepo(t *testing.T) {
-	hub := NewHub()
-	dc := &DaemonConn{ID: "00000000-0000-4000-8000-0000000000f1", Name: "laptop", send: make(chan []byte, 8)}
-	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
-	hub.Register(dc)
-	bc := &BrowserConn{ID: "b1"}
-
-	for _, repo := range []string{"../..", "../../..", "a/b/c", "org/../x", "a\\b", ".hidden", ".hidden/x", "org/.hidden", "..", "/etc", "/abs", "app/", "/org/name"} {
-		msg := protocol.BrowserSpawnSession{Kind: "agent", Type: "spawn_session", DaemonID: "00000000-0000-4000-8000-0000000000f1", Repo: repo}
-		_, err := hub.forwardBrowserSpawn(bc, msg, nil)
-		if err == nil {
-			t.Errorf("repo %q: expected error, got nil", repo)
-		}
-		select {
-		case m := <-dc.send:
-			t.Errorf("repo %q: message reached the daemon: %s", repo, m)
-		default:
-		}
-	}
-}
-
-func TestForwardBrowserSpawnAcceptsPlainRepoName(t *testing.T) {
-	hub := NewHub()
-	dc := &DaemonConn{ID: "00000000-0000-4000-8000-0000000000f1", Name: "laptop", send: make(chan []byte, 8)}
-	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
-	hub.Register(dc)
-	api := ownedInventoryAPI(t, hub, "fixture", nil, "")
-	bc := &BrowserConn{ID: "b1", AccountID: "user-1"}
-
-	sessionID, err := hub.forwardBrowserSpawn(bc, protocol.BrowserSpawnSession{Kind: "agent", Type: "spawn_session", DaemonID: "00000000-0000-4000-8000-0000000000f1", Repo: "my-app"}, api.dbPool)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if sessionID == "" {
-		t.Fatal("expected a session id")
 	}
 	select {
 	case <-dc.send:
@@ -149,6 +101,7 @@ func TestPostSessionsAcceptsOrgQualifiedRepo(t *testing.T) {
 	hub := NewHub()
 	dc := &DaemonConn{ID: "00000000-0000-4000-8000-0000000000f1", Name: "laptop", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	hub.Register(dc)
 	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 	tok := enableBrowserAuth(t, api)("session.start")
@@ -298,6 +251,7 @@ func runtimeTestAPI(t *testing.T) (*API, *DaemonConn) {
 	hub := NewHub()
 	dc := &DaemonConn{ID: runtimeTestDesktopID, Name: "laptop", ReposRoot: "/repos", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	hub.Register(dc)
 	pool := connectSrvTestDB(t)
 	api := NewAPI(hub, pool, "daemon-tok-1234567890", nil, "")

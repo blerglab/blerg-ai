@@ -35,6 +35,7 @@ var (
 	errOverlap     = errors.New("overlapping_repositories")
 	errSubmodule   = errors.New("submodule")
 	errBudget      = errors.New("discovery_limit")
+	errOutside     = errors.New("outside_folder")
 )
 
 const (
@@ -681,6 +682,8 @@ func (s *Service) Handle(ctx context.Context, req protocol.DiscoverWorkspace) pr
 		result.OK = true
 		return result
 	}
+	// resolve_base (BLG-501 design §10) reads one ref — O(1) regardless of repository
+	// size, so it needs no larger budget than every other operation here gets.
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	op := &operation{ctx: ctx}
@@ -715,10 +718,14 @@ func (s *Service) Handle(ctx context.Context, req protocol.DiscoverWorkspace) pr
 			s.remember(record)
 			result.Resolved = &record.resolved
 		}
+	case "addition":
+		result.Addition, err = s.addition(root, req, op)
 	case "bind":
 		err = s.bind(root, req, op)
 	case "bind_child":
 		err = s.bindChild(root, req, op)
+	case "resolve_base":
+		result.BaseSHA, result.Cause, err = s.resolveBase(root, req, op)
 	default:
 		err = errInvalid
 	}
@@ -726,9 +733,9 @@ func (s *Service) Handle(ctx context.Context, req protocol.DiscoverWorkspace) pr
 		err = errStale
 	}
 	if err != nil {
-		result.Page, result.Resolved = nil, nil
+		result.Page, result.Resolved, result.Addition = nil, nil, nil
 		switch {
-		case errors.Is(err, errStale), errors.Is(err, errInvalid), errors.Is(err, errTooMany), errors.Is(err, errOverlap), errors.Is(err, errSubmodule), errors.Is(err, errBudget):
+		case errors.Is(err, errStale), errors.Is(err, errInvalid), errors.Is(err, errTooMany), errors.Is(err, errOverlap), errors.Is(err, errSubmodule), errors.Is(err, errBudget), errors.Is(err, errOutside):
 			result.ErrorCode = err.Error()
 		default:
 			result.ErrorCode = errUnavailable.Error()

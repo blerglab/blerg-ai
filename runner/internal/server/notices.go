@@ -117,7 +117,7 @@ func (h *Hub) CancelIdleNotice(sessionID string) {
 // sendSessionNotice tells browsers to toast the session's notice for status (waiting or idle), and
 // pushes it when nobody is active. taskRunning: an idle notice sent at the cap, while a background
 // task still runs, says so. A private session's broadcast reaches only its owner (privacy.go) and
-// it is never pushed: a subscription belongs to no account.
+// its pushes target only its owner.
 func sendSessionNotice(hub *Hub, pool *pgxpool.Pool, row *db.SessionRow, status string, taskRunning bool) {
 	var title string
 	if row.Title != nil {
@@ -135,9 +135,7 @@ func sendSessionNotice(hub *Hub, pool *pgxpool.Pool, row *db.SessionRow, status 
 	hub.BroadcastJSON(protocol.SessionNotice{
 		Type: "session_notice", SessionID: row.ID, Status: status, Title: heading, Body: body, URL: url,
 	})
-	if !hub.ActiveWithin(activityTTL) && !row.Private {
-		SendPush(pool, heading, body, url)
-	}
+	SendPushForSession(pool, row.ID, heading, body, url, hub)
 }
 
 // noticeOnTransition applies the notice rule to a session that has just entered status (the row

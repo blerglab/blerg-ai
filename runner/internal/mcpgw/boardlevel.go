@@ -31,7 +31,7 @@ import (
 // set and column management) needs level full.
 var boardReadTools = map[string]bool{
 	"blerg_board_get": true, "blerg_board_list": true, "blerg_board_schema": true,
-	"blerg_column_list": true, "blerg_card_search": true, "blerg_card_get": true,
+	"blerg_release_list": true, "blerg_release_get": true, "blerg_column_list": true, "blerg_card_search": true, "blerg_card_get": true,
 }
 
 // BoardToolLevel is the least level a board tool needs: read for a read tool, full for the rest of
@@ -105,6 +105,8 @@ type BoardCall struct {
 	Arguments  json.RawMessage
 	// ReadOnly exchanges a card.read-only credential (every read, at any level).
 	ReadOnly bool
+	// CutExecutor is set only by the authenticated server outbox executor, never session input.
+	CutExecutor bool `json:"-"`
 }
 
 // BoardReadOnlyExchanger is a BoardExchanger that can also mint a card.read-only credential.
@@ -186,10 +188,11 @@ func (g *Gateway) CallBoard(ctx context.Context, c BoardCall) (json.RawMessage, 
 	if !g.BoardConfigured() {
 		return nil, errBoardNotConfigured
 	}
-	if !allBoardToolSet[c.Tool] || c.BoardID == "" || !c.Proof.Valid() || c.Proof.AccountID == "" {
+	allowedTool := allBoardToolSet[c.Tool] || c.CutExecutor && c.Tool == "blerg_release_close"
+	if !allowedTool || c.BoardID == "" || !c.Proof.Valid() || c.Proof.AccountID == "" {
 		return nil, ErrBoardCallInvalid
 	}
-	if boardColumnToolSet[c.Tool] && !PersonBehind(c.Proof) {
+	if (boardPersonToolSet[c.Tool] || c.Tool == "blerg_release_close") && !PersonBehind(c.Proof) {
 		return nil, ErrBoardCallInvalid
 	}
 	if c.ReadOnly && !boardReadTools[c.Tool] {
@@ -203,17 +206,34 @@ func (g *Gateway) CallBoard(ctx context.Context, c BoardCall) (json.RawMessage, 
 	defer cancel()
 	var tok BoardToken
 	var err error
+	var scope *boardReadScope
+	var scopeKey boardReadKey
 	if c.ReadOnly {
+		scope, _ = ctx.Value(boardReadScopeKey{}).(*boardReadScope)
+	}
+	if scope != nil {
+		scope.mu.Lock()
+		defer scope.mu.Unlock()
+		if scope.closed {
+			return nil, ErrBoardCallInvalid
+		}
+		scopeKey = boardReadKey{g, c.Proof, c.BoardID, c.SessionRef}
+		if cached, ok := scope.tokens[scopeKey]; ok {
+			tok = cached.token
+		}
+	}
+	reused := tok.Sub != ""
+	if !reused && c.ReadOnly {
 		ro, ok := g.cfg.Board.(BoardReadOnlyExchanger)
 		if !ok {
 			return nil, errBoardAccess // never a write credential for a read
 		}
 		tok, err = ro.ExchangeReadOnly(ctx, c.Proof, c.BoardID, c.SessionRef)
-	} else {
+	} else if !reused {
 		tok, err = g.cfg.Board.Exchange(ctx, c.Proof, c.BoardID, c.SessionRef)
 	}
-	if tok.Sub != "" {
-		defer func() {
+	if tok.Sub != "" && !reused {
+		revoke := func() {
 			rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer rcancel()
 			if rerr := g.cfg.Board.Revoke(rctx, c.Proof.AccountID, tok.Sub); rerr != nil {
@@ -222,7 +242,12 @@ func (g *Gateway) CallBoard(ctx context.Context, c BoardCall) (json.RawMessage, 
 				g.unrevoked.add(c.Proof.AccountID, tok.ExpiresAt)
 				log.Printf("mcpgw: revoke session board token: %v", rerr)
 			}
-		}()
+		}
+		if scope != nil && err == nil {
+			scope.tokens[scopeKey] = boardReadCredential{tok, revoke}
+		} else {
+			defer revoke()
+		}
 	}
 	switch {
 	case errors.Is(err, ErrConnectionGone):
@@ -234,6 +259,15 @@ func (g *Gateway) CallBoard(ctx context.Context, c BoardCall) (json.RawMessage, 
 		return nil, errBoardAccess
 	case !g.now().Add(5 * time.Second).Before(tok.ExpiresAt):
 		return nil, errBoardAccess
+	}
+	// A fresh exchange in each scope validates the proof before any cache hit.
+	// Keep caller/session/board boundaries, and cache only summary card reads.
+	cacheable := scope != nil && (c.Tool == "blerg_card_search" || c.Tool == "blerg_card_get" || c.Tool == "blerg_column_list")
+	cacheKey := boardReadCacheKey{scopeKey, c.Tool, string(c.Arguments)}
+	if cacheable {
+		if raw := g.boardReads.get(cacheKey, g.now()); raw != nil {
+			return raw, nil
+		}
 	}
 	gr := &db.MCPGrant{
 		SessionID: c.SessionRef, AccountID: c.Proof.AccountID, URLSnapshot: g.cfg.BoardMCPURL,
@@ -253,7 +287,11 @@ func (g *Gateway) CallBoard(ctx context.Context, c BoardCall) (json.RawMessage, 
 	if rerr != nil {
 		return errorResult("upstream error: " + capRunes(rerr.Message, 300)), nil
 	}
-	return sanitizeResult(res, g.cfg.MaxResultBytes), nil
+	raw := sanitizeBoardResult(res, g.cfg.MaxResultBytes)
+	if cacheable {
+		g.boardReads.put(cacheKey, raw, g.now())
+	}
+	return raw, nil
 }
 
 // UpstreamMessage is the agent-facing wording of a CallBoard failure: the gateway's own text,

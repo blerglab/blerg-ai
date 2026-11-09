@@ -13,24 +13,25 @@ import (
 )
 
 type liveChild struct {
-	Runtime        string     `json:"runtime,omitempty"`
-	UsageStatus    string     `json:"usage_status"`
-	ToolCalls      int64      `json:"tool_calls"`
-	Activity       string     `json:"activity,omitempty"`
-	ActivitySince  *time.Time `json:"activity_since,omitempty"`
-	LastActivityAt *time.Time `json:"last_activity_at,omitempty"`
-	Local          bool       `json:"local,omitempty"`
-	ID             string     `json:"id"`
-	Title          string     `json:"title"`
-	Engine         string     `json:"engine"`
-	Model          string     `json:"model"`
-	Effort         string     `json:"effort"`
-	Status         string     `json:"status"`
-	StartedAt      time.Time  `json:"started_at"`
-	EndedAt        *time.Time `json:"ended_at"`
-	Asking         bool       `json:"asking"`
-	Tokens         *int64     `json:"tokens"`
-	CostUSD        *float64   `json:"cost_usd,omitempty"`
+	LastTurnEndedAt *time.Time `json:"last_turn_ended_at,omitempty"`
+	Runtime         string     `json:"runtime,omitempty"`
+	UsageStatus     string     `json:"usage_status"`
+	ToolCalls       int64      `json:"tool_calls"`
+	Activity        string     `json:"activity,omitempty"`
+	ActivitySince   *time.Time `json:"activity_since,omitempty"`
+	LastActivityAt  *time.Time `json:"last_activity_at,omitempty"`
+	Local           bool       `json:"local,omitempty"`
+	ID              string     `json:"id"`
+	Title           string     `json:"title"`
+	Engine          string     `json:"engine"`
+	Model           string     `json:"model"`
+	Effort          string     `json:"effort"`
+	Status          string     `json:"status"`
+	StartedAt       time.Time  `json:"started_at"`
+	EndedAt         *time.Time `json:"ended_at"`
+	Asking          bool       `json:"asking"`
+	Tokens          *int64     `json:"tokens"`
+	CostUSD         *float64   `json:"cost_usd,omitempty"`
 	// Usage is Tokens broken down for the Running now chip's tooltip (live_usage.go); present
 	// exactly when Tokens is.
 	Usage *liveUsage `json:"usage,omitempty"`

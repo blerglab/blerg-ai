@@ -1,3 +1,4 @@
+import { IconButton } from '../IconButton'
 // ReviewConversation: the Conversation tab of a diff review, like a pull request's page. At the
 // top the body (the agent's ask when it requested the review); beneath it the timeline: each
 // version published (its files, +/− and commits), each review requested and decided, each review
@@ -302,7 +303,7 @@ export default function ReviewConversation({
         {history?.error && (
           <p className="review-conv-error" role="alert" data-testid="review-conversation-error">
             {history.error} Some versions, summaries or rounds may be missing.{' '}
-            {onRetry && <button type="button" className="artifact-btn" onClick={onRetry}>Retry</button>}
+            {onRetry && <IconButton label="Retry" onClick={onRetry} />}
           </p>
         )}
         {loading ? (

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strings"
 	"sync"
 	"testing"
 )
@@ -77,8 +78,8 @@ func TestAskBlocksUntilAnswerAndStatusWaits(t *testing.T) {
 	l.Enqueue("start", "chat")
 
 	waitForStatus(t, rec, "waiting")
-	// A plain user message while blocked IS the answer (spec).
-	l.Enqueue("blue", "chat")
+	// Only the committed, matching answer frame resolves the ask.
+	l.AnswerAsk(AskAnswer{QuestionID: "msg-1", Text: "blue", AnsweredBy: "person:owner"})
 	waitFor(t, rec, "turn_done")
 
 	// the answer must appear as the ask's tool_result
@@ -108,7 +109,7 @@ func TestSecondConcurrentAskErrors(t *testing.T) {
 	go l.Run(ctx)
 	l.Enqueue("start", "chat")
 	waitForStatus(t, rec, "waiting")
-	l.Enqueue("answer1", "chat")
+	l.AnswerAsk(AskAnswer{QuestionID: "msg-1", Text: "answer1", AnsweredBy: "person:owner"})
 	waitFor(t, rec, "turn_done")
 
 	errCount := 0
@@ -131,7 +132,7 @@ func TestAskAnswerIsRecordedAsTheAnswer(t *testing.T) {
 		source     string
 		wantClosed bool
 		answeredBy string
-	}{{"chat", true, ""}, {"ask_answer", false, ""}, {"session", true, "session"}} {
+	}{{"person:owner", false, ""}, {"session:parent", false, "session"}} {
 		rec := &recorder{}
 		fm := &fakeMessenger{}
 		fp := &fakeProvider{scripts: [][]StreamEvent{
@@ -144,7 +145,7 @@ func TestAskAnswerIsRecordedAsTheAnswer(t *testing.T) {
 		go l.Run(ctx)
 		l.Enqueue("start", "chat")
 		waitForStatus(t, rec, "waiting")
-		l.EnqueueInput(Input{Text: "blue", Source: c.source, ClientID: "cl-9"})
+		l.AnswerAsk(AskAnswer{QuestionID: "msg-1", Text: "blue", AnsweredBy: c.source, ClientID: "cl-9"})
 		waitFor(t, rec, "turn_done")
 
 		asks := rec.byKind("ask")
@@ -168,5 +169,84 @@ func TestAskAnswerIsRecordedAsTheAnswer(t *testing.T) {
 		if got := len(closed) == 1 && closed[0] == "msg-1=blue"; got != c.wantClosed {
 			t.Fatalf("%s: CloseAsk calls = %v, want closed=%v", c.source, closed, c.wantClosed)
 		}
+	}
+}
+
+// Parent frames can race escalation in transit. Only the server's committed ask
+// answer may satisfy an ask; ordinary parent input must remain queued.
+func TestParentInputQueuesBehindNativeAsk(t *testing.T) {
+	rec := &recorder{}
+	fm := &fakeMessenger{}
+	fp := &fakeProvider{scripts: [][]StreamEvent{toolCallResponse("ask", "tu_1", `{"question":"Which branch?"}`), textResponse("done"), textResponse("queued message read")}}
+	l := NewLoop(Config{Provider: fp, Emitter: rec, Registry: NewRegistry(), Model: "m", Messenger: fm})
+	l.installMessagingTools()
+	ctx, _ := contextWithCancel(t)
+	go l.Run(ctx)
+	l.Enqueue("start", "chat")
+	waitForStatus(t, rec, "waiting")
+	l.Enqueue("parent input", "session")
+	l.AnswerAsk(AskAnswer{QuestionID: "msg-1", Text: "person answer", AnsweredBy: "person:owner"})
+	waitFor(t, rec, "turn_done")
+	found := false
+	for _, ev := range rec.byKind("tool_result") {
+		p := ev.Payload.(ToolResultPayload)
+		if p.CallID == "tu_1" {
+			found = true
+			if p.Output != "person answer" {
+				t.Errorf("native ask consumed parent input: %q", p.Output)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no ask result")
+	}
+	queued := false
+	for _, ev := range rec.byKind("user_message") {
+		p := ev.Payload.(UserMessagePayload)
+		if p.Text == "parent input" && p.Source == "session" {
+			queued = true
+		}
+	}
+	if !queued {
+		t.Error("parent input was lost instead of queued after the ask")
+	}
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if len(fm.closed) > 0 {
+		t.Errorf("parent frame closed ask: %v", fm.closed)
+	}
+}
+
+// An answer the server committed as the ask was interrupted reaches the model.
+func TestCommittedAnswerRacingInterruptIsKept(t *testing.T) {
+	l := &Loop{cfg: Config{Emitter: &recorder{}}, wake: make(chan struct{}, 1)}
+	ch := make(chan AskAnswer, 1)
+	ch <- AskAnswer{QuestionID: "q", Text: "blue", Outcome: "answered"}
+	l.askCh, l.askID = ch, "q"
+	l.endInterruptedAsk("q", ch)
+	if len(l.queue) != 1 || !strings.Contains(l.queue[0].Text, "blue") || l.queue[0].Source != "question_answer" {
+		t.Fatalf("queued answer lost: %+v", l.queue)
+	}
+	ch = make(chan AskAnswer, 1)
+	l.askCh, l.askID = ch, "r"
+	l.endInterruptedAsk("r", ch)
+	if !l.AnswerAsk(AskAnswer{QuestionID: "r", Text: "green", Label: "[Answered by the person.]\n", Outcome: "answered"}) {
+		t.Fatal("late answer refused")
+	}
+	if len(l.queue) != 2 || !strings.HasPrefix(l.queue[1].Text, "[Answered by the person.]\n") {
+		t.Fatalf("late answer lost: %+v", l.queue)
+	}
+	if l.AnswerAsk(AskAnswer{QuestionID: "r", Text: "again"}) || len(l.queue) != 2 {
+		t.Fatal("a duplicate late answer queued twice")
+	}
+}
+
+func TestInputQueueIsBoundedWhileAnAskWaits(t *testing.T) {
+	l := &Loop{cfg: Config{Emitter: &recorder{}}, wake: make(chan struct{}, 1), askCh: make(chan AskAnswer, 1)}
+	for i := 0; i < 200; i++ {
+		l.EnqueueInput(Input{Text: "more"})
+	}
+	if len(l.queue) != 64 {
+		t.Fatalf("queue = %d", len(l.queue))
 	}
 }

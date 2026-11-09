@@ -2,7 +2,7 @@
 // browser API and on the proxy contract (list, raw, download, delete, upload), only the prefix and
 // the authentication differ. Ported from the runner's lib/artifacts.ts, lib/attachments.ts and
 // apiFetch.ts; the pure helpers (grouping, versions, size text) live in the model, not here.
-import type { ArtifactInfo, CommitDetails, CommitDiff, TransportFiles, UploadedFile, WorkspaceFile, WorkspaceGitRef } from './types'
+import type { AnswerRequest, ArtifactInfo, CommitDetails, CommitDiff, TransportFiles, UploadedFile, WorkspaceFile, WorkspaceGitRef } from './types'
 import { imageBlobType } from '../model/markdownHtml'
 
 export interface FilesOptions {
@@ -218,8 +218,8 @@ async function uploadRefusal(r: Response): Promise<FileRequestError> {
   const { detail, errorId, code } = await replyDetail(r)
   const say = (fallback: string) => new FileRequestError(detail || fallback, r.status, errorId, code)
   if (r.status === 413) return say('That file is larger than the server takes.')
-  if (r.status === 409) return say('This session can’t take more files.')
-  if (r.status === 404) return new FileRequestError('This session can’t be found.', r.status, errorId)
+  if (r.status === 409) return say('This workspace can’t take more files.')
+  if (r.status === 404) return new FileRequestError('This workspace can’t be found.', r.status, errorId)
   return say(`Upload failed (HTTP ${r.status}).`)
 }
 
@@ -366,15 +366,39 @@ export function createFiles(opts: FilesOptions): TransportFiles {
     }
   }
 
+  const commitRepositories = async (sessionId: string) => {
+    const r = await request(`${opts.base(sessionId)}/git`)
+    if (!r.ok) return []
+    const body = await r.json() as { members?: { id: string; name: string }[]; generation?: number; launch_generation?: string }
+    if (!body.members || !body.generation || !body.launch_generation) return []
+    return body.members.map(m => ({ name: m.name, ref: { member_id: m.id, generation: body.generation!, launch_generation: body.launch_generation! } }))
+  }
+  const commitFile = async (sessionId: string, sha: string, path: string, side: 'original' | 'changed', signal?: AbortSignal, member?: WorkspaceGitRef): Promise<WorkspaceFile> => {
+    if (!COMMIT_SHA.test(sha.toLowerCase())) throw new Error('No commit is named by this diff.')
+    const query = new URLSearchParams({ path, side, ...(member ? { member_id: member.member_id, launch_generation: member.launch_generation, generation: String(member.generation) } : {}) })
+    const abort = new AbortController()
+    const stop = () => abort.abort()
+    signal?.addEventListener('abort', stop, { once: true })
+    if (signal?.aborted) abort.abort()
+    try {
+      const r = await request(`${commitUrl(sessionId, sha.toLowerCase())}/file?${query}`, { signal: abort.signal })
+      if (!r.ok) throw new Error(r.status === 404 ? 'This version of the file does not exist at this commit.' : r.status === 413 ? 'This file is too large to open.' : 'This commit file cannot be read right now.')
+      if (member && (r.headers.get('X-Blerg-Member-ID') !== member.member_id || r.headers.get('X-Blerg-Launch-Generation') !== member.launch_generation || Number(r.headers.get('X-Blerg-Generation')) !== member.generation)) throw new Error('The repository changed while reading the file.')
+      const blob = await readCapped(r, COMMIT_DIFF_MAX, abort)
+      if (!blob) throw new Error('This file is too large to open.')
+      return { path, blob, size: blob.size, view: 'text', content_type: 'text/plain', mtime: '' }
+    } finally { signal?.removeEventListener('abort', stop) }
+  }
+
   return {
     ...(opts.queueScope ? {queueScope: opts.queueScope} : {}),
     ...(opts.workspace ? { workspaceFile } : {}),
-    ...(opts.commits ? { commit, commitDiff } : {}),
+    ...(opts.commits ? { commit, commitDiff, commitFile, commitRepositories } : {}),
     async space(sessionId) {
       const r = await request(artifacts(sessionId))
       if (!r.ok) {
         const {detail, errorId} = await replyDetail(r)
-        throw new FileRequestError(detail || 'Couldn’t read the session’s space.', r.status, errorId)
+        throw new FileRequestError(detail || 'Couldn’t read the workspace’s space.', r.status, errorId)
       }
       const body = await r.json()
       const all = body.can_delete === true
@@ -386,7 +410,7 @@ export function createFiles(opts: FilesOptions): TransportFiles {
       const r = await request(`${opts.base(sessionId)}/storage`, {method: 'POST'})
       if (r.ok) return
       const {detail, errorId, code} = await replyDetail(r)
-      const fallback = r.status === 403 ? 'Only an administrator can increase this session’s storage.' : r.status === 409 ? 'This session already has the most storage this install allows.' : r.status >= 500 || r.status === 0 ? 'Couldn’t reach the server. Try again.' : 'Couldn’t increase the storage. Try again.'
+      const fallback = r.status === 403 ? 'Only an administrator can increase this workspace’s storage.' : r.status === 409 ? 'This workspace already has the most storage this install allows.' : r.status >= 500 || r.status === 0 ? 'Couldn’t reach the server. Try again.' : 'Couldn’t increase the storage. Try again.'
       throw new FileRequestError(detail || fallback, r.status, errorId, code)
     },
     /** The session's artifacts, newest first. Throws when the list cannot be read. */
@@ -399,6 +423,19 @@ export function createFiles(opts: FilesOptions): TransportFiles {
       return list.filter((a): a is ArtifactInfo => !!a && typeof a === 'object' && typeof (a as ArtifactInfo).id === 'string')
     },
 
+    async answerRequest(sessionId, id) {
+      const r = await request(`${artifacts(sessionId)}/${enc(id)}/answer`)
+      if (r.status === 404 || r.status === 403) return null
+      if (!r.ok) throw new FileRequestError('Could not read the page answer request.', r.status)
+      return await r.json() as AnswerRequest
+    },
+    async submitAnswer(sessionId, id, result) {
+      const r = await request(`${artifacts(sessionId)}/${enc(id)}/answer`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: result})
+      if (!r.ok) {
+        const {detail, errorId} = await replyDetail(r)
+        throw new FileRequestError(detail || 'Could not send the answer. Try again.', r.status, errorId)
+      }
+    },
     async raw(sessionId, id) {
       const r = await request(`${artifacts(sessionId)}/${enc(id)}/raw`)
       if (!r.ok) throw await readFailure(r, `Couldn’t load this file (HTTP ${r.status}).`)
@@ -422,12 +459,28 @@ export function createFiles(opts: FilesOptions): TransportFiles {
       saveBlob(await r.blob(), saveAs)
     },
 
+    /** Saves a live file's current content as a normal versioned file, named with the time. */
+    async snapshot(sessionId, id) {
+      const r = await request(`${artifacts(sessionId)}/${enc(id)}/snapshot`, { method: 'POST' })
+      if (!r.ok) {
+        const { detail, errorId } = await replyDetail(r)
+        const fallback = r.status === 409
+          ? 'This file is not live, so it already keeps its own versions.'
+          : r.status === 410 ? 'This file’s bytes are gone, so there is nothing to snapshot.'
+          : 'Couldn’t snapshot the file. Try again.'
+        throw new FileRequestError(detail || fallback, r.status, errorId)
+      }
+      const j = (await r.json()) as Partial<ArtifactInfo>
+      if (typeof j.id !== 'string' || typeof j.name !== 'string') throw new Error('Unexpected reply from the server.')
+      return j as ArtifactInfo
+    },
+
     async remove(sessionId, id) {
       const r = await request(`${artifacts(sessionId)}/${enc(id)}`, { method: 'DELETE' })
       if (r.ok || r.status === 404) return
       const { detail, errorId } = await replyDetail(r)
       const fallback = r.status === 403
-        ? 'You can delete only the files you attached. The session’s owner or an administrator can delete the others.'
+        ? 'You can delete only the files you attached. The workspace’s owner or an administrator can delete the others.'
         : r.status >= 500 ? 'The server couldn’t delete the file. Try again.' : 'Couldn’t delete the file. Try again.'
       throw new FileRequestError(detail || fallback, r.status, errorId)
     },

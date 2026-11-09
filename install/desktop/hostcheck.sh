@@ -4,6 +4,21 @@
 # function reads its inputs from $HOME / the environment so it can be tested
 # against a scratch HOME (see hostcheck_test.sh).
 
+# Personal desktop enrollment uses Python's standard-library HTTP client.
+# Check before builds or service changes, including on an existing install.
+require_desktop_python() {
+  command -v python3 >/dev/null 2>&1 && return 0
+  blerg_box "can't continue" <<'EOF2'
+Python 3 isn't installed (or not on PATH). Desktop enrollment needs it.
+
+Install it, then run the installer again:
+  Debian/Ubuntu:  sudo apt install python3
+  Fedora/RHEL:    sudo dnf install python3
+  macOS:          brew install python
+EOF2
+  return 1
+}
+
 # is_wsl: true inside Windows Subsystem for Linux (WSL1 or WSL2).
 is_wsl() {
   [ -n "${WSL_DISTRO_NAME:-}" ] && return 0

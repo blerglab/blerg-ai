@@ -28,7 +28,7 @@ func TestLegacyClusterExplorerDoesNotRequireDesktopOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := f.api.ensureLegacyWorkspace(t.Context(), f.sess)
-	if err == nil || strings.Contains(strings.ToLower(err.Error()), "desktop") || err.Error() != "This session started without a workspace. Start a new cluster session to browse its files." {
+	if err == nil || strings.Contains(strings.ToLower(err.Error()), "desktop") || err.Error() != "This workspace started without file browsing. Start a new cluster workspace to browse its files." {
 		t.Fatal("legacy cluster should explain missing workspace binding")
 	}
 }

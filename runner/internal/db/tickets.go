@@ -37,19 +37,24 @@ var (
 // Tags, Repos, and Blocked are populated by ListTickets; other callers return
 // zero values for these fields.
 type TicketRow struct {
-	ID         string
-	BoardID    string
-	ColumnID   *string
-	Title      string
-	Body       *string
-	Priority   string
-	Size       *string
-	Rank       string
-	ArchivedAt *time.Time
-	SessionID  *string
-	Version    int
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	SizeFirstSetAt       *time.Time
+	RiskFirstSetAt       *time.Time
+	ComplexityFirstSetAt *time.Time
+	ID                   string
+	BoardID              string
+	ColumnID             *string
+	Title                string
+	Body                 *string
+	Priority             string
+	Size                 *string
+	Risk                 *string
+	Complexity           *string
+	Rank                 string
+	ArchivedAt           *time.Time
+	SessionID            *string
+	Version              int
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 	// Populated by ListTickets (batch-fetched; zero values for other callers).
 	Tags    []string
 	Repos   []string
@@ -67,14 +72,16 @@ type TicketDetail struct {
 
 // TicketInput is the input for CreateTicket.
 type TicketInput struct {
-	BoardID  string
-	Title    string
-	Body     *string
-	Repos    []string
-	ColumnID *string
-	Tags     []string
-	Priority string
-	Size     *string
+	BoardID    string
+	Title      string
+	Body       *string
+	Repos      []string
+	ColumnID   *string
+	Tags       []string
+	Priority   string
+	Size       *string
+	Risk       *string
+	Complexity *string
 }
 
 // TicketFilter is the filter for ListTickets.
@@ -83,6 +90,8 @@ type TicketFilter struct {
 	Tags         []string
 	Priority     *string
 	Size         *string
+	Risk         *string
+	Complexity   *string
 	Ready        bool
 	ArchivedOnly bool // when true: return archived tickets ordered by archived_at DESC
 	Limit        int
@@ -96,20 +105,22 @@ type TicketFilter struct {
 // Additive set ops (AddTags/RmTags/AddRepos/RmRepos) are idempotent and do
 // not check or bump the version.
 type TicketPatch struct {
-	Title    *string
-	Body     *string
-	Priority *string
-	Size     *string
-	AddTags  []string
-	RmTags   []string
-	AddRepos []string
-	RmRepos  []string
-	Repos    *[]string // whole-set replace (version-guarded; ≥1 repo; ⊆ board repos)
+	Title      *string
+	Body       *string
+	Priority   *string
+	Size       *string
+	Risk       *string
+	Complexity *string
+	AddTags    []string
+	RmTags     []string
+	AddRepos   []string
+	RmRepos    []string
+	Repos      *[]string // whole-set replace (version-guarded; ≥1 repo; ⊆ board repos)
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
-const ticketCols = `id, board_id, column_id, title, body, priority, size, rank, archived_at, session_id, version, created_at, updated_at`
+const ticketCols = `id, board_id, column_id, title, body, priority, size, rank, archived_at, session_id, version, created_at, updated_at, risk, complexity, size_first_set_at, risk_first_set_at, complexity_first_set_at`
 
 // blockedPredicate is the SQL EXISTS condition (true when ticket alias `t` has
 // at least one unsatisfied dependency: a blocker that is neither archived nor in
@@ -129,7 +140,7 @@ func scanTicketRow(row pgx.Row) (TicketRow, error) {
 	var r TicketRow
 	err := row.Scan(
 		&r.ID, &r.BoardID, &r.ColumnID, &r.Title, &r.Body, &r.Priority, &r.Size,
-		&r.Rank, &r.ArchivedAt, &r.SessionID, &r.Version, &r.CreatedAt, &r.UpdatedAt,
+		&r.Rank, &r.ArchivedAt, &r.SessionID, &r.Version, &r.CreatedAt, &r.UpdatedAt, &r.Risk, &r.Complexity, &r.SizeFirstSetAt, &r.RiskFirstSetAt, &r.ComplexityFirstSetAt,
 	)
 	return r, err
 }
@@ -194,10 +205,10 @@ func validateSize(s *string) error {
 		return nil
 	}
 	switch *s {
-	case "XS", "S", "M", "L", "XL":
+	case "", "S", "M", "L", "XL":
 		return nil
 	}
-	return fmt.Errorf("%w %q: must be one of XS, S, M, L, XL", ErrInvalidSize, *s)
+	return fmt.Errorf("%w %q: must be one of S, M, L, XL", ErrInvalidSize, *s)
 }
 
 // validateBoardRepos checks that every repo in repos exists in the board's
@@ -253,6 +264,9 @@ func CreateTicket(ctx context.Context, pool *pgxpool.Pool, in TicketInput) (Tick
 	if err := validatePriority(in.Priority); err != nil {
 		return TicketRow{}, fmt.Errorf("CreateTicket: %w", err)
 	}
+	if err := validateTicketEstimates(in.Risk, in.Complexity); err != nil {
+		return TicketRow{}, err
+	}
 	if err := validateSize(in.Size); err != nil {
 		return TicketRow{}, fmt.Errorf("CreateTicket: %w", err)
 	}
@@ -305,10 +319,10 @@ func CreateTicket(ctx context.Context, pool *pgxpool.Pool, in TicketInput) (Tick
 
 	// Insert ticket.
 	row, scanErr := scanTicketRow(tx.QueryRow(ctx, `
-		INSERT INTO tickets (board_id, column_id, title, body, priority, size, rank)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO tickets (board_id, column_id, title, body, priority, size, rank, risk, complexity)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING `+ticketCols,
-		in.BoardID, columnID, in.Title, in.Body, priority, in.Size, rank,
+		in.BoardID, columnID, in.Title, in.Body, priority, in.Size, rank, ticketEstimateValue(in.Risk), ticketEstimateValue(in.Complexity),
 	))
 	if scanErr != nil {
 		return TicketRow{}, fmt.Errorf("CreateTicket insert ticket: %w", scanErr)
@@ -445,7 +459,7 @@ func GetTicketCard(ctx context.Context, pool *pgxpool.Pool, id string) (TicketRo
 		 WHERE t.id = $1
 	`, id).Scan(
 		&r.ID, &r.BoardID, &r.ColumnID, &r.Title, &r.Body, &r.Priority, &r.Size,
-		&r.Rank, &r.ArchivedAt, &r.SessionID, &r.Version, &r.CreatedAt, &r.UpdatedAt,
+		&r.Rank, &r.ArchivedAt, &r.SessionID, &r.Version, &r.CreatedAt, &r.UpdatedAt, &r.Risk, &r.Complexity, &r.SizeFirstSetAt, &r.RiskFirstSetAt, &r.ComplexityFirstSetAt,
 		&r.Blocked,
 	)
 	if err != nil {
@@ -537,7 +551,7 @@ func listArchivedTickets(ctx context.Context, pool *pgxpool.Pool, boardID string
 			var r TicketRow
 			if err = rows.Scan(
 				&r.ID, &r.BoardID, &r.ColumnID, &r.Title, &r.Body, &r.Priority, &r.Size,
-				&r.Rank, &r.ArchivedAt, &r.SessionID, &r.Version, &r.CreatedAt, &r.UpdatedAt,
+				&r.Rank, &r.ArchivedAt, &r.SessionID, &r.Version, &r.CreatedAt, &r.UpdatedAt, &r.Risk, &r.Complexity, &r.SizeFirstSetAt, &r.RiskFirstSetAt, &r.ComplexityFirstSetAt,
 				&r.Blocked,
 			); err != nil {
 				return
@@ -660,6 +674,12 @@ func ListTickets(ctx context.Context, pool *pgxpool.Pool, boardID string, f Tick
 		args = append(args, *f.Size)
 		conds = append(conds, fmt.Sprintf("t.size = $%d", len(args)))
 	}
+	for col, v := range map[string]*string{"risk": f.Risk, "complexity": f.Complexity} {
+		if v != nil {
+			args = append(args, *v)
+			conds = append(conds, fmt.Sprintf("t.%s = $%d", col, len(args)))
+		}
+	}
 	for _, tag := range f.Tags {
 		args = append(args, tag)
 		conds = append(conds, fmt.Sprintf(
@@ -718,7 +738,7 @@ func ListTickets(ctx context.Context, pool *pgxpool.Pool, boardID string, f Tick
 			var r TicketRow
 			if err = rows.Scan(
 				&r.ID, &r.BoardID, &r.ColumnID, &r.Title, &r.Body, &r.Priority, &r.Size,
-				&r.Rank, &r.ArchivedAt, &r.SessionID, &r.Version, &r.CreatedAt, &r.UpdatedAt,
+				&r.Rank, &r.ArchivedAt, &r.SessionID, &r.Version, &r.CreatedAt, &r.UpdatedAt, &r.Risk, &r.Complexity, &r.SizeFirstSetAt, &r.RiskFirstSetAt, &r.ComplexityFirstSetAt,
 				&r.Blocked,
 			); err != nil {
 				return
@@ -827,7 +847,7 @@ func UpdateTicket(ctx context.Context, pool *pgxpool.Pool, id string, p TicketPa
 	}
 
 	// A version-guarded change is any scalar field OR a whole-set Repos replace.
-	hasScalarField := p.Title != nil || p.Body != nil || p.Priority != nil || p.Size != nil
+	hasScalarField := p.Title != nil || p.Body != nil || p.Priority != nil || p.Size != nil || p.Risk != nil || p.Complexity != nil
 	hasVersionedChange := hasScalarField || p.Repos != nil
 	if hasVersionedChange && expectVersion != nil && cur.Version != *expectVersion {
 		return TicketRow{}, fmt.Errorf("UpdateTicket: %w", ErrStaleVersion)
@@ -864,6 +884,15 @@ func UpdateTicket(ctx context.Context, pool *pgxpool.Pool, id string, p TicketPa
 			setClauses = append(setClauses, fmt.Sprintf("size = $%d", len(args)))
 		}
 
+		if err := validateTicketEstimates(p.Risk, p.Complexity); err != nil {
+			return TicketRow{}, err
+		}
+		for col, v := range map[string]*string{"risk": p.Risk, "complexity": p.Complexity} {
+			if v != nil {
+				args = append(args, ticketEstimateValue(v))
+				setClauses = append(setClauses, fmt.Sprintf("%s = $%d", col, len(args)))
+			}
+		}
 		args = append(args, id)
 		q := fmt.Sprintf("UPDATE tickets SET %s WHERE id = $%d",
 			strings.Join(setClauses, ", "), len(args))
@@ -1105,4 +1134,23 @@ func TicketBoardID(ctx context.Context, pool *pgxpool.Pool, ticketID string) (st
 		return "", fmt.Errorf("TicketBoardID: %w", err)
 	}
 	return boardID, nil
+}
+
+func validateTicketEstimates(values ...*string) error {
+	for _, v := range values {
+		if v != nil {
+			switch *v {
+			case "", "low", "medium", "high":
+			default:
+				return fmt.Errorf("%w: estimate must be low, medium or high", ErrInvalidSize)
+			}
+		}
+	}
+	return nil
+}
+func ticketEstimateValue(v *string) any {
+	if v == nil || *v == "" {
+		return nil
+	}
+	return *v
 }

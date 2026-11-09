@@ -1,0 +1,45 @@
+.workspace-layout-backdrop { position: fixed; inset: 0; z-index: 1100; display: grid; place-items: center; background: var(--permissions-backdrop); padding: 16px; box-sizing: border-box; }
+.workspace-layout-dialog { display: flex; flex-direction: column; background: var(--scree); color: var(--chalk); border: 1px solid var(--stone); border-radius: 16px; padding: clamp(20px, 1.25vw, 48px); width: min(66vw, 1280px); min-width: min(760px, 100%); max-width: 100%; max-height: calc(100dvh - 48px); box-sizing: border-box; box-shadow: 0 24px 80px var(--permissions-backdrop); }
+.workspace-layout-dialog > header { display: flex; flex: 0 0 auto; align-items: start; justify-content: space-between; gap: 16px; margin-bottom: 28px; }
+.workspace-layout-dialog h2 { margin: 0 0 6px; font-size: clamp(24px, 1.05vw, 40px); font-weight: 650; letter-spacing: -.025em; }
+.workspace-layout-dialog header p { color: var(--fog); margin: 0; }
+.workspace-layout-save { display: flex; flex: 0 0 auto; gap: 12px; align-items: end; flex-wrap: wrap; padding-bottom: 28px; }
+.workspace-layout-save label { display: grid; gap: 10px; min-width: 0; width: min(340px, 100%); font-size: 14px; font-weight: 600; }
+.workspace-layout-dialog input { min-width: 0; box-sizing: border-box; width: 100%; padding: 10px 12px; border: 1px solid var(--stone); background: var(--basalt); color: var(--chalk); border-radius: 6px; font: inherit; }
+.layout-save-confirmation { color: var(--fog); font-size: 13px; align-self: center; margin-top: 24px; }
+.workspace-layout-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: clamp(16px, 1vw, 32px); grid-auto-rows: min-content; align-content: start; overflow: auto; min-height: 0; padding: 2px 6px 6px 2px; scroll-padding: 4px; }
+.layout-card-holder { min-width: 0; display: flex; }
+.workspace-layout-card { display: flex; flex-direction: column; min-width: 0; width: 100%; background: var(--scree-2); border: 1px solid var(--stone); border-radius: 12px; overflow: hidden; }
+.workspace-layout-card.last-used { border-color: var(--selected-border); }
+.layout-card-preview { padding: clamp(18px, 1.2vw, 40px); background: var(--basalt); }
+.layout-preview { display: block; width: 100%; height: auto; max-height: 260px; }
+.layout-preview-window { fill: var(--scree); stroke: var(--stone); }
+.layout-preview-side { fill: var(--scree-2); stroke: var(--stone); }
+.layout-preview-group { fill: var(--basalt); stroke: var(--stone); }
+.layout-preview-active { fill: var(--selected-bg); stroke: var(--selected-border); }
+.layout-preview-rule { stroke: var(--stone); fill: none; }
+.layout-preview-content { stroke: var(--fog-dim); stroke-width: 3; stroke-linecap: round; opacity: .35; }
+.layout-preview-dot { fill: var(--fog-dim); }
+.layout-preview text { fill: var(--fog); font: 10px system-ui, sans-serif; }
+.layout-card-details { display: flex; flex-direction: column; flex: 1; padding: clamp(18px, 1vw, 30px); min-width: 0; }
+.layout-card-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.layout-card-heading h3 { font-size: clamp(17px, .65vw, 24px); font-weight: 600; margin: 0; overflow-wrap: anywhere; }
+.layout-card-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 20px; font-size: 12px; color: var(--selected-text); background: var(--selected-bg); }
+.layout-card-auto { color: var(--fog-dim); font-size: 12px; }
+.layout-card-summary { margin: 12px 0 8px; color: var(--fog); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.layout-card-details time, .layout-card-time { font-size: 12px; color: var(--fog-dim); }
+.layout-card-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; margin-top: 24px; }
+.layout-card-action, .workspace-layout-reset { padding: 4px 0; background: transparent; border: 0; color: var(--fog); font: inherit; font-size: 13px; cursor: pointer; }
+.layout-card-action:hover, .workspace-layout-reset:hover { color: var(--chalk); text-decoration: underline; }
+.layout-card-action:focus-visible, .workspace-layout-reset:focus-visible { outline: 2px solid var(--selected-border); outline-offset: 4px; border-radius: 2px; }
+.workspace-layout-dialog .layout-rename { width: 170px; padding: 6px 8px; }
+.workspace-layout-empty { display: flex; flex-direction: column; justify-content: center; padding: 32px; border: 1px dashed var(--stone); border-radius: 12px; color: var(--fog); }
+.workspace-layout-empty strong { color: var(--chalk); font-size: 20px; font-weight: 550; }
+.workspace-layout-empty p { max-width: 36ch; line-height: 1.6; }
+.workspace-layout-dialog > footer { display: flex; flex: 0 0 auto; justify-content: space-between; align-items: center; gap: 16px; border-top: 1px solid var(--stone); margin-top: 28px; padding-top: 20px; }
+.workspace-layout-dialog footer p { margin: 6px 0 0; font-size: 12px; color: var(--fog-dim); }
+.workspace-layout-dialog footer > span { color: var(--fog-dim); font-size: 12px; }
+@media (max-width: 1100px) { .workspace-layout-list { grid-template-columns: 1fr; } }
+@media (min-width: 2200px) { .workspace-layout-card { flex-direction: row; } .layout-card-preview { width: 43%; display: flex; align-items: center; box-sizing: border-box; } .layout-card-details { justify-content: center; } }
+@media (max-width: 600px) { .workspace-layout-dialog { border-radius: 12px; padding: 20px 16px; max-height: calc(100dvh - 32px); } .workspace-layout-dialog > header { margin-bottom: 20px; } .workspace-layout-save { gap: 8px; padding-bottom: 20px; } .workspace-layout-save label { width: calc(100% - 68px); font-size: 13px; } .layout-save-confirmation { margin-top: 0; flex-basis: 100%; font-size: 12px; } .layout-preview { max-height: 140px; } .layout-card-actions { margin-top: 18px; } .workspace-layout-dialog > footer { margin-top: 20px; padding-top: 16px; } .workspace-layout-dialog footer > span { display: none; } }
+@media (max-width: 600px) { .workspace-layout-card { flex-direction: row; } .layout-card-preview { width: 33%; padding: 10px; display: flex; align-items: center; flex-shrink: 0; box-sizing: border-box; } .layout-card-details { padding: 14px 12px; } .layout-card-heading { gap: 6px; } .layout-card-heading h3 { font-size: 16px; } .layout-card-summary { font-size: 12px; margin-top: 10px; } .layout-card-actions { gap: 12px; margin-top: 14px; } .layout-card-action { font-size: 12px; min-height: 44px; } .layout-card-badge { font-size: 10px; padding: 3px 6px; } .layout-card-details time { font-size: 11px; } }

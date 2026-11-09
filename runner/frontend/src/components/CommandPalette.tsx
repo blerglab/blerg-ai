@@ -1,17 +1,23 @@
+import { rootSessionId } from '../lib/sessionTree'
+import { useSessionStore } from '../hooks/useSessionStore'
 import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from 'react'
 import { createPortal, flushSync } from 'react-dom'
 import { signedInAccount } from '../lib/liveBoardCard'
-import { useLocation } from 'react-router-dom'
+import { useLocation, useMatch } from 'react-router-dom'
 import { PaletteContext, usePalette } from '../commands/context'
 import { CommandRegistry, assertCommandSafety, paletteShortcut, parseScope, paletteGroups, groupLabels, type PaletteGroup, type PaletteItem, type PaletteMode } from '../commands/registry'
+import { mark } from '../lib/releasePerfMarks'
 import { FileIcon } from '@blerglab/chat'
+import { IconMenuItem, SearchIcon } from './IconButton'
 import './CommandPalette.css'
 import PaneProvider from './PaneProvider'
+import KeyboardShortcuts from './KeyboardShortcuts'
+import { helpShortcut, platformShortcut } from '../commands/shortcuts'
 import { visibleSurfaceIsOpen, inShellTerminal, shellPaletteShortcut } from '../commands/shortcutOwnership'
 
 // Existing dialogs keep their own focus trap and Esc handling. Check every entry point,
 // including feature actions and the phone button, before mounting another modal.
-const anotherModalIsOpen = () => visibleSurfaceIsOpen('[aria-modal="true"], dialog[open]', '.palette-dialog')
+const anotherModalIsOpen = () => visibleSurfaceIsOpen('[aria-modal="true"], dialog[open]', '.palette-dialog:not(.shortcuts-dialog)')
 
 function ownsPaletteShortcut(event: KeyboardEvent) {
   if (inShellTerminal(event) && !shellPaletteShortcut(event)) return true
@@ -26,19 +32,47 @@ export function PaletteButton({ triggerRef }: { triggerRef?: RefObject<HTMLButto
   return <button ref={triggerRef} type="button" className="icon-btn" aria-label="Search commands and files" title="Search commands and files (Ctrl/⌘+K)" onClick={() => palette?.open('commands')}><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 5 5" /></svg></button>
 }
 
+/** The same opener, as a row inside the session header's collapsed "Open" menu (card BLG-450,
+ *  review round 2): on a phone, Search joins Star inside that one menu instead of staying its own
+ *  header control, so the title keeps the header's room. */
+export function PaletteMenuItem({ onSelect }: { onSelect(): void }) {
+  const palette = usePalette()
+  return <IconMenuItem label="Search commands and files" icon={<SearchIcon />} onSelect={() => { palette?.open('commands'); onSelect() }} />
+}
+
 export default function CommandPaletteProvider({ children }: { children: ReactNode }) {
   const [registry] = useState(() => new CommandRegistry())
   const [request, setRequest] = useState<{ mode: PaletteMode; n: number; route: string } | null>(null)
   const location = useLocation()
+  const sessionRoute = useMatch('/sessions/:id')
+  // File/tab history changes only router state; it must not dismiss a newly opened palette.
+  const paletteRoute = sessionRoute ? location.pathname + location.search : location.key
+  // Conversation URLs share one workspace's pane and focus preferences.
+  const paneScope = useSessionStore(state => sessionRoute?.params.id
+    ? `/sessions/${encodeURIComponent(rootSessionId(state.sessions, sessionRoute.params.id) ?? sessionRoute.params.id)}`
+    : location.pathname)
+  const [helpRoute, setHelpRoute] = useState<string | null>(null)
   const open = useCallback((mode: PaletteMode) => {
     if (anotherModalIsOpen()) return
-    setRequest(old => ({ mode, n: (old?.n ?? 0) + 1, route: location.key }))
-  }, [location.key])
+    setRequest(old => ({ mode, n: (old?.n ?? 0) + 1, route: paletteRoute }))
+  }, [paletteRoute])
   const close = useCallback(() => setRequest(null), [])
+  const closeHelp = useCallback(() => setHelpRoute(null), [])
+  useEffect(() => registry.register([
+    { id: 'keyboard-shortcuts', title: 'Keyboard shortcuts', destructive: false, shortcut: '?', shortcutGroup: 'Everywhere', run: () => { if (!anotherModalIsOpen()) setHelpRoute(paletteRoute) } },
+    { id: 'search-commands', title: 'Search commands and files', destructive: false, shortcut: 'Ctrl/⌘+K', shortcutGroup: 'Everywhere', run: () => open('commands') },
+  ]), [registry, paletteRoute, open])
   const context = useMemo(() => ({ registry, open }), [registry, open])
   useEffect(() => {
     const claimed = new WeakSet<KeyboardEvent>()
     const captureKey = (event: KeyboardEvent) => {
+      if (helpShortcut(event) && !anotherModalIsOpen() && !/^\/boards(?:\/|$)/.test(location.pathname)) {
+        event.preventDefault()
+        event.stopPropagation()
+        setRequest(null)
+        setHelpRoute(paletteRoute)
+        return
+      }
       const mode = paletteShortcut(event, location.pathname)
       if (!mode || event.defaultPrevented || ownsPaletteShortcut(event)) return
       // Claim the browser binding even when a visible modal prevents opening,
@@ -62,11 +96,12 @@ export default function CommandPaletteProvider({ children }: { children: ReactNo
     window.addEventListener('keydown', captureKey, true)
     window.addEventListener('keydown', bubbleKey)
     return () => { window.removeEventListener('keydown', captureKey, true); window.removeEventListener('keydown', bubbleKey) }
-  }, [location.pathname, open])
+  }, [location.pathname, paletteRoute, open])
   return <PaletteContext.Provider value={context}>
-    <PaneProvider scope={location.pathname}>{children}
+    <PaneProvider scope={paneScope}>{children}
     {/* Navigation unmounts the current dialog and cancels its provider requests. */}
-    {request?.route === location.key && <PaletteDialog key={request.n} registry={registry} mode={request.mode} close={close} />}
+    {helpRoute === paletteRoute && <KeyboardShortcuts registry={registry} close={closeHelp} />}
+    {request?.route === paletteRoute && <PaletteDialog key={request.n} registry={registry} mode={request.mode} close={close} />}
     </PaneProvider>
   </PaletteContext.Provider>
 }
@@ -121,12 +156,16 @@ export function PaletteDialog({ registry, mode, close }: { registry: CommandRegi
           }
           else notes.push(result.reason instanceof Error ? result.reason.message : 'Search is unavailable. Try again.')
         }
-        if (scope === 'files' && providers.length === 0) notes.push('File search is unavailable for this session.')
+        if (scope === 'files' && providers.length === 0) notes.push('File search is unavailable for this workspace.')
         setResult({ key: currentKey, items, note: notes.join(' '), busy: false })
       })
     }, 150)
     return () => { window.clearTimeout(timer); controller.abort() }
   }, [providers, search, scope, currentKey, account, close])
+  // BLG-453: a no-op everywhere except the release-perf harness — the
+  // search scenario's readiness signal, once results for the current query
+  // have resolved and are no longer busy.
+  useEffect(() => { if (!result.busy && result.key) mark('search-results-rendered') }, [result])
   const pool = [...snapshot.items, ...(result.key === currentKey ? result.items : [])]
   const empty = !scope && !search
   // Before the person types: actions on this session first, a few live sessions they opened, then
@@ -138,8 +177,8 @@ export function PaletteDialog({ registry, mode, close }: { registry: CommandRegi
     return group !== 'cards' || search.length >= 3
   }), search)
   const groups: { key: string; label: string; items: PaletteItem[] }[] = empty ? [
-    { key: 'here', label: 'This session', items: unique(pool.filter(item => item.here !== undefined)).sort((a, b) => a.here! - b.here! || a.title.localeCompare(b.title)) },
-    { key: 'sessions', label: 'Recent sessions', items: unique(pool.filter(item => item.group === 'sessions' && item.recentRank !== undefined)).sort((a, b) => a.recentRank! - b.recentRank!).slice(0, RECENT_SESSIONS) },
+    { key: 'here', label: 'This workspace', items: unique(pool.filter(item => item.here !== undefined)).sort((a, b) => a.here! - b.here! || a.title.localeCompare(b.title)) },
+    { key: 'sessions', label: 'Recent workspaces', items: unique(pool.filter(item => item.group === 'sessions' && item.recentRank !== undefined)).sort((a, b) => a.recentRank! - b.recentRank!).slice(0, RECENT_SESSIONS) },
     { key: 'commands', label: groupLabels.commands, items: registry.rank(pool.filter(item => (item.group ?? 'commands') === 'commands' && item.empty && !item.destructive && item.here === undefined && item.refine === undefined), '') },
   ].filter(group => group.items.length) : paletteGroups.map(group => {
     const all = ranked.filter(item => (item.group ?? 'commands') === group)
@@ -187,7 +226,7 @@ export function PaletteDialog({ registry, mode, close }: { registry: CommandRegi
       <header className="palette-header"><h2 id={`${id}-title`}>{commands ? 'Command palette' : 'Quick open'}</h2><button type="button" className="icon-btn" aria-label="Close search" onClick={close}>✕</button></header>
       <div className="palette-search">
         {scope && <button className="palette-chip" type="button" aria-label={`Remove ${groupLabels[scope].toLowerCase()} scope`} onClick={() => { setScope(null); setSelected(null); setExpanded([]); input.current?.focus() }}>{groupLabels[scope]} ×</button>}
-        <input ref={input} className="palette-input" role="combobox" aria-label={scope === 'files' ? 'Search session files' : scope === 'sessions' ? 'Search sessions' : scope === 'cards' ? 'Search cards' : scope === 'commands' ? 'Search commands' : 'Search commands, sessions, cards and files'} aria-expanded="true" aria-autocomplete="list" aria-controls={`${id}-list`} aria-activedescendant={activeOptionId} aria-describedby={`${id}-hint`} placeholder="s sessions · # cards · / files · > commands" value={query} maxLength={256} onChange={event => {
+        <input ref={input} className="palette-input" role="combobox" aria-label={scope === 'files' ? 'Search workspace files' : scope === 'sessions' ? 'Search workspaces' : scope === 'cards' ? 'Search cards' : scope === 'commands' ? 'Search commands' : 'Search commands, workspaces, cards and files'} aria-expanded="true" aria-autocomplete="list" aria-controls={`${id}-list`} aria-activedescendant={activeOptionId} aria-describedby={`${id}-hint`} placeholder={`${platformShortcut("Ctrl/⌘+K").replace("+", /Mac|iPhone|iPad|iPod/.test(navigator.platform) ? "" : " ")} · s workspaces · # cards · / files · > commands`} value={query} maxLength={256} onChange={event => {
           const parsed = parseScope(event.target.value)
           if (parsed.scope) { setScope(parsed.scope); setQuery(parsed.query) }
           else setQuery(event.target.value)
@@ -198,12 +237,12 @@ export function PaletteDialog({ registry, mode, close }: { registry: CommandRegi
         {groups.map(({ key: group, label, items: rows }) => <div role="group" aria-labelledby={`${id}-group-${group}`} key={group}>
           <h3 className="palette-group-title" id={`${id}-group-${group}`}>{label}</h3>
           {rows.map(item => <div role="option" id={`${id}-${encodeURIComponent(item.id)}`} key={item.id} aria-selected={item.id === activeId} className={`palette-option${item.destructive ? ' palette-destructive' : ''}${item.id.startsWith('more:') ? ' palette-more' : ''}`} onPointerDown={event => event.preventDefault()} onClick={() => run(item)} onPointerMove={() => setSelected(item.id)}>
-            <span className="palette-label"><span>{group === 'files' ? <FileIcon name={item.title} /> : item.icon} {item.title}</span>{(item.repo || item.detail) && <small>{[item.repo, item.detail].filter(Boolean).join(' · ')}</small>}</span>{item.shortcut && <kbd>{item.shortcut}</kbd>}
+            <span className="palette-label"><span>{group === 'files' ? <FileIcon name={item.title} /> : item.icon} {item.title}</span>{(item.repo || item.detail) && <small>{[item.repo, item.detail].filter(Boolean).join(' · ')}</small>}</span>{item.shortcut && <kbd>{platformShortcut(item.shortcut)}</kbd>}
           </div>)}
         </div>)}
       </div>
       <div className="palette-status" role="status" aria-live="polite">{result.key !== currentKey || result.busy ? 'Searching…' : result.note || (items.length ? `${empty ? items.length : ranked.length} results` : 'No matches.')}</div>
-      <footer id={`${id}-hint`} className="palette-hint">↑ ↓ to choose · Enter to open · Esc to close · s sessions · # cards · / files · &gt; commands</footer>
+      <footer id={`${id}-hint`} className="palette-hint">↑ ↓ to choose · Enter to open · Esc to close · s workspaces · # cards · / files · &gt; commands · ? all shortcuts</footer>
     </div>
   </div>, document.body)
 }

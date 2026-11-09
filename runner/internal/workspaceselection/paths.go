@@ -134,3 +134,41 @@ func boundedMemberName(name, suffix string) string {
 	}
 	return name + suffix
 }
+
+// AdditionPath projects a repository joining a live workspace. Existing members
+// keep their paths and IDs, so a suffix or the stable ID only ever applies to the
+// newcomer. It takes a named folder at the root, or a name in the reserved folder
+// when a member already holds the root.
+func AdditionPath(existing []protocol.WorkspaceMember, source protocol.DiscoverySource, options ...MemberPathOptions) (string, bool) {
+	cluster := len(options) > 0 && options[0].Cluster
+	parent := ""
+	for _, member := range existing {
+		if member.Path == "." {
+			parent = protocol.WorkspaceReservedFolder + "/"
+		}
+	}
+	taken := func(candidate string) bool {
+		folded := workspacepolicy.FoldName(parent + candidate)
+		for _, member := range existing {
+			other := workspacepolicy.FoldName(member.Path)
+			if other == folded || strings.HasPrefix(other, folded+"/") || strings.HasPrefix(folded, other+"/") {
+				return true
+			}
+		}
+		return false
+	}
+	base := source.ID
+	if workspacepolicy.SafeSegment(source.Name) && workspacepolicy.Directory(source.Name) && (!cluster || workspacepolicy.FoldName(source.Name) != "lost+found") {
+		if candidate := boundedMemberName(source.Name, ""); workspacepolicy.SafeSegment(candidate) {
+			base = candidate
+		}
+	}
+	candidate := base
+	for suffix := 2; taken(candidate); suffix++ {
+		if suffix > protocol.MaxWorkspaceMembers+1 {
+			return "", false
+		}
+		candidate = boundedMemberName(base, "-"+strconv.Itoa(suffix))
+	}
+	return parent + candidate, true
+}

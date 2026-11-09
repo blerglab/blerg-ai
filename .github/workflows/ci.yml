@@ -5,7 +5,7 @@ permissions:
   contents: read
 
 jobs:
-  # contracts + core share the root go.work.
+  # contracts + core use the root go.work; verification tooling is listed there too.
   core:
     runs-on: ubuntu-latest
     services:
@@ -17,17 +17,18 @@ jobs:
           --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
     env:
       DATABASE_URL: postgres://blerg:blerg@localhost:5432/blerg_core
+      TEST_DATABASE_URL: postgres://blerg:blerg@localhost:5432/blerg_core
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with: { go-version-file: core/go.mod }
-      - run: test -z "$(gofmt -l ./contracts ./core ./board ./runner)"
+      - run: make check-format
       - run: go vet ./contracts/... ./core/...
       - run: go test -timeout 30m ./contracts/... ./core/...
 
-  # One configuration (.golangci.yml at the root) for all four modules. contracts and
-  # core are linted together through go.work; runner and board are standalone modules,
-  # linted from their own directory with the workspace off.
+  # One configuration for production modules and verification tooling. contracts
+  # and core are linted together; the other entries run from their module directory
+  # with the workspace off.
   lint:
     runs-on: ubuntu-latest
     strategy:
@@ -47,6 +48,11 @@ jobs:
           - name: board
             dir: board
             gomod: board/go.mod
+            gowork: "off"
+            args: ./...
+          - name: verification
+            dir: scripts/verification
+            gomod: scripts/verification/go.mod
             gowork: "off"
             args: ./...
     name: lint (${{ matrix.name }})
@@ -86,6 +92,7 @@ jobs:
     env:
       GOWORK: "off"
       TEST_DATABASE_URL: postgres://blerg:blerg@localhost:5432/blerg_${{ matrix.module }}_test?sslmode=disable
+      DATABASE_URL: postgres://blerg:blerg@localhost:5432/blerg_${{ matrix.module }}_test?sslmode=disable
     defaults:
       run:
         working-directory: ${{ matrix.module }}
@@ -95,9 +102,7 @@ jobs:
         with:
           go-version-file: ${{ matrix.module }}/go.mod
           cache-dependency-path: ${{ matrix.module }}/go.sum
-      # Some daemon tests drive a real tmux and git; without them they skip.
-      - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
+
       - name: Git identity for tests that commit
         run: |
           git config --global user.name "ci"
@@ -105,12 +110,61 @@ jobs:
           git config --global init.defaultBranch main
       - run: go vet ./...
       - run: go test -timeout 30m ./...
-      - name: Daemon release race gate (three passes)
+      - name: Live-data cross-process security proofs
         if: matrix.module == 'runner'
-        run: make -C .. test-daemon-race
+        working-directory: .
+        run: bash scripts/test-live-data-process.sh
+      # This uses the same fail-closed named-test checks as the local gate.
+      # ubuntu-latest permits ptrace; the PostgreSQL service above supports fixtures.
+      - name: Persistent shell real-wire gate (normal and race)
+        if: matrix.module == 'runner'
+        env:
+          BLERG_TOOL_WORKERS: "1"
+        run: >-
+          ../scripts/pre-merge.sh
+          --suite persistent-shell-wire-go
+          --suite persistent-shell-wire-race
+          --logs "$RUNNER_TEMP/persistent-shell-wire"
+      # `make test-daemon-race` passes --release, which deliberately ignores
+      # suite filters and runs the complete matrix (frontends included), which this
+      # Go-only job cannot run. Run the daemon race suite alone here; the
+      # three-pass release matrix runs on the release gate host.
+      - name: Daemon race gate
+        if: matrix.module == 'runner'
+        run: >-
+          ../scripts/pre-merge.sh
+          --suite daemon-race
+          --logs "$RUNNER_TEMP/daemon-race"
+
+  # Verification tools have no service/database dependency. Use the same local
+  # target as make test and check-scripts, including vet and executable builds.
+  verification:
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: "off"
+      BLERG_TOOL_WORKERS: "2"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: scripts/verification/go.mod
+          cache-dependency-path: scripts/verification/go.mod
+      - run: make test-verification
 
   frontend:
     runs-on: ubuntu-latest
+    # Real-runner browser fixtures create isolated databases and compile their Go
+    # test executable; hosted images do not provide either prerequisite implicitly.
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: blerg, POSTGRES_PASSWORD: blerg, POSTGRES_DB: blerg_browser_test }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgres://blerg:blerg@localhost:5432/blerg_browser_test?sslmode=disable
+      BLERG_TOOL_WORKERS: "2"
     strategy:
       fail-fast: false
       matrix:
@@ -139,6 +193,11 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: ${{ matrix.install }}/package-lock.json
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        if: matrix.dir == 'runner/frontend'
+        with:
+          go-version-file: runner/go.mod
+          cache-dependency-path: runner/go.sum
       - run: npm ci
         working-directory: ${{ matrix.install }}
       # Key browser binaries by OS, engine set and lockfile (Playwright revision).
@@ -157,20 +216,55 @@ jobs:
       - run: npx tsc --noEmit
       - run: npm test
         if: matrix.dir != 'runner/frontend'
+      # Compile without competing Chromium/Firefox workers on a cold hosted
+      # cache. The fixture's unchanged 90s startup build then reuses this cache.
+      - name: Compile runner browser fixture before starting browsers
+        if: matrix.dir == 'runner/frontend'
+        working-directory: runner
+        env:
+          GOWORK: "off"
+          GOFLAGS: "-p=2"
+        run: go test -c -o "$RUNNER_TEMP/runner-browser.test" ./internal/server
       - name: Test runner units and browser interactions
         if: matrix.dir == 'runner/frontend'
-        run: npm test -- --project unit --project browser
+        run: |
+          npm test -- --project unit --project browser
+          node ../../scripts/test-default-theme-colors.mjs
       # Exit the other Vitest process so its browser workers and caches cannot contend with
       # strict wall-clock samples. The performance project also disables file parallelism.
       - name: Test runner performance after other workers exit
         if: matrix.dir == 'runner/frontend'
         run: npm run test:performance
       - run: npm run build
+      - name: Preserve runner browser failure evidence
+        if: failure() && matrix.dir == 'runner/frontend'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runner-browser-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: warn
+          # Synthetic chart captures are already bounded to 600 frames / 64 MB.
+          # Keep explicit fixture paths; never upload the session cache or logs.
+          path: |
+            .cache/blg513/dashboard-3840.json
+            .cache/blg513/dashboard-3840-frames/*.jpg
+            .cache/blg513/dashboard-3840-frames/frames.json
+            .cache/blg513/dashboard-1024.json
+            .cache/blg513/dashboard-1024-frames/*.jpg
+            .cache/blg513/dashboard-1024-frames/frames.json
+            runner/frontend/src/components/__screenshots__/ChartLifecycle.browser.test.tsx/*.png
+            runner/frontend/src/components/__screenshots__/QuestionCard.browser.test.tsx/*.png
+            runner/frontend/src/components/__screenshots__/ExplorerDock.browser.test.tsx/*.png
+            runner/frontend/src/components/__screenshots__/HovercardLists.browser.test.tsx/*.png
+            runner/frontend/src/components/__screenshots__/TabScroll.browser.test.tsx/*.png
 
   scripts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Installer syntax under Bash 3.2 and fast heredoc guard
+        run: make check-installer-bash32
       # Needs docker compose (present on the hosted runner); skips without it.
       - run: bash install/desktop/compose_test.sh
       # kubectl is installed on the hosted runner but there is no cluster, and

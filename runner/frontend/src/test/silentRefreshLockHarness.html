@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>BLG-487 refresh-lock harness</title>
+  </head>
+  <body>
+    <!--
+      A second, real browsing context on the dev server's own origin: it takes the shared
+      navigator.locks refresh lock (the same REFRESH_LOCK name authClient.ts uses) and holds it
+      until told to let go, standing in for "another tab's frame is still lingering" without
+      needing a running core server.
+    -->
+    <script type="module">
+      import { REFRESH_LOCK } from "/src/authClient.ts";
+
+      let release;
+      window.__lockHeld = new Promise((resolveHeld) => {
+        void navigator.locks.request(REFRESH_LOCK, () => new Promise((r) => {
+          release = r;
+          resolveHeld();
+        }));
+      });
+      window.__releaseLock = () => release?.();
+    </script>
+  </body>
+</html>

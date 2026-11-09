@@ -50,3 +50,15 @@ it('announces pane focus without mentioning tabs when the command runs outside a
   act(run)
   expect(screen.getByTestId('tab-focus-announce')).toHaveTextContent(/^Exited focus mode$/)
 })
+
+it('does not let a focus Undo from another workspace change the current layout', async () => {
+  const { useToastStore } = await import('../hooks/useToastStore')
+  useToastStore.setState({ toasts: [] })
+  const view = render(<PaneProvider scope="/sessions/one"><Status /></PaneProvider>)
+  fireEvent.keyDown(window, { key: 'Enter', ctrlKey: true, shiftKey: true })
+  const undo = useToastStore.getState().toasts.at(-1)!.action!.onClick
+  view.rerender(<PaneProvider scope="/sessions/two"><Status /></PaneProvider>)
+  fireEvent.keyDown(window, { key: 'Enter', ctrlKey: true, shiftKey: true })
+  act(undo)
+  expect(screen.getByTestId('focused')).toHaveTextContent('true')
+})

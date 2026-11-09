@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 // Real layout for the Plan tab's checklist (card #111): one line per item at a phone's width and at
 // 4K, the title cut with an ellipsis and shown whole on a click, the glyphs and the one commit chip on
 // the same line, nothing past the panel's edge.
@@ -25,7 +26,7 @@ beforeEach(() => {
 })
 afterEach(() => vi.unstubAllGlobals())
 
-it.each([390, 3840])('draws one line per item, folds the done ones, and opens the diff from the chip at %ipx', async width => {
+it.each(browserWidths([390, 3840]))('draws one line per item, folds the done ones, and opens the diff from the chip at %ipx', async width => {
   await page.viewport(width, 900)
   localStorage.setItem(RAIL_TAB_KEY, 'plan')
   const open = vi.fn()

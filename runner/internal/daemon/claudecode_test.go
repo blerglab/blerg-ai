@@ -3,8 +3,10 @@ package daemon
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -112,6 +114,144 @@ func TestClaudeCodeDriverTurn(t *testing.T) {
 	}
 	if !containsStr(string(raw), "--resume cc-sess-1") {
 		t.Errorf("second turn must pass --resume; calls:\n%s", raw)
+	}
+}
+
+// Barriers keep Stop inside preparation/Start until its prompt return is observed.
+func TestClaudeLegacyInterruptDuringStart(t *testing.T) {
+	for _, phase := range []string{"preparation", "before-start", "after-start", "running"} {
+		t.Run(phase, func(t *testing.T) {
+			binDir := fakeClaude(t)
+			t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+			t.Setenv("BLERG_CLAUDE_STEERING", "0")
+			d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", &collectEmitter{}, nil)
+			d.steer.legacy = true
+			ready, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			preparationCancelled := make(chan struct{})
+			oldHelp := ccHelpText
+			defer func() { ccHelpText = oldHelp }()
+			ccHelpText = func(ctx context.Context, _ sandboxExec, _ string, _ []string) ([]byte, error) {
+				if phase == "preparation" {
+					close(ready)
+					select {
+					case <-ctx.Done():
+						close(preparationCancelled)
+					case <-release:
+					}
+					return nil, ctx.Err()
+				}
+				return nil, nil
+			}
+			var process *exec.Cmd
+			var interrupts atomic.Int32
+			d.useCommandBoundary(func(cmd *exec.Cmd) error {
+				if phase == "preparation" {
+					t.Error("stopped preparation launched a process")
+					return context.Canceled
+				}
+				cmd.Path, cmd.Args = "/bin/sleep", []string{"sleep", "30"}
+				process = cmd
+				cmd.Cancel = func() error {
+					interrupts.Add(1)
+					if phase == "running" {
+						<-release
+					}
+					return cmd.Process.Kill()
+				}
+				if phase == "before-start" {
+					close(ready)
+					<-release
+					return cmd.Start()
+				}
+				err := cmd.Start()
+				if phase == "after-start" {
+					close(ready)
+					<-release
+				}
+				return err
+			})
+			if phase == "running" {
+				d.onEngine = func(_ int, running bool) {
+					if running {
+						close(ready)
+					}
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			stopped := make(chan struct{})
+			work := make(chan bool, 1)
+			queried := false
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			defer func() {
+				cancel()
+				unblock()
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Error("turn goroutine did not join")
+				}
+				select {
+				case <-stopped:
+				case <-time.After(5 * time.Second):
+					t.Error("Stop goroutine did not join")
+				}
+				if queried {
+					select {
+					case <-work:
+					case <-time.After(5 * time.Second):
+						t.Error("work query did not join")
+					}
+				}
+			}()
+			go func() { d.runTurn(ctx, "hello"); close(done) }()
+			select {
+			case <-ready:
+			case <-time.After(5 * time.Second):
+				close(stopped)
+				t.Fatal("barrier not reached")
+			}
+			queried = true
+			go func() { work <- d.HasInterruptibleWork() }()
+			select {
+			case active := <-work:
+				if !active {
+					t.Error("accepted turn is not interruptible")
+				}
+				work <- active
+			case <-time.After(500 * time.Millisecond):
+				t.Error("work query blocked behind Start")
+			}
+			go func() { d.Interrupt(); d.Interrupt(); close(stopped) }()
+			select {
+			case <-stopped:
+			case <-time.After(500 * time.Millisecond):
+				t.Error("Stop blocked behind preparation/Start")
+			}
+			if phase == "preparation" {
+				select {
+				case <-preparationCancelled:
+				case <-time.After(500 * time.Millisecond):
+					t.Error("Stop did not cancel preparation context")
+				}
+			}
+			unblock()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Stop did not cancel the accepted turn")
+			}
+			if process != nil && (process.ProcessState == nil || process.ProcessState.Success()) {
+				t.Error("started process was not cancelled")
+			}
+			if d.HasInterruptibleWork() {
+				t.Error("finished turn remains interruptible")
+			}
+			if phase != "preparation" && interrupts.Load() != 1 {
+				t.Errorf("interrupt delivered %d times, want once", interrupts.Load())
+			}
+
+		})
 	}
 }
 

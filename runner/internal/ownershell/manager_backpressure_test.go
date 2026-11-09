@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -56,58 +57,71 @@ func eventually(t *testing.T, what string, ok func() bool) {
 // ending the shell, and only after OutputStall detaches the attachment. The
 // shell keeps running and can be reattached.
 func TestStalledAttachmentDetachesAfterStallWithoutClosing(t *testing.T) {
-	f, clock := setupClock(t)
-	i, a := f.open(t)
-	for range OutputQueue/MaxFrame + 2 {
-		f.s.outputs[0] <- []byte("private-output")
-	}
-	eventually(t, "attachment queue did not fill", func() bool { return len(a.Output) == cap(a.Output) })
-	clock.Add(OutputStall - time.Second)
-	time.Sleep(50 * time.Millisecond)
-	if f.closedCount() != 0 {
-		t.Fatal("a full attachment queue ended the shell")
-	}
-	f.m.mu.Lock()
-	attached := f.m.shells[i.Handle] != nil && f.m.shells[i.Handle].attachment != nil
-	f.m.mu.Unlock()
-	if !attached {
-		t.Fatal("detached before the stall timeout")
-	}
-	clock.Add(time.Second)
-	eventually(t, "stalled attachment was not detached", func() bool {
-		f.m.mu.Lock()
-		defer f.m.mu.Unlock()
-		return f.m.shells[i.Handle] != nil && f.m.shells[i.Handle].attachment == nil
-	})
-	if f.closedCount() != 0 {
-		t.Fatal("stall detach ended the shell")
-	}
-	events := f.audits()
-	last := events[len(events)-1]
-	if last.Event != Detached || last.Reason != ReasonSlow {
-		t.Fatalf("stall cause not recorded: %+v", last)
-	}
-	delivered := false
-	_ = f.m.Forward(t.Context(), f.actor, i.Handle, a.ID, []byte("queued"), func([]byte) error { delivered = true; return nil })
-	if delivered {
-		t.Fatal("the detached attachment still received output")
-	}
-	again, err := f.m.Attach(t.Context(), f.actor, i.Handle, false)
-	if err != nil {
-		t.Fatal("reattach after a stall:", err)
-	}
-	f.s.outputs[0] <- []byte("after-reattach")
-	eventually(t, "reattached browser got no output", func() bool {
-		for {
-			select {
-			case data := <-again.Output:
-				if bytes.Equal(data, []byte("after-reattach")) {
-					return true
-				}
-			default:
-				return false
-			}
+	synctest.Test(t, func(t *testing.T) {
+		f, clock := setupClock(t)
+		i, a := f.open(t)
+		for range cap(a.Output) {
+			f.s.outputs[0] <- []byte("private-output")
 		}
+		synctest.Wait()
+		if len(a.Output) != cap(a.Output) {
+			t.Fatal("attachment queue did not fill")
+		}
+		// Queue the next frames without yielding to the drain. Queue fullness alone
+		// says nothing about whether it has observed this first blocked delivery.
+		f.s.outputs[0] <- []byte("private-output")
+		f.s.outputs[0] <- []byte("private-output")
+		// A full queue precedes the next drain attempt. Wait until that attempt
+		// has recorded the stall start and is blocked on its poll timer.
+		synctest.Wait()
+		clock.Add(OutputStall - time.Second)
+		time.Sleep(outputPoll)
+		synctest.Wait()
+		if f.closedCount() != 0 {
+			t.Fatal("a full attachment queue ended the shell")
+		}
+		f.m.mu.Lock()
+		attached := f.m.shells[i.Handle] != nil && f.m.shells[i.Handle].attachment != nil
+		f.m.mu.Unlock()
+		if !attached {
+			t.Fatal("detached before the stall timeout")
+		}
+		clock.Add(time.Second)
+		eventually(t, "stalled attachment was not detached", func() bool {
+			f.m.mu.Lock()
+			defer f.m.mu.Unlock()
+			return f.m.shells[i.Handle] != nil && f.m.shells[i.Handle].attachment == nil
+		})
+		if f.closedCount() != 0 {
+			t.Fatal("stall detach ended the shell")
+		}
+		events := f.audits()
+		last := events[len(events)-1]
+		if last.Event != Detached || last.Reason != ReasonSlow {
+			t.Fatalf("stall cause not recorded: %+v", last)
+		}
+		delivered := false
+		_ = f.m.Forward(t.Context(), f.actor, i.Handle, a.ID, []byte("queued"), func([]byte) error { delivered = true; return nil })
+		if delivered {
+			t.Fatal("the detached attachment still received output")
+		}
+		again, err := f.m.Attach(t.Context(), f.actor, i.Handle, false)
+		if err != nil {
+			t.Fatal("reattach after a stall:", err)
+		}
+		f.s.outputs[0] <- []byte("after-reattach")
+		eventually(t, "reattached browser got no output", func() bool {
+			for {
+				select {
+				case data := <-again.Output:
+					if bytes.Equal(data, []byte("after-reattach")) {
+						return true
+					}
+				default:
+					return false
+				}
+			}
+		})
 	})
 }
 

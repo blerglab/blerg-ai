@@ -29,7 +29,7 @@ interface Props {
   onChange: (v: LaunchPermissionsValue) => void
 }
 
-const GIVEN = 'Given as the session starts'
+const GIVEN = 'Given as the workspace starts'
 
 export default function LaunchPermissions({ kind, runtime, boards, boardsLoading, mcp, connectionName, engines = [], cluster, value, onChange }: Props) {
   const [open, setOpen] = useState(false)
@@ -53,7 +53,7 @@ export default function LaunchPermissions({ kind, runtime, boards, boardsLoading
       <button type="button" className="settings-action launch-permissions-button" aria-haspopup="dialog" onClick={() => setOpen(true)}>
         Permissions…{count > 0 && <>{' '}<span data-testid="launch-permissions-count">({count})</span></>}
       </button>
-      <span className="launch-permissions-hint">{count > 0 ? 'Given as the session starts; revoke them in the session panel.' : 'What the session may do without asking you.'}</span>
+      <span className="launch-permissions-hint">{count > 0 ? 'Given as the workspace starts; revoke them in the workspace panel.' : 'What the workspace may do without asking you.'}</span>
       {open && <PermissionsModal mode="launch" onClose={() => setOpen(false)}
         childSessions={{ state: 'ready', value: { options, note: LAUNCH_CHILD_NOTE } }}
         boards={boardsLoading ? { state: 'loading' } : { state: 'ready', value: boards }}

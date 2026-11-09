@@ -8,6 +8,13 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--probe-persistence" {
+		if shellruntime.ProbePersistent(os.Stdin, os.Stdout) != nil {
+			os.Exit(1)
+		}
+		return
+	}
+
 	if len(os.Args) == 2 && os.Args[1] == "--probe" {
 		if shellruntime.Probe(os.Stdout) != nil {
 			os.Exit(1)

@@ -23,6 +23,7 @@ import (
 	"github.com/blerglab/blerg-ai/board/internal/localinfer"
 	"github.com/blerglab/blerg-ai/board/internal/mcp"
 	"github.com/blerglab/blerg-ai/board/internal/runner"
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"github.com/blerglab/blerg-ai/contracts/health"
 	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/contracts/logsafe"
@@ -275,7 +276,7 @@ func main() {
 	mux.HandleFunc("GET /healthz", healthzHandler(pool))
 	mux.HandleFunc("GET /readyz", health.Handler(func(ctx context.Context) error { return db.Ready(ctx, pool) }))
 
-	srv.SetHandler(mux)
+	srv.SetHandler(failurelog.Default.HTTP("board", mux))
 	log.Printf("blerg-board-server listening on %s", addr)
 	// On SIGTERM: drain, then shut down gracefully (health.ServeUntilSignal), so a rolling update
 	// does not cut requests the ingress still sends here.

@@ -38,7 +38,12 @@ func (d *claudeCodeDriver) sessionPluginProblem() string {
 }
 func (d *claudeCodeDriver) prepareSessionPlugins(ctx context.Context, w *pluginWorkshop, id string, entries []pluginspec.Entry, _ bool) (func(), pluginsinstall.Result) {
 	dirs, res := w.prepare(ctx, id, entries)
-	return func() { d.pluginDirs = dirs }, res
+	return func() {
+		d.pluginDirs = dirs
+		if d.workflowPluginDir != "" {
+			d.pluginDirs = append(d.pluginDirs, d.workflowPluginDir)
+		}
+	}, res
 }
 
 // queuePluginUpdate is deliberately not Interrupt/markStale: applying a plugin

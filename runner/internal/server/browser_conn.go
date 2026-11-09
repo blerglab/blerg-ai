@@ -5,8 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"github.com/blerglab/blerg-ai/contracts/identity"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -128,7 +129,7 @@ const (
 //
 // authorize gates the upgrade the same way Task 7's authBrowser gates every
 // REST endpoint — this socket pushes the full daemon/session/message state on
-// connect and accepts state-changing commands (spawn_session, send_input,
+// connect and accepts state-changing commands (send_input,
 // interrupt_session, ...), so it is exactly as sensitive as the REST surface
 // and must not be reachable without a verified core-issued token. In
 // production this is (*API).AuthorizeBrowserWS. A nil authorize fails CLOSED
@@ -138,11 +139,14 @@ const (
 // remembered on the BrowserConn: socket commands that act on someone else's
 // session (resuming a cluster session with its launcher's personal
 // credentials) must be able to tell who is asking.
-func (h *Hub) ServeBrowser(dbPool *pgxpool.Pool, authorize func(*http.Request) (accountID, sessionID string, ok bool)) http.HandlerFunc {
+func (h *Hub) ServeBrowser(dbPool *pgxpool.Pool, authorize func(*http.Request) (identity.Principal, bool)) http.HandlerFunc {
+	// This handler is also used without NewAPI. Initialize broadcast privacy
+	// from the same database used by its commands before accepting sockets.
+	h.SetPrivacyPool(dbPool)
 	return func(w http.ResponseWriter, r *http.Request) {
-		accountID, sessionID, ok := "", "", false
+		principal, ok := identity.Principal{}, false
 		if authorize != nil {
-			accountID, sessionID, ok = authorize(r)
+			principal, ok = authorize(r)
 		}
 		if !ok {
 			// Reject BEFORE the upgrade: a 401 on the handshake is visible to
@@ -151,6 +155,7 @@ func (h *Hub) ServeBrowser(dbPool *pgxpool.Pool, authorize func(*http.Request) (
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		accountID, sessionID := principal.Sub, principal.Sid
 		wsConn, err := browserUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			log.Printf("browser ws upgrade error: %v", err)
@@ -160,8 +165,12 @@ func (h *Hub) ServeBrowser(dbPool *pgxpool.Pool, authorize func(*http.Request) (
 		// The connection outlives the upgrade request, so its context keeps
 		// the request's values but not its cancellation.
 		ctx, cancel := context.WithCancel(context.WithoutCancel(r.Context()))
+		if principal.Kind == "human" {
+			ctx = withLivePersonToken(ctx, wsBearerToken(r))
+		}
 		bc := &BrowserConn{
 			ID:        newUUID(),
+			verified:  principal,
 			AccountID: accountID,
 			SessionID: sessionID,
 			send:      make(chan []byte, 256),
@@ -169,17 +178,47 @@ func (h *Hub) ServeBrowser(dbPool *pgxpool.Pool, authorize func(*http.Request) (
 			cancel:    cancel,
 			subs:      make(map[string]context.CancelFunc),
 		}
-		bc.desktopFilter = func(raw []byte) ([]byte, bool) { return h.desktopPayloadFor(ctx, accountID, raw) }
+		bc.desktopFilter = func(raw []byte) ([]byte, bool) {
+			var allowed bool
+			raw, allowed = h.filterDatasetDelivery(ctx, bc, dbPool, raw)
+			if !allowed {
+				return nil, false
+			}
+			data, ok := h.desktopPayloadFor(ctx, accountID, raw)
+			if !ok && isInitialState(raw) {
+				bc.cancel()
+			}
+			return data, ok
+		}
 		bc.desktopDeliver = func(raw []byte, send func([]byte) error) error {
-			return h.deliverDesktopPayload(ctx, accountID, raw, send)
+			err := h.deliverDesktopPayload(ctx, accountID, raw, send)
+			if err != nil && isInitialState(raw) {
+				logInitialStateFailure("delivery", err)
+				return errDiscoveryUnavailable
+			}
+			return err
 		}
 		h.RegisterBrowser(bc)
 
-		scope, _ := h.desktopScopeRows(ctx, accountID)
+		connectCtx, connectCancel := context.WithTimeout(ctx, initialStateTimeout)
+		scope, scopeErr := h.desktopScopeRows(connectCtx, accountID)
+		connectCancel()
+		if scopeErr != nil {
+			logInitialStateFailure("desktop_scope", scopeErr)
+			h.UnregisterBrowser(bc.ID)
+			cancel()
+			_ = wsConn.Close()
+			return
+		}
 
 		// Send initial_state before starting the read pump so the browser
 		// gets it as its very first message.
 		sendInitialState(ctx, bc, h, dbPool)
+		if bc.ctx.Err() != nil {
+			h.UnregisterBrowser(bc.ID)
+			_ = wsConn.Close()
+			return
+		}
 		go h.watchDesktopScope(ctx, bc, dbPool, scope)
 
 		conn := wsConn
@@ -188,9 +227,22 @@ func (h *Hub) ServeBrowser(dbPool *pgxpool.Pool, authorize func(*http.Request) (
 	}
 }
 
+const initialStateTimeout = 5 * time.Second
+
 // sendInitialState assembles and sends the initial_state message to bc.
 func sendInitialState(ctx context.Context, bc *BrowserConn, h *Hub, dbPool *pgxpool.Pool) {
-	daemons := h.ownedHostDaemons(ctx, bc.AccountID)
+	started := time.Now()
+	defer func() {
+		slog.Debug("browser initial_state collected", "duration_ms", time.Since(started).Milliseconds())
+	}()
+	ctx, cancel := context.WithTimeout(ctx, initialStateTimeout)
+	defer cancel()
+	fail := func(stage string, err error) { logInitialStateFailure(stage, err); bc.cancel() }
+	daemons, err := h.initialStateDaemons(ctx, bc.AccountID)
+	if err != nil {
+		fail("desktops", err)
+		return
+	}
 	daemonInfos := make([]protocol.DaemonInfo, 0, len(daemons))
 	for _, d := range daemons {
 		if !isHostDaemon(d) {
@@ -217,20 +269,25 @@ func sendInitialState(ctx context.Context, bc *BrowserConn, h *Hub, dbPool *pgxp
 	}
 
 	sessionInfos := []protocol.SessionInfo{}
+	var sessionRows []db.SessionRow
 	if dbPool != nil {
-		rows, err := db.ListSessions(ctx, dbPool)
+		rows, err := db.ListBrowserSessions(ctx, dbPool, bc.AccountID, nil)
 		if err != nil {
-			log.Printf("browser initial_state ListSessions: %v", err)
-		} else {
-			for _, r := range rows {
-				if !canSeeAccount(bc.AccountID, &r) { // a private session is its owner's alone
-					continue
-				}
-				// Use the shared row→info mapper so every SessionInfo field
-				// (including unread/starred) is populated consistently — a manual
-				// duplicate here previously dropped those flags on reconnect.
-				sessionInfos = append(sessionInfos, h.sessionInfoFor(ctx, r, bc.AccountID))
+			fail("sessions", err)
+			return
+		}
+		sessionRows = rows
+		projectionCtx := ctx
+		if h.desktopPool != nil {
+			p, e := db.LoadBrowserProjection(ctx, h.desktopPool, bc.AccountID, rows, true)
+			if e != nil {
+				fail("session_metadata", e)
+				return
 			}
+			projectionCtx = context.WithValue(ctx, browserProjectionKey{}, &browserProjection{bc.AccountID, h.desktopPool, p})
+		}
+		for _, r := range rows {
+			sessionInfos = append(sessionInfos, h.sessionInfoFor(projectionCtx, r, bc.AccountID))
 		}
 	}
 
@@ -246,10 +303,15 @@ func sendInitialState(ctx context.Context, bc *BrowserConn, h *Hub, dbPool *pgxp
 	// Messages (open + recent), so each session's thread is populated on load.
 	messageInfos := []protocol.MessageInfo{}
 	if dbPool != nil {
-		if rows, err := db.ListMessagesFor(ctx, dbPool, defaultMessageLimit, bc.AccountID); err != nil {
-			log.Printf("browser initial_state ListMessages: %v", err)
-		} else {
-			messageInfos = messageInfosFor(ctx, dbPool, rows, bc.AccountID)
+		rows, err := db.ListMessagesFor(ctx, dbPool, defaultMessageLimit, bc.AccountID)
+		if err != nil {
+			fail("messages", err)
+			return
+		}
+		messageInfos, err = initialStateMessageInfos(ctx, dbPool, rows, bc.AccountID, sessionRows)
+		if err != nil {
+			fail("message_owners", err)
+			return
 		}
 	}
 
@@ -264,16 +326,21 @@ func sendInitialState(ctx context.Context, bc *BrowserConn, h *Hub, dbPool *pgxp
 		LatestVersion: latestVersion,
 		LatestURL:     latestURL,
 	}
+	if err := ctx.Err(); err != nil {
+		fail("collection", err)
+		return
+	}
 	limits := currentFileLimits()
 	msg.Limits = &limits
 	data, err := json.Marshal(msg)
 	if err != nil {
-		log.Printf("browser marshal initial_state: %v", err)
+		fail("marshal", err)
 		return
 	}
 	select {
 	case bc.send <- data:
 	case <-ctx.Done():
+		fail("enqueue", ctx.Err())
 	}
 }
 
@@ -353,6 +420,10 @@ func browserReadPump(h *Hub, bc *BrowserConn, conn *websocket.Conn, dbPool *pgxp
 		// Clean up all active subscriptions. Release focus BEFORE unsubscribing so
 		// ReleaseActiveBrowser can still see other browsers in h.subscriptions.
 		bc.subMu.Lock()
+		for _, sub := range bc.datasetSubs {
+			sub.cancel()
+		}
+		bc.datasetSubs = nil
 		for sessionID := range bc.subs {
 			bc.subs[sessionID]()
 			delete(bc.subs, sessionID)
@@ -394,15 +465,18 @@ func browserReadPump(h *Hub, bc *BrowserConn, conn *websocket.Conn, dbPool *pgxp
 		// command (subscribe, input, resize, scrollback, messages, model,
 		// interrupt, read, star) in one place, so a command added later
 		// inherits it. The refusal is silent, like an unknown session.
-		if sid := inboundSessionID(raw); sid != "" && !h.accountCanSee(bc.AccountID, sid) {
+		if sid := inboundSessionID(raw); sid != "" && !browserSessionAccess(ctx, h, dbPool, bc.AccountID, sid) {
 			log.Printf("browser %s: %s for a session it may not see: dropped", bc.ID, env.Type)
 			continue
 		}
 
 		switch env.Type {
+		case "subscribe_dataset", "unsubscribe_dataset", "dataset_heartbeat", "dataset_diagnostic":
+			handleDatasetCommand(h, bc, dbPool, raw)
+
 		case "activity":
 			// Throttled user-interaction signal; gates push vs in-app toast.
-			h.MarkActivity()
+			h.MarkActivity(bc.AccountID)
 
 		case "subscribe_board":
 			var msg protocol.SubscribeBoard
@@ -446,65 +520,9 @@ func browserReadPump(h *Hub, bc *BrowserConn, conn *websocket.Conn, dbPool *pgxp
 				log.Printf("browser %s: terminal input refused", bc.ID)
 			}
 
-		case "resize_session":
-			var msg protocol.ResizeSession
-			if err := json.Unmarshal(raw, &msg); err != nil {
-				log.Printf("browser %s malformed resize_session: %v", bc.ID, err)
-				continue
-			}
-			// Only the active browser drives PTY size; ignore resizes from others.
-			if !h.IsActiveBrowser(msg.SessionID, bc.ID) {
-				continue
-			}
-			dc := h.FindDaemonForSession(msg.SessionID)
-			if dc == nil {
-				log.Printf("browser %s resize_session: no daemon found for session %s", bc.ID, msg.SessionID)
-				continue
-			}
-			h.SetSessionPTYCols(msg.SessionID, msg.Cols)
-			fwd, _ := json.Marshal(protocol.ResizeSession{
-				Type:      "resize_session",
-				SessionID: msg.SessionID,
-				Cols:      msg.Cols,
-				Rows:      msg.Rows,
-			})
-			select {
-			case dc.send <- fwd:
-			default:
-				log.Printf("browser %s resize_session: daemon %s send channel full", bc.ID, dc.ID)
-			}
-
-		case "request_scrollback":
-			var msg protocol.RequestScrollback
-			if err := json.Unmarshal(raw, &msg); err != nil {
-				log.Printf("browser %s malformed request_scrollback: %v", bc.ID, err)
-				continue
-			}
-			dc := h.FindDaemonForSession(msg.SessionID)
-			if dc == nil {
-				continue
-			}
-			fwd, _ := json.Marshal(protocol.RequestScrollback{
-				Type:      "request_scrollback",
-				SessionID: msg.SessionID,
-				MaxLines:  msg.MaxLines,
-			})
-			select {
-			case dc.send <- fwd:
-			default:
-				log.Printf("browser %s request_scrollback: daemon %s send channel full", bc.ID, dc.ID)
-			}
-
-		case "spawn_session":
-			var msg protocol.BrowserSpawnSession
-			if err := json.Unmarshal(raw, &msg); err != nil {
-				log.Printf("browser %s malformed spawn_session: %v", bc.ID, err)
-				continue
-			}
-			if _, err := h.forwardBrowserSpawn(bc, msg, dbPool); err != nil {
-				log.Printf("browser %s spawn_session: %v", bc.ID, err)
-				continue
-			}
+		case "resize_session", "request_scrollback":
+			// Older clients may still send Terminal runtime commands. History is read-only.
+			continue
 
 		case "subscribe_agent_events":
 			var msg protocol.SubscribeAgentEvents
@@ -554,12 +572,22 @@ func browserReadPump(h *Hub, bc *BrowserConn, conn *websocket.Conn, dbPool *pgxp
 				log.Printf("browser %s malformed interrupt_session: %v", bc.ID, err)
 				continue
 			}
-			if err := withCancelledLimitResume(ctx, dbPool, msg.SessionID, func() error {
-				forwardToSessionDaemon(h, bc, msg.SessionID, protocol.InterruptSession{Type: "interrupt_session", SessionID: msg.SessionID})
+			stopCtx, cancelStop := context.WithTimeout(ctx, 35*time.Second)
+			if err := withCancelledLimitResume(stopCtx, dbPool, msg.SessionID, func() error {
+				if reason := pausedStopReason(stopCtx, dbPool, msg.SessionID); reason != "" {
+					// The existing paused notice already explains the refusal.
+					// Repeated stale Stop requests must not append chat lines.
+					return nil
+				}
+				if !forwardToSessionDaemon(h, bc, msg.SessionID, protocol.InterruptSession{Type: "interrupt_session", SessionID: msg.SessionID, TargetEventID: msg.TargetEventID}) {
+					recordServerAgentEvent(stopCtx, h, dbPool, msg.SessionID, newUUID(), "stop_result", map[string]string{"state": "failed", "message": "Stop could not reach the worker daemon. All work is retained; retry when it reconnects."})
+				}
 				return nil
 			}); err != nil {
-				recordServerAgentEvent(ctx, h, dbPool, msg.SessionID, newUUID(), "error", map[string]any{"message": "Continuation is busy; retry interrupt shortly.", "retryable": true})
+				recordServerAgentEvent(stopCtx, h, dbPool, msg.SessionID, newUUID(), "error", map[string]any{"message": "Continuation is busy; retry interrupt shortly.", "retryable": true})
 			}
+
+			cancelStop()
 
 		case "mark_session_read":
 			var msg protocol.MarkSessionRead
@@ -604,79 +632,6 @@ func browserReadPump(h *Hub, bc *BrowserConn, conn *websocket.Conn, dbPool *pgxp
 			log.Printf("browser %s unknown message type: %s", bc.ID, env.Type)
 		}
 	}
-}
-
-// forwardBrowserSpawn validates and forwards a browser-initiated spawn_session
-// request to the target daemon. Extracted out of the "spawn_session" case in
-// browserReadPump's read loop so it is directly testable: that loop reads
-// from a live websocket connection and isn't callable in isolation.
-//
-// Applied to every browser-WS spawn: the REST path validates too, but the
-// browser socket is a second, independent entry point into the same daemon
-// spawn, so it must not skip the check. Like the REST path it mints the
-// per-session messaging token (dbPool nil → no token, spawn still proceeds).
-func (h *Hub) forwardBrowserSpawn(bc *BrowserConn, msg protocol.BrowserSpawnSession, pool *pgxpool.Pool) (id string, err error) {
-	if problem := newSessionKindProblem(msg.Kind); problem != "" {
-		return "", errors.New(problem)
-	}
-	if bc == nil || bc.AccountID == "" || pool == nil {
-		return "", errors.New("desktop owner required")
-	}
-	err = db.WithDesktopFence(context.Background(), pool, msg.DaemonID, func(ctx context.Context) error {
-		var inner error
-		id, inner = h.forwardOwnedBrowserSpawn(ctx, bc, msg, pool)
-		return inner
-	})
-	return id, err
-}
-
-func (h *Hub) forwardOwnedBrowserSpawn(ctx context.Context, bc *BrowserConn, msg protocol.BrowserSpawnSession, dbPool *pgxpool.Pool) (sessionID string, err error) {
-	if err := validateRepoName(msg.Repo); err != nil {
-		return "", fmt.Errorf("rejected repo %q: %w", msg.Repo, err)
-	}
-	if problem := newSessionKindProblem(msg.Kind); problem != "" {
-		return "", errors.New(problem)
-	}
-	account := ""
-	if bc != nil {
-		account = bc.AccountID
-	}
-	dc := h.ownedHostDaemon(ctx, account, msg.DaemonID)
-	if dc == nil {
-		return "", fmt.Errorf("daemon %s not found", msg.DaemonID)
-	}
-	// A browser's start is interactive unless it says otherwise (interaction.go).
-	interaction, apiErr := resolveInteraction(msg.Interaction, true, false)
-	if apiErr != nil {
-		return "", fmt.Errorf("rejected interaction %q: %s", msg.Interaction, apiErr.Message)
-	}
-	sessionID = newUUID()
-	token := mintSpawnSessionTokenAs(ctx, dbPool, sessionID, dc, msg.Repo, msg.Title, "", sessionOriginFor(account, false, ""))
-	if token == "" {
-		return "", errors.New("session credential unavailable")
-	}
-	fwd, err := json.Marshal(protocol.SpawnSession{ //nolint:gosec // scoped session credential travels only over its authenticated owner desktop connection
-		Type:          "spawn_session",
-		Kind:          msg.Kind,
-		SessionID:     sessionID,
-		ProjectPath:   "",
-		Repo:          msg.Repo,
-		Title:         msg.Title,
-		Cols:          80,
-		Rows:          24,
-		InitialPrompt: msg.InitialPrompt,
-		Interaction:   interaction,
-		SessionToken:  token,
-	})
-	if err != nil {
-		return "", fmt.Errorf("marshal spawn_session: %w", err)
-	}
-	recordInteraction(ctx, dbPool, sessionID, interaction)
-	if !h.trySendToDaemon(dc, fwd) {
-		abortSpawnSessionToken(ctx, dbPool, sessionID)
-		return "", fmt.Errorf("daemon %s send channel full", dc.ID)
-	}
-	return sessionID, nil
 }
 
 // handleSubscribeSession implements the history-replay race-free subscription
@@ -862,6 +817,21 @@ func handleBrowserAgentMessageUnlocked(ctx context.Context, h *Hub, bc *BrowserC
 		recordServerAgentEvent(ctx, h, dbPool, msg.SessionID, newUUID(), "error", map[string]any{"message": problem.Message, "retryable": problem.Status == http.StatusServiceUnavailable, "client_id": msg.ClientID})
 		return
 	}
+	if h.boundAnswer != nil {
+		handled, err := h.boundAnswer(ctx, msg, bc.verified)
+		if handled && !errors.Is(err, errBoundConversation) {
+			if err != nil {
+				recordServerAgentEvent(ctx, h, dbPool, msg.SessionID, newUUID(), "error", map[string]any{"message": boundReplyMessage(err), "client_id": msg.ClientID, "retryable": true})
+			}
+			return
+		}
+		if errors.Is(err, errBoundConversation) {
+			msg.AnswerMessageID = ""
+			if msg.ClientID == "" {
+				msg.ClientID = newUUID()
+			}
+		}
+	}
 	fresh, err := acceptSessionInput(ctx, h, dbPool, msg)
 	if err != nil {
 		recordServerAgentEvent(ctx, h, dbPool, msg.SessionID, newUUID(), "error", map[string]any{"message": sessionInputError(err), "retryable": true, "client_id": msg.ClientID})
@@ -920,17 +890,26 @@ func handleBrowserAgentMessageUnlocked(ctx context.Context, h *Hub, bc *BrowserC
 	}
 }
 
-// Terminal bytes are executable input too. A stale socket cannot bypass discard.
+// Legacy Terminal input is refused without changing an agent's continuation state.
 func handleBrowserTerminalInput(ctx context.Context, h *Hub, bc *BrowserConn, pool *pgxpool.Pool, msg protocol.SendInput) error {
-	return withCancelledLimitResume(ctx, pool, msg.SessionID, func() error {
-		return withParentInputGuard(ctx, pool, msg.SessionID, func() error {
-			if !h.accountCanSee(bc.AccountID, msg.SessionID) {
-				return db.ErrDelegationNotFound
-			}
-			if !forwardToSessionDaemon(h, bc, msg.SessionID, protocol.SendInput{Type: "send_input", SessionID: msg.SessionID, Data: msg.Data}) {
-				return db.ErrDelegationNotFound
-			}
-			return nil
-		})
+	return withParentInputGuard(ctx, pool, msg.SessionID, func() error {
+		if !h.accountCanSee(bc.AccountID, msg.SessionID) {
+			return db.ErrDelegationNotFound
+		}
+		return errors.New("terminal history is read-only")
 	})
+}
+
+// Match browser read routes using persisted privacy, rather than trusting only
+// the broadcast cache. Missing rows retain the handlers' existing not-found
+// behavior, just as browserCanSee does; failed reads still fail closed.
+func browserSessionAccess(ctx context.Context, h *Hub, pool *pgxpool.Pool, account, id string) bool {
+	if pool == nil {
+		return h.accountCanSee(account, id)
+	}
+	if !db.ValidUUID(id) {
+		return false
+	}
+	row, err := db.GetSession(ctx, pool, id)
+	return err == nil && (row == nil || canSeeAccount(account, row))
 }

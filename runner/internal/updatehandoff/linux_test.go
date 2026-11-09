@@ -187,3 +187,61 @@ func TestPreparedUpdateRequiresOriginalInstallerAncestry(t *testing.T) {
 		t.Fatalf("unrelated installer accepted: %v", err)
 	}
 }
+
+func TestTimerRequesterRequiresObservedUnitAndLiveEngine(t *testing.T) {
+	// The installer PID is deliberately unrelated to the live engine. Unit
+	// membership is the kernel boundary input; all identity checks stay real.
+	engine := exec.Command("cat")
+	pipe, err := engine.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pipe.Close(); _ = engine.Wait() })
+	o := &Observer{}
+	r := Request{SessionID: "s1", Call: json.RawMessage(`{"call_id":"timer-1"}`), EnginePID: engine.Process.Pid, EngineStart: ProcessStart(engine.Process.Pid), TimerUnit: "reinstall.service"}
+	o.Observe(r)
+	if o.requesterInUnit(os.Getpid(), "reinstall.service") == nil {
+		t.Fatal("observed timer not attributed")
+	}
+	for _, unit := range []string{"", "other.service", "reinstall.timer"} {
+		if o.requesterInUnit(os.Getpid(), unit) != nil {
+			t.Fatalf("unrelated unit %q accepted", unit)
+		}
+	}
+	o.observed[r.SessionID] = time.Now().Add(-46 * time.Minute)
+	if o.requesterInUnit(os.Getpid(), "reinstall.service") != nil {
+		t.Fatal("stale timer accepted")
+	}
+	o.observed[r.SessionID] = time.Now()
+	r.EngineStart = "reused pid"
+	o.Observe(r)
+	if o.requesterInUnit(os.Getpid(), "reinstall.service") != nil {
+		t.Fatal("stale engine accepted")
+	}
+	for _, tc := range []struct{ data, want string }{
+		{"0::/user.slice/user-1000.slice/user@1000.service/app.slice/reinstall.service\n", "reinstall.service"},
+		{"0::/user.slice/user@1000.service/app.slice/reinstall.service/nested\n", ""},
+		{"1:name=systemd:/reinstall.service\n", "reinstall.service"},
+		{"1:memory:/reinstall.service\n", ""},
+		{"0::/other.service\n1:name=systemd:/reinstall.service\n", ""},
+	} {
+		if got := cgroupUnit(tc.data); got != tc.want {
+			t.Errorf("cgroup %q: %q, want %q", tc.data, got, tc.want)
+		}
+	}
+}
+
+// Opt-in proof through a real systemd user service, outside any session tracer.
+func TestProcessUnitInSystemdService(t *testing.T) {
+	prefix := os.Getenv("BLERG_TEST_SYSTEMD_UNIT_PREFIX")
+	if prefix == "" {
+		t.Skip("requires a named systemd user service")
+	}
+	unit := processUnit(os.Getpid())
+	if !strings.HasPrefix(unit, prefix) || !strings.HasSuffix(unit, ".service") {
+		t.Fatalf("kernel unit does not match expected service prefix")
+	}
+}

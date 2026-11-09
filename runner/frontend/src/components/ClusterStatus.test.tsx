@@ -123,7 +123,7 @@ describe('ClusterStatus', () => {
   it('shows the effective session cap, its default, live usage and what a pod costs', async () => {
     capFetch({ ...capStatus, max_sessions: 6 }, { ok: true, status: 200, body: {} })
     render(<ClusterStatus />)
-    const field = await screen.findByLabelText('Max concurrent session pods')
+    const field = await screen.findByLabelText('Max concurrent workspace pods')
     expect(field).toHaveValue(6)
     expect(screen.getByText('default 4')).toBeInTheDocument()
     expect(screen.getByText('3 in use')).toBeInTheDocument()
@@ -134,16 +134,16 @@ describe('ClusterStatus', () => {
   it('offers no Use default while the cap is the default', async () => {
     capFetch(capStatus, { ok: true, status: 200, body: {} })
     render(<ClusterStatus />)
-    expect(await screen.findByLabelText('Max concurrent session pods')).toHaveValue(4)
+    expect(await screen.findByLabelText('Max concurrent workspace pods')).toHaveValue(4)
     expect(screen.queryByText('Use default')).not.toBeInTheDocument()
   })
 
   it('saves a changed session cap with the other limits', async () => {
     const puts = capFetch(capStatus, { ok: true, status: 200, body: { ...capStatus, max_sessions: 8 } })
     render(<ClusterStatus />)
-    fireEvent.change(await screen.findByLabelText('Max concurrent session pods'), { target: { value: '8' } })
+    fireEvent.change(await screen.findByLabelText('Max concurrent workspace pods'), { target: { value: '8' } })
     fireEvent.click(screen.getByText('Save'))
-    await screen.findByLabelText('Max concurrent session pods')
+    await screen.findByLabelText('Max concurrent workspace pods')
     await waitFor(() => expect(puts()).toEqual([{ pod_idle_timeout_seconds: 86400, pod_ttl_seconds: 604800, max_sessions: 8 }]))
   })
 
@@ -154,7 +154,7 @@ describe('ClusterStatus', () => {
     window.addEventListener('blerg:cluster-settings-saved', listen)
     try {
       render(<ClusterStatus />)
-      fireEvent.change(await screen.findByLabelText('Max concurrent session pods'), { target: { value: '12' } })
+      fireEvent.change(await screen.findByLabelText('Max concurrent workspace pods'), { target: { value: '12' } })
       fireEvent.click(screen.getByText('Save'))
       await waitFor(() => expect(heard).toHaveLength(1))
       expect(heard[0]).toMatchObject({ max_sessions: 12 })
@@ -166,7 +166,7 @@ describe('ClusterStatus', () => {
   it('does not send max_sessions when it was not changed', async () => {
     const puts = capFetch(capStatus, { ok: true, status: 200, body: capStatus })
     render(<ClusterStatus />)
-    await screen.findByLabelText('Max concurrent session pods')
+    await screen.findByLabelText('Max concurrent workspace pods')
     fireEvent.click(screen.getByText('Save'))
     await waitFor(() => expect(puts()).toEqual([{ pod_idle_timeout_seconds: 86400, pod_ttl_seconds: 604800 }]))
   })
@@ -174,7 +174,7 @@ describe('ClusterStatus', () => {
   it('Use default clears the override on Save', async () => {
     const puts = capFetch({ ...capStatus, max_sessions: 9 }, { ok: true, status: 200, body: capStatus })
     render(<ClusterStatus />)
-    const field = await screen.findByLabelText('Max concurrent session pods')
+    const field = await screen.findByLabelText('Max concurrent workspace pods')
     fireEvent.click(screen.getByText('Use default'))
     expect(field).toHaveValue(4)
     fireEvent.click(screen.getByText('Save'))
@@ -184,7 +184,7 @@ describe('ClusterStatus', () => {
   it.each(['0', '65', '2.5', ''])('refuses the session cap %j without calling the server', async v => {
     const puts = capFetch(capStatus, { ok: true, status: 200, body: capStatus })
     render(<ClusterStatus />)
-    fireEvent.change(await screen.findByLabelText('Max concurrent session pods'), { target: { value: v } })
+    fireEvent.change(await screen.findByLabelText('Max concurrent workspace pods'), { target: { value: v } })
     fireEvent.click(screen.getByText('Save'))
     expect(await screen.findByText(/whole number from 1 to 64/)).toBeInTheDocument()
     expect(puts()).toEqual([])
@@ -193,7 +193,7 @@ describe('ClusterStatus', () => {
   it('shows the refusal when a non-administrator saves the session cap', async () => {
     capFetch(capStatus, { ok: false, status: 403, body: { error: 'missing capability: account.manage' } })
     render(<ClusterStatus />)
-    fireEvent.change(await screen.findByLabelText('Max concurrent session pods'), { target: { value: '8' } })
+    fireEvent.change(await screen.findByLabelText('Max concurrent workspace pods'), { target: { value: '8' } })
     fireEvent.click(screen.getByText('Save'))
     await screen.findByText('missing capability: account.manage')
   })

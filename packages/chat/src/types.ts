@@ -8,6 +8,7 @@ export type AgentEventKind =
   | 'user_message'
   | 'input_accepted'
   | 'assistant_text'
+  | 'question_thread'
   | 'assistant_thinking'
   | 'thinking_started'
   | 'thinking_done'
@@ -17,8 +18,11 @@ export type AgentEventKind =
   | 'provider_blocks'
   | 'status_changed'
   | 'check_in'
+  | 'bound_ask_note'
   | 'ask'
   | 'update'
+  | 'cron_command_result'
+  | 'ui_reveal'
   | 'note'
   | 'model_changed'
   | 'subagent_started'
@@ -26,12 +30,16 @@ export type AgentEventKind =
   | 'subagent_done'
   | 'background_task_started'
   | 'background_task_done'
+  | 'background_task_cleared'
+  | 'background_wait_stopped'
+  | 'stop_result'
   | 'turn_done'
   | 'usage_updated'
   | 'error'
   | 'compaction'
   | 'start_stage'
   | 'capabilities'
+  | 'inbox_item'
   | 'session_upload'
   | 'artifact'
   | 'topic'
@@ -41,8 +49,13 @@ export type AgentEventKind =
   | 'mcp_status'
   | 'delegation_request'
   | 'delegation_decided'
+  | 'channel_recommendation'
+  | 'blackboard_recommendation'
   | 'proposal_request'
   | 'proposal_decided'
+  | 'answer_requested'
+  | 'answer_submitted'
+  | 'answer_closed'
   | 'review_requested'
   | 'review_decided'
 
@@ -88,7 +101,7 @@ export interface CheckInPayload { phase: string; summary: string }
 // older events and on native updates and notes.
 // no_wait: a question the agent does not wait on (`blerg-runner ask --no-wait`): only an answer
 // addressed to it (its card, the host's Needs you) answers it, never the composer's next message.
-export interface MessagingPayload { body: string; message_id?: string; owner_only?: boolean; no_wait?: boolean }
+export interface MessagingPayload { question_withdrawn?: boolean; decision?: boolean; live_binding?: boolean; bound?: boolean; body: string; message_id?: string; owner_only?: boolean; no_wait?: boolean }
 export interface ModelChangedPayload { model: string; effort: string; source: string }
 // kinds subagent_started | subagent_update | subagent_done. The optional fields come from a Claude
 // Code session: an update carries the subagent's model and running totals; a done carries the
@@ -142,6 +155,11 @@ export interface ChecklistItem {
   diff?: string
 }
 export interface ChecklistPayload {
+  delta?: boolean
+  total?: number
+  completed?: number
+  updates?: ChecklistItem[]
+  removed?: string[]
   items: ChecklistItem[]
   op: 'set' | 'add' | 'tick' | 'untick' | 'remove' | 'clear' | string
   changed?: ChecklistItem & { index: number; from_item_id?: string }
@@ -212,6 +230,14 @@ export interface ArtifactPayload {
   /** Set by the server's list when the file is still listed but its bytes are no longer stored
    *  (a data volume that did not survive a restart): it can be deleted, not opened. */
   missing?: boolean
+  /** Live (BLG-470): `blerg-runner publish --live` updates this file in place on every republish
+   *  instead of adding a version — one id, no history. updated_at (set only when live) is when its
+   *  content last changed, for "Updated 2 min ago"; absent/false on an ordinary versioned file. */
+  live?: boolean
+  updated_at?: string
+  /** Set only when live: a content checksum, so two patches racing in (or a patch against a
+   *  fresher list read) can be ordered deterministically when their updated_at values tie. */
+  sha256?: string
 }
 // code: 'api_error' (the model API failed) or 'api_retry' (a notice: the engine is retrying the API;
 // the turn goes on). client_id: on a message the session dropped (its queue was full), that
@@ -465,7 +491,7 @@ export interface DelegationDecidedPayload {
 // person (a board card it wants to file, a new board it wants created, or a call to an MCP tool in
 // approval mode), and how it was decided. The events carry no draft or arguments: the card reads
 // those through Transport.proposal, which only the session's owner can.
-export type ProposalKind = 'board_file' | 'board_create' | 'mcp'
+export type ProposalKind = 'board_file' | 'board_create' | 'board_metadata' | 'mcp'
 export interface ProposalRequestPayload {
   proposal_id: string
   kind: ProposalKind

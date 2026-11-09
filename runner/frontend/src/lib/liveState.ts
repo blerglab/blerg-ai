@@ -6,7 +6,7 @@ import { readReasoning, type Reasoning } from '@blerglab/chat'
 // ask and its answer. Anything else (a turn's end, a status
 // change) brings a new read. Pure.
 import {
-  STALE_RUNNING_MS, foldTicketEvent, parseTs, readChecklist, safeChecklistAssignments, readMcp, readMcpHold,
+  applyChecklistDelta, STALE_RUNNING_MS, foldTicketEvent, parseTs, readChecklist, safeChecklistAssignments, readMcp, readMcpHold,
   type AgentEvent, type AskLive, type BackgroundTask, type ChecklistItem, type ChecklistLive, type PinnedLive, type McpHold, type McpLive, type PlanLive,
   type LiveState, type PlanStatus, type SubagentLive, type Ticket, type TicketLive, type TicketSummaryLive,
 } from '@blerglab/chat'
@@ -17,7 +17,9 @@ export interface LiveProgress { completed: number; total: number; label: string;
 export type ProgressSubagent = SubagentLive & { progress?: LiveProgress; reasoning?: Reasoning; usage?: UsageParts }
 /** The checklist with the names of its assignees, keyed "<kind>:<id>" (the server reads them). */
 export type PanelChecklist = ChecklistLive & { workerTitles?: Record<string, string> }
-export type SessionPanelLiveState = Omit<LiveState, 'subagents' | 'checklist'> & {
+export type PanelAsk = AskLive & { childSessionId?: string; childTitle?: string; waiterEnded?: boolean }
+export type SessionPanelLiveState = Omit<LiveState, 'subagents' | 'checklist' | 'openAsks'> & {
+  openAsks: PanelAsk[]
   subagents: ProgressSubagent[]
   checklist?: PanelChecklist | null
   progress?: LiveProgress | null
@@ -77,11 +79,14 @@ export interface LiveChildSession {
   /** Reported current-turn telemetry, separate from the completed-turn billing ledger. */
   usage_status?: 'pending' | 'reported' | 'hidden'; tool_calls?: number; activity?: string
   activity_since?: string; last_activity_at?: string; local?: boolean
+  /** Latest completed turn; activity can advance independently after it. */
+  last_turn_ended_at?: string
   /** The ticket the started session pinned last (its current pin), when it has one. */
   ticket?: { source: string; key: string; title: string; status: string; board_id?: string; url?: string } | null
 }
 export interface LiveDelegationRequest { request_id: string; engine: string; title: string; expires_at: string }
 /** A pending review request (blerg-runner review request): Needs you shows one row per request. */
+export interface LiveAnswerRequest { request_id: string; artifact_id: string; artifact_name: string; ask: string }
 export interface LiveReviewRequest { request_id: string; artifact_id: string; artifact_name: string; artifact_version: number; artifact_view: string; ask: string; created_at: string }
 export interface LiveDelegationGrant { id: string; engine: string; runtime: string; daemon_id?: string; daemon_name?: string; repo?: string; no_repo?: boolean }
 export const childIsRunning = (s: LiveChildSession) => !s.ended_at && ['starting', 'running', 'idle', 'waiting'].includes(s.status)
@@ -90,9 +95,12 @@ export const childIsRunning = (s: LiveChildSession) => !s.ended_at && ['starting
 export const childIsWorking = (s: LiveChildSession) => !s.ended_at && ['starting', 'running', 'waiting'].includes(s.status)
 
 export interface LiveReply {
+  repository_requests?: number
+  child_asks?: (Omit<LiveAskReply, 'event_id' | 'seq'> & { session_id: string; child_title: string; waiter_ended?: boolean })[]
   children?: LiveChildSession[]
   delegation_requests?: LiveDelegationRequest[]
   delegation_grants?: LiveDelegationGrant[]
+  answer_requests?: LiveAnswerRequest[]
   review_requests?: LiveReviewRequest[]
   session_id: string
   through_seq: number
@@ -126,7 +134,7 @@ export interface LiveReply {
 export const LIVE_TRIGGER_KINDS: ReadonlySet<string> = new Set([
   'ask', 'subagent_started', 'subagent_done', 'background_task_started', 'background_task_done', 'turn_done',
   'checklist', 'ticket', 'mcp_status', 'plan_updated', 'progress_updated', 'children_changed', 'delegation_request', 'delegation_decided',
-  'review_requested', 'review_decided',
+  'review_requested', 'review_decided', 'answer_requested', 'answer_submitted', 'answer_closed', 'artifact',
 ])
 
 /** The engine's task tools whose calls change the plan (the server's livestate.PlanTools). */
@@ -150,8 +158,9 @@ export interface LiveView {
   children?: LiveChildSession[]
   delegationRequests?: LiveDelegationRequest[]
   delegationGrants?: LiveDelegationGrant[]
+  answerRequests?: LiveAnswerRequest[]
   reviewRequests?: LiveReviewRequest[]
-  asks: AskLive[]
+  asks: PanelAsk[]
   subagents: ProgressSubagent[]
   /** Background tasks still running (a background subagent's own task left out). */
   tasks: BackgroundTask[]
@@ -251,7 +260,13 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
     tickets: (reply.tickets ?? []).map(t => ({ source: t.source, key: t.key, title: t.title, status: t.status, url: t.url, ...(t.board_id ? { boardId: t.board_id } : {}), eventId: t.event_id, updatedAt: parseTs(t.updated_at) })),
     ticket: reply.ticket ? (({ event_id, updated_at, ...t }) => ({ ...t, eventId: event_id, updatedAt: parseTs(updated_at) }))(reply.ticket) : null,
   }
-  const asks: AskLive[] = (reply.asks ?? []).map(a => ({ eventId: a.event_id, messageId: a.message_id, question: a.question, askedAt: parseTs(a.asked_at), ...(a.no_wait ? { noWait: true } : {}), ...(a.owner_only ? { ownerOnly: true } : {}) }))
+  const asks: PanelAsk[] = (reply.asks ?? []).map(a => ({ eventId: a.event_id, messageId: a.message_id, question: a.question, askedAt: parseTs(a.asked_at), ...(a.no_wait ? { noWait: true } : {}), ...(a.owner_only ? { ownerOnly: true } : {}) }))
+
+  for (const a of reply.child_asks ?? []) {
+    asks.push({ eventId: `child-ask:${a.message_id}`, messageId: a.message_id, question: a.question,
+      askedAt: parseTs(a.asked_at), childSessionId: a.session_id, childTitle: a.child_title || 'Worker',
+      ...(a.no_wait ? { noWait: true } : {}), ...(a.owner_only ? { ownerOnly: true } : {}), ...(a.waiter_ended ? { waiterEnded: true } : {}) })
+  }
 
   const promote = (native: string, call: string) => {
     if (!native || !call || native === call || subs.has(native)) return
@@ -271,13 +286,14 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
     const at = parseTs(ev.ts)
     switch (ev.kind) {
       case 'checklist': {
-        // Each event holds the whole list: the latest wins.
+        // Fold compact changes over the live baseline; legacy events replace it.
         const c = readChecklist(ev.payload, ev.client_event_id)
         // The pages of the commits the reply knew stay; a newer commit has none until the next read.
         if (c) {
           assignmentFences.clear()
           // So do the names of the workers it knew; a new one is named by the next read (a checklist event brings one).
-          checklist = c.items.length ? { items: c.items, eventId: ev.client_event_id, updatedAt: at, ...(checklist?.commitUrls ? { commitUrls: checklist.commitUrls } : {}), ...(checklist?.workerTitles ? { workerTitles: checklist.workerTitles } : {}) } : null
+          const items = applyChecklistDelta(checklist?.items ?? [], c)
+          checklist = items.length ? { items, eventId: ev.client_event_id, updatedAt: at, ...(checklist?.commitUrls ? { commitUrls: checklist.commitUrls } : {}), ...(checklist?.workerTitles ? { workerTitles: checklist.workerTitles } : {}) } : null
         }
         break
       }
@@ -357,6 +373,11 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
           asks.push({ eventId: ev.client_event_id, messageId: str(p.message_id), question: str(p.body), askedAt: at, ...(p.no_wait === true && str(p.message_id) ? { noWait: true } : {}), ...(p.owner_only === true ? { ownerOnly: true } : {}) })
         }
         break
+      case 'bound_ask_note': {
+        const ask = asks.find(a => a.messageId === str(p.message_id))
+        if (ask) ask.question += '\n\n' + str(p.text)
+        break
+      }
       case 'user_message': {
         // An answer closes its ask (by message id, else the newest); a person's message closes the
         // newest ask that has no message id.
@@ -364,12 +385,12 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
         const id = str(p.message_id)
         let k = -1
         // A question the agent did not wait on closes only with the answer naming it.
-        if (source === 'ask_answer') k = id ? asks.findIndex(a => a.messageId === id) : asks.map(a => !a.noWait).lastIndexOf(true)
-        else if (source !== 'system' && source !== 'question_answer' && source !== 'plan_drift' && source !== 'usage_limit') k = asks.map(a => a.messageId === '').lastIndexOf(true)
+        if (source === 'ask_answer') k = id ? asks.findIndex(a => a.messageId === id) : asks.map(a => !a.noWait && !a.childSessionId).lastIndexOf(true)
+        else if (source !== 'page_result' && source !== 'system' && source !== 'question_answer' && source !== 'plan_drift' && source !== 'usage_limit' && source !== 'process_limit' && source !== 'blackboard_setup') k = asks.map(a => a.messageId === '' && !a.childSessionId).lastIndexOf(true)
         if (k >= 0) asks.splice(k, 1)
         // The chat's liveCalls (and the server's rule): a message that is not the system's ends the
         // calls in flight, so a foreground subagent stops counting; a background one runs on.
-        if (source !== 'system' && source !== 'usage_limit') for (const sub of [...subs.values()]) if (!sub.background && !sub.resumed) subs.delete(sub.key)
+        if (source !== 'system' && source !== 'usage_limit' && source !== 'process_limit') for (const sub of [...subs.values()]) if (!sub.background && !sub.resumed) subs.delete(sub.key)
         break
       }
     }
@@ -405,8 +426,9 @@ export function foldLive(reply: LiveReply, events: readonly AgentEvent[], now: n
   return {
     asks, subagents, tasks: running, toolChanges,
     children: reply.children ?? [], delegationRequests: reply.delegation_requests ?? [], delegationGrants: reply.delegation_grants ?? [],
+    answerRequests: reply.answer_requests ?? [],
     reviewRequests: reply.review_requests ?? [],
-    counts: { needsYou: asks.length + toolChanges + (reply.delegation_requests?.length ?? 0) + (reply.review_requests?.length ?? 0) },
+    counts: { needsYou: (reply.repository_requests ?? 0) + asks.length + toolChanges + (reply.delegation_requests?.length ?? 0) + (reply.review_requests?.length ?? 0) + (reply.answer_requests?.length ?? 0) },
     checklist, plan, progress: readProgress(reply.progress), tickets: pinned.tickets, ticket: pinned.ticket,
     mcp: mcp && mcp.servers.length ? mcp : null,
     mcpHold: mcpHold && Number.isFinite(now) && mcpHold.until <= now ? null : mcpHold,

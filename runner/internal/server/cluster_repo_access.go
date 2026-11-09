@@ -22,7 +22,7 @@ var errRepositoryCheckUnavailable = errors.New("repository read access could not
 var errRepositoryAddress = errors.New("the cluster repository check needs a permitted HTTP(S) clone URL; use an HTTPS repository URL or the install's configured git base")
 
 func clusterStartFailureStatus(err error) int {
-	if errors.Is(err, errRepositoryUnreadable) || errors.Is(err, errRepositoryAddress) {
+	if clusterRefusal(err) != nil || errors.Is(err, errRepositoryUnreadable) || errors.Is(err, errRepositoryAddress) {
 		return http.StatusUnprocessableEntity
 	}
 	return http.StatusServiceUnavailable
@@ -75,7 +75,17 @@ func checkRepositoryRead(ctx context.Context, client *http.Client, cloneURL, tok
 		if response.StatusCode != http.StatusOK {
 			_ = response.Body.Close()
 			if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusGone {
-				return errRepositoryUnreadable
+				switch response.StatusCode {
+				case http.StatusUnauthorized:
+					if token == "" {
+						return &clusterAuthorizationRefusal{code: "owner_token_missing"}
+					}
+					return &clusterAuthorizationRefusal{code: "owner_token_rejected"}
+				case http.StatusForbidden:
+					return &clusterAuthorizationRefusal{code: "repository_scope_insufficient"}
+				default:
+					return &clusterAuthorizationRefusal{code: "repository_not_visible"}
+				}
 			}
 			return errRepositoryCheckUnavailable
 		}

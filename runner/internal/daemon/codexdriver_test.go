@@ -110,6 +110,7 @@ if os.environ.get("FAKE_CODEX_HELPERS"):
  with open(os.environ["FAKE_CODEX_HELPERS"],"a") as log: log.write(str(helper.pid)+"\n")
 mcp_reads=0
 turn_starts=0
+stuck_stop=bool(os.environ.get("FAKE_CODEX_STUCK_STOP")) and (os.environ.get("FAKE_CODEX_STUCK_STOP_ALWAYS") or not os.path.exists(os.environ["FAKE_CODEX_STUCK_STOP"]))
 for line in sys.stdin:
  r=json.loads(line); method=r.get("method", ""); ident=r.get("id")
  with open(os.environ.get("FAKE_CODEX_LOG", os.devnull), "a") as log: log.write(method + " " + json.dumps(r.get("params",{})) + "\n")
@@ -130,6 +131,7 @@ for line in sys.stdin:
    send({"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-1","status":"completed"}}})
   continue
  result={}
+ if method=="thread/backgroundTerminals/list" and os.getenv("FAKE_CODEX_BACKGROUND"): result={"data":[{"ItemID":"bg-call","ProcessID":"bg-process","Command":"sleep 60"}],"nextCursor":None}
  if method=="mcpServerStatus/list": result={"data":[],"nextCursor":None}
  if method=="mcpServerStatus/list" and os.environ.get("FAKE_CODEX_MCP_STATUS"): result={"data":[{"name":"fixture-server","runtimeStatus":os.environ["FAKE_CODEX_MCP_STATUS"],"tools":{}}],"nextCursor":None}
  if method=="mcpServerStatus/list" and os.environ.get("FAKE_CODEX_MCP_TRANSITION"):
@@ -149,7 +151,7 @@ for line in sys.stdin:
  if method=="thread/read" and r.get("params",{}).get("threadId")=="cx-thread-1": result={"thread":{"id":"cx-thread-1","status":{"type":"idle"},"turns":[]}}
  if method=="thread/read" and not os.environ.get("FAKE_CODEX_CHILD_READ"):
   child_id=r.get("params",{}).get("threadId")
-  if (child_id=="owned-child" and os.environ.get("FAKE_CODEX_CHILD_QUESTION") in ("owned","stale")) or (child_id=="child-thread" and (os.environ.get("FAKE_CODEX_CHILD_FOLLOWUP") or os.environ.get("FAKE_CODEX_CHILD_REROUTE"))):
+  if (child_id=="owned-child" and (os.environ.get("FAKE_CODEX_CHILD_QUESTION") in ("owned","stale") or os.getenv("FAKE_CODEX_STOP_LIVE_CHILD") or os.getenv("FAKE_CODEX_CHILD_ONLY"))) or (child_id=="child-thread" and (os.environ.get("FAKE_CODEX_CHILD_FOLLOWUP") or os.environ.get("FAKE_CODEX_CHILD_REROUTE"))):
    result={"thread":{"id":child_id,"parentThreadId":"cx-thread-1"}}
  if method=="thread/read" and os.environ.get("FAKE_CODEX_CHILD_READ"):
   time.sleep(0.03)
@@ -161,6 +163,8 @@ for line in sys.stdin:
  if method in ("thread/start", "thread/resume") and os.environ.get("FAKE_CODEX_OMIT_INITIAL_SETTINGS"):
   result={"thread":{"id":"cx-thread-1"}}
  if method=="skills/list" and os.environ.get("FAKE_CODEX_SKILL"): result={"data":[{"skills":[{"name":"review","path":"/opt/skills/review/SKILL.md","description":"Review code","scope":"project","enabled":True}]}]}
+ if method=="turn/start" and os.getenv("FAKE_CODEX_REJECT_MARKER") and not os.path.exists(os.environ["FAKE_CODEX_REJECT_MARKER"]):
+  open(os.environ["FAKE_CODEX_REJECT_MARKER"],"w").close();time.sleep(0.15);send({"id":ident,"error":{"code":-32600,"message":"fixture rejected prompt"}});continue
  if method=="turn/start":
   turn_starts += 1
   result={"turn":{"id":"turn-"+str(turn_starts) if os.environ.get("FAKE_CODEX_STEER_RACE") else "turn-1"}}
@@ -174,7 +178,19 @@ for line in sys.stdin:
    time.sleep(0.02)
    send(completion)
   continue
+ if method=="turn/interrupt" and os.getenv("FAKE_CODEX_STOP_NO_ACK"):
+  open(os.environ["FAKE_CODEX_STUCK_STOP"],"w").close()
+  if os.getenv("FAKE_CODEX_CHILD_COMPLETION_MS"):
+   import threading
+   completion={"method":"turn/completed","params":{"threadId":r.get("params",{}).get("threadId"),"turn":{"id":r.get("params",{}).get("turnId"),"status":"interrupted"}}}
+   threading.Timer(float(os.environ["FAKE_CODEX_CHILD_COMPLETION_MS"])/1000,lambda event=completion:send(event)).start()
+  continue
  send({"id":ident,"result":result})
+ if method=="turn/start" and os.getenv("FAKE_CODEX_CHILD_ONLY"):
+  send({"method":"thread/started","params":{"thread":{"id":"owned-child","parentThreadId":"cx-thread-1"}}})
+  send({"method":"turn/started","params":{"threadId":"owned-child","turn":{"id":"child-live","status":"inProgress"}}})
+  send({"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-1","status":"completed"}}})
+  continue
  if method=="turn/start" and os.environ.get("FAKE_CODEX_ROOT_USAGE_EVENTS"):
   gate=os.environ.get("FAKE_CODEX_ROOT_USAGE_GATE")
   if gate:
@@ -233,8 +249,12 @@ for line in sys.stdin:
  if method=="turn/start" and os.environ.get("FAKE_CODEX_QUESTION"):
   send({"id":2000,"method":"item/tool/requestUserInput","params":{"threadId":"cx-thread-1","turnId":"turn-1","isBlocking":not bool(os.environ.get("FAKE_CODEX_NONBLOCKING_QUESTION")),"questions":[{"id":"color","header":"Color","question":"Choose a color","isSecret":bool(os.environ.get("FAKE_CODEX_SECRET")),"options":[{"label":"Blue","description":"Cool tone"},{"label":"Green","description":"Natural tone"}]}]}})
   continue
+ if method=="turn/interrupt" and os.environ.get("FAKE_CODEX_STUCK_STOP"):
+  open(os.environ["FAKE_CODEX_STUCK_STOP"],"w").close()
+  continue
  if method=="turn/interrupt":
-  send({"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-1","status":"interrupted"}}})
+  time.sleep(float(os.getenv("FAKE_CODEX_STOP_DELAY_MS","0"))/1000)
+  send({"method":"turn/completed","params":{"threadId":r.get("params",{}).get("threadId","cx-thread-1") if os.getenv("FAKE_CODEX_CHILD_ONLY") else "cx-thread-1","turn":{"id":r.get("params",{}).get("turnId","turn-1") if os.getenv("FAKE_CODEX_CHILD_ONLY") else "turn-1","status":"interrupted"}}})
  if method=="turn/start" and os.environ.get("FAKE_CODEX_DYNAMIC"):
   send({"method":"item/started","params":{"threadId":"cx-thread-1","item":{"type":"dynamicToolCall","id":"dynamic1","tool":"read_file","arguments":{"path":"sample.txt"},"status":"inProgress"}}})
   send({"id":1000,"method":"item/tool/call","params":{"threadId":"cx-thread-1","turnId":"turn-1","tool":"read_file","arguments":{"path":"sample.txt"}}})
@@ -257,7 +277,12 @@ for line in sys.stdin:
  if method=="turn/start" and os.environ.get("FAKE_CODEX_STREAM_FIRST"):
   for _ in range(1000): send({"method":"item/agentMessage/delta","params":{"threadId":"cx-thread-1","delta":"progress"}})
   continue
- if method=="turn/start" and (os.environ.get("FAKE_CODEX_HOLD_FIRST") or (os.environ.get("FAKE_CODEX_STEER_RACE") and turn_starts==1)): continue
+ if method=="turn/start" and stuck_stop and os.getenv("FAKE_CODEX_STOP_LIVE_CHILD"):
+  send({"method":"thread/started","params":{"thread":{"id":"owned-child","parentThreadId":"cx-thread-1","model":"fixture-child-model"}}})
+  send({"method":"turn/started","params":{"threadId":"owned-child","turn":{"id":"child-turn-live","status":"inProgress"}}})
+ if method in ("turn/start", "turn/steer") and stuck_stop: continue
+ if method=="turn/steer" and os.environ.get("FAKE_CODEX_HOLD_STEER"): continue
+ if method=="turn/start" and (os.environ.get("FAKE_CODEX_HOLD_FIRST") or (os.environ.get("FAKE_CODEX_HOLD_ONCE") and turn_starts==1) or (os.environ.get("FAKE_CODEX_STEER_RACE") and turn_starts==1)): continue
  if method in ("turn/start", "turn/steer"):
   if os.environ.get("FAKE_CODEX_REASONING_PROGRESS"):
    # The real order: a request's reasoning item closes, then its usage arrives once the response
@@ -272,6 +297,7 @@ for line in sys.stdin:
   for name,item in [("item/completed",{"id":"i0","type":"agentMessage","text":"Reading the card."}), ("item/started",{"id":"i1","type":"commandExecution","command":"ls","status":"inProgress"}), ("item/completed",{"id":"i1","type":"commandExecution","command":"ls","status":"completed","aggregatedOutput":"README.md\n","exitCode":127 if os.environ.get("FAKE_CODEX_COMMAND_FAIL") else 0}), ("item/completed",{"id":"i2","type":"agentMessage","text":"Done."})]: send({"method":name,"params":{"threadId":"cx-thread-1","item":item}})
   send({"method":"thread/tokenUsage/updated","params":{"threadId":"cx-thread-1","tokenUsage":{"last":{"inputTokens":100,"cachedInputTokens":10,"outputTokens":20}}}})
   send({"method":"turn/completed","params":{"threadId":"cx-thread-1","turn":{"id":"turn-"+str(turn_starts) if os.environ.get("FAKE_CODEX_STEER_RACE") else "turn-1","status":"completed"}}})
+if stuck_stop and os.getenv("FAKE_CODEX_IGNORE_EOF"): time.sleep(60)
 `
 	path := filepath.Join(dir, "codex")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {

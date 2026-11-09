@@ -83,6 +83,9 @@ func (p *clusterLaunchProgress) done(ctx context.Context) {
 func (p *clusterLaunchProgress) finish(ctx context.Context, err *error) {
 	if *err != nil && p.current != "" {
 		detail := "Stage refused or its deadline expired; inspect server and cluster configuration"
+		if refusal := clusterRefusal(*err); refusal != nil {
+			detail = refusal.Error()
+		}
 		var submission *jobSubmissionError
 		if errors.As(*err, &submission) && safeJobSubmissionReason(submission.reason) {
 			detail = "Launch object creation refused: " + submission.reason
@@ -221,6 +224,18 @@ func clusterLaunchProblem(stages []clusterLaunchDiagnostic, now time.Time, limit
 }
 
 func launchDiagnosticReason(s protocol.StartStage) string {
+	for code := range workspaceRefusalMessages {
+		if s.State == protocol.StageStateFailed && s.Detail == (&clusterAuthorizationRefusal{code: code}).Error() {
+			return code
+		}
+	}
+
+	for _, code := range []string{"owner_token_missing", "owner_token_rejected", "repository_scope_insufficient", "repository_not_visible", "workspace_authority_changed", "owner_authorization_refused"} {
+		if s.State == protocol.StageStateFailed && s.Detail == (&clusterAuthorizationRefusal{code: code}).Error() {
+			return code
+		}
+	}
+
 	if s.State != protocol.StageStateFailed {
 		return "stage_transition"
 	}
@@ -244,6 +259,10 @@ func launchDiagnosticReason(s protocol.StartStage) string {
 		}
 	}
 	switch s.Detail {
+	case "Repository clone failed":
+		return "repository_clone_failed"
+	case "Retained repository storage is missing; resume refused":
+		return "retained_storage_missing"
 	case "Pod inventory refused; launcher requires get/list on pods (no exec permission)":
 		return "pod_inventory_refused"
 	case "Server and pod workspace capabilities do not match":

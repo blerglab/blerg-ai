@@ -91,6 +91,9 @@ type extRequests struct {
 }
 
 // requestExt sends msg (built with the request id) to dc and waits for its reply frame.
+// Storage controls use the persisted owner's desktop after terminal cleanup has
+// removed live session routing. Their caller must first verify ownedHostDaemon;
+// the exact connection, session, request and reply type remain correlated.
 func (h *Hub) requestExt(ctx context.Context, dc *DaemonConn, account, sid, reply string, build func(id string) any, timeout time.Duration) ([]byte, error) {
 	id := newUUID()
 	w := extWaiter{dc: dc, sessionID: sid, account: account, reply: reply, ch: make(chan []byte, 1)}
@@ -119,14 +122,14 @@ func (h *Hub) requestExt(ctx context.Context, dc *DaemonConn, account, sid, repl
 	r.mu.Unlock()
 	defer func() { r.mu.Lock(); delete(r.pending, id); r.mu.Unlock() }()
 	raw, _ := json.Marshal(build(id))
-	if h.FindDaemonForSession(sid) != dc || !h.trySendToDaemon(dc, raw) {
+	if (reply != "workspace_storage_result" && h.FindDaemonForSession(sid) != dc) || !h.trySendToDaemon(dc, raw) {
 		return nil, errExtUnavailable
 	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case res, ok := <-w.ch:
-		if !ok || h.GetDaemon(dc.ID) != dc || h.FindDaemonForSession(sid) != dc {
+		if !ok || h.GetDaemon(dc.ID) != dc || (reply != "workspace_storage_result" && h.FindDaemonForSession(sid) != dc) {
 			return nil, errExtUnavailable
 		}
 		return res, nil
@@ -147,7 +150,7 @@ func (h *Hub) deliverExtResult(dc *DaemonConn, typ string, raw []byte) {
 	if json.Unmarshal(raw, &head) != nil {
 		return
 	}
-	if h.GetDaemon(dc.ID) != dc || h.FindDaemonForSession(head.SessionID) != dc || dc.BoundSessionID != "" {
+	if h.GetDaemon(dc.ID) != dc || (typ != "workspace_storage_result" && h.FindDaemonForSession(head.SessionID) != dc) || dc.BoundSessionID != "" {
 		return
 	}
 	r := &h.extReqs

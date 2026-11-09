@@ -17,7 +17,6 @@ import {
   addColumn,
   patchColumn,
   deleteColumn,
-  spawnAssist,
 } from './boardApi'
 
 // ── fetch mock helpers ─────────────────────────────────────────────────────────
@@ -288,22 +287,6 @@ describe('deleteColumn', () => {
     const [url, init] = lastCall()
     expect(url).toBe('/api/columns/c1?op_id=op-dc')
     expect(init.method).toBe('DELETE')
-  })
-})
-
-// ── POST /api/boards/{id}/assist ──────────────────────────────────────────────
-
-describe('spawnAssist', () => {
-  it('POSTs /api/boards/b1/assist with ticket_id and op_id', async () => {
-    mockFetch(202, { session_id: 'sess-1' })
-    const result = await spawnAssist('b1', { ticketId: 't1', opId: 'op-as' })
-    const [url, init] = lastCall()
-    expect(url).toBe('/api/boards/b1/assist')
-    expect(init.method).toBe('POST')
-    const body = lastBody()
-    expect(body.ticket_id).toBe('t1')
-    expect(body.op_id).toBe('op-as')
-    expect(result.session_id).toBe('sess-1')
   })
 })
 

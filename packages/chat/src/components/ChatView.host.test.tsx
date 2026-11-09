@@ -31,7 +31,7 @@ describe('ChatView: describeUserMessage', () => {
   it('draws a brief as one collapsed line that opens, and never as the person', () => {
     render(<ChatView session={SESSION} transport={createFakeTransport().transport} meta={live} describeUserMessage={describe_} />)
     const brief = screen.getByTestId('message-brief')
-    expect(brief.textContent).toMatch(/session brief · \d+ chars/)
+    expect(brief.textContent).toMatch(/workspace brief · \d+ chars/)
     expect(screen.queryByText(/You are a worker/)).toBeNull()
     fireEvent.click(brief.querySelector('button')!)
     expect(screen.getByText(/You are a worker/)).toBeInTheDocument()
@@ -63,7 +63,7 @@ describe('ChatView: describeUserMessage', () => {
     }
     render(<ChatView session={SESSION} transport={createFakeTransport().transport} meta={live} describeUserMessage={look} />)
     expect(screen.getAllByTestId('message-brief')).toHaveLength(1)
-    expect(screen.getByTestId('message-brief').textContent).toMatch(/session brief/)
+    expect(screen.getByTestId('message-brief').textContent).toMatch(/workspace brief/)
     expect(seen.filter(([, first]) => first).map(([id]) => id)).toEqual(['e1'])
   })
 

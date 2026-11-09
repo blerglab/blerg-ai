@@ -254,6 +254,13 @@ func copyStatusMetadataFile(ctx context.Context, root *os.Root, source, destinat
 	if err != nil || count != before.Size() || workspaceMetadataFingerprint(before) != workspaceMetadataFingerprint(after) {
 		return errExplorerStale
 	}
+	// Git uses the index file's own mtime (including nanoseconds) to detect
+	// racily clean entries. A fresh copy timestamp can hide same-size edits.
+	// Other index-file stat fields are not used for that check. Keep the
+	// source timestamp only after the descriptor and copy stability checks.
+	if err := os.Chtimes(destination, before.ModTime(), before.ModTime()); err != nil {
+		return err
+	}
 	return ctx.Err()
 }
 func copyStatusRefs(ctx context.Context, root *os.Root, source, destination string, budget *metadataBudget, depth int) error {
@@ -329,6 +336,6 @@ func (s *workspaceStatusSnapshot) optionsForPlatform(p *pinnedGitDir, out io.Wri
 	}
 	return hostgit.Options{Dir: p.cwd, DirFile: p.dir, ExtraFiles: []*os.File{p.dir, s.objects}, SafeDirectory: p.resolved, Ceiling: filepath.Dir(p.resolved), MemoryLimit: true, LimitKB: 256 << 10, Untrusted: true, Stdout: out,
 		Env:    []string{"GIT_DIR=" + s.directory, "GIT_COMMON_DIR=" + s.directory, "GIT_WORK_TREE=" + worktree, "GIT_OBJECT_DIRECTORY=" + objects},
-		Config: []string{"core.bare=false", "core.fsmonitor=false", "core.hooksPath=/dev/null", "core.untrackedCache=false", "index.threads=1", "status.showUntrackedFiles=normal", "status.aheadBehind=false"},
+		Config: []string{"core.bare=false", "core.fsmonitor=false", "core.hooksPath=/dev/null", "core.untrackedCache=false", "index.threads=1", "core.preloadIndex=false", "status.showUntrackedFiles=normal", "status.aheadBehind=false"},
 	}
 }

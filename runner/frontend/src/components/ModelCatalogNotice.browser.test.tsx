@@ -1,11 +1,12 @@
-import { render, screen } from '@testing-library/react'
+import { browserWidths } from '../test/browserWidths'
+import { render, screen, within } from '@testing-library/react'
 import { expect, it, vi } from 'vitest'
 import { page } from 'vitest/browser'
 import ModelCatalogNotice from './ModelCatalogNotice'
 import RunColumn from './RunColumn'
 import '../index.css'
 
-it.each([390, 3840])('keeps launch and Session reconnect actions usable at %ipx', async width => {
+it.each(browserWidths([390, 3840]))('keeps launch and Session reconnect actions usable at %ipx', async width => {
   await page.viewport(width, 1000)
   const retry = vi.fn()
   const error = 'Cluster Codex needs a dedicated login to renew its access. For a person-owned launch, connect Codex under Settings → Managed connections and start a new cluster session. For an operator launch, configure an API key or use a person-owned launch.'
@@ -15,9 +16,12 @@ it.each([390, 3840])('keeps launch and Session reconnect actions usable at %ipx'
       modelsError={error} modelsReconnect onModelsRetry={retry} daemons={[]} selectedDaemon={null} onDaemonChange={vi.fn()}
       clusterConfigured availableEnginesHere={['codex']} clusterEngineBlocked={false} clusterGitMissing={false}
       settingsLink={<a href="/settings">Settings</a>} dangerouslySkipPermissions={false} onSkipPermissionsChange={vi.fn()} /></section>
-    <section aria-label="Session"><ModelCatalogNotice state={{ models: [], loading: false, fallback: false, engineEfforts: [], error, reconnect: true, retry }} /></section>
+    <section aria-label="Workspace"><ModelCatalogNotice state={{ models: [], loading: false, fallback: false, engineEfforts: [], error, reconnect: true, retry }} /></section>
   </main>)
-  const links = screen.getAllByRole('link', { name: 'Reconnect in Settings' })
+  // Cluster Codex replaces the launch column's small link with the Connect Codex callout (#308).
+  const launch = within(screen.getByRole('region', { name: 'Launch' }))
+  expect(launch.queryByRole('link', { name: 'Reconnect in Settings' })).toBeNull()
+  const links = [launch.getByRole('link', { name: 'Connect Codex' }), ...screen.getAllByRole('link', { name: 'Reconnect in Settings' })]
   expect(links).toHaveLength(2)
   for (const link of links) {
     link.focus()

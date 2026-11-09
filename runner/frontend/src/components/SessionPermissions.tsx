@@ -1,3 +1,4 @@
+import { IconButton } from '@blerglab/chat'
 // SessionPermissions: the session panel's compact Permissions summary. A title, how many are
 // active, a Manage button that opens the Permissions modal, then each active permission as a small
 // chip (kind glyph and target) with × to revoke it at once. Permissions that no longer approve
@@ -162,10 +163,10 @@ function Summary({ sessionId, active, delegationGrants, refreshKey, openRequest,
         {state !== 'loading' && <span className="perm-active-count" data-testid="perm-count">{count} active</span>}
         <button type="button" className="perm-manage" data-perm-manage disabled={state === 'loading'} onClick={() => setModal('search')} aria-haspopup="dialog">Manage</button>
       </div>
-      <div role="group" aria-label="Session permissions" className="perm-group">
+      <div role="group" aria-label="Workspace permissions" className="perm-group">
         {state === 'loading' && !view && <p className="child-approval-note">Loading permissions…</p>}
         {view && !view.can_grant && view.reason && <p className="child-approval-note" data-testid="perm-reason">{view.reason}</p>}
-        {state === 'ready' && count === 0 && dormant.length + dormantBoards.length === 0 && <p className="child-approval-note">None yet: this session asks you each time.</p>}
+        {state === 'ready' && count === 0 && dormant.length + dormantBoards.length === 0 && <p className="child-approval-note">None yet: this workspace asks you each time.</p>}
         {count > 0 && <ul className="perm-chips" data-testid="perm-active" aria-label="Active permissions">
           {groups.map(c => <Chip key={c.key} glyph={GRANT_GLYPH.child} text={c.chip} scope={c.label} title={`${c.label} without asking`} disabled={busy !== null} onRevoke={() => { void revokeChildren(c.ids) }} />)}
           {boards.map(b => <Chip key={`b:${b.board_id}`} testId="perm-board" glyph={GRANT_GLYPH.board} text={boardChip(b)} scope={boardScope(b)} title={`${boardScope(b)} · ${boardDetail(b)}`} disabled={busy !== null} onRevoke={() => { void revokeBoard(b) }} />)}
@@ -182,7 +183,7 @@ function Summary({ sessionId, active, delegationGrants, refreshKey, openRequest,
         </div>}
         {busy && <p role="status" className="child-approval-note">Saving…</p>}
         {status && !busy && <p role="status" className="child-approval-note perm-saved">{status}</p>}
-        {(error || state === 'failed') && <p role="alert" className="child-approval-note perm-error">{error || 'Could not load the session permissions.'} <button type="button" className="perm-revoke" onClick={() => { setError(''); void load() }}>Refresh</button></p>}
+        {(error || state === 'failed') && <p role="alert" className="child-approval-note perm-error">{error || 'Could not load the workspace permissions.'} <IconButton label="Refresh" onClick={() => { setError(''); return load() }} /></p>}
       </div>
       {modal && <SessionPermissionsModal sessionId={sessionId} view={view ?? UNREADABLE} groups={groups} refreshKey={refreshKey} initialFocus={modal}
         onClose={() => setModal(null)} reload={load} onSaved={summary => setStatus(`Saved: ${summary.toLowerCase()}.`)} />}
@@ -236,7 +237,7 @@ function SessionPermissionsModal({ sessionId, view, groups, refreshKey, initialF
     revokeDelegations: [], revokeDormant: [],
   }
   const active: ActiveEntry[] = [
-    ...groups.map(c => ({ key: c.key, kind: 'child' as const, label: c.label, detail: 'Allowed for this session', target: { delegation: c.key } })),
+    ...groups.map(c => ({ key: c.key, kind: 'child' as const, label: c.label, detail: 'Allowed for this workspace', target: { delegation: c.key } })),
     ...levels.map(b => ({ key: `b:${b.board_id}`, kind: 'board' as const, label: boardChip({ ...b, board_name: nameOf(b) }), detail: boardDetail(b),
       dormant: b.active === false ? SIGNED_OUT : undefined, target: { board: b.board_id } })),
     ...grants.map(g => ({ key: g.id, kind: 'tool' as const, label: grantScope(g), detail: grantDetail(g),
@@ -247,7 +248,7 @@ function SessionPermissionsModal({ sessionId, view, groups, refreshKey, initialF
   const dormantScopes = Object.fromEntries(dormant.map(g => [g.id, { tool: toolKey(g.connection_id ?? '', g.tool ?? '') }]))
 
   const caps = boardCaps(view.started_by)
-  const boardCap = caps && view.started_by ? { by: view.started_by.title || 'the session that started it', levels: caps } : undefined
+  const boardCap = caps && view.started_by ? { by: view.started_by.title || 'Main', levels: caps } : undefined
 
   async function save(_: unknown, c: PermissionChanges): Promise<SaveOutcome> {
     const errors: string[] = []

@@ -286,16 +286,16 @@ export default function DesktopsSection({ site }: { site: Site | null }) {
           {d.can_revoke && (
             <button type="button" className="settings-action btn btn-quiet" disabled={!!busy} onClick={() => setRemoving(d.id)}>Remove</button>
           )}
-          {view?.can_manage_others && !d.owner_id && (
+          {view?.can_manage_others && (
             <>
               <label className="settings-field desktop-assign" htmlFor={`assign-${d.id}`}>
                 <span className="sr-only">Owner of {d.name}</span>
                 <select className="settings-field" id={`assign-${d.id}`} value={assignTo[d.id] ?? ""} onChange={(e) => setAssignTo({ ...assignTo, [d.id]: e.target.value })}>
                   <option value="">Choose a person</option>
-                  {view.owners.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                  {view.owners.filter((o) => o.id !== d.owner_id).map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
                 </select>
               </label>
-              <button type="button" className="settings-action btn" disabled={!!busy || !assignTo[d.id]} onClick={() => void assign(d)}>Assign</button>
+              <button type="button" className="settings-action btn" disabled={!!busy || !assignTo[d.id]} onClick={() => void assign(d)}>{d.owner_id ? "Reassign" : "Assign"}</button>
             </>
           )}
         </div>
@@ -323,7 +323,7 @@ export default function DesktopsSection({ site }: { site: Site | null }) {
     <section className="settings-section section" id="desktops" ref={sectionRef} aria-labelledby="desktops-heading">
       <p className="eyebrow">Account</p>
       <h2 className="settings-heading section-title" id="desktops-heading">Your desktops</h2>
-      <p className="settings-description">The machines that run your sessions. Each one is enrolled to you with its own credential.</p>
+      <p className="settings-description">The machines that run your workspaces. Each one is enrolled to you with its own credential.</p>
       <div className="card-actions desktop-toolbar">
         <button type="button" className="settings-action btn btn-primary" disabled={!!busy} onClick={() => void addDesktop()}>
           {busy === "add" ? "Creating code…" : "Add a desktop"}

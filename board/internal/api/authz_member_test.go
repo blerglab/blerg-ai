@@ -46,6 +46,7 @@ func TestMemberRefusedOnAdminRoutes(t *testing.T) {
 	}{
 		{"POST", "/api/boards", map[string]any{"name": "nope"}},
 		{"PATCH", "/api/boards/" + board.ID, map[string]any{"name": "renamed"}},
+		{"PATCH", "/api/boards/" + board.ID, map[string]any{"auto_archive_done_days": 1}},
 		{"DELETE", "/api/boards/" + board.ID, nil},
 		{"GET", "/api/tokens", nil},
 		{"POST", "/api/tokens", map[string]any{"label": "x"}},

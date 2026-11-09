@@ -1,9 +1,7 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,12 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
@@ -34,7 +30,8 @@ type Sender interface {
 
 // ManagerConfig holds configuration for the session manager.
 type ManagerConfig struct {
-	Workspaces *LocalWorkspaceService
+	WorkerPriority *WorkerPriority
+	Workspaces     *LocalWorkspaceService
 	// ReposRoot is the initial repos root. ReposRootSetting, when set, is the
 	// live one (changeable from the app, persisted); without it the Manager
 	// wraps ReposRoot in a setting that cannot be saved, so a change is
@@ -94,25 +91,17 @@ func (m *Manager) reposRoot() string {
 	return m.config.ReposRootSetting.Get()
 }
 
-// writeRecord and deleteRecord touch a session record under the root in
-// effect, holding off a concurrent repos-root change (and its record move)
-// until they are done — see ReposRootSetting.WithRoot.
-func (m *Manager) writeRecord(rec SessionRecord) (err error) {
-	m.config.ReposRootSetting.WithRoot(func(root string) { err = writeSessionRecord(root, rec) })
-	return err
-}
-
 func (m *Manager) deleteRecord(id string) {
 	m.config.ReposRootSetting.WithRoot(func(root string) { deleteSessionRecord(root, id) })
 }
 
 // sandboxOptions is the sandbox setup every container start of this daemon
-// applies, terminal and agent kind alike.
+// applies.
 func (c ManagerConfig) sandboxOptions() SandboxOptions {
 	return SandboxOptions{Network: c.SandboxNetwork, RepoRoot: c.RepoRoot}
 }
 
-// Manager tracks active PTY sessions and handles server-driven lifecycle messages.
+// Manager tracks agent sessions and handles server-driven lifecycle messages.
 type Manager struct {
 	legacySandboxReader func(context.Context, string, workspaceFileBinding) *remoteWorkspaceExplorer
 	legacyMu            sync.Mutex
@@ -123,9 +112,6 @@ type Manager struct {
 	discovery       *discovery.Service
 	discoveryOps    discoveryOperations
 	mu              sync.Mutex
-	sessions        map[string]*Session
-	trackers        map[string]*StateTracker
-	metaParsers     map[string]*MetaParser
 	client          Sender
 	config          ManagerConfig
 
@@ -158,47 +144,9 @@ type Manager struct {
 	// tests can exercise a slow/blocking clone without a network.
 	ensureClonedFunc func(ctx context.Context, reposRoot, repo, provider, githubOrg string) error
 
-	// reattachMu serializes ReattachSessions so two overlapping (re)connections
-	// can't both reattach/recover the same session — which would double-attach a
-	// PTY and leak a goroutine. mu guards only the maps and must not be held
-	// across the blocking PTY/tmux work inside a reattach, so this is separate.
-	reattachMu sync.Mutex
-
-	// refreshTimers holds a pending debounced tmux repaint per session (guarded by
-	// mu). A resize changes the PTY size immediately, but tmux's incremental
-	// redraw can leave stale cells in the browser's xterm at the old geometry;
-	// forcing a full refresh-client once the resize burst settles clears that
-	// residue. refreshFunc performs the repaint (overridable in tests);
-	// refreshDebounce is how long after the last resize we wait before repainting.
-	refreshTimers   map[string]*time.Timer
-	refreshFunc     func(sessionID string)
-	refreshDebounce time.Duration
-
-	// scrollbackFunc captures the session's tmux scrollback (the lines above the
-	// visible screen) as ANSI text, bounded to the last maxLines lines when
-	// maxLines > 0. Overridable in tests; nil-guarded so unit tests don't exec
-	// tmux unless they inject their own.
-	scrollbackFunc func(sessionID string, maxLines int) (string, error)
-
-	// modeSyncFunc queries a session's current pane modes and returns the
-	// escape sequences that reflect them (see modeSyncSequences), for the
-	// mode-sync preamble on SessionScrollback.ModePrefix. Overridable in tests;
-	// nil-guarded so unit tests don't exec tmux unless they inject their own —
-	// nil means "no mode-sync preamble" rather than "run real tmux".
-	modeSyncFunc func(sessionID string) string
-
-	// noteReplies is a per-session single-slot pending injection (guarded by mu):
-	// either a note reply or a freshly spawned session's initial prompt. Both are
-	// "text to submit once the session is idle" and share the same queue/flush
-	// machinery. Latest-wins: a second entry before the session goes idle
-	// overwrites the first. The slot is daemon-memory only; it is cleared on
-	// consume or lost on restart.
-	noteReplies map[string]string
-
-	// capturePaneFunc captures the current screen of a session for state
-	// classification before injecting a note reply. Overridable in tests so no
-	// real tmux is needed; nil means "can't classify → queue the reply".
-	capturePaneFunc func(sessionID string) (string, error)
+	// Serialize workspace recovery across overlapping reconnects without holding
+	// the spawn map mutex through filesystem or runtime work.
+	reconnectMu sync.Mutex
 
 	// sandboxImagePresent reports whether the sandbox image is available, used
 	// by preflightEngine before a sandboxed spawn. Defaults to
@@ -218,45 +166,12 @@ type Manager struct {
 	beforeRecordMigration func()
 }
 
-// defaultRefreshDebounce coalesces a burst of resizes (e.g. a window drag, or the
-// frontend's history_done double-resize) into a single repaint, and is long
-// enough that tmux has applied the final size before we refresh.
-const defaultRefreshDebounce = 120 * time.Millisecond
-
-// statePollInterval is how often the daemon snapshots each session's screen to
-// classify its state. Short enough that clicking a session or submitting a prompt
-// reflects within ~1s; capture-pane is a cheap local exec.
-const statePollInterval = time.Second
-
-// minResizeCols/minResizeRows reject degenerate resizes — the frontend's gridCount
-// floor (20x5), sent when a terminal element is measured before it's laid out (e.g.
-// while navigating away on mobile, when clientWidth/clientHeight collapse to 0).
-// Honoring such a size shrinks the pane until Claude's status/working lines are
-// squeezed off-screen, so the state poller can't see them and a busy session is
-// misclassified as idle. Below these we ignore the resize and keep the last good
-// size. Real clients are always well above (the smallest observed is ~46x20).
-const (
-	minResizeCols = 24
-	minResizeRows = 8
-)
-
-// NewManager creates a Manager and registers its message handlers on client.
 func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 	client.OwnerShellRuntime()
 	cfg = cfg.withReposRootSetting()
 	m := &Manager{
-		sessions:             make(map[string]*Session),
-		trackers:             make(map[string]*StateTracker),
-		metaParsers:          make(map[string]*MetaParser),
 		client:               client,
 		config:               cfg,
-		refreshTimers:        make(map[string]*time.Timer),
-		refreshFunc:          refreshTmuxClient,
-		refreshDebounce:      defaultRefreshDebounce,
-		scrollbackFunc:       captureScrollback,
-		modeSyncFunc:         modeSyncSequences,
-		noteReplies:          make(map[string]string),
-		capturePaneFunc:      capturePane,
 		sandboxImagePresent:  sandboxImageAvailable,
 		sandboxEnginePresent: engineInSandboxImage,
 	}
@@ -276,6 +191,7 @@ func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 		}
 	}
 	m.agents = NewAgentHost(client, AgentHostConfig{
+		WorkerPriority: cfg.WorkerPriority,
 		// A desktop Claude agent session runs on the user's `claude` login
 		// when it is installed, like a terminal session does.
 		PreferClaudeCLI:      true,
@@ -285,6 +201,7 @@ func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 		ReposRootFn:          cfg.ReposRootSetting.Get,
 		ServerHTTP:           cfg.ServerHTTP,
 		DaemonToken:          cfg.DaemonToken,
+		DaemonTokenSource:    client.config.currentDesktopToken,
 		APIKey:               apiKey,
 		BudgetUSD:            budget,
 		Pricing:              DefaultPricing(),
@@ -295,7 +212,8 @@ func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 		// the person's ~/.claude (pluginworkshop.go).
 		Plugins: NewPluginWorkshop(DaemonStateDir()),
 		// Recovery records of agent sessions (agentrecord.go); "" keeps none.
-		RecordsDir: cfg.AgentRecordsDir,
+		RecordsDir:    cfg.AgentRecordsDir,
+		GenerationDir: cfg.AgentRecordsDir,
 		// Why the previous run ended, for the sessions it cut off (restartcause.go).
 		RestartCause: cfg.RestartCause,
 		// Usage limits per provider (limits.go).
@@ -327,6 +245,10 @@ func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 	client.discoveryVersion = 1
 	client.OnMessage("attach_session_workspace", m.handleAttachSessionWorkspace)
 	client.OnMessage("discover_workspace", m.handleDiscoverWorkspace)
+	client.OnMessage("clone_repository", m.handleDiscoverWorkspace)
+	client.repositoryCloneVersion = protocol.RepositoryCloneVersion
+	client.OnMessage("workspace_membership_apply", m.handleWorkspaceMembership)
+	client.OnMessage("workspace_storage", m.handleWorkspaceStorage)
 	client.OnMessage("spawn_session", m.enqueueSpawn)
 	client.OnMessage("send_input", m.handleSendInput)
 	client.OnMessage("kill_session", m.handleKillSession)
@@ -354,11 +276,18 @@ func NewManager(client *WSClient, cfg ManagerConfig) *Manager {
 	client.OnMessage("agent_event_ack", m.handleAgentEventAck)
 	client.OnMessage("agent_user_message", m.handleAgentUserMessage)
 	client.OnMessage("plan_input_result", m.agents.DeliverPlanInput)
+	client.OnMessage("set_session_verbosity", func(raw []byte) {
+		var msg protocol.SetSessionVerbosity
+		if json.Unmarshal(raw, &msg) == nil && m.agents != nil {
+			m.agents.SetVerbosity(msg.SessionID, msg.Verbosity)
+		}
+	})
 	client.OnMessage("set_session_model", m.handleSetSessionModel)
 	client.OnMessage("refresh_session_tools", m.handleRefreshSessionTools)
 	client.OnMessage("interrupt_session", m.handleInterruptSession)
 	client.OnMessage("release_held_prompt", m.handleReleaseHeldPrompt)
 	client.OnMessage("set_repos_root", m.handleSetReposRoot)
+	client.OnMessage("worker_priority", m.handleWorkerPriority)
 	client.SetReposRoot(cfg.ReposRootSetting.Get)
 	return m
 }
@@ -393,17 +322,16 @@ func (m *Manager) handleAgentUserMessage(raw []byte) {
 	// is still preparing its workspace or plugins: those are dropped, as they always were.
 	if !m.agents.Has(msg.SessionID) {
 		m.mu.Lock()
-		_, terminal := m.sessions[msg.SessionID]
 		_, starting := m.pendingSpawns[msg.SessionID]
 		m.mu.Unlock()
-		if terminal || starting {
+		if starting {
 			return
 		}
 	}
 	if msg.Source == "limit_resume" && msg.ExpectedTurnID == "" {
 		return
 	}
-	m.agents.UserInput(msg.SessionID, agent.Input{Text: msg.Text, PlanNudge: msg.PlanNudge, Source: msg.Source, ClientID: msg.ClientID, ExpectedTurnID: msg.ExpectedTurnID})
+	m.agents.UserInput(msg.SessionID, agent.Input{Text: msg.Text, PersonTime: msg.PersonTime, PlanNudge: msg.PlanNudge, Source: msg.Source, ClientID: msg.ClientID, ExpectedTurnID: msg.ExpectedTurnID})
 }
 
 func (m *Manager) handleSetSessionModel(raw []byte) {
@@ -435,7 +363,7 @@ func (m *Manager) handleInterruptSession(raw []byte) {
 	if err := json.Unmarshal(raw, &msg); err != nil || m.agents == nil {
 		return
 	}
-	m.agents.Interrupt(msg.SessionID)
+	m.agents.Interrupt(msg.SessionID, msg.TargetEventID)
 }
 
 // handleSetReposRoot answers set_repos_root off the read pump: validating a
@@ -491,40 +419,13 @@ func (m *Manager) setReposRoot(msg protocol.SetReposRoot) protocol.ReposRootResu
 func newManagerWithSender(sender Sender, cfg ManagerConfig) *Manager {
 	cfg = cfg.withReposRootSetting()
 	m := &Manager{
-		sessions:    make(map[string]*Session),
-		trackers:    make(map[string]*StateTracker),
-		metaParsers: make(map[string]*MetaParser),
-		client:      sender,
-		config:      cfg,
-		// refreshFunc is left nil so unit tests don't exec tmux; tests that need
-		// the repaint inject their own. refreshDebounce gets a sane default.
-		refreshTimers:   make(map[string]*time.Timer),
-		refreshDebounce: defaultRefreshDebounce,
-		// noteReplies must be initialised so handlers can write to it without a nil-map panic.
-		// capturePaneFunc is left nil; tests that need classification inject their own.
-		noteReplies:          make(map[string]string),
+		client:               sender,
+		config:               cfg,
 		sandboxImagePresent:  sandboxImageAvailable,
 		sandboxEnginePresent: engineInSandboxImage,
 	}
 	m.startSpawnWorker()
 	return m
-}
-
-// claudeCommand builds the inner claude invocation. When resume is true it
-// continues an existing conversation (--resume); otherwise it pins a new session
-// to id (--session-id) so the conversation can be resumed after a hard restart.
-func claudeCommand(id, model, effort string, skipPerms, resume, sandboxed bool) []string {
-	cmd := []string{resolveEngineBinary(claudeEngineSpec.Binary, sandboxed)}
-	cmd = append(cmd, modelEffortArgs(claudeEngineSpec, model, effort)...)
-	if skipPerms {
-		cmd = append(cmd, claudeEngineSpec.SkipPermsFlag)
-	}
-	if resume {
-		cmd = append(cmd, "--resume", id)
-	} else {
-		cmd = append(cmd, "--session-id", id)
-	}
-	return cmd
 }
 
 // spawnModelProblem reports why a spawn's engine/model/effort must be refused,
@@ -533,11 +434,6 @@ func claudeCommand(id, model, effort string, skipPerms, resume, sandboxed bool) 
 func spawnModelProblem(msg protocol.SpawnSession) string {
 	if problem := engineProblem(msg.Engine); problem != "" {
 		return problem
-	}
-	if spec, ok := engineRegistry[msg.Engine]; ok && msg.Kind != "agent" && spec.TerminalModelProblem != nil {
-		if problem := spec.TerminalModelProblem(msg.Model); problem != "" {
-			return problem
-		}
 	}
 	if !models.ValidModelFor(msg.Engine, msg.Model) {
 		return fmt.Sprintf("refusing spawn: invalid model %q", msg.Model)
@@ -548,13 +444,7 @@ func spawnModelProblem(msg protocol.SpawnSession) string {
 	return ""
 }
 
-// resolveEngineBinary returns the command name for a CLI engine (claude,
-// codex, ...). sandboxed skips resolving to an absolute host path via
-// LookPath: that path (e.g. /home/<host-user>/.local/bin/claude) doesn't
-// exist inside a Docker sandbox, and embedding it in the pane's command fails
-// instantly, silently killing the tmux session (and, since it was the
-// container's only session, its whole private tmux server) the moment it's
-// created. The bare name resolves fine there against the image's own PATH.
+// resolveEngineBinary uses the image's PATH in a sandbox and the daemon's PATH on the host.
 func resolveEngineBinary(name string, sandboxed bool) string {
 	if sandboxed {
 		return name
@@ -565,29 +455,14 @@ func resolveEngineBinary(name string, sandboxed bool) string {
 	return name
 }
 
-// ActiveSessionIDs returns the IDs this daemon should be considered to own:
-// sessions it is actively managing, plus any persistent tmux sessions left on
-// disk that a restart has not yet reattached. Reporting the union keeps the
-// server from reaping persisted sessions during the reconnect window.
+// ActiveSessionIDs returns managed agent sessions and pending workspace operations.
 func (m *Manager) ActiveSessionIDs() []string {
-	m.mu.Lock()
-	ids := make([]string, 0, len(m.sessions))
-	for id := range m.sessions {
-		ids = append(ids, id)
-	}
-	m.mu.Unlock()
+	var ids []string
 
 	if m.agents != nil {
 		ids = append(ids, m.agents.ActiveIDs()...)
 	}
-	ids = mergeSessionIDs(ids, m.config.Workspaces.PendingIDs())
-	// A custom command (tests) is not tmux-backed, so skip the tmux probe.
-	if len(m.config.Command) > 0 {
-		return ids
-	}
-	var recorded []string
-	m.config.ReposRootSetting.WithRoot(func(root string) { recorded = recordedSessionIDs(root) })
-	return mergeSessionIDs(ids, listBlergRunnerTmuxSessions(), recorded)
+	return mergeSessionIDs(ids, m.config.Workspaces.PendingIDs())
 }
 
 // SessionStates returns each managed session's current tracked state, keyed by
@@ -595,14 +470,7 @@ func (m *Manager) ActiveSessionIDs() []string {
 // snapshot classified yet) are omitted. Used by the heartbeat to let the server
 // reconcile any state change that was dropped in transit.
 func (m *Manager) SessionStates() map[string]string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make(map[string]string, len(m.trackers))
-	for id, tr := range m.trackers {
-		if st := tr.State(); st != "" {
-			out[id] = st
-		}
-	}
+	out := make(map[string]string)
 	if m.agents != nil {
 		for id, st := range m.agents.States() {
 			out[id] = st
@@ -647,7 +515,7 @@ func sanitizedEnviron(extra ...string) []string {
 			!strings.HasPrefix(e, attachmentsDirEnv+"=") &&
 			!strings.HasPrefix(e, "BLERG_RUNNER_BOARD_TOKEN=") &&
 			!strings.HasPrefix(e, "BLERG_RUNNER_BOARD_GATEWAY_URL=") &&
-			!strings.HasPrefix(e, RestrictToolsEnvVar+"=") && !strings.HasPrefix(e, InteractionEnvVar+"=") {
+			!strings.HasPrefix(e, RestrictToolsEnvVar+"=") && !strings.HasPrefix(e, InteractionEnvVar+"=") && !strings.HasPrefix(e, VerbosityEnvVar+"=") {
 			out = append(out, e)
 		}
 	}
@@ -767,6 +635,9 @@ func buildSessionEnv(o sessionEnvOpts) []string {
 	}
 
 	env = append(env, "BLERG_RUNNER_SESSION_ID="+o.SessionID)
+	if binary, err := os.Executable(); err == nil {
+		env = append(env, "BLERG_RUNNER_METRICS_BIN="+binary)
+	}
 	if path := sessionAttachmentsPath(attachmentsStateDir(o.AttachmentsStateDir), o.SessionID); path != "" {
 		env = append(env, attachmentsDirEnv+"="+path)
 	}
@@ -859,12 +730,12 @@ func resolveExistingAncestor(p string) (string, error) {
 }
 
 // preflightEngine refuses a spawn whose runtime can't start, with a reason a
-// human can act on — instead of a tmux/docker failure that surfaces as a bare
+// human can act on — instead of a runtime failure that surfaces as a bare
 // "error" (trial blocker 2). Reports only the binary/image name and the PATH
 // value, never a full resolved host path or any secret.
 //
 // Applies to agent-kind too, the kind every board-driven session uses: on the
-// host it runs its driver in-process (no tmux), so only a CLI-shelling driver
+// host it runs its driver in-process, so only a CLI-shelling driver
 // has a binary to check — the native loop has none, and its own
 // missing-credential error is the actionable one there. Sandboxed, the engine
 // runs inside the container instead, so the image must exist and the binary is
@@ -883,43 +754,30 @@ func (m *Manager) preflightEngine(msg protocol.SpawnSession) error {
 	if msg.Sandbox && msg.Engine == "openclaw" {
 		return errors.New(sandboxOpenclawRefusal)
 	}
-	if msg.Kind == "agent" {
-		if m.agents == nil {
-			return nil
-		}
-		name := m.agents.engineBinary(msg)
-		if msg.Sandbox {
-			if !m.sandboxImagePresent() {
-				return missingSandboxImageError()
-			}
-			if name == "" {
-				return nil // native loop: refused at spawn with the spec's reason
-			}
-			if err := m.sandboxEnginePresent(name); err != nil {
-				return fmt.Errorf("%s not found in the sandbox image %s — rebuild the image with the engine installed, or choose This machine", name, sandboxImage())
-			}
-			return nil
-		}
-		if name == "" {
-			return nil
-		}
-		return engineOnPath(resolveEngineBinary(name, false))
+	if m.agents == nil {
+		return nil
 	}
+	name := m.agents.engineBinary(msg)
 	if msg.Sandbox {
 		if !m.sandboxImagePresent() {
 			return missingSandboxImageError()
 		}
+		if name == "" {
+			return nil // native loop: refused at spawn with the spec's reason
+		}
+		if err := m.sandboxEnginePresent(name); err != nil {
+			return fmt.Errorf("%s not found in the sandbox image %s — rebuild the image with the engine installed, or choose This machine", name, sandboxImage())
+		}
 		return nil
 	}
-	bin := resolveEngineBinary("claude", false)
-	if spec, ok := engineRegistry[msg.Engine]; ok {
-		bin = resolveEngineBinary(spec.Binary, false)
+	if name == "" {
+		return nil
 	}
-	return engineOnPath(bin)
+	return engineOnPath(resolveEngineBinary(name, false))
 }
 
 // missingSandboxImageError is the one home for the "no sandbox image" reason,
-// shared by every kind that needs the container (terminal and, now, agent).
+// shared by agent launch checks.
 func missingSandboxImageError() error {
 	return fmt.Errorf("sandbox image %s missing — run install/desktop/daemon/install.sh install to build it, or pick the Desktop daemon runtime", sandboxImage())
 }
@@ -1010,6 +868,9 @@ func removeCreatedWorkspace(root string, c createdDirs) {
 // prepareWorkspaceTracked is prepareWorkspace plus what it created, returned on
 // failure too, so the caller can clean up when the spawn fails later.
 func (m *Manager) prepareWorkspaceTracked(msg protocol.SpawnSession) (string, createdDirs, error) {
+	if err := recordWorkBranch(msg); err != nil {
+		return "", createdDirs{}, err
+	}
 	if !msg.Sandbox && msg.Workspace != nil {
 		pins, err := m.PinWorkspaceSelection(m.spawnContext(msg.SessionID), *msg.Workspace)
 		if err != nil {
@@ -1262,13 +1123,20 @@ func (m *Manager) handleSpawnSession(raw []byte) {
 		log.Printf("manager: bad spawn_session: %v", err)
 		return
 	}
+	m.beginSpawn(msg.SessionID)
+	defer m.clearPendingSpawn(msg.SessionID)
+	if msg.Kind == "" {
+		msg.Kind = "agent"
+	}
+	if msg.Kind != "agent" {
+		m.sendError(msg.SessionID, "Terminal sessions have been removed. Start an Agent session instead.")
+		return
+	}
 	// Resolve the project path and make sure the workspace exists. Applied to
 	// EVERY spawn, agent-kind included: agent-kind used to branch off above
 	// this, so a board-driven session for a repo that was not cloned yet got a
 	// 202 and then died on AgentHost's os.Stat — the spawn black hole this
 	// plan set out to kill.
-	m.beginSpawn(msg.SessionID)
-	defer m.clearPendingSpawn(msg.SessionID)
 	// model/effort become engine CLI arguments: refuse a bad one before any
 	// workspace work, rather than trusting the server to have checked.
 	if problem := spawnModelProblem(msg); problem != "" {
@@ -1316,6 +1184,7 @@ func (m *Manager) handleSpawnSession(raw []byte) {
 			log.Printf("manager: spawn %s abandoned — killed while its workspace was being prepared", msg.SessionID)
 			return
 		}
+		logDaemonFailure("workspace preparation", err)
 		m.sendError(msg.SessionID, err.Error())
 		return
 	}
@@ -1340,7 +1209,7 @@ func (m *Manager) handleSpawnSession(raw []byte) {
 	// Preflight the runtime before creating anything (Task 1's
 	// resolveProjectPath has already run above; this comes after it, per the
 	// pre-flight ruling) — a missing engine binary or sandbox image should
-	// fail with a reason a human can act on, not a bare tmux/docker/driver
+	// fail with a reason a human can act on, not a bare runtime/driver
 	// error later. Agent-kind is included: it used to branch off below this,
 	// which left the headline board-driven flow with no preflight at all.
 	if err := m.preflightEngine(msg); err != nil {
@@ -1349,285 +1218,19 @@ func (m *Manager) handleSpawnSession(raw []byte) {
 		return
 	}
 
-	if msg.Kind == "agent" {
-		if m.agents == nil {
-			m.sendError(msg.SessionID, "agent sessions unavailable: no ANTHROPIC_API_KEY on this daemon")
-			return
-		}
-		cleanupCreated = false // AgentHost owns the workspace from here
-		m.agents.Spawn(msg)
+	if m.agents == nil {
+		m.sendError(msg.SessionID, "agent sessions unavailable: no ANTHROPIC_API_KEY on this daemon")
 		return
 	}
-
-	var terminalExplorer WorkspaceExplorer
-	if msg.Workspace != nil && !msg.Sandbox {
-		projectPath, terminalExplorer, err = m.prepareHostWorkspace(m.spawnContext(msg.SessionID), msg)
-		if err != nil {
-			m.sendError(msg.SessionID, err.Error())
-			return
-		}
-		defer func() {
-			if terminalExplorer != nil {
-				if c, ok := terminalExplorer.(interface{ Close() error }); ok {
-					_ = c.Close()
-				}
+	cleanupCreated = false // AgentHost owns the workspace from here
+	m.agents.Spawn(msg)
+	if !m.agents.Has(msg.SessionID) {
+		if folder := bindScratchFolder(m.reposRoot(), msg.ProjectPath, msg.Repo); folder != nil {
+			if report := folder.remove(); report != "" {
+				log.Printf("%s", report)
 			}
-		}()
+		}
 	}
-	// Build environment.
-	env := m.sessionEnv(msg.SessionID, msg.Assist, msg.BoardID, msg.BoardToken, msg.SessionToken, msg.ExtraEnv)
-	env = append(env, selectedBoardCLIEnv(msg.BoardID, msg.MCPGateway)...)
-
-	cols, rows := msg.Cols, msg.Rows
-	if cols == 0 {
-		cols = 220
-	}
-	if rows == 0 {
-		rows = 50
-	}
-
-	command := m.config.Command
-	if len(command) == 0 {
-		var codexHome, codexSource string
-		if msg.Engine == "codex" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				m.sendError(msg.SessionID, "Codex login home is unavailable")
-				return
-			}
-			codexSource = engineHome(home, "CODEX_HOME", ".codex")
-			codexHome, err = prepareCodexTerminalHome(DaemonStateDir(), msg.SessionID, codexSource)
-			if err != nil {
-				m.sendError(msg.SessionID, err.Error())
-				return
-			}
-		}
-		var inner []string
-		if spec, ok := engineRegistry[msg.Engine]; ok {
-			inner = buildTerminalCommand(spec, msg.Model, msg.Effort, msg.DangerouslySkipPermissions, msg.Sandbox)
-		} else {
-			inner = claudeCommand(msg.SessionID, msg.Model, msg.Effort, msg.DangerouslySkipPermissions, false, msg.Sandbox)
-		}
-		if _, registered := engineRegistry[msg.Engine]; !registered {
-			home, _ := os.UserHomeDir()
-			inner = append(inner, claudeTerminalSandboxArgs(msg.SessionID, env, home, projectPath, msg.Sandbox)...)
-		}
-		if codexHome != "" {
-			inner = append(inner, "--no-daemon")
-			inner = append([]string{"env", "CODEX_HOME=" + codexHome}, inner...)
-		}
-		// Run the engine inside a persistent, detached tmux session so the process
-		// survives a daemon restart; we then attach to it under the PTY. The
-		// daemon reattaches to the same session on reconnect. Sandbox runs that
-		// tmux session inside a throwaway container instead of on the host —
-		// see sandbox.go; everything downstream (attach, capture, kill) is
-		// registry-transparent so it needs no branching here beyond create.
-		var createErr error
-		if msg.Sandbox {
-			// A sandboxed terminal works in a clone of its own, as every sandbox does
-			// (sandboxclone.go): never the person's checkout. No clone, no session.
-			clone, err := createSandboxClone(projectPath, msg.SessionID, m.reposRoot())
-			if err != nil {
-				log.Printf("manager: %s: %v", msg.SessionID, err)
-				m.sendError(msg.SessionID, err.Error())
-				return
-			}
-			projectPath = clone
-			opts := m.config.sandboxOptions()
-			opts.Engine = msg.Engine
-			opts.CodexHome, opts.CodexSourceHome = codexHome, codexSource
-			if createErr = startTerminalSandbox(msg.SessionID, projectPath, inner, env, opts); createErr != nil {
-				removeSandboxContainer(msg.SessionID)
-				discardSandboxClone(clone, msg.SessionID)
-			}
-		} else {
-			createErr = createTmuxSession(msg.SessionID, projectPath, inner, env)
-		}
-		if createErr != nil {
-			log.Printf("manager: create session %s failed: %v", msg.SessionID, createErr)
-			m.sendError(msg.SessionID, createErr.Error())
-			return
-		}
-		// Persist a recovery record so the daemon can recreate this session after
-		// a hard restart (tmux server death). Best-effort: a write failure must
-		// not abort the spawn.
-		now := time.Now().UTC().Format(time.RFC3339)
-		if err := m.writeRecord(SessionRecord{
-			Version:                    recordSchemaVersion,
-			SessionID:                  msg.SessionID,
-			Repo:                       msg.Repo,
-			ProjectPath:                projectPath,
-			Model:                      msg.Model,
-			Effort:                     msg.Effort,
-			DangerouslySkipPermissions: msg.DangerouslySkipPermissions,
-			Sandbox:                    msg.Sandbox,
-			Engine:                     msg.Engine,
-			CodexHome:                  codexHome,
-			CodexSourceHome:            codexSource,
-			Title:                      msg.Title,
-			InitialPrompt:              msg.InitialPrompt,
-			Assist:                     msg.Assist,
-			BoardID:                    msg.BoardID,
-			TicketID:                   msg.TicketID,
-			BoardToken:                 msg.BoardToken,
-			SessionToken:               msg.SessionToken,
-			ExtraEnv:                   msg.ExtraEnv,
-			CreatedAt:                  now,
-			UpdatedAt:                  now,
-		}); err != nil {
-			log.Printf("manager: write session record %s: %v", msg.SessionID, err)
-		}
-		command = tmuxAttachCommand(msg.SessionID)
-	}
-
-	sess, err := NewSession(msg.SessionID, projectPath, cols, rows, env, command)
-	if err != nil {
-		log.Printf("manager: spawn_session %s failed: %v", msg.SessionID, err)
-		m.sendError(msg.SessionID, err.Error())
-		return
-	}
-
-	sess.sandboxed = msg.Sandbox
-	cleanupCreated = false // the session started: its folder is real now
-	tracker := NewStateTracker(msg.SessionID, m.client)
-	m.watchSandboxTurns(msg.SessionID, projectPath, tracker)
-	metaParser := NewMetaParser(msg.SessionID, m.client)
-	m.mu.Lock()
-	m.sessions[msg.SessionID] = sess
-	m.trackers[msg.SessionID] = tracker
-	m.metaParsers[msg.SessionID] = metaParser
-	m.mu.Unlock()
-	if terminalExplorer != nil {
-		m.BindWorkspaceExplorer(msg.SessionID, terminalExplorer)
-		terminalExplorer = nil
-	} else {
-		m.bindTerminalExplorer(msg.SessionID)
-	}
-
-	// Notify server the session started.
-	_ = m.client.Send(protocol.SessionStarted{
-		Type:        "session_started",
-		SessionID:   msg.SessionID,
-		ProjectPath: projectPath,
-		Repo:        msg.Repo,
-		Title:       msg.Title,
-		Model:       msg.Model,
-		Cols:        cols,
-		Rows:        rows,
-	})
-
-	m.streamSession(msg.SessionID, sess)
-	m.startStatePoller(msg.SessionID, tracker)
-
-	m.queueInitialPrompt(msg.SessionID, msg.InitialPrompt)
-}
-
-// queueInitialPrompt queues a freshly spawned or recovered session's initial
-// prompt rather than writing it after a blind delay: Claude's startup time
-// (plugin/hook loading) is unbounded, and a prompt written before its raw-mode
-// input is ready can land as inert text with no Enter — the human then has to
-// hit it manually. startStatePoller flushes this slot the first time it
-// observes the session idle (ready for input), however long that takes.
-// No-op for an empty prompt.
-func (m *Manager) queueInitialPrompt(sessionID, prompt string) {
-	if prompt == "" {
-		return
-	}
-	m.mu.Lock()
-	m.noteReplies[sessionID] = prompt
-	m.mu.Unlock()
-}
-
-// streamSession forwards a session's PTY output to the server until the process
-// exits, then removes the session and emits session_ended. Running in one
-// goroutine guarantees session_ended is sent after all session_output.
-func (m *Manager) streamSession(id string, sess *Session) {
-	m.mu.Lock()
-	metaParser := m.metaParsers[id]
-	m.mu.Unlock()
-
-	go func() {
-		for chunk := range sess.OutputCh {
-			if metaParser != nil {
-				metaParser.Process(chunk)
-			}
-			encoded := base64.StdEncoding.EncodeToString(chunk)
-			_ = m.client.Send(protocol.SessionOutput{
-				Type:      "session_output",
-				SessionID: id,
-				Data:      encoded,
-				Seq:       sess.NextSeq(),
-			})
-		}
-		// OutputCh is closed only after the process exits, so exit code is set.
-		// Removing the session here also signals the state poller to stop.
-		m.explorer.Unbind(id)
-		m.mu.Lock()
-		delete(m.sessions, id)
-		delete(m.trackers, id)
-		delete(m.metaParsers, id)
-		if t := m.refreshTimers[id]; t != nil {
-			t.Stop()
-			delete(m.refreshTimers, id)
-		}
-		m.mu.Unlock()
-		// A sandboxed terminal whose tmux is gone has ended for good: its leftover work is
-		// committed in the container, the container removed and the clone's branch brought
-		// back (a kill already did this; it is safe twice). An attach client that merely
-		// dropped, with tmux still running in the container, is left for the reattach pass.
-		if isSandboxClone(sess.workspace, id) {
-			if has, known := tmuxProbe(dockerContainerName(id)); !has && known {
-				finishSandbox(id)
-			}
-		}
-		// Remove the recovery record now that the session has ended naturally.
-		// Best-effort: safe to call when no record exists (e.g. test path).
-		m.deleteRecord(id)
-		removeSessionTokenFile(DaemonStateDir(), id)
-		removeSessionAttachments(DaemonStateDir(), id)
-		_ = m.client.Send(protocol.SessionEnded{
-			Type:      "session_ended",
-			SessionID: id,
-			ExitCode:  sess.exitCode,
-			Signal:    sess.signal,
-		})
-	}()
-}
-
-// startStatePoller periodically snapshots the session's screen and feeds the
-// classification to its tracker, which emits session_state_changed on
-// transitions. It exits once the session is removed (streamSession's cleanup),
-// so its lifetime tracks the session. No-op when a custom Command is configured
-// (tests, not tmux-backed).
-func (m *Manager) startStatePoller(id string, tracker *StateTracker) {
-	if len(m.config.Command) > 0 {
-		return
-	}
-	go func() {
-		ticker := time.NewTicker(statePollInterval)
-		defer ticker.Stop()
-		for range ticker.C {
-			m.mu.Lock()
-			_, alive := m.sessions[id]
-			capFn := m.capturePaneFunc
-			m.mu.Unlock()
-			if !alive {
-				return
-			}
-			if capFn == nil {
-				capFn = capturePane
-			}
-			screen, err := capFn(id)
-			if err != nil {
-				continue // session may be momentarily unavailable; keep last state
-			}
-			state := classifyScreen(screen)
-			tracker.Update(state)
-			if state == "idle" {
-				m.flushPendingNoteReply(id)
-			}
-		}
-	}()
 }
 
 // AdoptAgentSessions brings back the agent sessions a previous run of the daemon left recovery
@@ -1663,22 +1266,9 @@ func (m *Manager) FreezeAgentRecords() {
 	}
 }
 
-// ReattachSessions reattaches to persistent tmux sessions left by a prior daemon
-// run, resuming output streaming for each. It is idempotent — already-managed
-// sessions are skipped — so it is safe to call on every (re)connection. After
-// reattaching live tmux sessions it performs a recovery pass: for each record
-// whose session was lost in a hard restart (tmux server death), it recreates the
-// tmux session and resumes Claude via --resume. No-op when a custom Command is
-// configured (tests, not tmux-backed).
-func (m *Manager) ReattachSessions() {
+// ReconnectSessions reconnects agent sessions and recovers authenticated workspace records.
+func (m *Manager) ReconnectSessions() {
 	defer m.attachLegacyWorkspaces()
-	// A tmux server that outlived an older daemon (or was started from the
-	// user's shell) may hold the master token or a stale session token in
-	// its global env, which every later pane would inherit. Unset them
-	// before any session is created or recovered on it. Best-effort.
-	if len(m.config.Command) == 0 {
-		scrubTmuxGlobalEnv()
-	}
 	// Agent sessions survive in-process across reconnects — just flush any
 	// events the server hasn't acked yet.
 	if m.agents != nil {
@@ -1687,184 +1277,37 @@ func (m *Manager) ReattachSessions() {
 		// reported, and a cut-off turn waiting to be continued may be (agentadopt.go).
 		m.agents.NoteConnected()
 	}
-	// Desktop home configuration is never uploaded into an install-wide cache.
-	// Shared pod configuration is supplied explicitly by the operator.
-	if len(m.config.Command) > 0 {
-		return
-	}
-	// Serialize whole passes: onConnect fires this without awaiting it, so a
-	// rapid disconnect/reconnect could otherwise run two passes concurrently.
-	m.reattachMu.Lock()
-	defer m.reattachMu.Unlock()
-
-	// The records first: a sandbox container from before the owner label is this daemon's only when
-	// it has a record of the session (listOwnSandboxContainers).
-	var recs []SessionRecord
-	m.config.ReposRootSetting.WithRoot(func(root string) { recs = listSessionRecords(root) })
-	m.reattachPass(recs, listBlergRunnerTmuxSessions())
-}
-
-// reattachPass is ReattachSessions once the records and the host's tmux sessions are listed:
-// reattach what still runs, recover what a hard restart left behind, then sweep the sandbox
-// containers and homes nobody uses.
-func (m *Manager) reattachPass(recs []SessionRecord, hostTmux []string) {
+	m.reconnectMu.Lock()
+	defer m.reconnectMu.Unlock()
 	if err := m.recoverWorkspaces(context.Background()); err != nil {
 		log.Printf("workspace recovery refused: %v", err)
 	}
-	if m.config.Workspaces != nil {
-		legacy := recs[:0]
-		for _, record := range recs {
-			path, err := workspaceRecord(record.SessionID)
-			if err == nil {
-				if _, err := os.Lstat(path); err == nil {
-					continue
-				}
-			}
-			legacy = append(legacy, record)
-		}
-		recs = legacy
-	}
-	recorded := map[string]bool{}
-	for _, rec := range recs {
-		recorded[rec.SessionID] = true
-	}
-	listed := listSandboxedTmuxSessions(func(id string) bool { return recorded[id] })
-	sandboxed := m.stopLegacySandboxes(listed)
-	// A sandboxed terminal stopped just now has had its record deleted and been told why: it is not
-	// recovered (nor told again, less accurately) below.
-	stopped := map[string]bool{}
-	for _, id := range listed {
-		if !slices.Contains(sandboxed, id) {
-			stopped[id] = true
-			delete(recorded, id)
-		}
-	}
-	recs = slices.DeleteFunc(slices.Clone(recs), func(rec SessionRecord) bool { return stopped[rec.SessionID] })
-	liveIDs := mergeSessionIDs(hostTmux, sandboxed)
-	for _, id := range liveIDs {
-		m.mu.Lock()
-		_, exists := m.sessions[id]
-		m.mu.Unlock()
-		if exists {
-			continue
-		}
-		m.reattachSession(id)
-	}
-
-	// Recovery pass: recreate tmux sessions for records abandoned by a hard restart.
-	m.mu.Lock()
-	managedIDs := make([]string, 0, len(m.sessions))
-	for id := range m.sessions {
-		managedIDs = append(managedIDs, id)
-	}
-	m.mu.Unlock()
-
-	for _, rec := range recoverableRecords(recs, liveIDs, managedIDs) {
-		m.recoverSession(rec)
-	}
-
-	// Last, once everything reattachable has been reattached and everything
-	// recoverable recovered: a sandboxed agent session's container survives the
-	// daemon that made it, and nothing above will ever adopt one (it holds no
-	// tmux, and the engine subprocess inside it died with the old daemon). Left
-	// alone it keeps its memory ceiling, its mounts and its name forever, so
-	// the next session with that id cannot even start without a collision.
-	// A container from before the owner label counts with a session record too.
-	sweepOrphanSandboxContainers(m.ownsSession, func(id string) bool { return recorded[id] })
-	// Then the sandbox homes nobody uses any more (a crash's leftovers): never kept fresh, removed.
-	// A sandboxed terminal whose record is still here keeps its home (its transcript is in it).
-	sweepOrphanSandboxHomes(func(id string) bool { return recorded[id] || m.ownsSession(id) })
-}
-
-// startTerminalSandbox starts a sandboxed terminal's container and tmux (a seam for tests).
-var startTerminalSandbox = createDockerSandbox
-
-// watchSandboxTurns brings a sandboxed terminal's commits back to wip/<id> in the repository each
-// time it goes from running to idle (its turn's end, as near as the screen tells), one sync at a
-// time. Nothing for a session that is not in a sandbox clone.
-func (m *Manager) watchSandboxTurns(id, workspace string, tracker *StateTracker) {
-	if !isSandboxClone(workspace, id) {
-		return
-	}
-	var busy atomic.Bool
-	tracker.SetOnTurnEnd(func() {
-		if !busy.CompareAndSwap(false, true) {
-			return
-		}
-		defer busy.Store(false)
-		if err := syncSandboxAtTurnEnd(workspace, id); err != nil {
-			log.Printf("manager: sandboxed session %s: %v", id, err)
+	// Old records prove ownership for cleanup, never a claim to resume a Terminal.
+	recorded := make(map[string]bool)
+	m.config.ReposRootSetting.WithRoot(func(root string) {
+		for _, id := range recordedSessionIDs(root) {
+			recorded[id] = true
 		}
 	})
-}
-
-// legacySandboxMessage is what a terminal sandbox started by an older daemon is told when this one
-// stops it.
-const legacySandboxMessage = "This sandboxed session was started by an older daemon that mounted your checkout (.git included) into the sandbox. It was stopped for safety; start it again to work in a clone of its own."
-
-// legacySandboxRecordMessage is what a sandboxed terminal whose recovery record names no clone of its
-// own is told when this daemon declines to recover it.
-const legacySandboxRecordMessage = "This sandboxed session was not recovered: its record names a folder of yours, not a clone of its own (an older daemon started it). Start it again to work in a clone of its own."
-
-// sandboxRecordProblem is why a sandboxed terminal's recovery record cannot be used, or "".
-func sandboxRecordProblem(rec SessionRecord) string {
-	if !isSandboxClone(rec.ProjectPath, rec.SessionID) {
-		return legacySandboxRecordMessage
-	}
-	if _, err := loadSandboxClone(rec.SessionID); err != nil {
-		return "This sandboxed session was not recovered: the record of its clone is missing or invalid. Its work may still be on wip/" + rec.SessionID + " in your repository; start a new session to continue."
-	}
-	return ""
-}
-
-// unknownSandboxMessage is what a sandboxed terminal is told when this daemon stops it because it
-// has no record of a clone of its own for it.
-const unknownSandboxMessage = "This sandboxed session was stopped: this daemon has no record of a clone of its own for it, so it cannot tell what its container mounts (an older daemon may have started it). Any work it committed was brought back where possible; start it again to work in a clone of its own."
-
-// stopLegacySandboxes stops every running sandboxed terminal that this daemon cannot show is on a
-// clone of its own, and returns the others. It decides from what the daemon writes reliably: the
-// clone record (written before any container starts, and older daemons never wrote one), not the
-// best-effort recovery record. A session this process already manages is kept. Otherwise a session
-// is kept when its clone record loads and docker inspect, when it answers, names that clone. One
-// whose container mounts anything else, or that has no clone record, is stopped and told which.
-func (m *Manager) stopLegacySandboxes(ids []string) []string {
-	kept := ids[:0:0]
-	for _, id := range ids {
-		m.mu.Lock()
-		_, managed := m.sessions[id]
-		m.mu.Unlock()
-		if managed {
-			kept = append(kept, id)
-			continue
+	sweepOrphanSandboxContainers(m.ownsSession, func(id string) bool { return recorded[id] })
+	// Keep ownership evidence while a legacy sandbox still needs cleanup. Once
+	// it is gone (or the record was host-only), retire its obsolete credentials.
+	m.config.ReposRootSetting.WithRoot(func(root string) {
+		for _, rec := range listSessionRecords(root) {
+			if m.ownsSession(rec.SessionID) || rec.Sandbox && !sandboxContainerGone(dockerContainerName(rec.SessionID)) {
+				continue
+			}
+			deleteSessionRecord(root, rec.SessionID)
+			removeSessionTokenFile(DaemonStateDir(), rec.SessionID)
 		}
-		message, reason := "", ""
-		if source, ok := containerWorkspaceSource(dockerContainerName(id)); ok && !isSandboxClone(source, id) {
-			message, reason = legacySandboxMessage, "its container mounts "+source
-		} else if _, err := loadSandboxClone(id); err != nil {
-			message, reason = unknownSandboxMessage, "no record of a clone of its own"
-		}
-		if message == "" {
-			kept = append(kept, id)
-			continue
-		}
-		log.Printf("manager: stopping sandboxed session %s: %s", id, reason)
-		killTmuxSession(id)
-		m.deleteRecord(id)
-		m.sendError(id, message)
-	}
-	return kept
+	})
+	sweepOrphanSandboxHomes(m.ownsSession)
 }
 
 // ownsSession reports whether this daemon is currently managing sessionID, as
-// either a tmux-backed session or an in-process agent session. It is the
+// either a managed session or an in-process agent session. It is the
 // "leave this alone" test for cleanup passes that work from container names.
 func (m *Manager) ownsSession(sessionID string) bool {
-	m.mu.Lock()
-	_, ok := m.sessions[sessionID]
-	m.mu.Unlock()
-	if ok {
-		return true
-	}
 	if m.agents != nil {
 		for _, id := range m.agents.ActiveIDs() {
 			if id == sessionID {
@@ -1875,216 +1318,9 @@ func (m *Manager) ownsSession(sessionID string) bool {
 	return false
 }
 
-// reattachSession opens a fresh PTY attached to an existing tmux session and
-// resumes streaming its output under the original session ID. It does not send
-// session_started — the server already has the row from the original spawn.
-func (m *Manager) reattachSession(id string) {
-	// env is used only by tmuxAttachCommand (the attach-client subprocess); it does
-	// not reach the already-running Claude process. We still use sessionEnv for
-	// consistency so the attach client's env matches what Claude was spawned with.
-	// Assist=false and no session token here: board vars and the messaging
-	// token are not needed by the attach client (the engine inside tmux keeps
-	// the env it was created with).
-	env := m.sessionEnv(id, false, "", "", "", nil)
+func (m *Manager) handleSendInput(_ []byte) {}
 
-	// Size is provisional; the browser sends a resize on subscribe.
-	sess, err := NewSession(id, m.reposRoot(), 220, 50, env, tmuxAttachCommand(id))
-	if err != nil {
-		log.Printf("manager: reattach session %s failed: %v", id, err)
-		return
-	}
-	// The attach client's cwd is the repos parent, not the engine's workspace.
-	// Only a trusted recovery record can bind file reads to the original folder.
-	sess.workspace, sess.workspaceInfo = "", nil
-	m.config.ReposRootSetting.WithRoot(func(root string) {
-		if rec, e := readSessionRecord(root, id); e == nil && rec.ProjectPath != "" {
-			if info, statErr := os.Stat(rec.ProjectPath); statErr == nil && info.IsDir() {
-				sess.workspace, sess.workspaceInfo = rec.ProjectPath, info
-				sess.sandboxed = rec.Sandbox
-			}
-		}
-	})
-
-	tracker := NewStateTracker(id, m.client)
-	m.watchSandboxTurns(id, sess.workspace, tracker)
-	metaParser := NewMetaParser(id, m.client)
-	m.mu.Lock()
-	m.sessions[id] = sess
-	m.trackers[id] = tracker
-	m.metaParsers[id] = metaParser
-	m.mu.Unlock()
-	m.bindTerminalExplorer(id)
-
-	log.Printf("manager: reattached to persistent session %s", id)
-	m.streamSession(id, sess)
-	m.startStatePoller(id, tracker)
-}
-
-// recoverSession recreates a tmux session for an abandoned record and resumes
-// the original session ID. If the transcript is missing (a hard restart
-// caught the session before the engine's first write) — or the record is a
-// codex, hermes, or openclaw session, none of which has an equivalent way to
-// resume the interactive tmux case — it spawns fresh and injects the stored
-// initial prompt instead.
-func (m *Manager) recoverSession(rec SessionRecord) {
-	// A sandboxed record must name this session's own recorded clone. One an older daemon wrote
-	// names the person's folder: it is never recovered onto, the record goes (so it is not tried
-	// again at every reconnect) and the session says why.
-	if rec.Sandbox {
-		if problem := sandboxRecordProblem(rec); problem != "" {
-			log.Printf("manager: recover %s: not recovered: %s", rec.SessionID, problem)
-			m.deleteRecord(rec.SessionID)
-			m.sendError(rec.SessionID, problem)
-			return
-		}
-	}
-	if problem := engineProblem(rec.Engine); problem != "" {
-		m.sendError(rec.SessionID, problem)
-		return
-	}
-	var inner []string
-	resume := false
-	if spec, ok := engineRegistry[rec.Engine]; ok {
-		if spec.TerminalModelProblem != nil {
-			if problem := spec.TerminalModelProblem(rec.Model); problem != "" {
-				m.sendError(rec.SessionID, problem)
-				return
-			}
-		}
-		inner = buildTerminalCommand(spec, rec.Model, rec.Effort, rec.DangerouslySkipPermissions, rec.Sandbox)
-		if rec.Engine == "codex" {
-			thread := codexTerminalThread(rec.CodexHome)
-			if rec.CodexHome == "" || thread == "" {
-				m.sendError(rec.SessionID, "The Codex terminal's saved conversation could not be identified. Its original prompt was not replayed.")
-				return
-			}
-
-			source := rec.CodexSourceHome
-			if source == "" {
-				home, err := os.UserHomeDir()
-				if err != nil {
-					m.sendError(rec.SessionID, "Codex login home is unavailable")
-					return
-				}
-				source = engineHome(home, "CODEX_HOME", ".codex")
-			}
-			if err := prepareCodexTerminalGuide(rec.CodexHome, source); err != nil {
-				m.sendError(rec.SessionID, err.Error())
-				return
-			}
-			inner = append(inner, "--no-daemon", "resume", thread)
-			inner = append([]string{"env", "CODEX_HOME=" + rec.CodexHome}, inner...)
-			resume = true
-		}
-	} else {
-		if rec.Sandbox {
-			// A sandboxed terminal's transcript is in its own sandbox home, never the person's ~/.claude.
-			resume = sandboxTranscriptExists(rec.SessionID)
-		} else {
-			resume = transcriptExists(rec.SessionID)
-		}
-		inner = claudeCommand(rec.SessionID, rec.Model, rec.Effort, rec.DangerouslySkipPermissions, resume, rec.Sandbox)
-	}
-
-	// Records written before SessionToken existed recover with no token: the
-	// session runs but cannot message (it never could without the master
-	// token, which is gone for good).
-	env := m.sessionEnv(rec.SessionID, rec.Assist, rec.BoardID, rec.BoardToken, rec.SessionToken, rec.ExtraEnv)
-	if _, registered := engineRegistry[rec.Engine]; !registered {
-		home, _ := os.UserHomeDir()
-		inner = append(inner, claudeTerminalSandboxArgs(rec.SessionID, env, home, rec.ProjectPath, rec.Sandbox)...)
-	}
-
-	var createErr error
-	if rec.Sandbox {
-		opts := m.config.sandboxOptions()
-		opts.Engine = rec.Engine
-		opts.CodexHome, opts.CodexSourceHome = rec.CodexHome, rec.CodexSourceHome
-		// The record names the session's clone (checked above, and again by the mount check).
-		createErr = startTerminalSandbox(rec.SessionID, rec.ProjectPath, inner, env, opts)
-	} else {
-		createErr = createTmuxSession(rec.SessionID, rec.ProjectPath, inner, env)
-	}
-	if createErr != nil {
-		log.Printf("manager: recover %s: create session failed: %v", rec.SessionID, createErr)
-		return
-	}
-	rec.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	if err := m.writeRecord(rec); err != nil {
-		log.Printf("manager: recover %s: update record: %v", rec.SessionID, err)
-	}
-
-	m.reattachSession(rec.SessionID) // attaches PTY, registers tracker/parser, streams, polls
-
-	// reattachSession has no return value; it leaves m.sessions[id] unset if the
-	// PTY failed to open. A nil session here means recovery did not actually take
-	// hold — the record stays on disk so the next reconnect retries.
-	m.mu.Lock()
-	sess := m.sessions[rec.SessionID]
-	m.mu.Unlock()
-	if sess == nil {
-		log.Printf("manager: recover %s: reattach failed; will retry on next reconnect", rec.SessionID)
-		return
-	}
-
-	log.Printf("manager: recovered session %s (resume=%v)", rec.SessionID, resume)
-
-	if !resume {
-		m.queueInitialPrompt(rec.SessionID, rec.InitialPrompt)
-	}
-}
-
-func (m *Manager) handleSendInput(raw []byte) {
-	var msg protocol.SendInput
-	if err := json.Unmarshal(raw, &msg); err != nil {
-		log.Printf("manager: bad send_input: %v", err)
-		return
-	}
-	m.mu.Lock()
-	sess, ok := m.sessions[msg.SessionID]
-	m.mu.Unlock()
-	if !ok {
-		log.Printf("manager: send_input for unknown session %s", msg.SessionID)
-		return
-	}
-
-	// Data is base64 encoded by the sender.
-	data, err := base64.StdEncoding.DecodeString(msg.Data)
-	if err != nil {
-		log.Printf("manager: send_input bad base64: %v", err)
-		return
-	}
-
-	// claude runs directly as the tmux pane's process (no shell in between), so
-	// there's no job-control layer to "fg" it back from a SIGTSTP. Ctrl+Z (0x1A)
-	// has wedged the Ink TUI's raw-mode input handling in practice, so drop it
-	// rather than forward it.
-	data = bytes.ReplaceAll(data, []byte{0x1a}, nil)
-	if len(data) == 0 {
-		return
-	}
-
-	// State is derived from screen snapshots, so we don't nudge it here: the next
-	// poll reflects whatever the input produced (a turn starting → running, or
-	// just keystrokes echoing at an idle prompt → still idle).
-	if err := sess.Write(data); err != nil {
-		log.Printf("manager: send_input write error: %v", err)
-	}
-}
-
-// injectBytes strips CR/LF from text and appends exactly one \r (the Enter byte)
-// so the resulting bytes, when written to the PTY, submit the text as a new user
-// turn in Claude. Stripping is critical: an embedded newline would submit early,
-// splitting the message across two separate turns.
-func injectBytes(text string) []byte {
-	stripped := strings.NewReplacer("\r", "", "\n", "").Replace(text)
-	return []byte(stripped + "\r")
-}
-
-// handleInjectNoteReply handles the server→daemon inject_note_reply message.
-// If the session's current screen classifies as "idle", the reply is injected
-// immediately; otherwise it is stored in the single-slot pending map (latest-wins)
-// and flushed by startStatePoller on the next idle observation.
+// handleInjectNoteReply delivers a note reply as agent input.
 func (m *Manager) handleInjectNoteReply(raw []byte) {
 	var msg protocol.InjectNoteReply
 	if err := json.Unmarshal(raw, &msg); err != nil {
@@ -2099,72 +1335,6 @@ func (m *Manager) handleInjectNoteReply(raw []byte) {
 		return
 	}
 
-	m.mu.Lock()
-	sess, ok := m.sessions[msg.SessionID]
-	capFn := m.capturePaneFunc
-	m.mu.Unlock()
-
-	if !ok {
-		log.Printf("manager: inject_note_reply for unknown session %s", msg.SessionID)
-		return
-	}
-
-	// If we can't capture the screen (no capturePaneFunc in tests, or capture error),
-	// queue the reply conservatively so it is not lost.
-	if capFn == nil {
-		m.mu.Lock()
-		m.noteReplies[msg.SessionID] = msg.Text
-		m.mu.Unlock()
-		return
-	}
-	screen, err := capFn(msg.SessionID)
-	if err != nil {
-		log.Printf("manager: inject_note_reply capturePane %s: %v; queuing", msg.SessionID, err)
-		m.mu.Lock()
-		m.noteReplies[msg.SessionID] = msg.Text
-		m.mu.Unlock()
-		return
-	}
-
-	if classifyScreen(screen) == "idle" {
-		// Evict any stale queued reply before injecting so the state poller
-		// can't also flush it on the next idle tick (double-inject guard).
-		// Release the lock before sess.Write to avoid holding it across I/O.
-		m.mu.Lock()
-		delete(m.noteReplies, msg.SessionID)
-		m.mu.Unlock()
-		if err := sess.Write(injectBytes(msg.Text)); err != nil {
-			log.Printf("manager: inject_note_reply write %s: %v", msg.SessionID, err)
-		}
-		return
-	}
-
-	// Not idle (running or waiting) — queue latest-wins.
-	m.mu.Lock()
-	m.noteReplies[msg.SessionID] = msg.Text
-	m.mu.Unlock()
-}
-
-// flushPendingNoteReply pops and writes any pending note reply for id. It is
-// called by startStatePoller on each raw "idle" observation (not the debounced
-// StateTracker transition) so the reply lands promptly once the session is free.
-// Clear-on-consume: the slot is deleted before writing to prevent re-injection
-// on subsequent idle ticks even if Write fails.
-func (m *Manager) flushPendingNoteReply(id string) {
-	m.mu.Lock()
-	text, ok := m.noteReplies[id]
-	if ok {
-		delete(m.noteReplies, id)
-	}
-	sess := m.sessions[id]
-	m.mu.Unlock()
-
-	if !ok || sess == nil {
-		return
-	}
-	if err := sess.Write(injectBytes(text)); err != nil {
-		log.Printf("manager: flushPendingNoteReply write %s: %v", id, err)
-	}
 }
 
 func (m *Manager) handleKillSession(raw []byte) {
@@ -2206,6 +1376,8 @@ func (m *Manager) handleKillSession(raw []byte) {
 // One active worker per session, at most 64 overall. Never run lifecycle RPCs
 // on the socket pump that must receive their authenticated replies.
 func (m *Manager) killSession(id string) {
+	// Drop obsolete Terminal metadata on an explicit stop as well.
+	m.deleteRecord(id)
 	msg := protocol.KillSession{SessionID: id}
 	m.explorer.Unbind(id)
 
@@ -2230,124 +1402,16 @@ func (m *Manager) killSession(id string) {
 				return
 			}
 		}
-		if err := m.recoverWorkspaces(context.Background()); err != nil {
-			log.Printf("workspace cleanup retained: %v", err)
+		if err := service.RecoverSession(context.Background(), id, func(message protocol.SessionEnded) error { return m.client.Send(message) }); err != nil {
+			log.Printf("workspace %s cleanup retained: %v", id, err)
 		}
 	}
-	// Tear down the recovery record and the persistent tmux session
-	// unconditionally — even if we are not currently managing this session. A kill
-	// can arrive during the post-restart reconnect window, before ReattachSessions
-	// has re-registered the session; if we skipped this cleanup, the surviving
-	// record (or live tmux session) would resurrect a session the user explicitly
-	// killed on the next reconnect. Both calls are best-effort no-ops when the
-	// target is absent. tmux teardown is skipped when not tmux-backed (tests).
-	m.deleteRecord(msg.SessionID)
-	if len(m.config.Command) == 0 {
-		// Killing the persistent tmux session terminates the Claude process; the
-		// resulting EOF on any attached client PTY ends the session via streamSession.
-		killTmuxSession(msg.SessionID)
-	}
 
-	m.mu.Lock()
-	sess, ok := m.sessions[msg.SessionID]
-	m.mu.Unlock()
-	if !ok {
-		removeSessionAttachments(DaemonStateDir(), id)
-		log.Printf("manager: kill_session for unknown session %s (record and tmux cleared)", msg.SessionID)
-		return
-	}
-	sess.Kill()
 	removeSessionAttachments(DaemonStateDir(), id)
 }
 
-func (m *Manager) handleResizeSession(raw []byte) {
-	var msg protocol.ResizeSession
-	if err := json.Unmarshal(raw, &msg); err != nil {
-		log.Printf("manager: bad resize_session: %v", err)
-		return
-	}
-	// Ignore degenerate sizes (an unlaid-out terminal element's gridCount floor) so
-	// they can't shrink the pane and break state classification. Keep the last size.
-	if msg.Cols < minResizeCols || msg.Rows < minResizeRows {
-		log.Printf("manager: ignoring degenerate resize %dx%d for session %s", msg.Cols, msg.Rows, msg.SessionID)
-		return
-	}
-	m.mu.Lock()
-	sess, ok := m.sessions[msg.SessionID]
-	m.mu.Unlock()
-	if !ok {
-		log.Printf("manager: resize_session for unknown session %s", msg.SessionID)
-		return
-	}
-	if err := sess.Resize(msg.Cols, msg.Rows); err != nil {
-		log.Printf("manager: resize error: %v", err)
-	}
-	// Repaint after the resize settles to clear xterm residue (see scheduleRefresh).
-	m.scheduleRefresh(msg.SessionID)
-}
-
-// handleRequestScrollback captures the session's tmux scrollback and sends it to
-// the server (which fans it out to the requesting browser). This is the
-// authoritative source of scroll-back history — it works for full-screen /
-// alt-screen TUIs that the raw PTY-stream replay cannot reconstruct.
-func (m *Manager) handleRequestScrollback(raw []byte) {
-	var msg protocol.RequestScrollback
-	if err := json.Unmarshal(raw, &msg); err != nil {
-		log.Printf("manager: bad request_scrollback: %v", err)
-		return
-	}
-	m.mu.Lock()
-	_, ok := m.sessions[msg.SessionID]
-	fn := m.scrollbackFunc
-	modeFn := m.modeSyncFunc
-	m.mu.Unlock()
-	if !ok || fn == nil {
-		return
-	}
-	text, err := fn(msg.SessionID, msg.MaxLines)
-	if err != nil {
-		log.Printf("manager: scrollback capture %s: %v", msg.SessionID, err)
-		return
-	}
-	// Mode-sync preamble rides only on ModePrefix here — never as session_output.
-	// session_output is persisted to the event log and Seq-numbered by the PTY
-	// stream goroutine; session_scrollback is fan-out-only, exactly where a
-	// point-in-time snapshot like this belongs.
-	var modePrefix string
-	if modeFn != nil {
-		if seq := modeFn(msg.SessionID); seq != "" {
-			modePrefix = base64.StdEncoding.EncodeToString([]byte(seq))
-		}
-	}
-	_ = m.client.Send(protocol.SessionScrollback{
-		Type:       "session_scrollback",
-		SessionID:  msg.SessionID,
-		Data:       base64.StdEncoding.EncodeToString([]byte(text)),
-		ModePrefix: modePrefix,
-	})
-}
-
-// scheduleRefresh (re)arms a per-session debounce timer that, when it fires,
-// forces a full tmux repaint of the session's client. Each resize resets the
-// timer, so a burst coalesces into one repaint after the resizes stop. Safe to
-// call for non-tmux sessions: the default refreshFunc no-ops when no tmux client
-// exists, and it is nil in unit tests unless injected.
-func (m *Manager) scheduleRefresh(id string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if t := m.refreshTimers[id]; t != nil {
-		t.Stop()
-	}
-	m.refreshTimers[id] = time.AfterFunc(m.refreshDebounce, func() {
-		m.mu.Lock()
-		delete(m.refreshTimers, id)
-		fn := m.refreshFunc
-		m.mu.Unlock()
-		if fn != nil {
-			fn(id)
-		}
-	})
-}
+func (m *Manager) handleResizeSession(_ []byte)     {}
+func (m *Manager) handleRequestScrollback(_ []byte) {}
 
 // Kept separate from legacy install-wide discovery: workspace reconnect acts on
 // authenticated session records and must not sweep unrelated sandbox instances.

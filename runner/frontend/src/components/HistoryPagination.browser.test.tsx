@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { page, userEvent } from 'vitest/browser'
@@ -8,7 +9,7 @@ import '../index.css'
 vi.mock('../ws', () => import('../test/wsMock'))
 vi.mock('../apiFetch', () => ({ apiFetch: vi.fn() }))
 
-it.each([390, 3840].flatMap(width => ['earlier', 'newer'].map(direction => ({ width, direction }))))(
+it.each(browserWidths([390, 3840]).flatMap(width => ['earlier', 'newer'].map(direction => ({ width, direction }))))(
   'keeps keyboard focus through the $direction endpoint at $width px', async ({ width, direction }) => {
     await page.viewport(width, width === 390 ? 844 : 2160)
     const now = new Date('2026-10-15T12:00:00Z')

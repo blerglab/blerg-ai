@@ -25,3 +25,5 @@ func (d *DiskGit) Head(context.Context, Member) (string, error)       { return "
 func (d *DiskGit) Push(context.Context, Member, string, string) error { return ErrPlan }
 
 func (d *DiskGit) Identities() []MemberIdentity { return nil }
+
+func (d *DiskGit) SetWorkBranch(string) error { return ErrPlan }

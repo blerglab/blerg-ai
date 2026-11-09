@@ -50,11 +50,17 @@ func (a *API) HandleShellCapability(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	available := false
+	if a.shellRuntime != nil {
+		if err := a.checkShellSessionOwner(r.Context(), actor, r.PathValue("id")); ownershell.Unknown(err) {
+			shellError(w, err)
+			return
+		}
+	}
 	if a.shellRuntime != nil && a.ownsShellSession(r.Context(), actor, r.PathValue("id")) {
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()
 		b, err := (shellResolver{a, a.shellRuntime}).Resolve(ctx, r.PathValue("id"))
-		if ownershell.Busy(err) && b.Owner == actor.Owner {
+		if ownershell.Unknown(err) && b.Owner == actor.Owner {
 			// Not a "no": the browser keeps its current shells and asks again shortly.
 			shellError(w, err)
 			return
@@ -72,6 +78,10 @@ func (h *Hub) workspaceCapabilities() protocol.WorkspaceCapabilities {
 	caps := protocol.EnabledWorkspaceCapabilities()
 	if !h.runtimeShellReady.Load() {
 		caps.ShellVersion = 0
+	} else if h.shellCustodyReady.Load() {
+		caps.ShellPersistence = 2
+		caps.PersistentHost = caps.LinuxHost
+		caps.PersistentSandbox = false
 	}
 	return caps
 }

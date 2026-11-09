@@ -4,10 +4,10 @@ package hostgit
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"os"
 	"os/exec"
-	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -50,60 +50,6 @@ func TestDarwinDiagnosticJoinsBlockedSampleAndProcess(t *testing.T) {
 		if !found {
 			t.Errorf("missing lifecycle diagnostic %q in %q", stage, stages)
 		}
-	}
-}
-
-func TestDarwinRSSCommand(t *testing.T) {
-	cmd := darwinRSSCommand(t.Context(), 12345)
-	if cmd.Path != "/bin/ps" || !reflect.DeepEqual(cmd.Args, []string{"/bin/ps", "-o", "rss=", "-g", "12345"}) {
-		t.Fatalf("not a fixed Darwin process-group sample: %v", cmd)
-	}
-	if !reflect.DeepEqual(cmd.Env, []string{"PATH=/usr/bin:/bin", "LC_ALL=C"}) || cmd.WaitDelay != memorySampleTimeout {
-		t.Fatalf("unbounded/inherited sample environment: %v", cmd)
-	}
-}
-
-func TestDarwinRSSParser(t *testing.T) {
-	for _, raw := range []string{"RSS\n10\n", "-1\n", "1 2\n", "1.5\n", "18446744073709551615\n1\n", "18446744073709551616\n"} {
-		if _, err := parseGroupRSS(raw); err == nil {
-			t.Errorf("accepted invalid RSS: %q", raw)
-		}
-	}
-	if rss, err := parseGroupRSS("  153600\n\t153600\n 0\n"); err != nil || rss != 300<<10 {
-		t.Fatalf("did not sum helpers in KiB: %d %v", rss, err)
-	}
-}
-
-func TestDarwinRSSObservationBounds(t *testing.T) {
-	for _, tc := range []struct {
-		name, script string
-		want         uint64
-		fail         bool
-	}{
-		{"group", "printf ' 100\\n 200\\n'", 300, false},
-		{"departed", "exit 1", 0, false},
-		{"permission", "printf denied >&2; exit 1", 0, true},
-		{"failure", "exit 2", 0, true},
-		{"success-with-error", "printf failure >&2; exit 0", 0, true},
-		{"empty-success", "exit 0", 0, true},
-		{"malformed", "printf 'rss\\n'", 0, true},
-		{"overflow", "i=0; while [ $i -lt 20000 ]; do printf '1234\\n'; i=$((i+1)); done", 0, true},
-		{"blocked", "exec /bin/sleep 30", 0, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			start := time.Now()
-			rss, err := readGroupRSS(t.Context(), 12345, func(ctx context.Context, pgid int) *exec.Cmd {
-				if pgid != 12345 {
-					t.Errorf("sampled wrong process group: %d", pgid)
-				}
-				cmd := exec.CommandContext(ctx, "/bin/sh", "-c", tc.script)
-				cmd.WaitDelay = memorySampleTimeout
-				return cmd
-			})
-			if (err != nil) != tc.fail || rss != tc.want || time.Since(start) > time.Second {
-				t.Fatalf("RSS=%d err=%v elapsed=%s", rss, err, time.Since(start))
-			}
-		})
 	}
 }
 
@@ -166,7 +112,7 @@ func TestDarwinMemoryRefusalKillsGroup(t *testing.T) {
 				}
 				joined = make(chan error, 1)
 				go func() { joined <- helper.Wait() }()
-				return watchGroupMemory(cmd, memoryLimitKB(o), func(_ context.Context, pgid int) (uint64, error) {
+				return watchGroupMemory(cmd, memoryLimitKB(o), func(ctx context.Context, pgid int) (uint64, error) {
 					if pgid != cmd.Process.Pid {
 						t.Errorf("watching wrong group: %d", pgid)
 					}
@@ -174,7 +120,15 @@ func TestDarwinMemoryRefusalKillsGroup(t *testing.T) {
 						return 0, errors.New("injected sample failure")
 					}
 					// Each worker is below the budget; their sum must be refused.
-					return parseGroupRSS("153600\n153600\n")
+					return nativeGroupRSS(ctx, cmd.Process.Pid, func(call, _, _ int, buf []byte) (int, error) {
+						if call == procInfoListPIDs {
+							binary.LittleEndian.PutUint32(buf, 10)
+							binary.LittleEndian.PutUint32(buf[4:], 11)
+							return 8, nil
+						}
+						binary.LittleEndian.PutUint64(buf[8:], 150<<20)
+						return len(buf), nil
+					})
 				})
 			})
 			want, code := ErrMemoryLimit, 126

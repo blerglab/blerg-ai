@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install/desktop/daemon/install.sh — install, remove, or check the blerg-runner
 # daemon as a host service. The daemon is NOT containerized: it drives your
-# local `claude` CLI and tmux directly, so it has to run on the host, as you.
+# local engine CLI directly, so it has to run on the host, as you.
 #
 # Supported: systemd --user (Linux), launchd (macOS). Anything else: see
 # ../DAEMON.md for the manual (run-it-in-a-terminal) fallback.
@@ -91,6 +91,9 @@ case "$CMD" in
     exit 1 ;;
 esac
 shift
+case "$CMD" in
+  install|preflight|import-credential) require_desktop_python ;;
+esac
 if [ "$CMD" = import-credential ]; then
   [ "$#" -eq 1 ] || { usage >&2; exit 1; }
   python3 "$PWD/enroll.py" --import "$1" "${BLERG_RUNNER_DAEMON_STATE_DIR:-$HOME/.blerg-runner-daemon}"
@@ -282,7 +285,7 @@ EOF
   elif command -v docker >/dev/null 2>&1; then
     # No suitable host go — build inside a matching container instead. Only
     # the BUILD is containerized; the resulting binary runs directly on the
-    # host (it needs host tmux/claude/network). It runs as you (--user), like
+    # host (it needs host engine login and network). It runs as you (--user), like
     # scripts/go.sh, so bin/ stays yours: that needs a writable HOME and
     # module/build caches, which the image doesn't give a non-root uid.
     mkdir -p "$HOME/.cache/blerg-go" "$HOME/.cache/blerg-gocache"
@@ -401,6 +404,8 @@ put_binary_in_place() {
   if [ "$1" = 1 ]; then
     BLERG_RUNNER_DAEMON_STATE_DIR="$(daemon_state_dir)" "$NEW_BIN_PATH" prepare-update || true
   fi
+  # Replacing the pathname leaves a running keeper's executable inode usable.
+  # Keeper authentication, custody and replacement are background maintenance.
   mv -f "$NEW_BIN_PATH" "$BIN_PATH"
 }
 
@@ -412,6 +417,21 @@ put_binary_in_place() {
 # the daemon stopped unexpectedly. Nothing when no daemon was running. Never
 # fatal: a marker that cannot be written only changes those words.
 daemon_state_dir() { local configured; configured="${BLERG_RUNNER_DAEMON_STATE_DIR:-$(env_val BLERG_RUNNER_DAEMON_STATE_DIR)}"; printf '%s' "${configured:-$HOME/.blerg-runner-daemon}"; }
+INSTALL_FINISHED=0
+install_exit() {
+  local rc=$?
+  if declare -F remove_token_check_files >/dev/null; then remove_token_check_files; fi
+  if [ "$CMD" = install ] && [ "$INSTALL_FINISHED" = 0 ]; then
+    if [ -x "$BIN_PATH" ]; then
+      BLERG_RUNNER_DAEMON_STATE_DIR="$(daemon_state_dir)" "$BIN_PATH" cancel-update >/dev/null 2>&1 || true
+    fi
+    if [ "$rc" -ne 0 ]; then
+      blerg_step "Daemon install failed (exit $rc); update handoff canceled. Check the preceding build, file operation, or daemon service error and retry. Keeper setup warnings do not prevent daemon installation."
+    fi
+  fi
+  return 0
+}
+trap install_exit EXIT
 # Bind the original live tool call before a long build or a detached launch can
 # outlive it. The running daemon observes the helper's actual process ancestry.
 if [ "$CMD" = install ] && [ -x "$BIN_PATH" ]; then
@@ -524,7 +544,6 @@ RESTART_MARK=""
 remove_token_check_files() {
   rm -f "${TOKEN_CHECK_HDR:-}" "${TOKEN_CHECK_BODY:-}" "${TOKEN_CHECK_BODY:+$TOKEN_CHECK_BODY.err}" "${RESTART_MARK:-}"
 }
-trap remove_token_check_files EXIT
 
 token_refused_box() { # what was refused, where the token comes from, how to fix it
   blerg_box "daemon token refused" <<EOF
@@ -695,6 +714,8 @@ require_env_file() {
 
 render_placeholders() {
   local service_token="$DAEMON_TOKEN"
+  local keeper_cgroup="${BLERG_HOST_SHELL_CGROUP:-$(env_val BLERG_HOST_SHELL_CGROUP)}"
+  [ "$keeper_cgroup" = 1 ] || keeper_cgroup=0
   # Person credentials are loaded only from the private state file.
   case "$service_token" in bdt_*) service_token="" ;; esac
   # Reads a template on stdin, writes the substituted result to stdout.
@@ -703,6 +724,8 @@ render_placeholders() {
       -e "s#__SERVER_URL__#$SERVER_URL#g" \
       -e "s#__DAEMON_TOKEN__#$service_token#g" \
       -e "s#__REPOS_ROOT__#$REPOS_ROOT#g" \
+      -e "s#__DAEMON_STATE_DIR__#$(daemon_state_dir)#g" \
+      -e "s#__HOST_SHELL_CGROUP__#$keeper_cgroup#g" \
       -e "s#__LOG_DIR__#$LOG_DIR#g"
 }
 
@@ -711,7 +734,7 @@ render_placeholders() {
 # putting one in install/desktop/.env and re-running `install.sh install`
 # (or blerg-up.sh) bakes it into the unit/plist. The daemon itself never
 # reads .env — only its service environment.
-OPTIONAL_DAEMON_ENV="BLERG_RUNNER_DAEMON_STATE_DIR BLERG_RUNNER_DAEMON_NAME BLERG_RUNNER_PROVISION_CLAUDE_MD BLERG_RUNNER_ALLOW_HOST_CREDENTIAL_CLONE BLERG_RUNNER_CLAUDE_USAGE"
+OPTIONAL_DAEMON_ENV="BLERG_RUNNER_DAEMON_STATE_DIR BLERG_RUNNER_DAEMON_NAME BLERG_RUNNER_PROVISION_CLAUDE_MD BLERG_RUNNER_ALLOW_HOST_CREDENTIAL_CLONE BLERG_RUNNER_CLAUDE_USAGE BLERG_HOST_SHELL_CGROUP"
 daemon_extra_env() {
   local k v
   if [ -n "${OAUTH_TOKEN:-}" ]; then printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$OAUTH_TOKEN"; fi
@@ -746,7 +769,8 @@ xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>
 # daemon even after you log in to it. install and refresh-path give the service
 # your login shell's PATH instead, merged with the usual defaults: only
 # absolute folders made of plain path characters (no quotes, spaces, %, $ or
-# ..), each once, at most 64. A PATH holds folder names, never secrets.
+# ..), each once, at most 64. Interior repeated slashes are normalized before
+# filtering. A PATH holds folder names, never secrets.
 
 # login_shell: your login shell ($SHELL, else your passwd entry), else /bin/sh.
 login_shell() {
@@ -787,8 +811,10 @@ login_shell_path() {
 # merge_service_path PATH...: the colon lists, in order, as one clean PATH.
 merge_service_path() {
   printf '%s\n' "$@" | tr ':' '\n' | awk '
-    { sub(/\/+$/, "") }
-    /^\/[A-Za-z0-9\/._+@,~-]*$/ && $0 !~ /\/\.\.(\/|$)/ && $0 !~ /\/\// && !seen[$0]++ && n < 64 { out = out (n++ ? ":" : "") $0 }
+    # Leading // has implementation-defined meaning; keep rejecting it.
+    /^\/\// { next }
+    { gsub(/\/+/, "/"); sub(/\/$/, "") }
+    /^\/[A-Za-z0-9\/._+@,~-]*$/ && $0 !~ /\/\.\.(\/|$)/ && !seen[$0]++ && n < 64 { out = out (n++ ? ":" : "") $0 }
     END { print out }'
 }
 
@@ -1123,7 +1149,19 @@ EOF
   render_placeholders < "$SERVICE_NAME.service.tmpl" | replace_marker_line __EXTRA_ENV__ "$extra_lines" > "$UNIT_PATH"
   chmod 600 "$UNIT_PATH"
 
+  # The keeper is a mode of the same atomic-installed binary. Init preserves
+  # existing identities and refuses partial/corrupt state instead of rotating.
+  if ! BLERG_RUNNER_DAEMON_STATE_DIR="$(daemon_state_dir)" "$BIN_PATH" shell-keeper init; then
+    blerg_step "Warning: host shells are unavailable because keeper initialization failed. The daemon and agents will still start. Preserve keeper keys and live custody; follow the repair instructions above, then retry keeper setup."
+  fi
+  render_placeholders < blerg-shell-keeper.service.tmpl > "$UNIT_DIR/blerg-shell-keeper.service"
+  chmod 600 "$UNIT_DIR/blerg-shell-keeper.service"
+
   systemctl --user daemon-reload
+  # Queue keeper startup independently; daemon restart never waits for readiness.
+  if ! systemctl --user enable --now --no-block blerg-shell-keeper.service; then
+    blerg_step "Warning: host shells are unavailable because the keeper could not start. The daemon and agents will still start. Preserve keeper keys and live custody; repair the keeper service and retry."
+  fi
   systemctl --user enable "$SERVICE_NAME.service"
   note_planned_restart
   mark_restart
@@ -1161,7 +1199,30 @@ remove_provisioned_links() {
   local pair link rel got dir
   for pair in \
     "$HOME/.local/bin/blerg-runner|.claude/skills/session-messaging/blerg-runner" \
-    "$HOME/.claude/skills/managing-tickets|skills/managing-tickets"; do
+    "$HOME/.claude/skills/managing-tickets|skills/managing-tickets" \
+    "$HOME/.codex/skills/managing-tickets|skills/managing-tickets" \
+    "$HOME/.agents/skills/managing-tickets|skills/managing-tickets" \
+    "$HOME/.hermes/skills/managing-tickets|skills/managing-tickets" \
+    "$HOME/.claude/skills/coordinating|skills/coordinating" \
+    "$HOME/.codex/skills/coordinating|skills/coordinating" \
+    "$HOME/.agents/skills/coordinating|skills/coordinating" \
+    "$HOME/.hermes/skills/coordinating|skills/coordinating" \
+    "$HOME/.claude/skills/test-driven-development|skills/test-driven-development" \
+    "$HOME/.codex/skills/test-driven-development|skills/test-driven-development" \
+    "$HOME/.agents/skills/test-driven-development|skills/test-driven-development" \
+    "$HOME/.hermes/skills/test-driven-development|skills/test-driven-development" \
+    "$HOME/.claude/skills/ux-design|skills/ux-design" \
+    "$HOME/.claude/skills/planning|skills/planning" \
+    "$HOME/.codex/skills/ux-design|skills/ux-design" \
+    "$HOME/.codex/skills/planning|skills/planning" \
+    "$HOME/.agents/skills/ux-design|skills/ux-design" \
+    "$HOME/.agents/skills/planning|skills/planning" \
+    "$HOME/.hermes/skills/ux-design|skills/ux-design" \
+    "$HOME/.hermes/skills/planning|skills/planning" \
+    "$HOME/.claude/skills/test-timing|skills/test-timing" \
+    "$HOME/.codex/skills/test-timing|skills/test-timing" \
+    "$HOME/.agents/skills/test-timing|skills/test-timing" \
+    "$HOME/.hermes/skills/test-timing|skills/test-timing"; do
     link="${pair%%|*}"; rel="${pair#*|}"
     [ -L "$link" ] || continue
     got="$(readlink "$link")"
@@ -1180,7 +1241,9 @@ uninstall_systemd() {
   # If Windows is inaccessible, leave the service installed and explain repair.
   if is_wsl; then wsl_startup disable || return 1; fi
   systemctl --user disable --now "$SERVICE_NAME.service" 2>/dev/null || true
+  systemctl --user disable --now blerg-shell-keeper.service 2>/dev/null || true
   rm -f "$HOME/.config/systemd/user/$SERVICE_NAME.service"
+  rm -f "$HOME/.config/systemd/user/blerg-shell-keeper.service"
   systemctl --user daemon-reload
   remove_provisioned_links
   blerg_ok "Removed."
@@ -1395,7 +1458,7 @@ ensure_systemd_user_session() {
   if command -v sudo >/dev/null 2>&1; then
     blerg_step "No systemd --user session for this account — starting one (needs sudo)..."
     sudo systemctl start "user@$(id -u).service" >/dev/null 2>&1 || true
-    sudo loginctl enable-linger "$USER" >/dev/null 2>&1 || true
+    sudo loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || true
   fi
 
   systemctl --user show-environment >/dev/null 2>&1 && return 0
@@ -1471,3 +1534,4 @@ EOF
     exit 1
     ;;
 esac
+INSTALL_FINISHED=1

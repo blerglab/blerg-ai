@@ -17,7 +17,7 @@ export default function CopyMessage({ text }: { text: string }) {
     <button
       ref={btn}
       type="button"
-      className={`msg-copy${state === 'idle' ? '' : ` is-${state}`}`}
+      className={`msg-copy${state === 'copied' ? ' is-copied' : state === 'failed' ? ' is-failed' : ''}`}
       aria-label={label}
       title={label}
       data-nocopy=""

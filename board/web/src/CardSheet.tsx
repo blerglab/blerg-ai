@@ -1,3 +1,6 @@
+import { announceBoardMove } from '../../../packages/board/columnVisibility';
+import { CardRelease } from "./ReleasePlanning";
+import { EstimateEditor } from "./EstimateEditor";
 import { modelDisplayName } from "@blerglab/chat";
 import { CardOrigin, RestrictedMarker } from "./CardOrigin";
 import { CardLinks, SafeAnchor } from "./CardLinks";
@@ -69,6 +72,8 @@ export function ReviewSection({ card, events, columns, deployURL, checks, onDone
     String(e.data?.text ?? "").toLowerCase().startsWith("review guide"),
   ) ?? comments[comments.length - 1];
   const prs = (card.links ?? []).filter((l) => l.kind === "pr");
+  const branch = card.fields.work_branch ?? card.fields.branch;
+  const branchLinks = (card.links ?? []).filter(l => l.kind === "branch");
   const doneCol = columns.find((c) => c.is_terminal) ??
     columns.find((c) => c.name.toLowerCase().includes("done"));
   const workCol = columns.find((c) => c.name.toLowerCase().includes("progress")) ?? columns[0];
@@ -146,15 +151,16 @@ export function ReviewSection({ card, events, columns, deployURL, checks, onDone
           No review guide was posted — the trail and PR below are what there is.
         </p>
       )}
+      {branchLinks.map(l => <p key={l.url}><span className="chip">branch</span>{" "}<SafeAnchor href={l.url}>{l.label || l.url}</SafeAnchor></p>)}
       {prs.map((l) => (
         <p key={l.url}><span className="chip">pr</span>{" "}
           <SafeAnchor href={l.url}>{l.label || l.url}</SafeAnchor></p>
       ))}
-      <p>
+      {current && !["stopped", "error"].includes(current.lifecycle) ? <p>
         <Link className="btn ghost small" to={`/boards/${card.board_id}/cards/${card.number}/diff`}>
           View diff in blerg-board
         </Link>
-      </p>
+      </p> : <p>{current ? "Local diffs are unavailable because the workspace has ended." : "Open a workspace to view local diffs."}{current && <> {typeof branch === "string" && branch.trim() ? <>Work branch: <code>{branch}</code>.</> : branchLinks.length === 0 ? <>The work branch was not recorded on this card.</> : null} {prs.length > 0 && "See the PR above for the final branch."}</>}</p>}
       {deployURL && (
         <p><SafeAnchor className="live-chip" href={deployURL}>● LIVE — verify there ↗</SafeAnchor></p>
       )}
@@ -162,9 +168,9 @@ export function ReviewSection({ card, events, columns, deployURL, checks, onDone
         <div style={{ marginTop: 10 }}>
         <p className="accept-means">
           {hasPR
-            ? <>Accept will: merge the PR into main (deleting its branch), move the card to {doneCol?.name ?? "done"}, and stop the card's sessions. If the PR no longer merges cleanly, nothing merges — the card goes back to {workCol?.name ?? "in progress"} for a worker to resolve the conflict.</>
-            : <>Accept will: mark the card accepted, move it to {doneCol?.name ?? "done"}, and stop the card's sessions. No PR is attached — nothing merges.</>}
-          {" "}Reject sends your feedback to the working session and moves the card back to {workCol?.name ?? "in progress"}.
+            ? <>Accept will: merge the PR into main (deleting its branch), move the card to {doneCol?.name ?? "done"}, and stop the card's workspaces. If the PR no longer merges cleanly, nothing merges — the card goes back to {workCol?.name ?? "in progress"} for a worker to resolve the conflict.</>
+            : <>Accept will: mark the card accepted, move it to {doneCol?.name ?? "done"}, and stop the card's workspaces. No PR is attached — nothing merges.</>}
+          {" "}Reject sends your feedback to the worker and moves the card back to {workCol?.name ?? "in progress"}.
         </p>
         {me?.is_admin ? (
           <div className="row">
@@ -252,6 +258,7 @@ export function CardSheet({ card, board, columns, onClose }: {
 }) {
   const [events, setEvents] = useState<CardEvent[]>([]);
   const [full, setFull] = useState<Card>(card);
+  const me = useMe();
   const isMirrored = !!board.driven_by;
   const { sessions } = useCardSessions(card.id);
   const hasSession = sessions.length > 0;
@@ -326,7 +333,7 @@ export function CardSheet({ card, board, columns, onClose }: {
             {hasSession && !isMirrored && (
               <Link className="btn ghost small session-link-mobile"
                 to={`/boards/${board.id}/cards/${full.number}/session`}>
-                Session →
+                Workspace →
               </Link>
             )}
             <button className="btn ghost small" onClick={onClose}>Close</button>
@@ -339,7 +346,7 @@ export function CardSheet({ card, board, columns, onClose }: {
             {full.size && <span className="chip">{full.size}</span>}
             {full.model && (
               <span className="chip mono"
-                title={`This card's sessions use ${full.model} instead of the board's model`}>
+                title={`This card's workspaces use ${full.model} instead of the board's model`}>
                 {modelDisplayName(full.model)}
               </span>
             )}
@@ -350,6 +357,8 @@ export function CardSheet({ card, board, columns, onClose }: {
             {full.gate_flag && <span className={`dot ${full.gate_flag}`} title={full.gate_flag} />}
           </div>
 
+          {!isMirrored && (me?.is_admin || me?.capabilities?.includes("card.write")) && <CardRelease card={full} onChange={setFull} />}
+          {!isMirrored && <EstimateEditor card={full} onChange={setFull} />}
           {!isMirrored && (
             <label className="automerge-toggle"
               title="when the adversarial review approves this card's PR, merge it and move to done without waiting for you">
@@ -367,7 +376,7 @@ export function CardSheet({ card, board, columns, onClose }: {
             <section className="review-box" style={{ borderColor: "var(--stone)" }}>
               <p className="adv-banner working" style={{ margin: 0 }}>
                 ⟳ Revision round {advAll.length + 1} — the adversarial review requested
-                changes and the authoring session is addressing the findings. It returns
+                changes and the worker is addressing the findings. It returns
                 to review when done.
               </p>
               <details className="adv-details">
@@ -428,7 +437,7 @@ export function CardSheet({ card, board, columns, onClose }: {
             </section>
           )}
 
-          {!isMirrored && <GitPanel cardId={full.id} boardId={board.id} cardNumber={full.number} />}
+          {!isMirrored && <GitPanel cardId={full.id} boardId={board.id} cardNumber={full.number} summary={full.commit_summary} />}
 
           {!isMirrored && <StatsPanel cardId={full.id} />}
 
@@ -438,7 +447,7 @@ export function CardSheet({ card, board, columns, onClose }: {
 
           {!isMirrored && !hasSession && (
             <section>
-              <h4>Session</h4>
+              <h4>Workspace</h4>
               <Conversation cardId={full.id} />
             </section>
           )}
@@ -486,18 +495,18 @@ export function CardSheet({ card, board, columns, onClose }: {
         {hasSession && !isMirrored && !sessCollapsed && (
           <div className="sheet-session">
             <div className="row" style={{ margin: "0 0 8px" }}>
-              <h4 className="sign" style={{ fontSize: 12, color: "var(--fog-dim)", margin: 0 }}>Session</h4>
+              <h4 className="sign" style={{ fontSize: 12, color: "var(--fog-dim)", margin: 0 }}>Workspace</h4>
               <span className="spacer" />
               <button className="btn ghost small" onClick={() => setCollapsed(true)}
-                title="collapse the session panel — the session keeps running">⟫</button>
+                title="collapse the workspace panel — the workspace keeps running">⟫</button>
             </div>
             <Conversation cardId={full.id} />
           </div>
         )}
         {hasSession && !isMirrored && sessCollapsed && (
           // button-guard-ignore: the pull tab shows only at 1000px and wider, where .sess-tab (styles.css) styles it.
-          <button className="sess-tab" onClick={() => setCollapsed(false)} title="show the session panel">
-            ⟪ session
+          <button className="sess-tab" onClick={() => setCollapsed(false)} title="show the workspace panel">
+            ⟪ workspace
           </button>
         )}
       </div>
@@ -517,6 +526,7 @@ function FieldRow({ def, value }: { def: FieldDef; value: unknown }) {
 function MoveButton({ card, column, onDone }: { card: Card; column: Column; onDone: () => void }) {
   const move = async () => {
     await api(`/api/cards/${card.id}/move`, { json: { column_id: column.id } });
+    announceBoardMove(card.board_id, column.id, card.reference || `#${card.number}`);
     onDone();
   };
   return <button className="btn ghost small" onClick={move}>→ {column.name}</button>;

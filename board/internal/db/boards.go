@@ -15,12 +15,15 @@ import (
 )
 
 type Board struct {
-	Key              string   `json:"key"`
-	SuggestedKey     string   `json:"suggested_key"`
-	KeyAliases       []string `json:"key_aliases"`
-	RunRuntime       string   `json:"run_runtime"`
-	RunDaemonID      string   `json:"run_daemon_id"`
-	RunTargetAccount string   `json:"-"`
+	AutoArchiveKeepTags []string `json:"auto_archive_keep_tags"`
+	AutoArchiveDoneDays int      `json:"auto_archive_done_days"`
+	Key                 string   `json:"key"`
+	SuggestedKey        string   `json:"suggested_key"`
+	KeyAliases          []string `json:"key_aliases"`
+	RuntimeTargetID     *string  `json:"runtime_target_id,omitempty"`
+	RunRuntime          string   `json:"run_runtime"`
+	RunDaemonID         string   `json:"run_daemon_id"`
+	RunTargetAccount    string   `json:"-"`
 	// RunHostAckAt is when the automation owner acknowledged a host ("This machine") target:
 	// it runs unattended and unsandboxed as that desktop's person. Set only for a host target.
 	RunHostAckBy            string          `json:"-"`
@@ -110,21 +113,21 @@ func TerminalColumnSQL(alias string) string {
 	return `coalesce(` + alias + `.is_terminal OR lower(` + alias + `.name) LIKE '%done%', false)`
 }
 
-const boardCols = `board_key, ARRAY(SELECT key FROM board_keys WHERE board_id=boards.id ORDER BY key), effort, reviewer_effort, discuss_effort, chat_effort, id, name, description, default_runner, deploy_url, git_base, model, reviewer_model,
+const boardCols = `auto_archive_keep_tags, auto_archive_done_days, board_key, ARRAY(SELECT key FROM board_keys WHERE board_id=boards.id ORDER BY key), effort, reviewer_effort, discuss_effort, chat_effort, id, name, description, default_runner, deploy_url, git_base, model, reviewer_model,
 	discuss_model, chat_model, field_schema, require_repo,
 	gate_enabled, gate_on_unavailable, gate_on_dispute, driven_by, concurrency, ci_policy,
 	automation_engine, automation_token <> '', automation_token_expires_at, automation_account_id,
 	automation_token_minted_id IS NOT NULL,
-	to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), include_component_version, run_runtime, run_daemon_id, run_target_account,
+	to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), include_component_version, run_runtime, runtime_target_id, run_daemon_id, run_target_account,
 	run_host_ack_by, to_char(run_host_ack_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`
 
 func scanBoard(row pgx.Row) (Board, error) {
 	var b Board
-	err := row.Scan(&b.Key, &b.KeyAliases, &b.Effort, &b.ReviewerEffort, &b.DiscussEffort, &b.ChatEffort, &b.ID, &b.Name, &b.Description, &b.DefaultRunner, &b.DeployURL, &b.GitBase, &b.Model, &b.ReviewerModel,
+	err := row.Scan(&b.AutoArchiveKeepTags, &b.AutoArchiveDoneDays, &b.Key, &b.KeyAliases, &b.Effort, &b.ReviewerEffort, &b.DiscussEffort, &b.ChatEffort, &b.ID, &b.Name, &b.Description, &b.DefaultRunner, &b.DeployURL, &b.GitBase, &b.Model, &b.ReviewerModel,
 		&b.DiscussModel, &b.ChatModel, &b.FieldSchema,
 		&b.RequireRepo, &b.GateEnabled, &b.GateOnUnavailable, &b.GateOnDispute, &b.DrivenBy, &b.Concurrency,
 		&b.CIPolicy, &b.AutomationEngine, &b.AutomationTokenSet, &b.AutomationTokenExpiresAt, &b.AutomationAccountID,
-		&b.AutomationTokenMinted, &b.CreatedAt, &b.UpdatedAt, &b.IncludeComponentVersion, &b.RunRuntime, &b.RunDaemonID, &b.RunTargetAccount,
+		&b.AutomationTokenMinted, &b.CreatedAt, &b.UpdatedAt, &b.IncludeComponentVersion, &b.RunRuntime, &b.RuntimeTargetID, &b.RunDaemonID, &b.RunTargetAccount,
 		&b.RunHostAckBy, &b.RunHostAckAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return b, ErrNotFound
@@ -133,7 +136,9 @@ func scanBoard(row pgx.Row) (Board, error) {
 }
 
 type BoardParams struct {
-	Key *string `json:"key"`
+	AutoArchiveKeepTags *[]string `json:"auto_archive_keep_tags"`
+	AutoArchiveDoneDays *int      `json:"auto_archive_done_days"`
+	Key                 *string   `json:"key"`
 	// Execution placement is accepted only through the owner-checked HTTP setting.
 	RunRuntime       *string `json:"-"`
 	RunDaemonID      *string `json:"-"`
@@ -400,6 +405,15 @@ func createBoard(ctx context.Context, pool *pgxpool.Pool, p BoardParams, before 
 	if err := checkBoardEfforts(&p); err != nil {
 		return Board{}, false, err
 	}
+	if err := checkKeepTags(p.AutoArchiveKeepTags); err != nil {
+		return Board{}, false, err
+	}
+	if p.DrivenBy != nil && *p.DrivenBy != "" && archiveDays(p.AutoArchiveDoneDays) > 0 {
+		return Board{}, false, mirrorRetentionError()
+	}
+	if err := checkArchiveDays(p.AutoArchiveDoneDays); err != nil {
+		return Board{}, false, err
+	}
 	if err := checkConcurrency(p.Concurrency); err != nil {
 		return Board{}, false, err
 	}
@@ -481,12 +495,12 @@ func insertBoardTx(ctx context.Context, tx pgx.Tx, p BoardParams, schema json.Ra
 		INSERT INTO boards (name, description, default_runner, deploy_url, git_base, model, reviewer_model,
 			discuss_model, chat_model,
 			field_schema, require_repo, gate_enabled, gate_on_unavailable, gate_on_dispute, driven_by,
-			concurrency, ci_policy, automation_engine, effort, reviewer_effort, discuss_effort, chat_effort, include_component_version)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+			concurrency, ci_policy, automation_engine, effort, reviewer_effort, discuss_effort, chat_effort, include_component_version, auto_archive_done_days, auto_archive_keep_tags)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
 		RETURNING `+boardCols,
 		p.Name, p.Description, p.DefaultRunner, p.DeployURL, gitBase, deref(p.Model), deref(p.ReviewerModel),
 		deref(p.DiscussModel), deref(p.ChatModel), schema,
-		requireRepo, gateEnabled, onUnavail, onDispute, p.DrivenBy, concurrency, ciPolicy, engine, deref(p.Effort), deref(p.ReviewerEffort), deref(p.DiscussEffort), deref(p.ChatEffort), p.IncludeComponentVersion != nil && *p.IncludeComponentVersion))
+		requireRepo, gateEnabled, onUnavail, onDispute, p.DrivenBy, concurrency, ciPolicy, engine, deref(p.Effort), deref(p.ReviewerEffort), deref(p.DiscussEffort), deref(p.ChatEffort), p.IncludeComponentVersion != nil && *p.IncludeComponentVersion, archiveDays(p.AutoArchiveDoneDays), archiveKeepTags(p.AutoArchiveKeepTags)))
 	if err != nil {
 		return Board{}, fmt.Errorf("insert board: %w", err)
 	}
@@ -531,6 +545,7 @@ func insertBoardTx(ctx context.Context, tx pgx.Tx, p BoardParams, schema json.Ra
 	cols := p.Columns
 	if len(cols) == 0 {
 		cols = []string{"inbox", "ready", "in progress", "done"}
+		p.TerminalColumns = append(p.TerminalColumns, "done")
 	}
 	rank := ""
 	for _, name := range cols {
@@ -627,6 +642,12 @@ func UpdateBoardWithAutomation(ctx context.Context, pool *pgxpool.Pool, id strin
 	if err := checkBoardEfforts(&p); err != nil {
 		return Board{}, nil, err
 	}
+	if err := checkKeepTags(p.AutoArchiveKeepTags); err != nil {
+		return Board{}, nil, err
+	}
+	if err := checkArchiveDays(p.AutoArchiveDoneDays); err != nil {
+		return Board{}, nil, err
+	}
 	if err := checkConcurrency(p.Concurrency); err != nil {
 		return Board{}, nil, err
 	}
@@ -654,6 +675,20 @@ func UpdateBoardWithAutomation(ctx context.Context, pool *pgxpool.Pool, id strin
 
 	if err := lockBoard(ctx, tx, id); err != nil {
 		return Board{}, nil, err
+	}
+	var driven string
+	var retention int
+	if err := tx.QueryRow(ctx, `SELECT coalesce(driven_by,''),auto_archive_done_days FROM boards WHERE id=$1`, id).Scan(&driven, &retention); err != nil {
+		return Board{}, nil, err
+	}
+	if p.DrivenBy != nil {
+		driven = *p.DrivenBy
+	}
+	if p.AutoArchiveDoneDays != nil {
+		retention = *p.AutoArchiveDoneDays
+	}
+	if driven != "" && retention > 0 {
+		return Board{}, nil, mirrorRetentionError()
 	}
 	if p.Key != nil {
 		if err := claimBoardKey(ctx, tx, id, *p.Key); err != nil {
@@ -771,6 +806,12 @@ func UpdateBoardWithAutomation(ctx context.Context, pool *pgxpool.Pool, id strin
 	}
 	if p.DrivenBy != nil {
 		add("driven_by", *p.DrivenBy)
+	}
+	if p.AutoArchiveKeepTags != nil {
+		add("auto_archive_keep_tags", archiveKeepTags(p.AutoArchiveKeepTags))
+	}
+	if p.AutoArchiveDoneDays != nil {
+		add("auto_archive_done_days", *p.AutoArchiveDoneDays)
 	}
 	if p.Concurrency != nil {
 		add("concurrency", *p.Concurrency)
@@ -1102,4 +1143,44 @@ func deref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+func archiveDays(n *int) int {
+	if n == nil {
+		return 0
+	}
+	return *n
+}
+func checkArchiveDays(n *int) error {
+	if n != nil && (*n < 0 || *n > 36500) {
+		return &FieldError{Key: "auto_archive_done_days", Msg: "must be between 0 and 36500 days (0 disables automatic archiving)"}
+	}
+	return nil
+}
+
+func archiveKeepTags(tags *[]string) []string {
+	if tags == nil {
+		return []string{"to-test"}
+	}
+	if *tags == nil {
+		return []string{}
+	}
+	return *tags
+}
+func checkKeepTags(tags *[]string) error {
+	if tags == nil {
+		return nil
+	}
+	if len(*tags) > 50 {
+		return &FieldError{Key: "auto_archive_keep_tags", Msg: "at most 50 tags"}
+	}
+	for _, tag := range *tags {
+		if strings.TrimSpace(tag) == "" || len(tag) > 100 {
+			return &FieldError{Key: "auto_archive_keep_tags", Msg: "tags must contain 1 to 100 characters"}
+		}
+	}
+	return nil
+}
+func mirrorRetentionError() error {
+	return &FieldError{Key: "auto_archive_done_days", Msg: "automatic archiving is unavailable on mirrored boards"}
 }

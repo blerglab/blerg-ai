@@ -27,7 +27,7 @@ func feedFixture(t *testing.T, name string) []agent.Event {
 	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", em, nil)
 	d.now = func() time.Time { return time.Unix(1_800_000_000, 0) }
 	d.steer.legacy = false
-	p := &ccProc{}
+	p := claudeTestProc(t, d, &ccProc{})
 	d.steer.proc = p
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -273,7 +273,7 @@ func TestSubagentReplayIsNotAUserMessage(t *testing.T) {
 	em := &collectEmitter{}
 	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", em, nil)
 	d.steer.legacy = false
-	p := &ccProc{}
+	p := claudeTestProc(t, d, &ccProc{})
 	d.steer.proc = p
 	d.onLine(p, []byte(`{"type":"user","parent_tool_use_id":"toolu_a","isReplay":true,"uuid":"u9","message":{"role":"user","content":"Look around the repo."}}`))
 	for _, ev := range em.snapshot() {

@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -28,8 +27,8 @@ func TestSessionPluginsWireDoesNotWaitBehindOtherWriters(t *testing.T) {
 	}
 	defer conn.Close()
 	c.conn = conn
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+	release := holdWriter(t, c)
+	defer release()
 	start := time.Now()
 	if err := c.sendSessionPluginsResult(protocol.SessionPluginsResult{}, time.Second); err == nil {
 		t.Fatal("busy writer accepted")
@@ -43,34 +42,18 @@ func TestSessionPluginsWireDoesNotWaitBehindOtherWriters(t *testing.T) {
 	}
 }
 func TestSessionPluginsWireTimeoutClosesStalledConnection(t *testing.T) {
-	release := make(chan struct{})
-	upgrader := websocket.Upgrader{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		if tcp, ok := conn.NetConn().(*net.TCPConn); ok {
-			_ = tcp.SetReadBuffer(1024)
-		}
-		<-release // deliberately never drain the socket
-	}))
-	defer func() { close(release); srv.Close() }()
-	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	if tcp, ok := conn.NetConn().(*net.TCPConn); ok {
-		_ = tcp.SetWriteBuffer(1024)
-	}
+	conn, observed := stalledWorkspacePeer(t)
 	c := NewWSClient(Config{})
 	c.conn = conn
 	start := time.Now()
-	err = c.sendSessionPluginsResult(protocol.SessionPluginsResult{Error: strings.Repeat("A", 8<<20)}, 20*time.Millisecond)
+	err := c.sendSessionPluginsResult(protocol.SessionPluginsResult{Error: "stalled"}, 20*time.Millisecond)
 	if err == nil {
 		t.Fatal("stalled transfer succeeded")
+	}
+	select {
+	case <-observed.writing:
+	default:
+		t.Fatal("transfer did not enter the stalled write")
 	}
 	if time.Since(start) > time.Second {
 		t.Fatal("stalled transfer was not bounded")

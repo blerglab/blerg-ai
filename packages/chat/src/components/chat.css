@@ -33,6 +33,18 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* BLG-468 review round 2: reserved unconditionally, not only once a scrollbar is actually
+     needed. A tall diagram's own width fills this column (chat.css's own :has(.visual-block)
+     rule above); without this, a diagram tall enough to make the timeline itself start
+     scrolling vertically shrinks the column's available width by the scrollbar's own width,
+     which shrinks the diagram's drawn height back below the scroll threshold, which removes the
+     scrollbar and widens the column again — a real, continuous resize loop (measured). A
+     reserved gutter keeps the column's own width constant regardless of whether its content
+     currently needs to scroll, which breaks that cycle at its source. Unsupported browsers keep
+     today's behavior (a scrollbar that only reserves space when shown) — this is why BLG-468's
+     resize-redraw must also be a diagram's own fit-time choice, not an assumption no browser
+     still needs it. */
+  scrollbar-gutter: stable;
   /* The transcript keeps the reader's place itself (Transcript.tsx), measured after every change;
      the browser's own anchoring would move the view a second time, and not every browser has it. */
   overflow-anchor: none;
@@ -48,6 +60,7 @@
   font-size: 13px;
   max-width: 100%;
 }
+
 
 .agent-card pre {
   margin: 0;
@@ -137,6 +150,16 @@
   background: var(--chat-card-assistant-bg);
   max-width: 92%;
 }
+
+/* BLG-468 review round 2: a card drawing a diagram needs the column's own width to lay out and
+   reflow against — a flowchart's natural, text-driven size has no relation to what's actually
+   available, unlike prose, which this card's own shrink-wrap (the align-self rules above) is
+   otherwise right to keep. Matched structurally (:has(.visual-block), present from the card's
+   first render, before any diagram content loads) so the card is never still shrink-wrapped by
+   the time Surface's own effect measures it (VisualBlock.tsx) — measuring from a content-driven
+   size would just recreate the same circular collapse a fixed width here removes outright. Kept
+   at least as specific as, and after, the align-self rules above so it reliably wins. */
+.agent-card.user:has(.visual-block), .agent-card.assistant:has(.visual-block) { align-self: stretch; }
 
 .agent-card.assistant.streaming {
   opacity: 0.85;
@@ -273,6 +296,8 @@
   background: var(--chat-surface);
   color: inherit;
 }
+
+.ask-reply-actions { display: flex; align-items: center; gap: 8px; }
 
 .ask-reply-error {
   flex-basis: 100%;
@@ -613,13 +638,16 @@
 }
 
 .agent-composer {
+  position: relative;
+  flex-shrink: 0;
   display: flex;
   gap: 8px;
   padding: 10px;
   border-top: 1px solid var(--chat-border);
 }
 
-.agent-composer textarea {
+.agent-composer textarea,
+.ask-reply textarea {
   flex: 1;
   resize: none;
   min-height: 40px;
@@ -633,14 +661,53 @@
   font-family: inherit;
 }
 
-.agent-composer button {
+.agent-composer button,
+.ask-reply-send {
   align-self: flex-end;
-  background: var(--chat-border);
+  background: var(--chat-button-bg);
   color: inherit;
   border: 1px solid var(--chat-border);
   border-radius: 8px;
   padding: 8px 14px;
   cursor: pointer;
+}
+
+/* The shared composer grows with its text; hosts can bound its height. */
+.agent-composer textarea {
+  box-sizing: border-box;
+  height: 40px;
+  min-width: 0;
+  max-height: none;
+  overflow-y: auto;
+}
+
+.agent-composer .agent-composer-resize {
+  position: absolute;
+  top: -5px;
+  left: 10px;
+  right: 10px;
+  height: 10px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.agent-composer-resize::after {
+  content: '';
+  display: block;
+  width: 32px;
+  height: 3px;
+  margin: auto;
+  border-radius: 2px;
+  background: var(--chat-border);
+}
+
+.agent-composer-resize:hover::after,
+.agent-composer-resize:focus-visible::after {
+  background: var(--chat-muted-2);
 }
 
 .agent-composer button:disabled {
@@ -676,13 +743,18 @@
   background: var(--chat-bg);
   border: 1px solid color-mix(in srgb, var(--chat-success) 35%, var(--chat-border));
   padding: 10px 12px;
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
 }
 
 .ready-title {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 4px 8px;
   font-weight: 650;
+  min-width: 0;
 }
 
 .ready-dot {
@@ -1170,8 +1242,8 @@
   gap: 8px;
   padding: 12px 16px;
   /* more placeholders than any screen shows, fading out so the list never just stops */
-  -webkit-mask-image: linear-gradient(to bottom, #000 65%, transparent);
-  mask-image: linear-gradient(to bottom, #000 65%, transparent);
+  -webkit-mask-image: linear-gradient(to bottom, var(--chat-fg) 65%, transparent);
+  mask-image: linear-gradient(to bottom, var(--chat-fg) 65%, transparent);
 }
 
 /* The bars have no width of their own, so a bubble must: otherwise it shrinks to its padding. */
@@ -1450,7 +1522,7 @@
 
 /* ── transcript card ─────────────────────────────────────────────────────── */
 
-/* The inline preview: the image itself, or a play tile for video and audio. */
+/* The inline preview: an image, video player, or audio play tile. */
 .artifact-preview {
   display: block;
   margin: 2px 0 8px;
@@ -1489,7 +1561,7 @@
   position: relative;
   width: min(480px, 100%);
   max-width: min(480px, 100%);
-  background: #fff;
+  background: var(--chat-document-bg);
   cursor: pointer;
 }
 
@@ -1500,7 +1572,7 @@
   border: 0;
   transform-origin: 0 0;
   pointer-events: none;
-  background: #fff;
+  background: var(--chat-document-bg);
 }
 
 .artifact-preview-cover {
@@ -1639,6 +1711,14 @@
   color: var(--chat-danger);
 }
 
+/* Same accent treatment as .delegation-btn.primary: the one recommended action in a card whose
+   other actions stay the plain .artifact-btn look. */
+.artifact-btn.primary {
+  border-color: color-mix(in srgb, var(--chat-accent) 60%, var(--chat-border));
+  color: var(--chat-accent);
+  font-weight: 600;
+}
+
 .artifact-error {
   color: var(--chat-danger);
   font-size: var(--chat-text-sm);
@@ -1707,7 +1787,7 @@
   color: var(--chat-fg);
   border: 1px solid var(--chat-border);
   border-radius: 12px;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 24px 64px var(--chat-shadow-overlay);
   overflow: hidden;
 }
 
@@ -1741,7 +1821,7 @@
 
 /* A markdown document in a viewer reads in GitHub's box (markdown.css, .md-box): a centered, bordered
    column of GitHub's width, however large the dialog is or when it is maximized. The body is the size
-   container the box's narrow rule reads; its height also sizes scroll-past-end space. */
+   container whose height sizes scroll-past-end space. */
 .artifact-viewer .artifact-body {
   container-type: size;
 }
@@ -2035,7 +2115,7 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
   min-height: 320px;
   border: 1px solid var(--chat-border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--chat-document-bg);
 }
 
 .data-table-wrap {
@@ -2792,8 +2872,8 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
   cursor: pointer;
 }
 .artifact-preview-excerpt.has-more {
-  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 2.6em), transparent);
-  mask-image: linear-gradient(to bottom, #000 calc(100% - 2.6em), transparent);
+  -webkit-mask-image: linear-gradient(to bottom, var(--chat-fg) calc(100% - 2.6em), transparent);
+  mask-image: linear-gradient(to bottom, var(--chat-fg) calc(100% - 2.6em), transparent);
 }
 .artifact-preview-excerpt > *:not(.artifact-preview-cover) {
   pointer-events: none;
@@ -2900,6 +2980,22 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
 .msg-copy.is-copied,
 .msg-copy.is-failed { opacity: 1; }
 .msg-copy.is-copied { color: var(--chat-accent); }
+/* Copy and the pop-out sit over the card's top-right corner. Reserve that corner with a float
+   at the very start of the card, so the first line wraps around the icons instead of running
+   under them (a hovered icon used to hide a reference chip at the end of the line). */
+.agent-card:is(.user, .assistant):has(> .msg-copy)::before {
+  content: '';
+  float: right;
+  width: 24px;
+  height: 22px;
+  margin-left: 4px;
+}
+.agent-card:is(.user, .assistant):has(> .msg-popout)::before { width: 52px; }
+@media (hover: none) {
+  /* No Copy on a touch screen: only the pop-out's slot, or nothing. */
+  .agent-card:is(.user, .assistant):has(> .msg-copy)::before { content: none; }
+  .agent-card:is(.user, .assistant):has(> .msg-popout)::before { content: ''; width: 24px; }
+}
 .msg-copy-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 @media (hover: none) {
   /* A touch screen copies by long-press (LongPress): no button on the card. */
@@ -2911,7 +3007,7 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
   [data-pressing] a { -webkit-touch-callout: default; }
 }
 /* The long-press action sheet, at the bottom of the screen. */
-.lp-backdrop { position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-end; justify-content: center; background: rgba(0, 0, 0, 0.35); }
+.lp-backdrop { position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-end; justify-content: center; background: var(--chat-backdrop); }
 .lp-sheet {
   width: min(100%, 420px);
   display: flex;
@@ -3007,6 +3103,64 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
   transform: rotate(40deg);
 }
 
+/* Pop out a long message into its own tab (PopOutMessage, BLG-449): beside Copy, same quiet box.
+   Shown only once the card passes the one-third-of-pane rule; always visible once shown on a touch
+   screen, since there is no hover there to reveal it. */
+.msg-popout {
+  position: absolute;
+  top: 4px;
+  right: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 4px;
+  background: var(--chat-surface-2);
+  color: var(--chat-muted);
+  border: 1px solid var(--chat-border);
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.agent-card:hover > .msg-popout,
+.msg-popout:focus-visible { opacity: 1; }
+@media (hover: none) {
+  /* Copy is hidden here (a touch screen copies by long-press instead): the pop-out takes its
+     slot rather than leaving that space empty beside it. */
+  .msg-popout { opacity: 1; right: 4px; }
+}
+.msg-popout-icon {
+  position: relative;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border: 1.4px solid currentColor;
+  border-radius: 2px;
+}
+.msg-popout-icon::before {
+  content: '';
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 7px;
+  height: 7px;
+  border-top: 1.4px solid currentColor;
+  border-right: 1.4px solid currentColor;
+}
+.msg-popout-icon::after {
+  content: '';
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  width: 6px;
+  height: 0;
+  border-top: 1.4px solid currentColor;
+  transform: rotate(-45deg);
+  transform-origin: right top;
+}
+
 /* ─── The delegation card: a session asks to start another ───────────────────────────────── */
 .agent-card.delegation-card {
   border-left: 3px solid var(--chat-info);
@@ -3078,6 +3232,13 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+/* Touch devices retain large decision targets without growing desktop actions. */
+@media (pointer: coarse) {
+  .delegation-actions .delegation-btn {
+    min-height: 44px;
+  }
 }
 
 .delegation-btn {
@@ -3179,6 +3340,18 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
   overflow: hidden;
 }
 
+/* Metadata approvals always describe one frozen patch, including long IDs and field schemas. */
+.proposal-metadata-request { min-width: 0; max-width: 100%; }
+.proposal-metadata-request summary { cursor: pointer; }
+.proposal-metadata-request pre {
+  margin: 8px 0;
+  max-height: 360px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--chat-font-mono);
+}
+
 /* The card a proposal created, drawn like a pinned ticket's summary. */
 .proposal-ticket {
   display: flex;
@@ -3250,7 +3423,11 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
 }
 
 /* A published Mermaid file: the diagram itself (VisualBlock), as wide as the message allows. */
-.artifact-preview-diagram { min-width: 0; max-width: 100%; margin: 2px 0 8px; }
+.artifact-preview-diagram { min-width: 0; max-width: 100%; height: 260px; margin: 2px 0 8px; overflow: auto; }
+.artifact-preview-diagram > .visual-block { height: 100%; box-sizing: border-box; display: flex; flex-direction: column; }
+.artifact-preview-diagram .visual-surface-wrap { flex: 1; min-height: 0; }
+.viewer-live-updated { margin-left: auto; flex: none; color: var(--chat-muted); font-size: var(--chat-text-sm); font-weight: normal; white-space: nowrap; }
+.viewer-live-updated .card-time { font: inherit; }
 .artifact-preview-diagram > .visual-block,
 .artifact-preview-diagram > .visual-failed { margin: 0; }
 
@@ -3263,13 +3440,15 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
 .embedded-viewer { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 .embedded-viewer > .artifact-dialog.artifact-viewer { width: 100%; max-width: none; height: 100%; max-height: none; min-height: 0; border: 0; border-radius: 0; box-shadow: none; margin: 0; }
 /* A single bounded row: paths yield space to keyboard-accessible actions. */
-.viewer-toolbar { display: flex; align-items: center; flex: none; gap: 4px; height: 38px; box-sizing: border-box; padding: 3px 8px; border-bottom: 1px solid var(--chat-border); background: var(--chat-bg); min-width: 0; }
+.viewer-toolbar { container-type: inline-size; display: flex; flex-wrap: nowrap; align-items: center; flex: none; gap: 4px; min-height: 38px; box-sizing: border-box; padding: 3px 8px; border-bottom: 1px solid var(--chat-border); background: var(--chat-bg); min-width: 0; }
 .viewer-toolbar h2 { flex: 1; min-width: 0; margin: 0; display: flex; }
 .viewer-path { display: block; width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; border: 0; border-radius: 4px; padding: 6px 2px; background: none; color: var(--chat-muted); font: 12px var(--chat-font); cursor: pointer; }
-.viewer-action { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 30px; height: 30px; border: 1px solid transparent; border-radius: 4px; background: none; color: var(--chat-muted); cursor: pointer; }
+/* Keep the quiet base explicit for hosts’ static button-style checks. */
+.viewer-action { border: 0; background: transparent; }
+.viewer-action.refresh-control { width: 30px; height: 30px; min-width: 30px; min-height: 30px; color: var(--chat-muted); }
 .viewer-action:hover, .viewer-path:hover { background: var(--chat-surface); color: var(--chat-fg); }
-.viewer-action[aria-pressed="true"] { background: var(--chat-selected-bg); border-color: var(--chat-selected-border); color: var(--chat-selected-text); }
-.viewer-action:focus-visible, .viewer-path:focus-visible { outline: 2px solid var(--chat-accent); outline-offset: -2px; }
+.viewer-action[aria-pressed="true"] { background: var(--chat-selected-bg); color: var(--chat-selected-text); }
+.viewer-action:focus-visible, .viewer-path:focus-visible, .viewer-version:focus-visible, .viewer-version-select:focus-visible { outline: 2px solid var(--chat-accent); outline-offset: -2px; }
 .viewer-action:disabled { opacity: .5; cursor: default; }
 .viewer-toolbar > .artifact-btn { flex: none; font-size: 12px; padding: 4px 6px; white-space: nowrap; }
 .embedded-viewer .artifact-body { padding: 0; }
@@ -3323,3 +3502,64 @@ button.artifact-row-main:focus-visible { outline: 2px solid var(--chat-accent); 
 .system-text .md.md-inline { display: inline; overflow-wrap: anywhere; }
 .system-text .md.md-inline code { overflow-wrap: anywhere; white-space: normal; }
 .system-text .md.md-inline img { display: none; }
+
+/* A stable frame keeps metadata from moving the transcript; contain preserves tall clips. */
+.artifact-preview.artifact-preview-video {
+  position: relative;
+  width: min(480px, 100%);
+  aspect-ratio: 16 / 9;
+  max-height: 320px;
+  cursor: default;
+  background: var(--chat-media-bg);
+}
+.artifact-preview-video video { display: block; width: 100%; height: 100%; object-fit: contain; }
+.artifact-video-play { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+
+/* Trusted answer chrome stays outside the sandbox and fits narrow viewer tabs. */
+.answer-page { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; gap: 8px; }
+.answer-controls { flex-shrink: 0; max-height: 50%; overflow: auto; padding: 12px; border: 1px solid var(--chat-border); border-radius: 8px; }
+.answer-controls p { margin: 0 0 8px; overflow-wrap: anywhere; }
+.answer-controls pre { max-height: 160px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 8px; }
+.answer-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.artifact-live-status {
+  flex: 0 0 auto;
+  padding: 4px 12px;
+  color: var(--chat-muted);
+  font-size: var(--chat-text-sm);
+  overflow-wrap: anywhere;
+}
+.artifact-live-status span { display: block; }
+
+.artifact-comparison { min-height: 0; overflow: auto; }
+.artifact-comparison-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 16px; }
+.artifact-comparison-controls label { display: flex; align-items: center; gap: 6px; }
+.artifact-body[hidden] { display: none; }
+.artifact-comparison.is-active { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; padding: 0 12px 12px; }
+.artifact-comparison-controls { flex: 0 0 auto; }
+.artifact-comparison aside { max-height: 25vh; overflow: auto; flex: 0 0 auto; }
+.artifact-comparison aside p { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.artifact-comparison q { overflow-wrap: anywhere; }
+
+.viewer-control-slot { display: contents; }
+.viewer-version { display: inline-flex; align-items: center; gap: 4px; flex: none; padding: 0 4px; border: 0; background: transparent; color: var(--chat-muted); font: inherit; font-size: 12px; cursor: pointer; }
+.viewer-version-select { flex: 0 1 auto; min-width: 0; height: 30px; padding: 0 2px; border: 0; border-radius: 6px; background: transparent; color: var(--chat-muted); font: inherit; font-size: 12px; cursor: pointer; }
+.viewer-version-select:hover { background: var(--chat-surface); color: var(--chat-fg); }
+.viewer-version-select option { background: var(--chat-surface); color: var(--chat-fg); }
+.viewer-version-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--chat-accent); }
+.viewer-comparison-options { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.viewer-comparison-options label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+
+@container (max-width: 600px) {
+  /* Each file already names its changes; keep the file title readable in narrow panes. */
+  .viewer-toolbar .diff-summary { display: none; }
+}
+
+.viewer-toolbar .diff-summary { min-width: 0; max-width: 180px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.ask-reply textarea { min-height: 7.5em; max-height: 35dvh; width: 100%; box-sizing: border-box; line-height: 1.5; overflow-y: auto; }
+
+.viewer-exports { position: relative; flex: none; }
+.viewer-export-row { display: flex; gap: 4px; }
+.viewer-export-menu { position: absolute; z-index: 10; top: 100%; right: 0; display: flex; padding: 4px; gap: 4px; background: var(--chat-bg); border: 1px solid var(--chat-border); border-radius: 4px; }
+.viewer-export-menu[hidden] { display: none; }

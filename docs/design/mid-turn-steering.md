@@ -99,8 +99,12 @@ awaiting messages are kept.
 `SetModel` records values as today and marks the process `stale`. When the driver is idle (not running, no
 awaiting, queue empty), a stale process is closed by closing stdin (`intentionalClose`, never counted as a
 crash); the check also runs on every transition to idle. An idle process is closed after **10 minutes**
-(var, test-overridable); the next message restarts it with `--resume`. Documented consequence: background
-tasks started by the agent die at such a restart/shutdown (they used to die at every turn end).
+(var, test-overridable); the next message restarts it with `--resume`. Neither close happens while the engine
+reports background work running: closing would end it, so the process waits, with no limit, and the CLI's
+own turn for the task's end is never cut off. The CLI's `background_tasks_changed` list is the live inventory;
+`tool_use_result.backgroundTaskId` names a foreground command it moved to the background. An idle session
+is woken once when a task's output has not changed for 30 minutes. If the engine still ends with work running
+(a crash), the agent is woken with what was running and the person sees the same row.
 
 ### Failure handling
 

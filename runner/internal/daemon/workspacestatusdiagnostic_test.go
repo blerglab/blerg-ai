@@ -158,3 +158,37 @@ func TestWorkspaceStatusMetadataReasons(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkspaceStatusRetriesFinalMetadataChange(t *testing.T) {
+	for _, persistent := range []bool{false, true} {
+		t.Run(map[bool]string{false: "transient", true: "persistent"}[persistent], func(t *testing.T) {
+			e, root, req := explorerFixture(t)
+			member := filepath.Join(root, "member")
+			initChildRepo(t, member)
+			e.pinMembers()
+			req.Operation, req.Path, req.MemberID = "status", "member", "one"
+			head := strings.TrimSpace(childRepoGit(t, member, "rev-parse", "HEAD"))
+			runs := 0
+			ctx := context.WithValue(t.Context(), workspaceStatusTimingKey{}, workspaceStatusTiming(func(stage string, _, _ time.Duration, _ error) {
+				if stage != "Git status" {
+					return
+				}
+				runs++
+				if runs == 1 || persistent {
+					// A sibling writer updates an inert ref after the private snapshot was read.
+					name := "sibling"
+					if runs > 1 {
+						name = "sibling-again"
+					}
+					if err := os.WriteFile(filepath.Join(member, ".git", "refs", "heads", name), []byte(head+"\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}))
+			res := e.Explore(ctx, req)
+			if runs != 2 || res.OK == persistent || (!persistent && res.Status == nil) || (persistent && res.StatusReason != "metadata_changed") {
+				t.Fatalf("bounded status retry: persistent=%v runs=%d result=%+v", persistent, runs, res)
+			}
+		})
+	}
+}

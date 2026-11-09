@@ -145,7 +145,7 @@ describe('ArtifactViewer: diff', () => {
       artifact={{ id: 'd1', name: 'retry-the-upload.diff', size: PATCH.length, content_type: 'text/x-diff; charset=utf-8', view: 'diff' }} />)
     expect(await screen.findByTestId('diff-view')).toBeTruthy()
     expect(screen.getByRole('dialog').className).toContain('is-diff')
-    expect(document.querySelector('.artifact-meta')?.textContent).toMatch(/^Diff · /)
+    expect(document.querySelector('.viewer-path')?.getAttribute('title')).toContain(' · Diff · ')
   })
 
   it('makes a patch over the size limit download-only', () => {

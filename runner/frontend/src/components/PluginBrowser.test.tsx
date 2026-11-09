@@ -103,7 +103,7 @@ describe('the plugin browser', () => {
     expect(local).toHaveAccessibleDescription('This local marketplace cannot be installed here.')
     expect(within(local.parentElement!).getByText('This local marketplace cannot be installed here.')).toBeVisible()
     expect(within(other.parentElement!).getByText('This marketplace is not allowed by this install.')).toBeVisible()
-    expect(within(on.parentElement!).getByText('Already enabled in this session.')).toBeVisible()
+    expect(within(on.parentElement!).getByText('Already enabled in this workspace.')).toBeVisible()
     expect(other).toBeDisabled()
     expect(other.getAttribute('title')).toContain('not allowed')
     expect(on).toBeDisabled()
@@ -111,7 +111,7 @@ describe('the plugin browser', () => {
     expect(apiFetch.mock.calls.filter(c => c[1]?.method === 'POST')).toHaveLength(0)
     // State glyphs, with words for a screen reader.
     const states = screen.getAllByTestId('plugin-state').map(s => s.getAttribute('title'))
-    expect(states).toEqual(['Installed, not enabled here', 'Enabled in this session'])
+    expect(states).toEqual(['Installed, not enabled here', 'Enabled in this workspace'])
   })
 
   it.each(['session', 'always'])('installs an allowed native Codex marketplace for %s', async scope => {
@@ -149,7 +149,7 @@ describe('the plugin browser', () => {
   it('offers only always-on when the session cannot load plugins live', async () => {
     show(model({ session_apply: false, reason: 'This engine loads plugin changes in new sessions.' }))
     await screen.findByTestId('plugin-browser-list')
-    expect(screen.getByRole('option', { name: 'This session only' })).toBeDisabled()
+    expect(screen.getByRole('option', { name: 'This workspace only' })).toBeDisabled()
     expect(screen.getByLabelText('Install for')).toHaveValue('always')
     expect(screen.getByText('This engine loads plugin changes in new sessions.')).toBeInTheDocument()
   })
@@ -220,7 +220,7 @@ describe('the plugin browser', () => {
     try {
       const { onClose } = show(model({ engine: 'codex', session_apply: false }))
       fireEvent.click(await screen.findByRole('button', { name: 'Install release-notes' }))
-      fireEvent.click(await screen.findByRole('button', { name: 'Start a new session with it' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Start a new workspace with it' }))
       expect(onClose).toHaveBeenCalled()
       expect(opened).toHaveBeenCalledOnce()
     } finally { window.removeEventListener('blerg:open-launch-sheet', opened) }
@@ -301,7 +301,7 @@ describe('MCP sign-in rows', () => {
     expect(link).toHaveAttribute('href', 'https://claude.ai/customize/connectors')
     expect(link).toHaveAttribute('target', '_blank')
     expect(link.getAttribute('rel')).toContain('noopener')
-    expect(screen.getByText('After connecting, restart the session to load it.')).toBeInTheDocument()
+    expect(screen.getByText('After connecting, restart the workspace to load it.')).toBeInTheDocument()
     expect(apiFetch).not.toHaveBeenCalled()
   })
 
@@ -328,7 +328,7 @@ describe('MCP sign-in rows', () => {
     expect(open).toHaveAttribute('href', 'https://auth.example/authorize?state=s')
     expect(open).toHaveAttribute('target', '_blank')
     expect(open.getAttribute('aria-label')).toContain('auth.example')
-    expect(screen.getByRole('status')).toHaveTextContent('on the machine that runs this session')
+    expect(screen.getByRole('status')).toHaveTextContent('on the machine that runs this workspace')
     fireEvent.click(within(confirm).getByRole('button', { name: 'Cancel' }))
     expect(screen.queryByTestId('caps-mcp-confirm')).toBeNull()
     // Focus goes back to where it was.
@@ -401,7 +401,7 @@ describe('MCP sign-in rows', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('does not need a sign-in now')
     view.unmount()
     render(<McpSignIn item={row('user')} ctx={{ sessionId: 's1', runtime: 'docker' }} />)
-    expect(screen.getByTestId('caps-mcp-sandboxed')).toHaveTextContent('Sign-in for sandboxed sessions is coming.')
+    expect(screen.getByTestId('caps-mcp-sandboxed')).toHaveTextContent('Sign-in for sandboxed workspaces is coming.')
     expect(screen.queryByRole('button')).toBeNull()
   })
 

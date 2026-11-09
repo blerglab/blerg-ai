@@ -11,11 +11,14 @@ import (
 func idleTimerFixture(t *testing.T) (*claudeCodeDriver, *ccProc) {
 	t.Helper()
 	shrink(t, &ccIdleShutdown, time.Hour)
+	// A real fallback timer (closeBackgroundTask/armWakeFallback) has no writer goroutine to
+	// deliver its message in this fixture; keep it from firing on its own during the test unless a
+	// test shrinks it (and fires it deterministically, never by waiting).
+	shrink(t, &ccWakeFallbackAfter, time.Hour)
 	d := newClaudeCodeDriver(t.TempDir(), "fixture", "", &collectEmitter{}, nil)
 	d.steer.legacy = false
-	p := &ccProc{gen: 1, closeReq: make(chan struct{}), done: make(chan struct{})}
+	p := claudeTestProc(t, d, &ccProc{gen: 1})
 	d.steer.proc = p
-	t.Cleanup(func() { d.sm.Lock(); d.steer.closed = true; d.stopIdleTimerLocked(); d.sm.Unlock(); close(p.done) })
 	return d, p
 }
 
@@ -129,38 +132,73 @@ func assertIdleTimerOpen(t *testing.T, p *ccProc) {
 	}
 }
 
-func TestIdleTimerDeferralsKeepCapAndCommitShutdown(t *testing.T) {
+func TestIdleTimerDefersForRunningWorkThenCommitsShutdown(t *testing.T) {
 	d, p := idleTimerFixture(t)
-	setDeferrals(t, 2)
 	startTestTask(d, "running")
 	d.sm.Lock()
 	d.idleLocked(p)
 	d.sm.Unlock()
-	for i := 0; i < 3; i++ {
+	for range 100 {
 		d.sm.Lock()
 		epoch := d.steer.idleEpoch
 		d.sm.Unlock()
 		d.idleFired(p.gen, epoch)
 		d.sm.Lock()
-		closed, deferrals, intentional := p.stdinClosed, d.steer.idleDeferrals, p.intentionalClose
+		closed := p.stdinClosed
 		d.sm.Unlock()
-		if i < 2 {
-			if closed || deferrals != i+1 {
-				t.Fatalf("deferral %d: closed=%v deferrals=%d", i, closed, deferrals)
-			}
-		} else {
-			if !closed || !intentional || deferrals != 2 {
-				t.Fatalf("shutdown not committed at cap: closed=%v intentional=%v deferrals=%d", closed, intentional, deferrals)
-			}
-			select {
-			case <-p.closeReq:
-			default:
-				t.Fatal("committed shutdown did not close stdin")
-			}
-			// A callback that was already dispatched cannot close twice or rearm.
-			d.idleFired(p.gen, epoch)
+		if closed {
+			t.Fatal("idle shutdown closed a process with running work")
 		}
 	}
+	d.closeBackgroundTask(noticeFromBlock("<task-id>running</task-id><status>completed</status>"))
+	// The last task's end arms a fallback wake-up instead of trusting the process to resume on its
+	// own (BLG-447): nothing is queued yet, pending only the CLI's chance to self-wake first, so
+	// idleFired is free to run — it is the fallback firing, checked next, that must not close a
+	// process whose wake-up message is still undelivered.
+	d.sm.Lock()
+	queued := len(d.steer.sq)
+	pending := d.steer.wakePending != nil
+	d.sm.Unlock()
+	if queued != 0 || !pending {
+		t.Fatalf("the finished task's fallback was not armed as pending: queued=%d pending=%v", queued, pending)
+	}
+	// Fire the fallback directly (deterministic: no real wait for its window) as the CLI's own
+	// resume never arrived to cancel it.
+	d.wakeFallbackFired(p.gen)
+	d.sm.Lock()
+	queued = len(d.steer.sq)
+	epoch := d.steer.idleEpoch
+	d.sm.Unlock()
+	if queued != 1 {
+		t.Fatalf("the fired fallback did not queue its wake-up: %d messages", queued)
+	}
+	d.idleFired(p.gen, epoch)
+	d.sm.Lock()
+	closed := p.stdinClosed
+	d.sm.Unlock()
+	if closed {
+		t.Fatal("idle shutdown closed a process with its wake-up message still undelivered")
+	}
+	// Simulate the writer goroutine delivering that message and the process going idle again.
+	d.sm.Lock()
+	d.steer.sq = nil
+	d.idleLocked(p)
+	epoch = d.steer.idleEpoch
+	d.sm.Unlock()
+	d.idleFired(p.gen, epoch)
+	d.sm.Lock()
+	closed, intentional := p.stdinClosed, p.intentionalClose
+	d.sm.Unlock()
+	if !closed || !intentional {
+		t.Fatalf("shutdown not committed: closed=%v intentional=%v", closed, intentional)
+	}
+	select {
+	case <-p.closeReq:
+	default:
+		t.Fatal("committed shutdown did not close stdin")
+	}
+	// A callback that was already dispatched cannot close twice or rearm.
+	d.idleFired(p.gen, epoch)
 }
 
 func TestIdleTimerStoppedCallbackCannotCloseSession(t *testing.T) {

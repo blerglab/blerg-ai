@@ -19,6 +19,7 @@ import (
 	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/testsupport"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -60,21 +61,27 @@ func newDelegFx(t *testing.T) *delegFx {
 		t.Fatal(err)
 	}
 	pool := runnerContractPool(t)
+	seedPhase := testsupport.Phase(t, "seed")
 	hub := NewHub()
 	api := NewAPI(hub, pool, delegDaemonToken, nil, "")
 	api.coreAuth = newTestCoreAuthClient(t, pub, "core-1")
 	api.SetRunnerKey(runnerTestKey)
 	dc := registerDaemon(t, api, hub, "00000000-0000-4000-8000-0000000000d1", "laptop", "app")
 	fixtureOwnDesktop(t, pool, dc, "owner-1")
+	dc.SetAuthoritativeAnswers(true)
 	dc.SetSandboxAvailable(true)
 	dc.RecoveryReadyCapable = true
 	dc.SetSandboxClones(true)
+	dc.SetWorkBranches(true) // current daemon: immutable recorded branch names
 	dc.SetAvailableEngines([]string{"claude", "codex", "hermes"})
 	mux := http.NewServeMux()
 	api.RegisterDelegationRoutes(mux)
 	RegisterRunnerContractRoutes(mux, api)
 	fx := &delegFx{t: t, api: api, hub: hub, pool: pool, mux: mux, priv: priv, dc: dc}
 	fx.parent, fx.parentTok = fx.session(sessOpts{owner: "owner-1", title: "Parent"})
+	seedPhase.End()
+	bodyPhase := testsupport.Phase(t, "body")
+	bodyPhase.Cleanup()
 	return fx
 }
 

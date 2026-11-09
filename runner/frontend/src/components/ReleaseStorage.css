@@ -1,0 +1,5 @@
+.release-storage-paragraph { display: block; margin-bottom: .65em; }
+.release-storage-losses { display: block; max-height: 40vh; overflow: auto; overflow-wrap: anywhere; }
+.release-storage-losses [role="list"] { display: block; margin: 0 0 .65em; }
+.release-storage-losses [role="listitem"] { display: list-item; margin-left: 1.5em; }
+.release-storage-error { color: var(--danger); font-size: var(--text-xs); max-width: 24rem; }

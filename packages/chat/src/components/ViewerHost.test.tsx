@@ -76,7 +76,7 @@ it('refreshes the visible Files list after saving a hosted workspace copy', asyn
     fireEvent.click(screen.getByRole('button', { name: 'Files (0)' }))
     await waitFor(() => expect(t.files!.listCalls).toBeGreaterThan(1))
     const before = t.files!.listCalls
-    fireEvent.click(await screen.findByTitle('Open from the session’s folder'))
+    fireEvent.click(await screen.findByTitle('Open from the workspace’s folder'))
     fireEvent.click(await screen.findByRole('button', { name: 'Save a copy to Files' }))
     await screen.findByText('Saved a copy to Files.')
     expect(t.files!.uploads).toHaveLength(1)
@@ -180,4 +180,12 @@ it('places one mounted Chat and its composer in a split host even when another g
     expect(nextGroup.querySelector('.agent-composer textarea')).toBe(input)
     expect(input).toHaveValue('Draft survives moving groups')
   } finally { mounted.unmount(); target.remove(); nextGroup.remove() }
+})
+it('renders a popped-out chart inside its tab, never as a modal over the workspace', async () => {
+  const target = document.createElement('div'); document.body.appendChild(target)
+  const value = host({ target, active: 'chart', views: [{ id: 'chart', view: { kind: 'visual', id: 'v1', visualKind: 'mermaid', source: 'graph LR; A-->B', label: 'Diagram' } as HostedView }] })
+  render(<ViewerHostContext.Provider value={value}><HostedViewers sessionId="s1" files={createFakeFiles()} /></ViewerHostContext.Provider>)
+  await waitFor(() => expect(target.querySelector('[data-testid="visual-viewer"]')).not.toBeNull())
+  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(target.querySelector('.embedded-viewer')).not.toBeNull()
 })

@@ -1,12 +1,15 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
@@ -269,6 +272,11 @@ func TestPodDeathDiagnosticsOwnerOnly(t *testing.T) {
 					check(t, result.ErrorReason, own)
 				})
 				t.Run(b.AccountID+"/replay", func(t *testing.T) {
+					// Reconciliation now publishes a failure update as well as the
+					// session snapshot; isolate replay from those live frames.
+					for len(b.send) > 0 {
+						<-b.send
+					}
 					replayAgentEvents(t.Context(), f.api.hub, b, f.pool, protocol.SubscribeAgentEvents{SessionID: f.sessionID})
 					var event protocol.AgentEvent
 					if err := json.Unmarshal(<-b.send, &event); err != nil {
@@ -319,4 +327,179 @@ func TestResumeBroadcastClearsPodDeath(t *testing.T) {
 		}
 	}
 	t.Fatal("resume cleared database but sent no clearing session snapshot to connected browser")
+}
+
+func TestClusterFailurePodCauseSurvivesMissingStatus(t *testing.T) {
+	for _, tc := range []struct{ name, podReason, containerReason, want string }{
+		{"OOM with generic pod failure", "Error", "OOMKilled", "OOMKilled"},
+		{"storage eviction without container status", "Evicted", "", "Evicted"},
+		{"node loss without container status", "NodeLost", "", "NodeLost"},
+		{"failed pod without reason", "", "", "PodFailed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := failedRunnerPod(tc.containerReason)
+			status := raw["status"].(map[string]any)
+			status["reason"] = tc.podReason
+			if tc.containerReason == "" {
+				delete(status, "containerStatuses")
+			}
+			fatal := podTermination(decodePod(t, raw))
+			if fatal == nil || !strings.Contains(fatal.Detail, tc.want) {
+				t.Fatalf("missing named terminal cause %s: %+v", tc.want, fatal)
+			}
+		})
+	}
+}
+
+// A pod can disappear without a session-ended frame or a turn_done event.
+func TestEvictedWorkerNotifiesParentOnce(t *testing.T) {
+	for _, tc := range []struct{ status, reason string }{
+		{"running", "Evicted"}, {"disconnected", "Evicted"}, {"disconnected", "OOMKilled"}, {"running", "NodeLost"},
+	} {
+		status, reason := tc.status, tc.reason
+		t.Run(status+"/"+reason, func(t *testing.T) {
+			f := newDelegFx(t)
+			f.dc.SetInputReceipts(true)
+			f.hub.SetSessionOwner(f.parent, f.dc.ID)
+			child := f.childOf(f.parent)
+			if _, err := f.pool.Exec(t.Context(), "UPDATE sessions SET runtime='cluster',status=$2 WHERE id=$1", child, status); err != nil {
+				t.Fatal(err)
+			}
+			fake := &fakeK8s{}
+			jm := newTestJobManager(t, fake)
+			f.hub.SetJobManager(jm)
+			pod := failedRunnerPod(reason)
+			pod["status"].(map[string]any)["reason"] = reason
+			if reason != "OOMKilled" {
+				delete(pod["status"].(map[string]any), "containerStatuses")
+			}
+			fake.setPod(child, pod)
+			fake.setJobStatus(jm.jobName(child), map[string]any{"failed": 1})
+			f.api.reconcileClusterJobsOnce(t.Context())
+			var count int
+			if err := f.pool.QueryRow(t.Context(), "SELECT count(*) FROM session_inputs WHERE session_id=$1 AND client_id LIKE 'child-turn-%'", f.parent).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 1 {
+				t.Fatalf("parent notices = %d, want 1 after evicted pod reconciliation", count)
+			}
+			// Drop in-process deduplication: the durable receipt owns replay safety.
+			f.api.childTurns = childTurnSeen{}
+			f.api.reconcileClusterJobsOnce(t.Context())
+			if err := f.pool.QueryRow(t.Context(), "SELECT count(*) FROM session_inputs WHERE session_id=$1 AND client_id LIKE 'child-turn-%'", f.parent).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 1 {
+				t.Fatalf("duplicate parent notices: %d", count)
+			}
+			messages, err := db.ListMessagesBySession(t.Context(), f.pool, child)
+			if err != nil || len(messages) != 1 || !strings.Contains(messages[0].Body, "session result") {
+				t.Fatalf("missing failure update: %+v %v", messages, err)
+			}
+			wakes := 0
+			for len(f.dc.send) > 0 {
+				var msg protocol.AgentUserMessage
+				if json.Unmarshal(<-f.dc.send, &msg) == nil && msg.Type == "agent_user_message" && msg.Source == childTurnSource {
+					wakes++
+					if !isWorkerNotice(msg.Text, child, childTurnFailed) {
+						t.Fatal("missing failed wake", msg.Text)
+					}
+				}
+			}
+			if wakes != 1 {
+				t.Fatalf("parent received %d wakes, want one", wakes)
+			}
+		})
+	}
+}
+
+func TestPodFailureResumeExplainsInterruptedTurn(t *testing.T) {
+	f := newReconcileFixture(t, "disconnected")
+	f.fake.setPod(f.sessionID, failedRunnerPod("OOMKilled"))
+	f.api.reconcileClusterJobsOnce(t.Context())
+	if err := resumeClusterSessionMode(t.Context(), f.api.hub, f.pool, f.sessionID, "continue", "", "", false); err != nil {
+		t.Fatal(err)
+	}
+	f.fake.mu.Lock()
+	raw, err := json.Marshal(f.fake.createdSecrets)
+	f.fake.mu.Unlock()
+	if err != nil || !strings.Contains(string(raw), "Your last turn was interrupted") || !strings.Contains(string(raw), "OOMKilled") {
+		t.Fatal("resume omitted interruption context", err)
+	}
+}
+
+func TestPodTerminationLogContainsSafeCauseAndActualLimits(t *testing.T) {
+	var output bytes.Buffer
+	previous := failurelog.Default
+	failurelog.Default = failurelog.New(slog.New(slog.NewJSONHandler(&output, nil)))
+	t.Cleanup(func() { failurelog.Default = previous })
+	pod := failedRunnerPod("Error")
+	pod["status"].(map[string]any)["reason"] = "Evicted"
+	pod["status"].(map[string]any)["message"] = "The node was low on resource: memory. private-canary-secret"
+	limits := pod["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["resources"].(map[string]any)
+	limits["limits"] = map[string]string{"memory": "4Gi", "cpu": "1500m", "ephemeral-storage": "private-canary-secret"}
+	logPodTermination(newUUID(), decodePod(t, pod))
+	var fields map[string]any
+	if err := json.Unmarshal(output.Bytes(), &fields); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"cause": "Evicted", "resource_pressure": "memory", "memory_limit": "4Gi", "cpu_limit": "1500m", "ephemeral_storage_limit": "unknown"} {
+		if fields[key] != want {
+			t.Errorf("%s = %v, want %s", key, fields[key], want)
+		}
+	}
+	if strings.Contains(output.String(), "private-canary-secret") {
+		t.Fatal("raw Kubernetes diagnostics leaked")
+	}
+}
+
+func TestInterruptedPodRecoveryDescribesRecordedVolume(t *testing.T) {
+	for _, retained := range []bool{false, true} {
+		t.Run(fmt.Sprint(retained), func(t *testing.T) {
+			f := newDelegFx(t)
+			child, _ := f.session(sessOpts{owner: "owner-1", runtime: "cluster", status: "disconnected", parent: f.parent})
+			if err := db.SetSessionError(t.Context(), f.pool, child, "stopped: pod terminated (Evicted)"); err != nil {
+				t.Fatal(err)
+			}
+			if retained {
+				if err := db.BindSessionNativeHistory(t.Context(), f.pool, db.SessionNativeHistory{SessionID: child, AccountID: "owner-1", Engine: "claude", ClaimName: "fixture-claim", ClaimUID: "fixture-uid"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result, problem := f.api.Result(t.Context(), RunnerPrincipal{Kind: "human", Sub: "owner-1"}, child)
+			if problem != nil || !strings.Contains(result.ErrorReason, "blerg-runner session send "+child) {
+				t.Fatal("explicit result read omitted recovery command", problem)
+			}
+			work, got := failureWork(t.Context(), f.pool, f.row(child))
+			if got != retained || !strings.Contains(work, "uncommitted") || !strings.Contains(work, "blerg-runner session send "+child) {
+				t.Fatal("missing retention status or recovery command", work, got)
+			}
+			if !retained && !strings.Contains(work, "No retained workspace volume") {
+				t.Fatal(work)
+			}
+		})
+	}
+}
+
+// Public conversation readers may see updates, but pod diagnostics remain owner-only.
+func TestPodFailureAlertDoesNotExposeDiagnostics(t *testing.T) {
+	f := newDelegFx(t)
+	child, _ := f.session(sessOpts{owner: "owner-1", runtime: "cluster", status: "disconnected", parent: f.parent})
+	if err := db.SetSessionError(t.Context(), f.pool, child, "stopped: pod terminated (Evicted)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordSessionFailure(t.Context(), f.hub, f.pool, child); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := db.ListMessagesBySession(t.Context(), f.pool, child)
+	if err != nil || len(messages) != 1 {
+		t.Fatal("missing failure update", err)
+	}
+	if strings.Contains(messages[0].Body, "Evicted") || strings.Contains(messages[0].Body, "uncommitted") {
+		t.Fatal("public update exposes owner-only pod diagnostics")
+	}
+	result, problem := f.api.Result(t.Context(), RunnerPrincipal{Kind: "human", Sub: "owner-1"}, child)
+	if problem != nil || !strings.Contains(result.ErrorReason, "Evicted") {
+		t.Fatal("owner lost pod diagnostics", problem)
+	}
 }

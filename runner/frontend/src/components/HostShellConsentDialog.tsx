@@ -6,8 +6,8 @@ import './CapabilitiesPanel.css'
 import './PermissionsModal.css'
 import './HostShellConsentDialog.css'
 
-export default function HostShellConsentDialog({ challenge, busy, onCancel, onAllow }: {
-  challenge: HostShellChallenge; busy: boolean; onCancel(): void; onAllow(): void
+export default function HostShellConsentDialog({ challenge, privileged = false, busy, onCancel, onAllow }: {
+  challenge: HostShellChallenge; privileged?: boolean; busy: boolean; onCancel(): void; onAllow(): void
 }) {
   const title = useId()
   const description = useId()
@@ -28,6 +28,7 @@ export default function HostShellConsentDialog({ challenge, busy, onCancel, onAl
     const settle = window.setTimeout(() => { if (overlay.current && !overlay.current.contains(document.activeElement)) cancel.current?.focus() }, 0)
     return () => { document.removeEventListener('focusin', keep); window.clearTimeout(settle); inerted.forEach(el => { el.inert = false }); previous?.focus() }
   }, [])
+  // button-guard-ignore: useBackdropClose supplies pointer handlers only; this overlay is not a button
   return createPortal(<div ref={overlay} className="caps-overlay shell-consent-overlay" {...backdrop}>
     <section className="caps-dialog shell-consent" role="dialog" aria-modal="true" aria-labelledby={title} aria-describedby={description} aria-busy={busy} onKeyDown={e => {
       e.stopPropagation()
@@ -53,11 +54,13 @@ export default function HostShellConsentDialog({ challenge, busy, onCancel, onAl
       <div className="shell-consent-body" role="region" aria-label="Host shell details" tabIndex={0}>
         <p className="shell-consent-brand">Blerg · Host shell</p>
         <p id={description}>This runs as the OS account below. Startup files and ordinary account permissions can expose credentials.</p>
+        {privileged && <p>This is a privileged shell. It can use sudo where this machine allows it and is not frozen at turn end. The turn's copy may include in-flight writes. A stolen Blerg login may gain root access on this machine.</p>}
+        {challenge.version === 2 && <><p>This shell keeps running while disconnected for up to seven days. Your sign-in expiring ends it.</p><p>You can withdraw consent from this shell, even while the desktop is offline. Signing out or withdrawing consent starts cleanup; offline cleanup may be delayed.</p></>}
         <dl><dt>Machine</dt><dd>{challenge.machine_id}</dd><dt>Account</dt><dd>{challenge.account} (UID {challenge.uid})</dd><dt>Shell</dt><dd>{challenge.shell}</dd><dt>Folder</dt><dd>{challenge.cwd}</dd></dl>
       </div>
       <footer className="pm-foot shell-consent-actions">
         <button ref={cancel} type="button" className="pm-button" disabled={busy} onClick={onCancel}>Cancel</button>
-        <button type="button" className="pm-button pm-primary" disabled={busy} onClick={onAllow}>{busy ? 'Allowing…' : 'Allow this launch'}</button>
+        <button type="button" className="pm-button pm-primary" disabled={busy} onClick={onAllow}>{busy ? 'Allowing…' : challenge.version === 2 ? 'Allow this shell' : 'Allow this launch'}</button>
       </footer>
     </section>
   </div>, document.body)

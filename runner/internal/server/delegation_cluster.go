@@ -27,6 +27,7 @@ package server
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"slices"
 	"time"
@@ -94,9 +95,18 @@ func (a *API) parentHost(parent *db.SessionRow, dc *DaemonConn) childHost {
 
 // forRuntime is the host of a child on runtime: the cluster for a desktop parent's runtime
 // "cluster" child when the install has one, else h itself.
+//
+// BLG-501 live e2e: this used to drop h.workspace entirely, since that struct literal never
+// named it. For a host *workspace* parent's explicit --runtime cluster child (the only new
+// case this card adds), that wiped host.workspace before parseChildStart's own dispatch
+// switch ever saw it — every such start fell through to the legacy single-repo branch
+// (msgClusterChildBareRepo) regardless of which member was named, because the "workspace
+// parent" case the switch needs to pick (selectHostClusterChildSelectors) never looked
+// reachable. The workspace manifest carries forward unchanged; only cluster/fromDesktop/
+// bareRepo/repoSource describe "where this child's job now runs."
 func (h childHost) forRuntime(runtime string) childHost {
 	if !h.cluster && h.clusterOn && runtime == runnerRuntimeCluster {
-		return childHost{cluster: true, fromDesktop: true, bareRepo: h.bareRepo, repoSource: h.dc}
+		return childHost{cluster: true, fromDesktop: true, bareRepo: h.bareRepo, repoSource: h.dc, workspace: h.workspace}
 	}
 	return h
 }
@@ -292,6 +302,11 @@ func clusterParentPod(h *Hub, parent *db.SessionRow) *DaemonConn {
 // the delegate's proof, no plugins, and must report recovery-ready like a desktop child. Every
 // refusal comes before the Job exists; a child row that could not be fully recorded is removed.
 func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, principal runnerPrincipal, sessionID string) *APIError {
+	if req.Grant != nil {
+		if problem := a.checkGrant(req.Grant, grantTarget{Runtime: runnerRuntimeCluster, Engine: req.Engine, Kind: "agent"}); problem != nil {
+			return problem
+		}
+	}
 	jm := a.hub.JobManager()
 	if jm == nil && req.Workspace == nil {
 		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgClusterNotConfigured)
@@ -335,7 +350,21 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 	var members []clusterworkspace.Member
 	if req.Workspace == nil {
 		var selectionErr *APIError
-		workspace, members, selectionErr = a.clusterChildWorkspace(ctx, parent, req, sessionID)
+		// BLG-501: a host Main's cluster worker (design §3) reaches this same, already-
+		// authorized dispatch (onDesktopDaemon(parent) above admits it) — only which
+		// selection function resolves it differs, by the PARENT's own saved runtime, never
+		// anything the caller's request claims.
+		saved, serr := db.GetSessionWorkspace(ctx, a.dbPool, parent.ID)
+		switch {
+		case serr != nil:
+			return apiErrorf(409, "parent workspace unavailable")
+		case saved == nil || saved.Manifest == nil:
+			// No workspace parent at all: an ordinary cluster child, unchanged.
+		case saved.Manifest.Runtime == "host":
+			workspace, members, selectionErr = a.hostClusterChildWorkspace(ctx, parent, req, sessionID, *saved.Manifest, proof)
+		default:
+			workspace, members, selectionErr = a.clusterChildWorkspace(ctx, parent, req, sessionID)
+		}
 		if selectionErr != nil {
 			return selectionErr
 		}
@@ -351,7 +380,9 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 	if err := db.UpsertDaemon(ctx, a.dbPool, clusterDaemonID, "cluster", "runner", ""); err != nil {
 		logLaunchFailure("queued", &jobSubmissionError{reason: "InternalError"})
 	}
-	origin := sessionOriginFor(account, parent.Private, "")
+	origin := sessionOriginFor(account, parent.Private || req.channelPrivate, "")
+	origin.WorkerKind = req.WorkerKind
+	origin.RuntimeTargetID = derefOrEmpty(parent.RuntimeTargetID)
 	origin.ParentSessionID, origin.DelegationVia, origin.KeepRunning = req.ParentSessionID, req.DelegationVia, req.KeepRunning
 	origin.RequireParentEpoch, origin.ParentEpoch = true, req.ParentEpoch
 	a.notePrivateInsert(sessionID, origin)
@@ -367,7 +398,11 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 		return apiErrorCause(http.StatusServiceUnavailable, errDaemonUnavailable, "the child session could not be recorded — retry")
 	}
 	// Must land: it is one of the marks that keep a child a child (isChildSession).
-	if err := db.SetSessionStartedBy(ctx, a.dbPool, sessionID, "session", a.parentLabel(ctx, parent.ID)); err != nil {
+	kind, name := "session", a.parentLabel(ctx, parent.ID)
+	if req.personChannel {
+		kind, name = "", ""
+	}
+	if err := db.SetSessionStartedBy(ctx, a.dbPool, sessionID, kind, name); err != nil {
 		logLaunchFailure("queued", &jobSubmissionError{reason: "InternalError"})
 		return abort()
 	}
@@ -409,6 +444,9 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 		}
 	}
 	recordInteraction(ctx, a.dbPool, sessionID, req.Interaction)
+	if err := recordVerbosity(ctx, a.dbPool, sessionID, req.Verbosity); err != nil {
+		log.Printf("record verbosity: %v", err)
+	}
 	// The child's own messaging token (cap "message"), scoped as a desktop child's: the
 	// `blerg-runner` CLI in its pod cannot work without it, so a start that could not mint it is
 	// refused rather than started mute.
@@ -421,7 +459,9 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 		// Hermes providers); neither does a child it starts.
 		NoOperatorFallback:   cronChild,
 		RequireRecoveryReady: true,
+		RestrictTools:        req.channelRestricted,
 		Interaction:          req.Interaction,
+		Verbosity:            req.Verbosity,
 		SessionID:            sessionID, Repo: req.Repo, Title: req.Title,
 		Model: req.Model, Effort: req.Effort, Engine: req.Engine, InitialPrompt: req.Prompt,
 		InitialPromptSource: promptSourceSession, // the parent wrote it, not the person
@@ -435,6 +475,32 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 		PluginsResolved: true,
 		PluginsNote:     pluginsNoteDelegated,
 	}
+	if req.channelRestricted {
+		if err := db.SetSessionRestrictTools(ctx, a.dbPool, sessionID); err != nil {
+			return abort()
+		}
+	}
+	if req.Grant != nil {
+		// L5: startClusterChild only ever starts a cluster worker (a child, on the cluster
+		// runtime, by construction) — refused by default, never attached, never recorded
+		// as an exception on the card. Widened past the fixed provider list with this
+		// launch's own resolved repository hosts, so a GitHub Enterprise or self-hosted
+		// GitLab host is covered too.
+		gitHosts := workspaceMemberHosts(members)
+		if h := hostOfGitURL(gitURL); h != "" {
+			gitHosts = append(gitHosts, h)
+		}
+		if req.Grant.hasGitProviderConnection(gitHosts...) {
+			a.abortGrantSession(ctx, sessionID)
+			return apiErrorf(http.StatusForbidden, "a cluster worker cannot be granted an MCP connection to a git provider")
+		}
+		gateway, problem := a.attachGrant(ctx, sessionID, req.Grant)
+		if problem != nil {
+			a.abortGrantSession(ctx, sessionID)
+			return problem
+		}
+		spec.MCPGateway = gateway
+	}
 	if req.Workspace != nil {
 		if db.InsertSessionWorkspace(ctx, a.dbPool, sessionID, *req.Workspace) != nil {
 			return abort()
@@ -447,9 +513,23 @@ func (a *API) startClusterChild(ctx context.Context, req runnerStartRequest, pri
 		return nil
 	}
 	spec.Workspace, spec.WorkspaceMembers = workspace, members
+	// BLG-460: whether this is a read-only cluster worker (workspace-shaped or single-repo)
+	// is decided inside CreateSessionJob, from the session's own persisted row (its
+	// ParentSessionID/DelegationVia, set by InsertClusterSessionAs above) — not here. This
+	// covers every parent kind (host, cluster, sandbox) and every repo shape uniformly,
+	// which setting a flag only in this one branch, for this one call site, did not.
 	announceClusterStart(ctx, a.hub, a.dbPool, sessionID, req.Repo, false, pluginStage(nil, pluginsNoteDelegated))
 	if err := jm.CreateSessionJob(spec); err != nil { //nolint:contextcheck // cluster calls are bounded by the JobManager client timeout and deliberately not tied to the caller: a Job or Secret half-made because the caller went away would be orphaned
 		a.markClusterStartFailed(ctx, sessionID, err.Error())
+		if clusterRefusal(err) != nil {
+			// These refusals precede Job creation. Archive the failed child while
+			// retaining its launch receipt, progress and any protected storage.
+			if _, err := db.ArchiveChildSession(ctx, a.dbPool, sessionID, parent.ID, account); err != nil {
+				logLaunchFailure("authorization", &jobSubmissionError{reason: "InternalError"})
+			} else {
+				a.broadcastChildrenChanged(parent.ID, sessionID) //nolint:contextcheck // broadcasts use independently bounded delivery and outlive this launch request
+			}
+		}
 		// No pod will ever use the child's messaging token.
 		if rerr := db.RevokeBoardTokensForSession(ctx, a.dbPool, sessionID); rerr != nil {
 			logLaunchFailure("queued", &jobSubmissionError{reason: "InternalError"})

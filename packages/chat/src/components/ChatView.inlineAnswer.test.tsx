@@ -3,7 +3,7 @@
 // answered: orange"), never the person's bubble, never Blerg's relay text with the question's id;
 // the relayed decisions are short rows too; a dismissed question says so.
 import { beforeEach, describe, expect, it } from 'vitest'
-import { act, render, screen } from '@testing-library/react'
+import { act, render, screen, fireEvent, within } from '@testing-library/react'
 import ChatView from './ChatView'
 import { createFakeTransport } from '../test/fakeTransport'
 import { SESSION, ev as mk, meta, resetChatState, seed } from '../test/chat'
@@ -17,6 +17,11 @@ const RELAY = `Answer to your question ${ID} ("${QUESTION}"): orange`
 
 function ev(seq: number, kind: AgentEvent['kind'], payload: unknown, ts = '2026-10-14T00:00:00Z'): AgentEvent {
   return mk({ seq, kind, ts, payload })
+}
+
+function openQuestion() {
+ fireEvent.click(within(screen.getByTestId('ask-card')).getByRole('button'))
+ return screen.getByRole('dialog')
 }
 
 describe('an inline answer to a question (#156)', () => {
@@ -40,6 +45,7 @@ describe('an inline answer to a question (#156)', () => {
       expect(screen.queryByTestId('queued-message')).toBeNull()
       expect(document.body.textContent).not.toContain(ID)
       expect(document.body.textContent).not.toContain('Answer to your question')
+      openQuestion()
       expect(screen.getByTestId('ask-closed').textContent).toMatch(/^Answered: orange · by you · /)
       const row = screen.getByTestId('system-note')
       expect(row.textContent).toMatch(/^You\s*answered: orange/)
@@ -61,12 +67,23 @@ describe('an inline answer to a question (#156)', () => {
     expect(document.querySelector('.agent-card.user')).toBeNull()
   })
 
+  it('labels a discarded question as withdrawn without implying an answer', () => {
+    seed(ev(1, 'ask', { body: QUESTION, message_id: ID, no_wait: true, owner_only: true }))
+    const t = createFakeTransport()
+    render(<ChatView session={SESSION} transport={t.transport} meta={running} />)
+    act(() => t.closeAsk(ID, '', false, undefined, true))
+    openQuestion()
+      expect(screen.getByTestId('ask-closed').textContent).toBe('Withdrawn · workspace discarded without an answer')
+    expect(screen.queryByText('Answered:')).toBeNull()
+  })
+
   it('says a question the person dismissed was dismissed', () => {
     seed(ev(1, 'ask', { body: QUESTION, message_id: ID, no_wait: true, owner_only: true }))
     const t = createFakeTransport()
     render(<ChatView session={SESSION} transport={t.transport} meta={running} />)
     act(() => t.closeAsk(ID, '', true, 'you'))
-    expect(screen.getByTestId('ask-closed').textContent).toBe('Dismissed by you (maybe answered in the chat)')
+    openQuestion()
+      expect(screen.getByTestId('ask-closed').textContent).toBe('Dismissed by you (maybe answered in the chat)')
   })
 
   // Card #155 review: someone else's dismissal is not "by you"; with no one known, it names no one.
@@ -77,6 +94,7 @@ describe('an inline answer to a question (#156)', () => {
       const t = createFakeTransport()
       const { unmount } = render(<ChatView session={SESSION} transport={t.transport} meta={running} />)
       act(() => t.closeAsk(ID, '', true, by))
+      openQuestion()
       expect(screen.getByTestId('ask-closed').textContent).toBe(words)
       unmount()
     }
@@ -93,4 +111,22 @@ describe('an inline answer to a question (#156)', () => {
     render(<ChatView session={SESSION} transport={t.transport} meta={running} />)
     expect(screen.getByTestId('queued-message').textContent).toContain('my own words')
   })
+})
+
+for (const close of ['Escape', 'backdrop']) it(`keeps each question draft after ${close}`, () => {
+  resetChatState()
+  seed(ev(1, 'ask', { body: QUESTION, message_id: ID, no_wait: true, owner_only: true }))
+  render(<ChatView session={SESSION} transport={createFakeTransport({ answersAsks: true }).transport} meta={running} canAnswerApprovals />)
+  openQuestion()
+  fireEvent.change(screen.getByLabelText('Your answer'), { target: { value: 'unfinished answer' } })
+  if (close === 'Escape') fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
+  else {
+    const overlay = screen.getByTestId('ticket-modal-overlay')
+    fireEvent.pointerDown(overlay)
+    fireEvent.pointerUp(overlay)
+    fireEvent.click(overlay)
+  }
+  expect(screen.queryByRole('dialog')).toBeNull()
+  openQuestion()
+  expect(screen.getByLabelText('Your answer')).toHaveValue('unfinished answer')
 })

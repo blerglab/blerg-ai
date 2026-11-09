@@ -53,7 +53,7 @@ describe('TabBar open-questions badge', () => {
     renderTabBar()
     expect(screen.queryByText('Chat')).not.toBeInTheDocument()
     expect(screen.queryByTestId('open-count-badge')).not.toBeInTheDocument()
-    expect(screen.getByText('Sessions')).toBeInTheDocument()
+    expect(screen.getByText('Workspaces')).toBeInTheDocument()
   })
 
   it('hides the badge when there are no open messages', () => {
@@ -208,7 +208,7 @@ describe('notifications are opt-in', () => {
     await waitFor(() => expect(screen.getByTestId('push-state')).toHaveTextContent('Off for this browser.'))
     expect(fetchMock).toHaveBeenCalledWith('/api/push/subscribe', expect.objectContaining({ method: 'DELETE', body: JSON.stringify({ endpoint: 'https://push.example.com/sub/1' }) }))
     expect(unsubscribe).toHaveBeenCalledOnce()
-    expect(localStorage.getItem('blerg_notifications_wanted')).toBeNull()
+    expect(localStorage.getItem('blerg_notifications_wanted')).toBe('0')
     expect(screen.getByRole('button', { name: 'Turn on' })).toBeInTheDocument()
     vi.unstubAllGlobals()
   })

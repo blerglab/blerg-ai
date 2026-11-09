@@ -4,6 +4,7 @@ import { BoardSettings } from "./BoardSettings";
 import { MeProvider } from "./me";
 import { api, Board } from "./api";
 
+let identityName = "";
 let catalog: unknown = { state: "known", engines: [] };
 let me: unknown = { kind: "service", is_admin: true, is_human: true };
 let targets: unknown = {};
@@ -18,6 +19,8 @@ vi.mock("./api", async (importOriginal) => {
         return Promise.reject(new actual.ApiError(403, { error: runAsMeRefusal }));
       }
       if (path.includes("/repo-remote?")) return Promise.resolve(remote);
+      if (path.endsWith("/automation/identity")) return Promise.resolve({ username: identityName });
+      if (path.endsWith("/archive-preview")) return Promise.resolve({ count: 7 });
       return Promise.resolve(path === "/api/me" ? me : path.includes("/launch-options") ? catalog : path.endsWith("/run-targets") ? targets : {});
     }),
   };
@@ -38,12 +41,13 @@ function board(over: Partial<Board> = {}): Board {
 
 function open(b: Board, onChanged = vi.fn()) {
   render(<MeProvider><BoardSettings board={b} onChanged={onChanged} /></MeProvider>);
-  fireEvent.click(screen.getByRole("button", { name: /model/i }));
+  fireEvent.click(screen.getByRole("button", { name: /Board settings/ }));
   return onChanged;
 }
 
 describe("BoardSettings automation", () => {
   beforeEach(() => {
+    identityName = "";
     vi.mocked(api).mockClear();
     catalog = { state: "known", engines: ["claude", "codex", "hermes"].map(id => ({ id, name: id === "claude" ? "Claude" : id, models: { models: [] } })) };
     me = { kind: "service", is_admin: true, is_human: true };
@@ -86,7 +90,7 @@ describe("BoardSettings automation", () => {
     catalog = { state: "known", engines: [{ id: "codex", name: "Codex", models: { models: [] } }] };
     open(board({ automation_token_set: true }));
     await waitFor(() => expect(api).toHaveBeenCalledWith("/api/boards/b1/launch-options", expect.anything()));
-    await waitFor(() => expect(screen.queryByRole("combobox")).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("combobox", { name: "Engine" })).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(api).toHaveBeenCalledWith("/api/boards/b1", { method: "PATCH", json: { automation_engine: "codex" } }));
   });
@@ -104,7 +108,7 @@ describe("BoardSettings automation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
     expect(api).toHaveBeenCalledWith("/api/boards/b1", { method: "PATCH", json: { automation_token: "fixture-token" } });
-    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Engine" })).toBeNull();
   });
 
   it("does not display inherited effort for an explicit role model", () => {
@@ -115,7 +119,7 @@ describe("BoardSettings automation", () => {
 
   it("says plainly when the board has no automation token", async () => {
     open(board());
-    expect(screen.getByText("no token — this board cannot start sessions")).toBeInTheDocument();
+    expect(screen.getByText("no token — this board cannot start workspaces")).toBeInTheDocument();
     expect(screen.getByLabelText("no automation token")).toBeInTheDocument();
   });
 
@@ -130,7 +134,7 @@ describe("BoardSettings automation", () => {
     const onChanged = open(board({ automation_token_set: true }));
     const input = await screen.findByPlaceholderText("paste a run-sessions agent token");
     fireEvent.change(input, { target: { value: "  tok.en.value  " } });
-    fireEvent.change(await screen.findByRole("combobox"), { target: { value: "hermes" } });
+    fireEvent.change(await screen.findByRole("combobox", { name: "Engine" }), { target: { value: "hermes" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
     expect(api).toHaveBeenCalledWith("/api/boards/b1", {
@@ -142,7 +146,7 @@ describe("BoardSettings automation", () => {
 
   it("changing only the engine never sends a token", async () => {
     open(board({ automation_token_set: true }));
-    fireEvent.change(await screen.findByRole("combobox"), { target: { value: "codex" } });
+    fireEvent.change(await screen.findByRole("combobox", { name: "Engine" }), { target: { value: "codex" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(api).toHaveBeenCalledWith("/api/boards/b1", {
       method: "PATCH", json: { automation_engine: "codex" },
@@ -151,7 +155,7 @@ describe("BoardSettings automation", () => {
 
   it("removes the token", async () => {
     open(board({ automation_token_set: true, automation_token_expires_at: new Date(Date.now() + 5 * 86_400_000).toISOString() }));
-    expect(screen.getByText("token set")).toBeInTheDocument(); // no account recorded
+    expect(screen.getByText("Token owner")).toBeInTheDocument(); // no account recorded
     expect(screen.getByText(/expires in 4 days|expires in 5 days/)).toBeInTheDocument();
     fireEvent.click(await screen.findByRole("button", { name: "Remove token" }));
     await waitFor(() => expect(api).toHaveBeenCalledWith("/api/boards/b1", {
@@ -162,8 +166,8 @@ describe("BoardSettings automation", () => {
   it("shows whose token it is, and marks the viewer's own", async () => {
     me = { kind: "service", is_admin: true, is_human: true, account_id: "acct-7" };
     open(board({ automation_token_set: true, automation_account_id: "acct-7" }));
-    expect(screen.getByText("account acct-7")).toBeInTheDocument();
-    expect(await screen.findByText("(you)")).toBeInTheDocument();
+    expect(await screen.findByText("You")).toBeInTheDocument();
+    expect(screen.queryByText(/account acct-7/)).toBeNull();
   });
 
   it("warns that every card-writer can spend and extract the credential", () => {
@@ -207,7 +211,7 @@ describe("BoardSettings automation", () => {
       automation_token_set: true, automation_account_id: "acct-7", automation_token_minted: true,
       automation_token_expires_at: new Date(Date.now() + 30 * 86_400_000).toISOString(),
     }));
-    expect(await screen.findByText("(you)")).toBeInTheDocument();
+    expect(await screen.findByText("You")).toBeInTheDocument();
     expect(screen.getByText(/Run as me$/)).toBeInTheDocument(); // the "· Run as me" marker
     expect(screen.queryByRole("button", { name: "Run as me" })).toBeNull();
   });
@@ -237,7 +241,7 @@ describe("BoardSettings automation", () => {
     open(board());
     await waitFor(() => expect(api).toHaveBeenCalledWith("/api/me"));
     expect(screen.queryByPlaceholderText("paste a run-sessions agent token")).toBeNull();
-    expect(screen.getByText("no token — this board cannot start sessions")).toBeInTheDocument();
+    expect(screen.getByText("no token — this board cannot start workspaces")).toBeInTheDocument();
   });
 });
 
@@ -262,6 +266,7 @@ describe('BoardSettings originating component metadata', () => {
 describe("BoardSettings bare repos", () => {
   const owned = () => board({ repos: ["app"], automation_token_set: true, automation_account_id: "owner-fixture" });
   beforeEach(() => {
+    identityName = "";
     vi.mocked(api).mockClear();
     catalog = { state: "known", engines: [] };
     me = { is_admin: true, is_human: true, account_id: "owner-fixture" };
@@ -311,4 +316,90 @@ describe("BoardSettings bare repos", () => {
     await screen.findByRole("combobox", { name: "Where this board runs" });
     expect(screen.queryByText("Repos for the cluster")).toBeNull();
   });
+});
+
+it('saves opt-in automatic archiving and can disable it', async () => {
+  vi.mocked(api).mockClear();
+  me = { is_admin: true, is_human: true };
+  open(board());
+  const days = await screen.findByRole('spinbutton', { name: 'Auto-archive done after (days)' });
+  expect(days).toHaveValue(0);
+  fireEvent.change(days, { target: { value: '30' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save archiving' }));
+  await screen.findByRole('button', { name: 'Confirm archiving' });
+  expect(screen.getByText('7 cards eligible now. Future eligible cards will also be archived.')).toBeInTheDocument();
+  expect(api).not.toHaveBeenCalledWith('/api/boards/b1', expect.objectContaining({ method: 'PATCH' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm archiving' }));
+  await waitFor(() => expect(api).toHaveBeenCalledWith('/api/boards/b1', { method: 'PATCH', json: { auto_archive_done_days: 30, auto_archive_keep_tags: ['to-test'] } }));
+  fireEvent.change(days, { target: { value: '0' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save archiving' }));
+  await waitFor(() => expect(api).toHaveBeenCalledWith('/api/boards/b1', { method: 'PATCH', json: { auto_archive_done_days: 0, auto_archive_keep_tags: ['to-test'] } }));
+});
+
+it('does not offer retention on mirrored boards', async () => {
+  me = { is_admin: true, is_human: true };
+  open(board({ driven_by: 'external' }));
+  await screen.findByText('Automatic archiving is unavailable on mirrored boards.');
+  expect(screen.queryByRole('spinbutton', { name: 'Auto-archive done after (days)' })).toBeNull();
+});
+
+it('keeps Model compact and puts editable board settings in a separate dialog', async () => {
+  identityName = 'example-user';
+  me = { is_admin: true, is_human: true, account_id: 'owner-fixture', username: 'example-user' };
+  render(<MeProvider><BoardSettings board={board({ automation_token_set: true, automation_account_id: 'owner-fixture' })} /></MeProvider>);
+  fireEvent.click(screen.getByRole('button', { name: /model/i }));
+  expect(await screen.findByRole('dialog', { name: 'Board models' })).toBeInTheDocument();
+  expect(screen.queryByText('Repos')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: /^Board settings/ }));
+  expect(await screen.findByRole('dialog', { name: /^Board settings/ })).toBeInTheDocument();
+  for (const name of ['General', 'Repos', 'Runs', 'Filed tickets', 'Models']) expect(screen.getByRole('heading', { name })).toBeInTheDocument();
+  expect(await screen.findByLabelText('Board name')).toHaveValue('work');
+  expect(screen.getByText('You (example-user)')).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText('Board name'), { target: { value: 'Renamed' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save general' }));
+  await waitFor(() => expect(api).toHaveBeenCalledWith('/api/boards/b1', { method: 'PATCH', json: { name: 'Renamed', description: '' } }));
+});
+
+it.each([{ is_admin: false }, { is_admin: true, board_id: 'other' }])('keeps non-admin settings read-only: %j', async viewer => {
+  me = { ...viewer, is_human: true };
+  open(board());
+  await screen.findByText('Only board admins can edit these settings.');
+  expect(screen.queryByRole('textbox')).toBeNull();
+  expect(screen.queryByRole('combobox')).toBeNull();
+  expect(screen.queryByRole('checkbox')).toBeNull();
+  expect(screen.queryByRole('button', { name: /^Save/ })).toBeNull();
+});
+
+it('saves repository and run settings for a board admin', async () => {
+  me = { is_admin: true, is_human: true };
+  open(board());
+  fireEvent.change(await screen.findByLabelText('Repositories (one per line)'), { target: { value: 'example-org/app\nexample-org/lib' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save repos' }));
+  await waitFor(() => expect(api).toHaveBeenCalledWith('/api/boards/b1', { method: 'PATCH', json: { repos: ['example-org/app', 'example-org/lib'], git_base: '' } }));
+  fireEvent.change(screen.getByLabelText('Concurrency'), { target: { value: '3' } });
+  fireEvent.change(screen.getByLabelText('CI policy'), { target: { value: 'if_present' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save runs' }));
+  await waitFor(() => expect(api).toHaveBeenCalledWith('/api/boards/b1', { method: 'PATCH', json: { concurrency: 3, ci_policy: 'if_present' } }));
+});
+
+it('preserves stored models when the catalog replaces fallback options and saves catalog efforts', async () => {
+  me = { is_admin: true, is_human: true };
+  catalog = { state: 'known', engines: [{ id: 'codex', name: 'Codex', models: { models: [{ id: 'gpt-6', name: 'GPT-6', efforts: ['low', 'high'] }] } }] };
+  open(board({ automation_token_set: true, automation_engine: 'codex', model: 'gpt-6', effort: 'high', reviewer_model: 'gpt-6' }));
+  await waitFor(() => expect(screen.getAllByRole('option', { name: 'GPT-6' })).toHaveLength(4));
+  expect(screen.getByLabelText('worker model')).toHaveValue('gpt-6');
+  expect(screen.getByLabelText('reviewer model')).toHaveValue('gpt-6');
+  expect(screen.getByRole('combobox', { name: 'worker effort' })).toHaveValue('high');
+  fireEvent.click(screen.getByRole('button', { name: 'Save models' }));
+  await waitFor(() => expect(api).toHaveBeenCalledWith('/api/boards/b1', { method: 'PATCH', json: expect.objectContaining({ model: 'gpt-6', reviewer_model: 'gpt-6', effort: 'high' }) }));
+});
+
+it('returns focus to Model after Escape from its popover', async () => {
+  me = { is_admin: true, is_human: true };
+  render(<MeProvider><BoardSettings board={board()} /></MeProvider>);
+  const model = screen.getByRole('button', { name: /model/i });
+  fireEvent.click(model);
+  await screen.findByRole('dialog', { name: 'Board models' });
+  fireEvent.keyDown(document, { key: 'Escape' });
+  expect(model).toHaveFocus();
 });

@@ -11,7 +11,7 @@ export function corpus(shard: number) {
     it.each(cases.filter((_, i) => i % 4 === shard))('$id [$diagram]', async fixture => {
       const host = document.createElement('section')
       document.body.append(host)
-      let dispose: (() => void) | undefined
+      let visual: {svg: string; width: number; height: number; dispose(): void} | undefined
       try {
         if (fixture.refusal || fixture.error || fixture.upstream) {
           await expect(renderMermaid(fixture.source, host), fixture.id).rejects.toThrow(fixture.refusal || fixture.error || fixture.upstream!.error)
@@ -29,7 +29,7 @@ export function corpus(shard: number) {
           host.style.setProperty('--chat-surface-2', dark ? '#222222' : '#ffffff')
           host.style.setProperty('--chat-surface', dark ? '#171717' : '#f5f5f5')
         }
-        dispose = await renderMermaid(fixture.source, host, readVisualTheme(host))
+        visual = await renderMermaid(fixture.source, host, readVisualTheme(host))
         const image = host.querySelector('img')!
         expect(image, `${fixture.id}: renderer produced no image`).not.toBeNull()
         expect(image.naturalWidth, `${fixture.id}: empty image`).toBeGreaterThan(0)
@@ -62,7 +62,7 @@ export function corpus(shard: number) {
         }
         for (const color of fixture.colors ?? []) expect(raw.toLowerCase(), `${fixture.id}: missing color ${color}`).toContain(color)
         if (fixture.upstreamMissing) {
-          const original = await renderInFrame(fixture.source, { startOnLoad: false, securityLevel: 'strict', htmlLabels: false }, false)
+          const { svg: original } = await renderInFrame(fixture.source, { startOnLoad: false, securityLevel: 'strict', htmlLabels: false }, false)
           expect(original, fixture.upstreamMissing.reason).not.toContain(fixture.upstreamMissing.label)
         }
         if (fixture.theme) expect(raw).toContain(fixture.theme === 'dark' ? '#eeeeee' : '#111111')
@@ -84,7 +84,7 @@ export function corpus(shard: number) {
         expect(frame.getAttribute('sandbox')).toBe('allow-scripts')
         expect(frame.srcdoc).toContain("default-src 'none'")
       } finally {
-        dispose?.()
+        visual?.dispose()
         host.remove()
       }
     }, 30_000)

@@ -1,3 +1,5 @@
+import { browserWidths } from '../test/browserWidths'
+import { page } from 'vitest/browser'
 // A shell that is gone (its authorization expired or was revoked, the server no longer lists it, or
 // it ended) says so in its own tab and offers New shell, which takes the same tab position. An
 // unexpected drop reconnects by itself; another tab's control never does (0.5.0, owner test).
@@ -51,6 +53,7 @@ beforeEach(() => {
   vi.stubGlobal('WebSocket', LiveSocket)
   server.listed = []; server.failInventory = false; server.creates = 0; server.next = 'new'; server.attachedElsewhere = new Set(); server.holdCreate = null; server.deleted = []; server.failDelete = false
   apiFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/details')) return new Response(JSON.stringify({ reason: 'revoked' }))
     if (url.endsWith('/shell-capability')) return new Response(JSON.stringify({ available: true }))
     if (/\/api\/sessions\/[^/]+\/shells$/.test(url)) {
       if (init?.method === 'POST') {
@@ -105,7 +108,7 @@ it('a restored shell whose socket is refused and that the server no longer lists
   const status = await screen.findByText('This shell ended.', undefined, { timeout: 3000 })
   const bar = status.closest('.shell-connection') as HTMLElement
   expect(within(bar).getByRole('button', { name: 'New shell' })).toBeTruthy()
-  expect(screen.queryByText(/^(Disconnected\.|Controlled in another tab\.)$/)).toBeNull()
+  expect(screen.queryByText(/^(Disconnected\.|This shell was opened in another tab with the same browser sign-in\.)$/)).toBeNull()
   expect(shellTabIds()).toEqual(['shell:shell-a'])
 })
 
@@ -118,6 +121,14 @@ it('a restored tab whose shell the server no longer lists says it ended instead 
   const bar = (await screen.findByText('This shell ended.')).closest('.shell-connection') as HTMLElement
   expect(bar).toHaveTextContent('It is no longer running, for example after Blerg was updated.')
   expect(within(bar).getByRole('button', { name: 'New shell' })).toBeTruthy()
+  const writeText = vi.fn(async (_text: string) => {})
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+  await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/api/shells/h-a/details', expect.anything()))
+  await waitFor(() => expect(within(bar).getByRole('button', { name: 'Copy details' })).toBeEnabled())
+  fireEvent.click(within(bar).getByRole('button', { name: 'Copy details' }))
+  // Calling writeText must stay in the click's synchronous user-gesture task.
+  expect(writeText).toHaveBeenCalledOnce()
+  expect(writeText.mock.calls[0]?.[0]).toContain('Server reason: revoked')
 })
 
 it('a restored tab whose inventory is refused is never a blank surface', async () => {
@@ -187,7 +198,7 @@ it('an unexpected drop reconnects by itself, keeping the picture, with no bar an
   expect(screen.queryByText('This shell ended.')).toBeNull()
 })
 
-it('a drop because another tab took the shell keeps the bar with Take over and never reconnects by itself', async () => {
+it('a drop because another tab took the shell keeps the bar with Take back control and never reconnects by itself', async () => {
   server.listed = [shell('a')]
   render(view('takeover'))
   fireEvent.click(await screen.findByRole('tab', { name: 'Shell' }))
@@ -195,8 +206,8 @@ it('a drop because another tab took the shell keeps the bar with Take over and n
   await say(socketsFor('h-a')[0], 'project $ echo mine\r\n')
   server.attachedElsewhere.add('h-a')
   act(() => socketsFor('h-a')[0].drop())
-  expect(await screen.findByText('Controlled in another tab.', undefined, { timeout: 3000 })).toBeTruthy()
-  expect(screen.getByRole('button', { name: 'Take over' })).toBeTruthy()
+  expect(await screen.findByText('This shell was opened in another tab with the same browser sign-in.', undefined, { timeout: 3000 })).toBeTruthy()
+  expect(screen.getByRole('button', { name: 'Take back control' })).toBeTruthy()
   await new Promise(r => setTimeout(r, 2500))
   expect(socketsFor('h-a')).toHaveLength(1)
   expect(screen.queryByText('This shell ended.')).toBeNull()
@@ -241,15 +252,15 @@ it('a replaced shell that a later inventory still lists does not get its tab bac
   expect(shellTabIds()).toEqual(['shell:shell-new'])
 })
 
-// Review P2 4: an ordinary outage offers Reconnect only; Take over only for a confirmed other tab.
-it.each([['outage', 'Disconnected.', false], ['elsewhere', 'Controlled in another tab.', true], [undefined, 'Disconnected.', false]] as const)('a disconnect for reason %s says %s', async (reason, text, takeover) => {
+// Review P2 4: an ordinary outage offers Reconnect only; Take back control only for a confirmed other tab.
+it.each([['outage', 'Disconnected.', false], ['elsewhere', 'This shell was opened in another tab with the same browser sign-in.', true], [undefined, 'Disconnected.', false]] as const)('a disconnect for reason %s says %s', async (reason, text, takeover) => {
   const shell = new FakeShell(`reason-${reason}`)
   shell.connectionState = 'disconnected'; shell.reason = reason
   const ui = render(<div className="shell-terminal" style={{ width: 600, height: 300, display: 'flex' }}><ShellView transport={shell} /></div>)
   const bar = await ui.findByRole('status')
   expect(bar).toHaveTextContent(text)
   expect(within(bar).getByRole('button', { name: 'Reconnect' })).toBeTruthy()
-  expect(!!within(bar).queryByRole('button', { name: 'Take over' })).toBe(takeover)
+  expect(!!within(bar).queryByRole('button', { name: 'Take back control' })).toBe(takeover)
   ui.unmount()
 })
 
@@ -299,4 +310,28 @@ it('a cancelled replacement whose DELETE fails never comes back, and the next in
   await waitFor(() => expect(server.deleted).toContain('h-new'))
   expect(shellTabIds()).toEqual([])
   expect(socketsFor('h-new').every(socket => socket.closed)).toBe(true)
+})
+
+it('copies safe details where a shell ended', async () => {
+ const writeText = vi.fn(async (_text: string) => {})
+ Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+ const transport = new FakeShell('details'); transport.connectionState = 'closed'
+ render(<ShellView transport={transport} keepSession="session" name="Test watcher" onNewShell={() => {}} />)
+ await waitFor(() => expect(screen.getByRole('button', { name: 'Copy details' })).toBeEnabled())
+ fireEvent.click(screen.getByRole('button', { name: 'Copy details' }))
+ await waitFor(() => expect(writeText).toHaveBeenCalledOnce())
+ expect(writeText.mock.calls[0]?.[0]).toContain('Blerg shell report — please diagnose:')
+ expect(writeText.mock.calls[0]?.[0]).not.toContain('Test watcher')
+ expect(await screen.findByRole('button', { name: 'Copied' })).toBeTruthy()
+})
+
+it.each(browserWidths([390, 3840]))('truncates an ended shell name with its full tooltip at %i px', async width => {
+ await page.viewport(width,900)
+ const transport = new FakeShell('long-name'); transport.connectionState = 'closed'
+ const name = 'Watcher' + 'a'.repeat(110)
+ render(<ShellView transport={transport} keepSession="session" name={name} onNewShell={() => {}} />)
+ const label = screen.getByText(`${name}:`)
+ expect(label.getBoundingClientRect().width).toBeLessThanOrEqual(260)
+ expect(label.title).toBe(name)
+ expect(label.getBoundingClientRect().right).toBeLessThanOrEqual(width)
 })

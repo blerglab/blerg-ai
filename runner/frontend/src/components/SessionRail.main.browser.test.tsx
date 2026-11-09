@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 import { page, userEvent } from 'vitest/browser'
@@ -41,7 +42,7 @@ function show(width: number, working: boolean, o: Opts = {}) {
 beforeEach(() => localStorage.clear())
 
 describe('Running now heads with Main, in Chromium', () => {
-  it.each([390, 3840])('at %i px: Main first and compact, inside rows indented, the child at its level', async width => {
+  it.each(browserWidths([390, 3840]))('at %i px: Main first and compact, inside rows indented, the child at its level', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 844)
     const running = show(width, true)
     expect(within(running).getByTestId('rail-running-count')).toHaveTextContent('4')
@@ -74,7 +75,7 @@ describe('Running now heads with Main, in Chromium', () => {
     expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
   })
 
-  it.each([390, 3840])('at %i px: idle with a background command, Main is Zz and not counted', async width => {
+  it.each(browserWidths([390, 3840]))('at %i px: idle with a background command, Main is Zz and not counted', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 844)
     const running = show(width, false)
     expect(within(running).getByTestId('rail-running-count')).toHaveTextContent('3')
@@ -86,7 +87,7 @@ describe('Running now heads with Main, in Chromium', () => {
 })
 
 describe('Main with a progress bar and a step, in Chromium', () => {
-  it.each([390, 3840])('at %i px the step and its clock stay visible inside the card', async width => {
+  it.each(browserWidths([390, 3840]))('at %i px the step and its clock stay visible inside the card', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 844)
     const running = show(width, true, { progress: true })
     const main = within(running).getByTestId('rail-main')

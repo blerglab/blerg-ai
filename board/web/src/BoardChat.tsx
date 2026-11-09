@@ -78,29 +78,29 @@ export function BoardChat({ boardId, onClosed }: { boardId: string; onClosed: ()
     const lc = session?.lifecycle ?? "starting";
     return (
       <button className="board-chat-mini" onClick={() => { setMin(false); setTimeout(() => rootRef.current?.querySelector("textarea")?.focus(), 80); }}
-        title={`board session (${lc}) — click to restore`}>
+        title={`board channel (${lc}) — click to restore`}>
         💬 <span className={`mini-dot ${lc}`} />
       </button>
     );
   }
 
   return (
-    <div className="board-chat" role="dialog" aria-label="Board session" ref={rootRef}>
+    <div className="board-chat" role="dialog" aria-label="Board channel" ref={rootRef}>
       <div className="row board-chat-head">
-        <span className="sign">Board session</span>
+        <span className="sign">Board channel</span>
         {session && <span className={`convo-state ${session.lifecycle}`}>{session.lifecycle}</span>}
         {session?.model && (
           <span className="mono" style={{ color: "var(--fog-dim)", fontSize: 11 }}><span title={session.model}>{modelDisplayName(session.model || "")}</span>{session.effort && <span className="model-effort" title="Configured effort">{session.effort}</span>}</span>
         )}
         <span className="spacer" />
         <button className="btn ghost small" onClick={() => setMin(true)}
-          title="minimize — the session keeps running">—</button>
-        <button className="btn ghost small" onClick={close} title="ends the session">✕ Close</button>
+          title="minimize — the workspace keeps running">—</button>
+        <button className="btn ghost small" onClick={close} title="ends the workspace">✕ Close</button>
       </div>
       {error && (
         <div className="board-chat-error" style={{ padding: "0 12px" }}>
           <p role="alert" style={{ color: "var(--danger)", fontSize: 13, margin: "0 0 8px" }}>
-            The board session could not start: {error}
+            The board channel could not start: {error}
           </p>
           <div className="row" style={{ gap: 8 }}>
             {/* Where it runs and the board's repos live in its settings: always one click away. */}
@@ -125,7 +125,7 @@ export function BoardChat({ boardId, onClosed }: { boardId: string; onClosed: ()
       )}
       {session?.lifecycle === "error" && (
         <p className="adv-banner working" style={{ margin: 8 }}>
-          The session failed to start — most often the board's repo doesn't
+          The workspace failed to start — most often the board's repo doesn't
           exist or isn't reachable. Check the board's repos, then close and
           reopen.
         </p>

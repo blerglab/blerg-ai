@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
@@ -27,6 +28,9 @@ func TestHostLifecycleHelper(t *testing.T) {
 func hostLifecycleTestService(t *testing.T, authority WorkspaceRuntimeAuthority) *LocalWorkspaceService {
 	t.Helper()
 	service := shellruntime.NewService(func(shellruntime.RPC) error { return nil })
+	if err := service.ConfigureHostRetirements(filepath.Join(t.TempDir(), "retirements")); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	return &LocalWorkspaceService{Resolve: func(context.Context, protocol.SpawnSession) ([]WorkspaceSource, string, error) { return nil, "", nil }, HostExecutable: os.Getenv("BLERG_HOST_HELPER_TEST_BINARY"), Authority: authority, Supervisor: newWorkspaceSupervisors(service), HostCommand: func(identity shellruntime.Identity) shellruntime.Command {
 		return shellruntime.Command{Executable: os.Args[0], Args: []string{"-test.run=^TestHostLifecycleHelper$", "--", "host-lifecycle-helper"}, Identity: identity}

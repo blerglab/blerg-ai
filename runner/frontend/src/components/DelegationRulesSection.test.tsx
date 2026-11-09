@@ -14,7 +14,7 @@ describe('session-starting rules', () => {
   it('lists account rules and server limits, and removes the selected rule', async () => {
     render(<DelegationRulesSection />)
     expect(await screen.findByText(/Codex · desktop sandbox/)).toHaveTextContent('Workstation')
-    expect(screen.getByText(/Each session can run 3/)).toHaveTextContent('start 60 an hour')
+    expect(screen.getByText(/Each agent can run 3/)).toHaveTextContent('start 60 an hour')
     fireEvent.click(screen.getByRole('button', { name: 'Remove' }))
     await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/api/delegation-rules/rule', { method: 'DELETE' }))
   })

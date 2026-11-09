@@ -123,7 +123,7 @@ describe("Boards empty state", () => {
     responses["/api/me"] = { kind: "service", is_admin: true, is_human: true };
     render(<MemoryRouter><MeProvider><Boards /></MeProvider></MemoryRouter>);
     expect(await screen.findByText(
-      "Create one, then mint an agent token so sessions can start stacking cards.",
+      "Create one, then mint an agent token so workspaces can start stacking cards.",
     )).toBeInTheDocument();
   });
 });
@@ -257,7 +257,7 @@ describe("New board template", () => {
       fireEvent.click(await screen.findByText("New board"));
       fireEvent.change(screen.getByPlaceholderText("board name"), { target: { value: "mine" } });
       await clickCreate();
-      expect(await screen.findByRole("status")).toHaveTextContent(/created, but it can't start sessions yet: blerg-core did not accept your sign-in/);
+      expect(await screen.findByRole("status")).toHaveTextContent(/created, but it can't start workspaces yet: blerg-core did not accept your sign-in/);
     } finally {
       vi.mocked(api).mockImplementation(real);
     }

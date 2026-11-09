@@ -90,7 +90,7 @@ async function walk(to: { x: number; y: number }, opts: { step?: number; into?: 
   }
 }
 
-/** Walks straight down the chips; each chip's card opens in turn, the first after the delay, the
+/** Walks down the chips at their measured centers; each card opens in turn, the first after the delay, the
  *  rest at once (warm), and the pointer never enters a card. */
 /** Hovercards' time, the test's own: a card opens when the test says the delay has passed. */
 let clock: ManualHoverClock
@@ -109,6 +109,7 @@ async function opened() {
 }
 
 async function walkDown(chips: HTMLElement[], keyOf: (i: number) => string, x?: number) {
+  await document.fonts.ready
   const first = { ...center(chips[0]), ...(x !== undefined ? { x } : {}) }
   await moveTo(first.x, first.y - 1)
   await moveTo(first.x, first.y)
@@ -116,7 +117,9 @@ async function walkDown(chips: HTMLElement[], keyOf: (i: number) => string, x?: 
   expect(card()!.textContent).toContain(keyOf(0))
   for (let i = 1; i < chips.length; i++) {
     const c = center(chips[i])
-    await walk({ x: first.x, y: c.y })
+    const target = {x: x ?? c.x, y: c.y}
+    expect(chips[i].contains(document.elementFromPoint(target.x, target.y)), 'the measured pointer destination hits this chip').toBe(true)
+    await walk(target)
     // At once: only the short warm dwell passes, far less than the open delay.
     await warmDwell()
     await expect.poll(() => card()?.textContent ?? '').toContain(keyOf(i))
@@ -183,7 +186,7 @@ describe('Hovercards in lists, with a real mouse', () => {
     const x = Math.round(rows[0].getBoundingClientRect().left + 70)
     await walkDown(rows, i => ['Main', 'Survey the layout', 'Audit the tests', 'Watch the build', 'Parallel reviewer'][i], x)
     expect(within(card()!).getByTestId('hovercard-run-model').textContent).toContain('Codex')
-    expect(within(card()!).getByTestId('hovercard-run-kind').textContent).toContain('Child session')
+    expect(within(card()!).getByTestId('hovercard-run-kind').textContent).toContain('Worker')
   })
 
   it('waits for a Running now hover delivered on a later browser frame before advancing time', async () => {

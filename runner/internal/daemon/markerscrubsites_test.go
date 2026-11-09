@@ -45,7 +45,7 @@ func TestMarkerCodeIsScrubbedAtEveryPostingSite(t *testing.T) {
 		srv, bodies := messagesServer(t)
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
-		m := &httpMessenger{base: srv.URL, token: "fixture-token", sessionID: "s1", markerNonce: testMarkerNonce, client: srv.Client(), ctx: ctx, onAnswer: func(string) {}}
+		m := &httpMessenger{base: srv.URL, token: "fixture-token", sessionID: "s1", markerNonce: testMarkerNonce, client: srv.Client(), ctx: ctx, onAnswerFrame: func(agent.AskAnswer) {}}
 		if err := m.SendUpdate(leak); err != nil {
 			t.Fatal(err)
 		}

@@ -6,15 +6,17 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"github.com/blerglab/blerg-ai/contracts/health"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/health"
+
 	"github.com/blerglab/blerg-ai/contracts/agentsmanifest"
 	cid "github.com/blerglab/blerg-ai/contracts/identity"
+	ld "github.com/blerglab/blerg-ai/contracts/livedata"
 	"github.com/blerglab/blerg-ai/core/internal/authprovider"
 	"github.com/blerglab/blerg-ai/core/internal/credentials"
 	"github.com/blerglab/blerg-ai/core/internal/db"
@@ -37,6 +39,18 @@ type identityProvider interface {
 }
 
 type Deps struct {
+	// LiveDataSafeRuntime is a trusted installation assessment. False/unknown requires owner consent; it never enables dispatch.
+	LiveDataDesktop     bool
+	LiveDataSafeRuntime bool
+	// LiveDataPosture is a trusted fresh Runner assessment, evaluated before approval locks.
+	LiveDataPosture func(context.Context) (bool, error)
+	// LiveDataNow is the proposal and listing freshness clock; nil preserves monotonic readings.
+	LiveDataNow func() time.Time
+	// Nil verifies the dedicated Runner mTLS certificate. Overrides are trusted process configuration.
+	LiveDataRunnerIdentity func(*http.Request) (ld.RunnerIdentity, error)
+	// LiveDataAuthorityEpoch must read the same external epoch as the issuer keyring. Nil leaves approval/proposal admission unavailable.
+	LiveDataAuthorityEpoch func() int64
+
 	ShellPolicy *shellpolicy.Service
 
 	// CookieNow supplies the refresh-cookie lifetime clock; nil uses real time.
@@ -66,6 +80,9 @@ type Deps struct {
 	// MCPConnections backs /api/mcp/connections and /internal/mcp/connections/* (routes_mcp.go).
 	// Nil fails those endpoints closed (503).
 	MCPConnections *mcpconn.Service
+	// SessionMCPOAuth is the human-flow seam. Nil uses MCPConnections; its
+	// required session authority is unwired by default and refuses the flow.
+	SessionMCPOAuth mcpconn.SessionOAuthFlow
 
 	// RegisterKey is the bootstrap shared secret components (board, runner) present to
 	// POST /components to self-register. It is intentionally a simple shared secret, not a
@@ -90,6 +107,20 @@ type Deps struct {
 	RunnerURL string
 	// RunnerClient overrides the HTTP client for RunnerURL (tests). Nil: a 10-second client.
 	RunnerClient *http.Client
+
+	// Dedicated live-data TLS transport; no fallback to the general internal client.
+	LiveDataRunnerURL    string
+	LiveDataRunnerClient *http.Client
+
+	// GitHubAPIBase / GitLabAPIBase override the provider API host BLG-460's read-only-token
+	// validation (gitreadonly_validate.go) calls at save time (tests only, via a fake server).
+	// Empty uses the real api.github.com / gitlab.com/api/v4.
+	GitHubAPIBase string
+	GitLabAPIBase string
+	// GitProviderClient overrides the HTTP client for that validation call (tests). Nil: a
+	// short-timeout client — this call blocks a person's Settings save, so it must fail fast
+	// rather than hang if the provider is unreachable.
+	GitProviderClient *http.Client
 
 	// BoardMintKey is the shared secret blerg-board presents to POST
 	// /internal/tokens/board-automation(/revoke): "Run as me", where the board asks core to mint a
@@ -410,6 +441,9 @@ func NewRouter(deps Deps) http.Handler {
 	// branches on the principal's kind and refuses anything else — no capability is required
 	// here, so a password-change-only token can still see who it is.
 	mux.HandleFunc("GET /api/me", requirePrincipal(deps.handleMe, deps, ""))
+	mux.HandleFunc("GET /api/me/theme", deps.handleAccountTheme)
+	mux.HandleFunc("PUT /api/me/theme", deps.handleAccountTheme)
+	mux.HandleFunc("POST /internal/accounts/whats-new", deps.handleInternalWhatsNew)
 
 	// Agent tokens (spec §2). Human-only, on purpose: an agent token must not be able to mint
 	// another one, or revoking the parent would leave the child alive. "card.read" is the same
@@ -495,7 +529,10 @@ func NewRouter(deps Deps) http.Handler {
 	mux.HandleFunc("POST /internal/desktop-tokens/issue", deps.handleInternalIssueDesktopToken)
 	mux.HandleFunc("POST /internal/desktop-tokens/validate", deps.handleValidateDesktopToken)
 	mux.HandleFunc("POST /internal/desktop-owners", deps.handleDesktopOwners)
+	mux.HandleFunc("GET /api/me/time", requireHumanPrincipal(deps.handleAccountTime, deps, "card.read"))
+	mux.HandleFunc("PUT /api/me/time", requireHumanPrincipal(deps.handleAccountTime, deps, "card.read"))
 	deps.registerDesktopRoutes(mux)
+	deps.registerPeopleRoutes(mux)
 	mux.HandleFunc("GET /api/settings/child-limits", requireHumanPrincipal(deps.handleGetChildLimits, deps, "account.manage"))
 	mux.HandleFunc("PUT /api/settings/child-limits", requireHumanPrincipal(deps.handlePutChildLimits, deps, "account.manage"))
 	mux.HandleFunc("POST /internal/child-limits", deps.handleInternalChildLimits)
@@ -515,6 +552,7 @@ func NewRouter(deps Deps) http.Handler {
 	mux.HandleFunc("POST /internal/shell/control", deps.handleShellControl)
 
 	deps.registerMCPRoutes(mux)
+	deps.registerLiveDataRoutes(mux)
 	deps.registerInternalTokenRoutes(mux)
 
 	return mux

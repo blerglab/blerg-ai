@@ -765,6 +765,29 @@ func TestTickets(t *testing.T) {
 		}
 	})
 
+	t.Run("archive refuses board-started session token", func(t *testing.T) {
+		rec := postTicket(board.ID, map[string]interface{}{"title": "Keep session card", "repos": []string{"repo-a"}}, nil)
+		if rec.Code != 201 {
+			t.Fatalf("create=%d", rec.Code)
+		}
+		var card struct{ ID string }
+		if err := json.Unmarshal(rec.Body.Bytes(), &card); err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest("POST", "/api/tickets/"+card.ID+"/archive", nil)
+		req.SetPathValue("id", card.ID)
+		req.Header.Set("Authorization", "Bearer "+rawToken)
+		result := httptest.NewRecorder()
+		api.HandleArchiveTicket(result, req)
+		if result.Code != 403 {
+			t.Fatalf("board session archive=%d want403", result.Code)
+		}
+		var archived bool
+		if err := pool.QueryRow(ctx, `SELECT archived_at IS NOT NULL FROM tickets WHERE id=$1`, card.ID).Scan(&archived); err != nil || archived {
+			t.Fatalf("card changed: archived=%v err=%v", archived, err)
+		}
+	})
+
 	// ── POST /api/tickets/{id}/dependencies ───────────────────────────────────
 
 	var depTicketA, depTicketB string

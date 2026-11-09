@@ -35,6 +35,8 @@ func StartCause(err error) string {
 // startStages is the fixed vocabulary shared by runtime diagnostics and owner UI.
 // Never add paths, account names, command text or environment values here.
 var startStages = map[string]string{
+	"keeper_unavailable":  "Host shells are unavailable while the shell keeper reconnects. Agents keep running.",
+	"keeper_incompatible": "The shell keeper is incompatible with this daemon. Restart the keeper service, then reopen shells. This ends its old shells; agents keep running.",
 	"helper_start":        "The shell helper could not be launched. Check the service process permissions and restrictions.",
 	"workspace_admission": "The session workspace could not authorize this shell launch. Reconnect the desktop.",
 	"bootstrap_read":      "The shell helper could not read its launch request.",

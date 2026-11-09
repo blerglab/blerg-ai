@@ -111,16 +111,16 @@ function SessionsTable() {
   };
   return (
     <section className="fleet">
-      <h4 className="fleet-title">Active sessions</h4>
+      <h4 className="fleet-title">Active workspaces</h4>
       <table>
         <thead>
-          <tr><th>board</th><th>session</th><th>card</th><th>state</th><th>running</th><th>last active</th></tr>
+          <tr><th>board</th><th>workspace</th><th>card</th><th>state</th><th>running</th><th>last active</th></tr>
         </thead>
         <tbody>
           {rows.map((r) => (
             <tr key={r.id} onClick={() => go(r)}>
               <td className="fleet-board">{r.board_name}</td>
-              <td>{r.role === "board" ? "💬 board session" : r.role === "reviewer" ? "🛡 reviewer" : r.role}</td>
+              <td>{r.role === "board" ? "💬 board channel" : r.role === "reviewer" ? "🛡 reviewer" : r.role}</td>
               <td className="fleet-card">{r.card_number != null ? `#${r.card_number} ${r.card_title ?? ""}` : "—"}</td>
               <td><span className={`convo-state ${r.lifecycle}`}>{r.lifecycle}</span></td>
               <td><TimeAgo iso={r.created_at} /></td>
@@ -139,8 +139,10 @@ function BoardIcon({ board }: { board: Board }) {
   const [failed, setFailed] = useState(false);
   const hue = [...board.name].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) % 360, 7);
   if (!board.deploy_url || failed) {
+    // The hue is a hash of the board name, one of 360 values; there is no fixed token list that
+    // could stand in for an arbitrary hash-derived hue, only the saturation/lightness are fixed.
     return (
-      <span className="tile-icon letter" style={{ background: `hsl(${hue} 45% 28%)` }}>
+      <span className="tile-icon letter" style={{ background: `hsl(${hue} 45% 28%)` }}> {/* themecheck:allow BLG-473: see above */}
         {board.name.slice(0, 1).toUpperCase()}
       </span>
     );
@@ -222,7 +224,7 @@ function Boards() {
       });
       // The board exists either way; if Run as me did not take, say so and how to finish.
       if (created?.automation_error) {
-        setCreateNote(`“${created.name ?? name.trim()}” was created, but it can't start sessions yet: ${created.automation_error}. ` +
+        setCreateNote(`“${created.name ?? name.trim()}” was created, but it can't start workspaces yet: ${created.automation_error}. ` +
           "Open its settings and choose Run as me to try again.");
       }
     } catch (err) {
@@ -272,8 +274,8 @@ function Boards() {
           {offerRunAsMe && (
             <p style={{ margin: 0, color: "var(--fog-dim)", fontSize: 13 }}>
               {runAsMe
-                ? "Sessions this board starts run as you, on your own credentials: a run-sessions token is created for you in blerg-core (revocable in its Settings → Agent tokens)."
-                : "The board starts no sessions until someone sets who they run as, in the board's settings."}
+                ? "Workspaces this board starts run as you, on your own credentials: a run-sessions token is created for you in blerg-core (revocable in its Settings → Agent tokens)."
+                : "The board starts no workspaces until someone sets who they run as, in the board's settings."}
             </p>
           )}
           {createError && <p role="alert" style={{ color: "var(--danger)", fontSize: 13, margin: 0 }}>{createError}</p>}
@@ -286,7 +288,7 @@ function Boards() {
           <p className="sign">No boards yet</p>
           <p>
             {me?.is_admin
-              ? "Create one, then mint an agent token so sessions can start stacking cards."
+              ? "Create one, then mint an agent token so workspaces can start stacking cards."
               : "No boards yet — create one. To let agents work here, an admin mints a token on the Tokens page."}
           </p>
         </div>
@@ -301,7 +303,7 @@ function Boards() {
                   <BoardIcon board={b} />
                   <h2 style={{ margin: 0 }}>{b.name}{b.key && <span className="mono"> · {b.key}</span>}</h2>
                   {(o?.working ?? 0) > 0 && (
-                    <span className="churn" title={`${o!.working} session${o!.working === 1 ? "" : "s"} working right now`} />
+                    <span className="churn" title={`${o!.working} workspace${o!.working === 1 ? "" : "s"} working right now`} />
                   )}
                   <span className="spacer" />
                   {o && <Spark week={o.token_week.some((v) => v > 0) ? o.token_week : o.activity_week} />}
@@ -314,7 +316,7 @@ function Boards() {
                     {o.in_progress > 0 && <span className="tid blaze-t">in&nbsp;progress <b>{o.in_progress}</b></span>}
                     {o.review > 0 && <span className="tid amber-t">review <b>{o.review}</b></span>}
                     {o.sessions_week > 0 && (
-                      <span className="tid">7d <b>{o.sessions_week}</b> sessions · <b>{durShort(o.agent_secs_week)}</b></span>
+                      <span className="tid">7d <b>{o.sessions_week}</b> workspaces · <b>{durShort(o.agent_secs_week)}</b></span>
                     )}
                     {o.tokens_today > 0 && <span className="tid">today <b>{tokShort(o.tokens_today)}</b> tok</span>}
                   </div>
@@ -417,8 +419,8 @@ function ShellChrome({ children }: { children: React.ReactNode }) {
             <NavLink to="/tokens" className={({ isActive }) => (isActive ? "active" : "")}>Tokens</NavLink>
           )}
           <a href="/onboard" title="the doc to point an agent at">Onboard</a>
-          <ThemeToggle />
         </nav>
+        <ThemeToggle />
       </header>
       {children}
       {searchOpen && <SearchModal boardId={boardId} onClose={() => setSearchOpen(false)} key={boardId ?? "all"} />}

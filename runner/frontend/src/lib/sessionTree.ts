@@ -43,3 +43,22 @@ export function searchTree(tree: SessionTree, q: string): SessionTree {
   }
   return { top: tree.top.filter(keep), childrenOf }
 }
+
+export function rootSessionId(sessions: readonly SessionInfo[], id?: string): string | undefined {
+  const seen = new Set<string>()
+  while (id && !seen.has(id)) {
+    seen.add(id)
+    const parent = sessions.find(session => session.id === id)?.parent_session_id
+    if (!parent || !sessions.some(session => session.id === parent && !session.archived_at)) return id
+    id = parent
+  }
+  return id
+}
+export function sessionSearchReason(tree: SessionTree, session: SessionInfo, query: string): string | undefined {
+  const q = query.trim().toLowerCase()
+  if (!q || `${session.title} ${session.repo}`.toLowerCase().includes(q)) return undefined
+  const matches: string[] = []
+  const visit = (id: string) => { for (const child of tree.childrenOf.get(id) ?? []) { if (`${child.title} ${child.repo}`.toLowerCase().includes(q)) matches.push(child.title || 'Untitled chat'); visit(child.id) } }
+  visit(session.id)
+  return matches.length ? `Matches in ${matches.join(', ')}` : undefined
+}

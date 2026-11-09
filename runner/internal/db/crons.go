@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/blerglab/blerg-ai/runner/internal/commandsteps"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -46,6 +47,7 @@ const (
 
 // Cron is a row of crons (migration 021).
 type Cron struct {
+	CommandSteps        *commandsteps.Definition
 	ID                  string
 	OwnerAccountID      string
 	Name                string
@@ -56,6 +58,7 @@ type Cron struct {
 	Engine              string
 	Model               *string
 	Effort              *string
+	RuntimeTargetID     *string
 	Runtime             string
 	DaemonID            *string
 	BoardID             *string
@@ -98,17 +101,17 @@ func (r CronRun) IdempotencyKey() string {
 }
 
 const cronColumns = `id::text, owner_account_id, name, enabled, schedule, timezone, prompt, engine,
-	model, effort, runtime, daemon_id::text, board_id, mcp, token_id, token_expires_at,
+	model, effort, runtime, runtime_target_id, daemon_id::text, board_id, mcp, token_id, token_expires_at,
 	grace_seconds, max_runtime_seconds, next_run_at, last_run_at, consecutive_failures,
-	paused_reason, created_at, updated_at`
+	paused_reason, created_at, updated_at, command_steps`
 
 func scanCron(row pgx.Row) (*Cron, error) {
 	var c Cron
 	var mcp []byte
 	if err := row.Scan(&c.ID, &c.OwnerAccountID, &c.Name, &c.Enabled, &c.Schedule, &c.Timezone, &c.Prompt,
-		&c.Engine, &c.Model, &c.Effort, &c.Runtime, &c.DaemonID, &c.BoardID, &mcp, &c.TokenID,
+		&c.Engine, &c.Model, &c.Effort, &c.Runtime, &c.RuntimeTargetID, &c.DaemonID, &c.BoardID, &mcp, &c.TokenID,
 		&c.TokenExpiresAt, &c.GraceSeconds, &c.MaxRuntimeSeconds, &c.NextRunAt, &c.LastRunAt,
-		&c.ConsecutiveFailures, &c.PausedReason, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		&c.ConsecutiveFailures, &c.PausedReason, &c.CreatedAt, &c.UpdatedAt, &c.CommandSteps); err != nil {
 		return nil, err
 	}
 	c.MCP = json.RawMessage(mcp)
@@ -163,14 +166,18 @@ func InsertCron(ctx context.Context, conn *pgxpool.Pool, c Cron, maxPerAccount i
 	row := tx.QueryRow(ctx, `
 		INSERT INTO crons (owner_account_id, name, enabled, schedule, timezone, prompt, model, effort,
 		                   runtime, daemon_id, board_id, mcp, token_id, token_expires_at,
-		                   grace_seconds, max_runtime_seconds, next_run_at, paused_reason, engine)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::text::uuid, $11, $12::jsonb, $13, $14, $15, $16, $17, $18, $19)
+		                   grace_seconds, max_runtime_seconds, next_run_at, paused_reason, engine, runtime_target_id, command_steps)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::text::uuid, $11, $12::jsonb, $13, $14, $15, $16, $17, $18, $19, $20, $21::jsonb)
 		RETURNING `+cronColumns,
 		c.OwnerAccountID, c.Name, c.Enabled, c.Schedule, c.Timezone, c.Prompt, c.Model, c.Effort,
 		c.Runtime, c.DaemonID, c.BoardID, mcp, c.TokenID, c.TokenExpiresAt,
-		c.GraceSeconds, c.MaxRuntimeSeconds, c.NextRunAt, c.PausedReason, c.Engine)
+		c.GraceSeconds, c.MaxRuntimeSeconds, c.NextRunAt, c.PausedReason, c.Engine, c.RuntimeTargetID, c.CommandSteps)
 	out, err := scanCron(row)
 	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO cron_command_step_audit (cron_id,owner_account_id,definition)
+ SELECT $1::uuid,$2,$3::jsonb WHERE $3::jsonb IS NOT NULL`, out.ID, out.OwnerAccountID, out.CommandSteps); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -261,6 +268,7 @@ func UpdateCronTx(ctx context.Context, conn *pgxpool.Pool, owner, id string, mut
 	if err != nil {
 		return nil, err
 	}
+	oldCommands, _ := json.Marshal(c.CommandSteps)
 	if err := mutate(ctx, tx, c); err != nil {
 		return nil, err
 	}
@@ -272,14 +280,20 @@ func UpdateCronTx(ctx context.Context, conn *pgxpool.Pool, owner, id string, mut
 		UPDATE crons SET name = $2, enabled = $3, schedule = $4, timezone = $5, prompt = $6, model = $7,
 		       effort = $8, runtime = $9, daemon_id = $10::text::uuid, board_id = $11, mcp = $12::jsonb,
 		       token_id = $13, token_expires_at = $14, grace_seconds = $15, max_runtime_seconds = $16,
-		       next_run_at = $17, consecutive_failures = $18, paused_reason = $19, updated_at = now(), engine=$20
+		       next_run_at = $17, consecutive_failures = $18, paused_reason = $19, updated_at = now(), engine=$20, runtime_target_id=$21, command_steps=$22::jsonb
 		 WHERE id = $1
 		RETURNING `+cronColumns,
 		id, c.Name, c.Enabled, c.Schedule, c.Timezone, c.Prompt, c.Model, c.Effort, c.Runtime, c.DaemonID,
 		c.BoardID, mcp, c.TokenID, c.TokenExpiresAt, c.GraceSeconds, c.MaxRuntimeSeconds, c.NextRunAt,
-		c.ConsecutiveFailures, c.PausedReason, c.Engine))
+		c.ConsecutiveFailures, c.PausedReason, c.Engine, c.RuntimeTargetID, c.CommandSteps))
 	if err != nil {
 		return nil, err
+	}
+	newCommands, _ := json.Marshal(c.CommandSteps)
+	if string(oldCommands) != string(newCommands) {
+		if _, err := tx.Exec(ctx, `INSERT INTO cron_command_step_audit (cron_id,owner_account_id,definition) VALUES ($1::uuid,$2,$3::jsonb)`, c.ID, c.OwnerAccountID, newCommands); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
@@ -789,9 +803,9 @@ func PruneCronRuns(ctx context.Context, conn *pgxpool.Pool, cutoff time.Time) (i
 func GetIdempotencyKey(ctx context.Context, conn *pgxpool.Pool, scope, key string) (*IdempotencyRow, error) {
 	var r IdempotencyRow
 	err := conn.QueryRow(ctx, `
-		SELECT scope, key, request_hash, session_id::text, created_at
+		SELECT scope, key, request_hash, session_id::text, created_at, refusal_code, refusal_via
 		  FROM runner_idempotency WHERE scope = $1 AND key = $2`, scope, key).
-		Scan(&r.Scope, &r.Key, &r.RequestHash, &r.SessionID, &r.CreatedAt)
+		Scan(&r.Scope, &r.Key, &r.RequestHash, &r.SessionID, &r.CreatedAt, &r.RefusalCode, &r.RefusalVia)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

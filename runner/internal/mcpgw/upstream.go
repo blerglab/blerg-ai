@@ -48,7 +48,12 @@ var (
 // upstreamStatusError is an upstream reply with a non-2xx status to a request. The text is the
 // gateway's own wording; ExecuteApproved reads Status to tell a definite refusal from a proxy
 // that may have forwarded the call.
-type upstreamStatusError struct{ Status int }
+type upstreamStatusError struct {
+	Status     int
+	RetryAfter time.Duration
+}
+
+var errLiveResponseLimit = errors.New("live_response_limit")
 
 func (e *upstreamStatusError) Error() string {
 	return fmt.Sprintf("the upstream server returned status %d", e.Status)
@@ -57,8 +62,11 @@ func (e *upstreamStatusError) Error() string {
 // grantState is the in-memory state for one grant (one gateway token): the concurrency
 // limiter, the cached credential, the upstream MCP session and the last verified tool hashes.
 type grantState struct {
-	g   *Gateway
-	sem chan struct{}
+	actorSessionID string // a current human approver, additional to the original binding
+
+	liveOnly bool // Never fall back to a human/session credential fetch.
+	g        *Gateway
+	sem      chan struct{}
 
 	credMu    sync.Mutex
 	cred      *Credential
@@ -205,7 +213,30 @@ func (st *grantState) credential(ctx context.Context, gr *db.MCPGrant) (Credenti
 		return *st.cred, nil
 	}
 	st.cred = nil
-	c, err := g.cfg.Core.Token(ctx, ProofFromGrant(gr.AccountID, gr.ProofKind, gr.ProofValue), gr.ConnectionID)
+	if st.liveOnly {
+		return Credential{}, errLiveProvider
+	}
+	var c Credential
+	var err error
+	if gr.SessionScope != nil {
+		in, scopeErr := dispatchForGrant(gr, st.actorSessionID)
+		if scopeErr != nil {
+			return Credential{}, scopeErr
+		}
+		core, ok := g.cfg.Core.(SessionCoreClient)
+		if !ok {
+			return Credential{}, sessionCoreFailure("unwired")
+		}
+		c, err = core.SessionToken(ctx, in)
+		if err == nil {
+			if c.URL != gr.URLSnapshot {
+				return Credential{}, sessionCoreFailure("resource_changed")
+			}
+			c.session = &in
+		}
+	} else {
+		c, err = g.cfg.Core.Token(ctx, ProofFromGrant(gr.AccountID, gr.ProofKind, gr.ProofValue), gr.ConnectionID)
+	}
 	if err != nil {
 		return Credential{}, err
 	}
@@ -271,6 +302,14 @@ func (st *grantState) post(ctx context.Context, cred Credential, payload []byte,
 	if st.builtin {
 		client = st.g.boardClient
 	}
+	if cred.session != nil {
+		if err := st.admitSession(ctx, *cred.session); err != nil {
+			if errors.Is(err, ErrConnectionGone) {
+				st.invalidateCredential()
+			}
+			return rpcMessage{}, nil, 0, err
+		}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return rpcMessage{}, nil, 0, err
@@ -282,22 +321,30 @@ func (st *grantState) post(ctx context.Context, cred Credential, payload []byte,
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		return rpcMessage{}, resp.Header, resp.StatusCode, errUpstreamAuth
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
-		return rpcMessage{}, resp.Header, resp.StatusCode, &upstreamStatusError{Status: resp.StatusCode}
+		return rpcMessage{}, resp.Header, resp.StatusCode, &upstreamStatusError{Status: resp.StatusCode, RetryAfter: liveRetryAfter(resp.Header.Get("Retry-After"), st.g.now())}
 	}
 	if wantID == "" {
 		return rpcMessage{}, resp.Header, resp.StatusCode, nil
 	}
+	// Live dispatch bounds the response stream before JSON/SSE parsing.
+	var body io.Reader = resp.Body
+	if st.liveOnly {
+		body = io.LimitReader(resp.Body, 5*1024*1024+1)
+	}
 	mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	switch mt {
 	case "application/json":
-		body, err := io.ReadAll(resp.Body)
+		raw, err := io.ReadAll(body)
 		if err != nil {
 			return rpcMessage{}, resp.Header, resp.StatusCode, err
 		}
-		msg, err := matchJSONResponse(body, wantID)
+		if st.liveOnly && len(raw) > 5*1024*1024 {
+			return rpcMessage{}, resp.Header, resp.StatusCode, errLiveResponseLimit
+		}
+		msg, err := matchJSONResponse(raw, wantID)
 		return msg, resp.Header, resp.StatusCode, err
 	case "text/event-stream":
-		msg, err := readSSEResponse(resp.Body, wantID)
+		msg, err := readSSEResponse(body, wantID)
 		return msg, resp.Header, resp.StatusCode, err
 	default:
 		return rpcMessage{}, resp.Header, resp.StatusCode, fmt.Errorf("the upstream server replied with unsupported content type %q", mt)

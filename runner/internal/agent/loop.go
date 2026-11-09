@@ -40,13 +40,17 @@ type queuedMsg = Input
 // Loop is one agent session's engine. Not safe for concurrent Run calls;
 // Enqueue is safe from any goroutine.
 type Loop struct {
+	InputClockSource
 	recoveryInputGate func(context.Context) // guarded by mu; runs on workers, never Enqueue
 	cfg               Config
 	mu                sync.Mutex
 	queue             []queuedMsg
 	wake              chan struct{}
-	messages          []Message  // provider-format context
-	askCh             chan Input // non-nil while an ask blocks; Enqueue routes here
+	messages          []Message      // provider-format context
+	askCh             chan AskAnswer // only the server answer channel resolves an ask
+	askID             string
+	earlyAnswers      map[string]AskAnswer
+	interruptedAsk    string // its committed answer may still arrive
 
 	pending    *modelChange // model/effort change awaiting application
 	turnBlocks []Block      // assistant blocks emitted this turn (thinking detection)
@@ -60,10 +64,9 @@ type Loop struct {
 // turn_done{StopReason: "interrupted"}. No-op when idle.
 func (l *Loop) Interrupt() {
 	l.mu.Lock()
-	cancel := l.turnCancel
-	l.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	defer l.mu.Unlock()
+	if l.turnCancel != nil {
+		l.turnCancel()
 	}
 }
 
@@ -179,25 +182,16 @@ func NewLoop(cfg Config) *Loop {
 // is injected at the next provider call.
 func (l *Loop) Enqueue(text, source string) { l.EnqueueInput(Input{Text: text, Source: source}) }
 
-// EnqueueInput is Enqueue with what the transcript records and the sender's id (Input). While an
-// ask is waiting, the message is its answer instead (askTool).
+// EnqueueInput queues conversational input, including while an ask is blocked.
+// Only AnswerAsk accepts an authoritative, question-id-bearing result.
 func (l *Loop) EnqueueInput(in Input) {
+	in = l.WithPersonTime(in)
 	if in.Source == "" {
 		in.Source = "chat"
 	}
 	l.mu.Lock()
-	if l.askCh != nil {
-		// Non-blocking send under the lock: if the ask is mid-teardown or the
-		// buffer already holds an answer, fall through to the normal queue so
-		// no user message is ever lost or blocks the transport goroutine.
-		select {
-		case l.askCh <- in:
-			l.mu.Unlock()
-			return
-		default:
-		}
-	}
-	if l.recoveryInputGate != nil && len(l.queue) >= 64 {
+	// Bounded while recovery holds input or an ask waits, however long the person takes.
+	if (l.recoveryInputGate != nil || l.askCh != nil) && len(l.queue) >= 64 {
 		l.mu.Unlock()
 		l.emit("error", ErrorPayload{Message: "message queue full — dropped", Retryable: true, ClientID: in.ClientID})
 		return
@@ -221,9 +215,12 @@ func (l *Loop) dequeue() (queuedMsg, bool) {
 	return m, true
 }
 
-func (l *Loop) drainQueue() []queuedMsg {
+func (l *Loop) drainQueue(ctx context.Context) []queuedMsg {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if ctx.Err() != nil {
+		return nil
+	}
 	out := l.queue
 	l.queue = nil
 	return out
@@ -339,6 +336,18 @@ func (l *Loop) runTurn(sessionCtx, ctx context.Context, msg queuedMsg) {
 		}
 
 		resultBlocks, sawCompletion, mutatedInStep := l.executeToolCalls(ctx, blocks, enf)
+		if ctx.Err() != nil {
+			// Keep tool/result pairing in the conversation, but leave unaccepted
+			// queued input for the next turn when Stop canceled this tool wait.
+			if len(resultBlocks) > 0 {
+				l.messages = append(l.messages, Message{Role: "user", Blocks: resultBlocks})
+			}
+			if sessionCtx.Err() == nil {
+				l.emit("turn_done", TurnDonePayload{StopReason: "interrupted", Model: l.cfg.Model, Usage: totalUsage, Context: turnContext.Reported()})
+				l.emit("status_changed", StatusPayload{Status: "idle", Reason: "interrupted"})
+			}
+			return
+		}
 		if sawCompletion {
 			completionDone = true
 		} else if mutatedInStep {
@@ -348,7 +357,7 @@ func (l *Loop) runTurn(sessionCtx, ctx context.Context, msg queuedMsg) {
 		}
 		// Inject queued user messages alongside tool results (tool_result
 		// blocks must come first in the user message — API pairing rule).
-		for _, q := range l.drainQueue() {
+		for _, q := range l.drainQueue(ctx) {
 			l.emit("user_message", q.Payload())
 			resultBlocks = append(resultBlocks, Block{Type: "text", Text: q.ModelText(l.cfg.MarkerNonce)})
 		}

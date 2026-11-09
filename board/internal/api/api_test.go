@@ -436,6 +436,7 @@ func testServerHeld(t *testing.T) (*httptest.Server, *pgxpool.Pool, db.Board, []
 	apiSrv := api.New(pool, a, g)
 	mux := http.NewServeMux()
 	apiSrv.Routes(mux)
+	mux.Handle("/mcp", mcp.New(apiSrv))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 

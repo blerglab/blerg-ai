@@ -50,6 +50,7 @@ describe.each([
     serve()
     render(<MemoryRouter><PinnedTicketModal ticket={pinned} sessionId="sess-a" worker="Port the parser" onClose={() => {}} /></MemoryRouter>)
     const live = await screen.findByTestId('board-card-live')
+    expect(screen.queryByRole('button', { name: /^Open board tab$/ })).toBeNull()
     const modal = screen.getByTestId('ticket-modal')
     if (shotDir) {
       document.documentElement.dataset.theme = 'dark'

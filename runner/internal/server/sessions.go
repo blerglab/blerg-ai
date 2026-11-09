@@ -152,12 +152,16 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 	// same runtime/kind labels the sessions list shows.
 	kind := msg.Kind
 	runtime := ""
+	runtimeTargetID := ""
 	effort := "" // the launch effort, recorded on the row at spawn
 	engine := ""
 	cronID := "" // set when a cron started the session, so the badge shows from the first message
 	var startedBy *protocol.StartedBy
 	var parentSessionID *string
 	interaction := ""
+	verbosity := "standard"
+	color := ""
+	emoji := ""
 	if pool != nil {
 		if row, err := db.GetSession(ctx, pool, msg.SessionID); err != nil {
 			log.Printf("session_started GetSession %s: %v", msg.SessionID, err)
@@ -168,11 +172,15 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 			if row.Effort != nil {
 				effort = *row.Effort
 			}
+			runtimeTargetID = derefOrEmpty(row.RuntimeTargetID)
 			engine = derefOrEmpty(row.Engine)
 			cronID = derefOrEmpty(row.CronID)
 			startedBy = startedByOf(row)
 			parentSessionID = row.ParentSessionID
 			interaction = effectiveInteraction(row)
+			verbosity = effectiveVerbosity(row)
+			color = row.Color
+			emoji = row.Emoji
 			if kind == "" {
 				kind = row.Kind
 			}
@@ -198,6 +206,8 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 				SteeringSupported:    engineSteeringSupported(engine, kind),
 				LimitResumeSupported: kind == "agent" && engineLimitResumeSupported(engine),
 				ID:                   msg.SessionID,
+				Color:                color,
+				Emoji:                emoji,
 				DaemonID:             publicDaemon,
 				Status:               "starting",
 				ProjectPath:          publicPath,
@@ -209,9 +219,11 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 				StartedAt:            time.Now().UTC().Format(time.RFC3339),
 				Kind:                 kind,
 				Runtime:              runtime,
+				RuntimeTargetID:      runtimeTargetID,
 				CronID:               cronID,
 				StartedBy:            startedBy,
 				Interaction:          interaction,
+				Verbosity:            verbosity,
 			},
 		}
 	})
@@ -304,13 +316,22 @@ func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 		if updateErr != nil {
 			return fmt.Errorf("UpdateSessionStatus %s → %s: %w", msg.SessionID, msg.Status, updateErr)
 		}
+		if isLiveStatus(msg.Status) {
+			if err := resolveSessionFailureAlerts(ctx, hub, pool, msg.SessionID); err != nil {
+				return fmt.Errorf("resolve recovered failure: %w", err)
+			}
+		}
 		if end.Reason != "" {
 			hub.SessionTerminallyEnded(msg.SessionID)
+			hub.ChildTurnEnded(msg.SessionID, "recommended_channel_closed", "")
 		}
 		if msg.Status == "error" && current.Status != "error" {
 			hub.ChildTurnEnded(msg.SessionID, childTurnFailed, "") // child_turn_notes.go
 		}
 		hub.ChildActivity(msg.SessionID)
+		if msg.Status == "idle" {
+			hub.applyPendingMembership(ctx, pool, msg.SessionID)
+		}
 		if msg.Status == "running" {
 			hub.checkUsageNotices(hub.FindDaemonForSession(msg.SessionID), msg.SessionID)
 		}
@@ -455,6 +476,7 @@ func handleSessionEndedEffects(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 			hub.releaseWorkspaceSelection(hub.FindDaemonForSession(msg.SessionID), ws.Manifest)
 		}
 		hub.SessionTerminallyEnded(msg.SessionID)
+		hub.ChildTurnEnded(msg.SessionID, "recommended_channel_closed", "")
 		if msg.Message != "" {
 			// Why it failed (its engine runtime stopped): the reason the session page, the
 			// sidebar and `session watch` show.

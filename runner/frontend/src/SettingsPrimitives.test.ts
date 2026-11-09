@@ -5,7 +5,7 @@ import { buttonStyles, DESIGN_SYSTEM_BUTTONS, unstyledButtons } from '../../../p
 import { readCss } from '../../../packages/settings/readCss'
 
 const all = import.meta.glob<string>(['./**/*.{ts,tsx}', '!./**/*.test.{ts,tsx}'], { query: '?raw', import: 'default', eager: true })
-const sources = settingsScreens(ts, all, ['./components/SettingsDialog.tsx'], [])
+const sources = settingsScreens(ts, all, ['./components/SettingsDialog.tsx', './components/KeyboardShortcuts.tsx'], [])
 
 describe('shared settings primitives guard', () => {
   it.each(Object.entries(sources))('%s has no bare settings controls', (screen, source) => {
@@ -33,7 +33,7 @@ describe('shared settings primitives guard', () => {
 })
 
 // The button guard (#229): every button in the app is styled. CSS is what this app loads, read from disk.
-const css = readCss('src', '../../packages/chat/src', '../../packages/settings')
+const css = readCss('src', '../../packages/chat/src', '../../packages/settings', '../../packages/board')
 const styles = buttonStyles(css)
 
 describe('button guard', () => {
@@ -92,9 +92,11 @@ describe('button guard', () => {
     fails('<button className="action">Retry</button>', sheet('.action { background: none; border: 0 } .action { all: revert }'))
     passes('<button className="action">Retry</button>', sheet('.action { all: unset }'))
     fails('<button className="action">Retry</button>', sheet('.action { background: revert; border: 0 }'))
-    // Repository CSS: the Answer button's styling is scoped to the rail.
-    fails('<button className="ask-reply-send">Answer</button>')
-    passes('<div className="rail-reply"><button className="ask-reply-send">Answer</button></div>')
+    // Isolate spacing-only CSS: production ask-reply-send now supplies button styling.
+    const spacingOnly = sheet('.btn { background: none; border: 0 } .rail-reply .ask-reply-send { margin-left: auto }')
+    fails('<button className="ask-reply-send">Answer</button>', spacingOnly)
+    fails('<div className="rail-reply"><button className="ask-reply-send">Answer</button></div>', spacingOnly)
+    passes('<div className="rail-reply"><button className="artifact-btn btn primary ask-reply-send">Answer</button></div>', spacingOnly)
   })
   it('counts an inline style only for known values that set the background and the border', () => {
     fails('<button style={{}}>Retry</button>')
@@ -111,7 +113,8 @@ describe('button guard', () => {
   it('reads props left to right and fails closed on what it cannot resolve', () => {
     fails('const props = { className: undefined }\nconst x = <button className="btn" {...props}>Retry</button>')
     fails('const x = <button className="btn" {...rest}>Retry</button>')
-    passes('const x = <button {...rest} className="btn">Retry</button>')
+    fails('const x = <button {...rest} className="btn">Retry</button>')
+    passes('const x = <button {...rest} className="btn" style={undefined}>Retry</button>')
     fails("const kind = 'submit'\nconst x = <input type={kind} />")
     fails("const props = { type: 'submit' }\nconst x = <input {...props} />")
     fails('const x = <input {...rest} />')
@@ -120,6 +123,25 @@ describe('button guard', () => {
     fails('function Chip({ cls }: { cls: string }) { return <button className={cls}>A</button> }')
     fails("const cls = 'btn'\nfunction Chip({ cls }: { cls: string }) { return <button className={cls}>A</button> }")
     passes("const kind = 'text'\nconst x = <input type={kind} />")
+  })
+  it.each([
+    '<button className="btn" style={unknown} />',
+    '<button className={"btn " + unknown} />',
+    '<button style={{ background: `red ${unknown}`, border: 0 }} />',
+    '<button style={{ all: "unset", background: unknown }} />',
+    '<div role={unknown} />',
+    'const x = { props: { className: "btn" }, ...unknown }; const el = <button {...x.props} />',
+    'function props() { if (condition) return; return { className: "btn" } }; const el = <button {...props()} />',
+    'function props() { if (condition) return { className: "btn" } }; const el = <button {...props()} />',
+  ])('fails closed on unresolved overrides: %s', src => fails(src))
+  it('keeps failing alternatives beyond the limit', () => {
+    const choices = Array.from({ length: 65 }, (_, i) => `if (c${i}) return { className: "btn" }; `).join('')
+    fails(`function props() { ${choices} return {} }; const el = <button {...props()} />`)
+  })
+  it('does not credit ancestry across portals', () => {
+    fails('<div className="toolbar">{createPortal(<button />, target)}</div>', buttonStyles({ 'a.css': '.toolbar button { background: none; border: 0 }' }))
+    fails('<div className="toolbar">{portalCallback(() => <button />)}</div>', buttonStyles({ 'a.css': '.toolbar button { background: none; border: 0 }' }))
+    passes('<div className="toolbar">{items.map(item => <button />)}</div>', buttonStyles({ 'a.css': '.toolbar button { background: none; border: 0 }' }))
   })
   it('accepts only a real comment with a reason, alone on the line above', () => {
     fails('<button data-note="button-guard-ignore:" type="button">Retry</button>')

@@ -31,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"github.com/blerglab/blerg-ai/contracts/netguard"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 )
@@ -51,11 +52,10 @@ const BoardConnectionID = "00000000-0000-4000-8000-00000000b0a2"
 const boardRenewBefore = 60 * time.Second
 
 // boardToolNames is the fixed set of board tools every board connection offers (spec 10.2).
-// Archiving and creating or updating boards are deliberately absent; column management is the
-// separate boardColumnToolNames.
+// Creating or updating boards is deliberately absent. Person-backed tools are separate.
 var boardToolNames = []string{
 	"blerg_board_get", "blerg_board_list", "blerg_board_schema",
-	"blerg_column_list",
+	"blerg_column_list", "blerg_release_list", "blerg_release_get",
 	"blerg_card_search", "blerg_card_get", "blerg_card_create", "blerg_card_update",
 	"blerg_card_move", "blerg_card_comment", "blerg_card_link",
 }
@@ -80,24 +80,28 @@ func toolSet(names ...[]string) map[string]bool {
 
 var (
 	boardColumnToolSet = toolSet(boardColumnToolNames)
-	allBoardToolSet    = toolSet(boardToolNames, boardColumnToolNames)
+	boardPersonToolSet = toolSet(boardColumnToolNames, []string{"blerg_card_archive"})
+	allBoardToolSet    = toolSet(boardToolNames, boardColumnToolNames, []string{"blerg_card_archive"})
 )
 
-// BoardToolNames returns every board tool a session may call, column management included (a copy).
+// BoardToolNames returns every board tool a session may call, archiving and column management included (a copy).
 func BoardToolNames() []string {
-	return append(append([]string(nil), boardToolNames...), boardColumnToolNames...)
+	return append(append(append([]string(nil), boardToolNames...), boardColumnToolNames...), "blerg_card_archive")
 }
 
 // IsBoardColumnTool reports whether tool manages a board's columns.
 func IsBoardColumnTool(tool string) bool { return boardColumnToolSet[tool] }
 
+// BoardToolNeedsPerson reports whether a tool requires a person behind Full access.
+func BoardToolNeedsPerson(tool string) bool { return boardPersonToolSet[tool] }
+
 // PersonBehind reports whether the access a board call acts with is a person's sign-in (a login
 // session), rather than an agent token's (a cron, or a launch made with a token). Column
-// management needs one.
+// management and archiving need one.
 func PersonBehind(p Proof) bool { return p.SessionID != "" && p.TokenID == "" }
 
 // builtinToolOffered reports whether the built-in board connection offers tool at all (before its
-// level and, for column management, the person behind the access, both read per call).
+// level and, for archiving and column management, the person behind the access, both read per call).
 func builtinToolOffered(tool string) bool {
 	return allBoardToolSet[tool]
 }
@@ -152,7 +156,9 @@ func BoardHTTPClient(rawURL string, timeout time.Duration, maxBody int64) *http.
 	if u, err := url.Parse(rawURL); err == nil && u.Hostname() != "" {
 		p = netguard.Policy{AllowHTTPHosts: []string{u.Hostname()}, AllowPrivateHosts: []string{u.Hostname()}}
 	}
-	return p.Client(timeout, maxBody)
+	client := p.Client(timeout, maxBody)
+	client.Transport = failurelog.Default.Transport("runner", "board", client.Transport)
+	return client
 }
 
 // ---- the gateway side ------------------------------------------------------------------------
@@ -394,6 +400,7 @@ func (c *HTTPBoardExchanger) post(ctx context.Context, path string, body any) (*
 	}
 	// Never follow a redirect: the request carries the internal key.
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client.Transport = failurelog.Default.Transport("runner", "core", client.Transport)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("core unreachable: %w", err)

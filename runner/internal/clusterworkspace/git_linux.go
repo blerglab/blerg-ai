@@ -20,6 +20,7 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/gitprovider"
 	"github.com/blerglab/blerg-ai/runner/internal/hostgit"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/workbranch"
 	"github.com/blerglab/blerg-ai/runner/internal/workspacepolicy"
 	"golang.org/x/sys/unix"
 )
@@ -36,6 +37,7 @@ type objectSnapshot struct {
 }
 
 type DiskGit struct {
+	budgetRoot      func() (budgetDirectory, error)
 	snapshots       map[string]objectSnapshot
 	cachedBytes     int64
 	cachedEntries   int
@@ -116,7 +118,7 @@ func newDiskGit(public, private, session string, enforceCapacity bool, expected 
 	for _, identity := range expected {
 		identities[identity.ID] = identity
 	}
-	return &DiskGit{snapshots: map[string]objectSnapshot{}, enforceCapacity: enforceCapacity, privateRoot: privateRoot, fresh: map[string]bool{}, expected: identities, root: root, rootID: identity, branch: "wip/" + session, members: map[string]*diskMember{}}, nil
+	return &DiskGit{snapshots: map[string]objectSnapshot{}, enforceCapacity: enforceCapacity, privateRoot: privateRoot, fresh: map[string]bool{}, expected: identities, root: root, rootID: identity, branch: workbranch.Effective(session, ""), members: map[string]*diskMember{}}, nil
 }
 func (d *DiskGit) Binding(ref protocol.WorkspaceRuntimeRef, digest string) protocol.WorkspaceRuntimeBinding {
 	return protocol.WorkspaceRuntimeBinding{WorkspaceRuntimeRef: ref, ManifestDigest: digest, Root: d.rootID}
@@ -234,7 +236,24 @@ func (d *DiskGit) Prepare(ctx context.Context, m Member, branch string, resume b
 	if branch != d.branch || !stableID.MatchString(m.ID) || !workspacepolicy.SafeSegment(m.Path) || workspacepolicy.FoldName(m.Path) == "lost+found" {
 		return "", "", ErrPlan
 	}
+	if m.BaseSHA != "" && !oid.MatchString(m.BaseSHA) {
+		return "", "", ErrPlan
+	}
 	dest := filepath.Join(d.root.Name(), m.Path)
+	if resume && m.BaseSHA != "" {
+		// BLG-501 design row 18 (Codex review of 1524a5d8): a resumed read-only worker
+		// starts fresh from the verified base on a new local branch; it never recovers
+		// pre-resume commits. Safe to discard unconditionally here, unlike an ordinary
+		// push-authorized member's retained work below: this member never held push
+		// authority, and anything it committed was already exported through BLG-479's own
+		// bundle mechanism at the end of whichever turn made it, before this pod went
+		// away. Treated as an ordinary fresh allocation from here on.
+		if e := os.RemoveAll(dest); e != nil && !os.IsNotExist(e) { //nolint:gosec // dest is d.root.Name() joined with the same m.Path already validated above (SafeSegment, not "lost+found"); the member never held push/write authority to begin with.
+			return "", "", ErrPlan
+		}
+		delete(d.expected, m.ID)
+		resume = false
+	}
 	// Fresh allocation only. Existing contents require explicit recovery; never
 	// delete a directory whose allocation/identity cannot be proven unused.
 	_, statErr := os.Lstat(dest) //nolint:gosec // m.Path is a safe public component; later access uses pinned openat2 descriptors.
@@ -244,9 +263,28 @@ func (d *DiskGit) Prepare(ctx context.Context, m Member, branch string, resume b
 	}
 	if os.IsNotExist(statErr) {
 		if resume {
-			return "", "", ErrPlan
+			return "", "", ErrRetainedStorage
 		} // local retained work must not silently disappear
-		if e := gitCall(ctx, d.root.Name(), m, "clone", "--no-local", "--", m.CloneURL, dest); e != nil {
+		cloneArgs := []string{"clone", "--no-local"}
+		if m.BaseRef != "" {
+			// "=" form, never a separate argument: a branch name that happened to start
+			// with "-" must never be mistaken for a flag by git's own argv parser.
+			cloneArgs = append(cloneArgs, "--branch="+m.BaseRef)
+		}
+		cloneArgs = append(cloneArgs, "--", m.CloneURL, dest)
+		if e := gitCall(ctx, d.root.Name(), m, cloneArgs...); e != nil {
+			return "", "", ErrClone
+		}
+		if m.BaseSHA != "" {
+			// Pin to the provider commit recorded at launch (cluster_host_workspace.go).
+			// Never trust BaseRef's name alone, which could move between launch and this
+			// clone. Already validated as a bare hex oid above, so this can never be
+			// mistaken for a flag by git's own argv parser.
+			if e := gitCall(ctx, dest, m, "checkout", "--detach", m.BaseSHA); e != nil {
+				return "", "", ErrPlan
+			}
+		}
+		if e := gitCall(ctx, dest, m, "update-ref", "refs/blerg/result-base", "HEAD"); e != nil {
 			return "", "", ErrPlan
 		}
 		if e := gitCall(ctx, dest, m, "checkout", "-b", branch); e != nil {
@@ -609,8 +647,9 @@ func (d *DiskGit) scanBudget(ctx context.Context, memberErrors map[string]error)
 	budget := protocol.DefaultWorkspaceBudget()
 	var checkout, objects, metadata int64
 	var entries, metaEntries int
-	var walk func(*os.File, string, string, int) error
-	walk = func(dir *os.File, prefix, member string, depth int) error {
+	var walk func(budgetDirectory, string, string, int) error
+	walk = func(dir budgetDirectory, prefix, member string, depth int) error {
+		defer dir.Close()
 		// Refuse settlement at the member policy depth, but keep counting with
 		// pinned, no-symlink/no-mount descriptors. Bound accounting separately:
 		// deeper or inaccessible usage makes the entire budget unproven.
@@ -623,13 +662,8 @@ func (d *DiskGit) scanBudget(ctx context.Context, memberErrors map[string]error)
 		if depth > 256 {
 			return ErrPlan
 		}
-		listing, e := beneath(dir, ".", true)
-		if e != nil {
-			return e
-		}
-		defer closeRead(listing)
 		for {
-			batch, e := listing.ReadDir(256)
+			batch, e := dir.ReadDir(256)
 			if e != nil && !errors.Is(e, io.EOF) {
 				return ErrPlan
 			}
@@ -654,8 +688,8 @@ func (d *DiskGit) scanBudget(ctx context.Context, memberErrors map[string]error)
 						return errAggregateBudget
 					}
 				}
-				var st unix.Stat_t
-				if unix.Fstatat(int(dir.Fd()), entry.Name(), &st, unix.AT_SYMLINK_NOFOLLOW) != nil {
+				st, statErr := dir.Stat(entry.Name())
+				if statErr != nil {
 					return ErrPlan
 				}
 				if st.Size < 0 || st.Size > budget.CheckoutBytes {
@@ -666,7 +700,7 @@ func (d *DiskGit) scanBudget(ctx context.Context, memberErrors map[string]error)
 					continue
 				}
 				if mode == unix.S_IFDIR {
-					f, e := beneath(dir, entry.Name(), true)
+					f, e := dir.Open(entry.Name())
 					if e == nil {
 						owner := member
 						if depth == 0 {
@@ -678,7 +712,6 @@ func (d *DiskGit) scanBudget(ctx context.Context, memberErrors map[string]error)
 							}
 						}
 						e = walk(f, path, owner, depth+1)
-						closeRead(f)
 					}
 					if e != nil {
 						return e
@@ -705,7 +738,15 @@ func (d *DiskGit) scanBudget(ctx context.Context, memberErrors map[string]error)
 			}
 		}
 	}
-	return walk(d.root, "", "", 0)
+	open := d.budgetRoot
+	if open == nil {
+		open = func() (budgetDirectory, error) { return openBudgetDirectory(d.root, ".") }
+	}
+	root, err := open()
+	if err != nil {
+		return err
+	}
+	return walk(root, "", "", 0)
 }
 
 // Read-only descriptor close failures do not affect data/identity decisions.
@@ -783,3 +824,39 @@ func (r cancelReader) Read(p []byte) (int, error) {
 	}
 	return r.reader.Read(p)
 }
+
+// SetWorkBranch binds the validated launch branch before any member is prepared.
+func (d *DiskGit) SetWorkBranch(branch string) error {
+	if !workbranch.Valid(branch) {
+		return ErrPlan
+	}
+	d.branch = branch
+	return nil
+}
+
+// budgetDirectory isolates traversal input from aggregate policy. The disk
+// adapter keeps all opens descriptor-relative with the existing no-follow fence.
+type budgetDirectory interface {
+	ReadDir(int) ([]os.DirEntry, error)
+	Stat(string) (unix.Stat_t, error)
+	Open(string) (budgetDirectory, error)
+	Close()
+}
+type diskBudgetDirectory struct{ *os.File }
+
+func openBudgetDirectory(parent *os.File, name string) (budgetDirectory, error) {
+	f, err := beneath(parent, name, true)
+	if err != nil {
+		return nil, err
+	}
+	return diskBudgetDirectory{f}, nil
+}
+func (d diskBudgetDirectory) Stat(name string) (unix.Stat_t, error) {
+	var st unix.Stat_t
+	err := unix.Fstatat(int(d.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW)
+	return st, err
+}
+func (d diskBudgetDirectory) Open(name string) (budgetDirectory, error) {
+	return openBudgetDirectory(d.File, name)
+}
+func (d diskBudgetDirectory) Close() { closeRead(d.File) }

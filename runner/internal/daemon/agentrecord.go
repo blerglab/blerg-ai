@@ -31,10 +31,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/blerglab/blerg-ai/runner/internal/commandpolicy"
+	"github.com/blerglab/blerg-ai/runner/internal/persontime"
+
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/blerglab/blerg-ai/runner/internal/updatehandoff"
+	"github.com/blerglab/blerg-ai/runner/skills"
 )
 
 const (
@@ -47,13 +51,16 @@ const (
 // (recovery must never replay the kickoff), the git token and clone source, and anything about a
 // sandbox, a tool restriction or an MCP grant (a session with one of those has no record).
 type AgentRecord struct {
-	RequireRecoveryReady bool   `json:"require_recovery_ready,omitempty"`
-	Version              int    `json:"version"`
-	SessionID            string `json:"session_id"`
-	Repo                 string `json:"repo"`
-	WorkDir              string `json:"work_dir"` // the resolved workspace
+	PersonTime           *persontime.Account `json:"person_time,omitempty"`
+	SkillPolicy          *skills.Policy      `json:"skill_policy,omitempty"`
+	RequireRecoveryReady bool                `json:"require_recovery_ready,omitempty"`
+	Version              int                 `json:"version"`
+	SessionID            string              `json:"session_id"`
+	Repo                 string              `json:"repo"`
+	WorkDir              string              `json:"work_dir"` // the resolved workspace
 
 	Interaction string `json:"interaction,omitempty"`
+	Verbosity   string `json:"verbosity,omitempty"`
 	Assist      bool   `json:"assist,omitempty"`
 	BoardID     string `json:"board_id,omitempty"`
 	TicketID    string `json:"ticket_id,omitempty"`
@@ -80,6 +87,8 @@ type AgentRecord struct {
 	CurrentTurnID   string              `json:"current_turn_id,omitempty"`
 	// TurnActive: a turn was running when this was last written.
 	TurnActive bool `json:"turn_active,omitempty"`
+	// StopRequested survives a daemon restart before the interrupted turn settles.
+	StopRequested bool `json:"stop_requested,omitempty"`
 	// ToolRunning: one of the agent's own tool calls had started and not returned when this was
 	// last written (a command half run, a question waiting for its answer) — not a subagent's
 	// call, and not the Agent call that runs a subagent. nil in a record from a daemon that did
@@ -88,6 +97,9 @@ type AgentRecord struct {
 	// OpenCalls are those tool calls (ToolRunning's), oldest first, each with what it ran: what the
 	// agent is told was cut off. Absent in a record from a daemon that did not keep them.
 	OpenCalls []OpenCall `json:"open_calls,omitempty"`
+	// PlannedUpdate retains a timer arming call after its tool step returns.
+	// It is invalidated by the next tool or turn, and never proves success alone.
+	PlannedUpdate *OpenCall `json:"planned_update,omitempty"`
 	// Waiting: the session was waiting for the person (status "waiting") when this was last
 	// written. Absent (false) in a record from a daemon that did not keep it.
 	Waiting bool `json:"waiting,omitempty"`
@@ -126,9 +138,10 @@ type OpenCall struct {
 	// CommandHash binds the full input without persisting arbitrary shell text.
 	CommandHash string `json:"command_hash,omitempty"`
 	// UpdateSafe preserves the destructive-work decision made from the full input.
-	UpdateSafe    bool `json:"update_safe,omitempty"`
-	DaemonCommand bool `json:"daemon_command,omitempty"`
-	SignalCommand bool `json:"signal_command,omitempty"`
+	UpdateSafe    bool   `json:"update_safe,omitempty"`
+	DaemonCommand bool   `json:"daemon_command,omitempty"`
+	SignalCommand bool   `json:"signal_command,omitempty"`
+	TimerUnit     string `json:"timer_unit,omitempty"`
 }
 
 // destructive reports whether the call is one a restart must not let the agent pick up by
@@ -141,73 +154,18 @@ func (c OpenCall) destructive() bool {
 	return strings.EqualFold(c.Tool, "Bash") && destructiveCommand(c.Detail)
 }
 
-// restartDenyList is the deterministic list of commands that, cut off by a daemon restart, pause
-// the session instead of letting it continue by itself (docs: install/desktop/DAEMON.md). Matched
-// on the full command, case-insensitively: a force push, a recursive forced delete, a database
-// migration, a deploy (helm, kubectl apply/delete), the installer or a service restart (it may
-// be what restarted the daemon), SQL that drops or truncates.
-var restartDenyList = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\bgit\b[^;&|\n]*\bpush\b[^;&|\n]*(\s--force(-with-lease)?\b|\s-[a-z]*f[a-z]*\b|\s\+\S)`),
-	// rm recursive and forced, flags in any order and anywhere among its arguments (rm x -rf,
-	// rm --recursive --force, rm -r x -f): see rmRecursiveForced.
-	regexp.MustCompile(`(?i)\bgit\b[^;&|\n]*\breset\b[^;&|\n]*\s--hard\b`),
-	regexp.MustCompile(`(?i)\bgit\b[^;&|\n]*\bclean\b[^;&|\n]*\s(-[a-z]*f[a-z]*|--force)\b`),
-	regexp.MustCompile(`(?i)\bterraform\b[^;&|\n]*\b(apply|destroy)\b`),
-	regexp.MustCompile(`(?i)\bmigrat(e|es|ed|ion|ions)\b|\b(alembic|goose|flyway|liquibase)\b`),
-	regexp.MustCompile(`(?i)\b(re)?deploy|\bhelm\s+(install|upgrade|uninstall|delete|rollback)\b|\bkubectl\b[^;&|\n]*\b(apply|delete)\b`),
-	daemonCommand,
-	regexp.MustCompile(`(?i)\bdrop\s+(table|database|schema|index|view|owned)\b|\btruncate\b|\bdelete\s+from\b`),
-}
+var daemonCommand = commandpolicy.DaemonCommand
+var restartDenyList = commandpolicy.RestartDenyList
 
-// daemonCommand is the deny-list's entry for a command that can stop or restart the daemon
-// itself: the installer, blerg-up.sh, a service restart or stop. A restart notice names it as the
-// only kind of command that can have caused an unplanned restart (restartCauseWords).
-var daemonCommand = regexp.MustCompile(`(?i)\binstall\.sh\b|\bblerg-up\.sh\b|\bsystemctl\b[^;&|\n]*\b(restart|stop|kill)\b|\blaunchctl\b[^;&|\n]*\b(kickstart|stop|unload|bootout)\b|\bservice\s+\S+\s+(restart|stop)\b|\bmake\b[^;&|\n]*\b(install|restart)-daemon\b`)
+func rmRecursiveForced(cmd string) bool { return commandpolicy.RMRecursiveForced(cmd) }
 
-// rmSegment finds each rm invocation and its arguments, up to the next command separator.
-var rmSegment = regexp.MustCompile(`(?i)(^|[\s;&|(])rm(\s[^;&|\n]*)?`)
-
-// rmRecursiveForced reports whether a command runs rm both recursively and forced, whatever the
-// order and place of its flags: -rf, -fr, -Rf, -r … -f, x -rf, --recursive --force.
-func rmRecursiveForced(cmd string) bool {
-	for _, m := range rmSegment.FindAllStringSubmatch(cmd, -1) {
-		var r, f bool
-		for _, arg := range strings.Fields(m[2]) {
-			if arg == "--" {
-				break // what follows are file names
-			}
-			switch {
-			case arg == "--recursive":
-				r = true
-			case arg == "--force":
-				f = true
-			case strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--"):
-				r = r || strings.ContainsAny(arg, "rR")
-				f = f || strings.Contains(arg, "f")
-			}
-		}
-		if r && f {
-			return true
-		}
-	}
-	return false
-}
-
-// destructiveCommand reports whether a command matches restartDenyList.
-func destructiveCommand(cmd string) bool {
-	if rmRecursiveForced(cmd) {
-		return true
-	}
-	for _, re := range restartDenyList {
-		if re.MatchString(cmd) {
-			return true
-		}
-	}
-	return false
-}
+func destructiveCommand(cmd string) bool { return commandpolicy.Destructive(cmd) }
 
 // destructiveCutOff reports whether one of the record's open calls is on restartDenyList.
 func destructiveCutOff(rec AgentRecord) bool {
+	if rec.PlannedUpdate != nil {
+		return true
+	}
 	for _, c := range rec.OpenCalls {
 		if c.destructive() {
 			return true
@@ -259,6 +217,7 @@ func openCallOf(callID, tool string, input json.RawMessage) OpenCall {
 			c.UpdateSafe = safeUpdateCommand(in.Command)
 			c.DaemonCommand = daemonCommand.MatchString(in.Command)
 			c.SignalCommand = signalCommand.MatchString(in.Command)
+			c.TimerUnit = updatehandoff.TimerUnit(in.Command)
 		}
 	}
 	return c
@@ -497,12 +456,14 @@ type recordKeeper struct {
 	dir    string
 	frozen *atomic.Bool // the host's: set when the daemon is stopping
 
-	mu        sync.Mutex
-	rec       AgentRecord
-	deleted   bool
-	liveCalls map[string]OpenCall // complete calls observed in this process, never inferred from disk
+	mu         sync.Mutex
+	rec        AgentRecord
+	deleted    bool
+	liveCalls  map[string]OpenCall // complete calls observed in this process, never inferred from disk
+	liveUpdate *OpenCall
 	// lastTurnErrored: the latest turn_done had stop reason "error" (see setTurnActive).
 	lastTurnErrored bool
+	stopSettled     bool // Stop completed; only a later input may clear its recovery intent
 	// calls are the agent's own tool calls that have started and not returned (ToolRunning,
 	// OpenCalls), oldest first.
 	calls []OpenCall
@@ -517,7 +478,7 @@ func newRecordKeeper(dir string, frozen *atomic.Bool, rec AgentRecord) *recordKe
 	if rec.ToolRunning == nil {
 		rec.ToolRunning = new(bool)
 	}
-	k := &recordKeeper{dir: dir, frozen: frozen, rec: rec, calls: rec.OpenCalls}
+	k := &recordKeeper{dir: dir, frozen: frozen, rec: rec, calls: rec.OpenCalls, stopSettled: rec.StopRequested}
 	k.update(func(*AgentRecord) bool { return true })
 	return k
 }
@@ -572,6 +533,10 @@ func (k *recordKeeper) setTurnActive(on bool) {
 			return false
 		}
 		r.TurnActive = on
+		if on {
+			r.PlannedUpdate = nil
+			k.liveUpdate = nil
+		}
 		return true
 	})
 }
@@ -585,6 +550,9 @@ func (k *recordKeeper) turnEnded(stopReason string) {
 		return
 	}
 	k.update(func(r *AgentRecord) bool {
+		if r.StopRequested {
+			k.stopSettled = true
+		}
 		k.lastTurnErrored = stopReason == "error"
 		if k.lastTurnErrored {
 			return false
@@ -610,6 +578,9 @@ func (k *recordKeeper) setStatus(status string) {
 	k.update(func(r *AgentRecord) bool {
 		prev := k.status
 		k.status = status
+		if status == "idle" && r.StopRequested {
+			k.stopSettled = true
+		}
 		changed := false
 		if prev != "running" && prev != "waiting" && status == "running" {
 			changed = k.setCallsLocked(r, nil)
@@ -640,6 +611,10 @@ func (k *recordKeeper) toolCall(callID, tool string, input json.RawMessage, pare
 		}
 		if open {
 			k.liveCalls[callID] = openCallOf(callID, tool, input)
+			r.PlannedUpdate, k.liveUpdate = nil, nil
+			if call := k.liveCalls[callID]; call.TimerUnit != "" && call.UpdateSafe && len(k.calls) == 0 {
+				r.PlannedUpdate, k.liveUpdate = &call, &call
+			}
 		} else {
 			delete(k.liveCalls, callID)
 		}
@@ -791,14 +766,17 @@ func stopLeftoverEngine(rec AgentRecord) bool {
 }
 
 func (k *recordKeeper) setCurrentTurnID(id string) {
-	if id == "" {
-		return
-	}
 	k.update(func(r *AgentRecord) bool {
-		if r.CurrentTurnID == id {
+		if (id == "" || r.CurrentTurnID == id) && !k.stopSettled {
 			return false
 		}
-		r.CurrentTurnID = id
+		if id != "" {
+			r.CurrentTurnID = id
+		}
+		if k.stopSettled {
+			r.StopRequested = false
+			k.stopSettled = false
+		}
 		return true
 	})
 }
@@ -814,4 +792,25 @@ func (k *recordKeeper) setKnownSubagents(children []OpenSubagent) {
 		r.KnownSubagents = children
 		return true
 	})
+}
+
+// requestStop retains cancellation through late steering receipts and restart.
+// Only input accepted after the stopped turn settles clears this intent.
+func (k *recordKeeper) requestStop() {
+	if k == nil {
+		return
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.deleted {
+		return
+	}
+	k.stopSettled = false
+	k.rec.StopRequested = true
+	// Like deletion, this is the person's decision, even after Freeze has
+	// barred engine-driven writes during daemon shutdown.
+	k.observeUpdateLocked()
+	if err := writeAgentRecord(k.dir, k.rec); err != nil {
+		log.Printf("agent record %s: Stop could not be retained: %v", k.rec.SessionID, err)
+	}
 }

@@ -14,6 +14,7 @@ func TestPinnedDaemonStartResolvesRepoOnThatDaemon(t *testing.T) {
 	hub := NewHub()
 	dc := &DaemonConn{ID: "00000000-0000-4000-8000-000000000074", Name: "laptop", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	dc.SetAvailableEngines([]string{"claude"})
 	dc.SetCheckedOutRepos([]string{"app-checkout", "tool", "lib"})
 	dc.SetRepoOrigins(map[string]protocol.RepoOrigin{

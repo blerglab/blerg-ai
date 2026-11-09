@@ -6,9 +6,13 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/blerglab/blerg-ai/runner/internal/persontime"
+
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 
+	"github.com/blerglab/blerg-ai/runner/internal/commandsteps"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
+	"github.com/blerglab/blerg-ai/runner/skills"
 )
 
 // ─── Domain types ────────────────────────────────────────────────────────────
@@ -83,6 +87,8 @@ type DaemonInfo struct {
 // carries secret values — only key presence (AvailableEngines) and
 // non-secret config, all safe to show in a browser.
 type ClusterStatus struct {
+	RuntimeTargetName     string                `json:"runtime_target_name,omitempty"`
+	RuntimeTargetID       string                `json:"runtime_target_id,omitempty"`
 	WorkspaceCapabilities WorkspaceCapabilities `json:"workspace_capabilities,omitzero"`
 	// Configured is false when this server has no cluster runtime at all
 	// (not running in k8s, or BLERG_RUNNER_AGENT_IMAGE unset) — every other
@@ -154,11 +160,14 @@ type MyCredentials struct {
 
 // SessionInfo describes a terminal or agent session.
 type SessionInfo struct {
+	WorkerKind           string                  `json:"worker_kind,omitempty"`
+	RuntimeTargetID      string                  `json:"runtime_target_id,omitempty"`
 	DesktopCompatibility bool                    `json:"desktop_compatibility,omitempty"`
 	DesktopStatus        string                  `json:"desktop_status,omitempty"`
 	DesktopStatusReason  string                  `json:"desktop_status_reason,omitempty"`
 	Workspace            *WorkspaceManifest      `json:"workspace,omitempty"`
 	WorkspaceResults     []WorkspaceMemberResult `json:"workspace_results,omitempty"`
+	RepositoryRequest    *RepositoryRequest      `json:"repository_request,omitempty"`
 
 	ArchivedAt           *string `json:"archived_at,omitempty"`
 	SteeringSupported    bool    `json:"steering_supported"`
@@ -176,6 +185,8 @@ type SessionInfo struct {
 	EndedAt              *string `json:"ended_at,omitempty"`
 	Unread               bool    `json:"unread"`
 	Starred              bool    `json:"starred"`
+	Emoji                string  `json:"emoji"`
+	Color                string  `json:"color"`
 	Kind                 string  `json:"kind,omitempty"` // "" | "tmux" | "agent"
 	ParentSessionID      *string `json:"parent_session_id,omitempty"`
 	Runtime              string  `json:"runtime,omitempty"` // "daemon" | "docker" | "cluster"
@@ -196,6 +207,7 @@ type SessionInfo struct {
 	// Interaction is the session's interaction mode: InteractionInteractive (a person reads the
 	// chat as it works) or InteractionUnattended (nobody does). The effective value, never "".
 	Interaction string `json:"interaction,omitempty"`
+	Verbosity   string `json:"verbosity,omitempty"`
 	// BackgroundTasks is how many background tasks (a background shell, a monitor, a background
 	// subagent) the session's agent has running; absent when none, and for a session that ended.
 	BackgroundTasks int `json:"background_tasks,omitempty"`
@@ -203,6 +215,7 @@ type SessionInfo struct {
 	// (PausedByRestart), a daemon restart cut off what it was doing and it was not continued by
 	// itself. "" when it is not paused (migration 043).
 	PausedReason string `json:"paused_reason,omitempty"`
+	PausedDetail string `json:"paused_detail,omitempty"`
 }
 
 // A session's interaction mode, decided by the server at start and told to the engine in its
@@ -233,7 +246,10 @@ type EndedBy struct {
 
 // DaemonHello is the first message a daemon sends upon connecting.
 type DaemonHello struct {
-	PluginPolicy bool `json:"plugin_policy,omitempty"`
+	RepositoryCloneVersion int             `json:"repository_clone_version,omitempty"`
+	FixedCommandSteps      bool            `json:"fixed_command_steps,omitempty"`
+	ShellLink              *ShellLinkHello `json:"shell_link,omitempty"`
+	PluginPolicy           bool            `json:"plugin_policy,omitempty"`
 	// Display-only local identity for a person's enrollment confirmation.
 	Hostname              string                `json:"hostname,omitempty"`
 	OSUser                string                `json:"os_user,omitempty"`
@@ -311,6 +327,9 @@ type DaemonHello struct {
 	SessionTokenFile bool `json:"session_token_file,omitempty"`
 	// InputReceipts: accepts correlated input redelivery without executing it twice.
 	InputReceipts bool `json:"input_receipts,omitempty"`
+	// AuthoritativeAnswers: a native ask resolves only from the server's answer poll, never from
+	// ordinary input. Without it question routing is off for the daemon's sessions.
+	AuthoritativeAnswers bool `json:"authoritative_answers,omitempty"`
 	// RestrictTools: this daemon honours SpawnSession.RestrictTools (the
 	// built-in tool allow-list, no ambient MCP servers, no user settings,
 	// plugins, hooks or skills). Absent from older daemons, which would ignore
@@ -325,6 +344,8 @@ type DaemonHello struct {
 	// older daemons, which mount the checkout itself, .git included, so the server refuses to
 	// start any sandboxed session on one.
 	SandboxClones bool `json:"sandbox_clones,omitempty"`
+	// WorkBranches honors the immutable branch carried by SpawnSession.
+	WorkBranches bool `json:"work_branches,omitempty"`
 	// CodexRestricted supports the isolated Codex file/MCP runtime. Older daemons
 	// must never receive a Codex grant or an unattended Codex session.
 	CodexRestricted bool `json:"codex_restricted,omitempty"`
@@ -402,9 +423,12 @@ type DaemonHello struct {
 // was accepted and the daemon attached. Sent only when the hello set Welcome,
 // before any other message on the connection. Never carries a credential.
 type DaemonWelcome struct {
+	ShellLink             *ShellLinkWelcome     `json:"shell_link,omitempty"`
 	WorkspaceCapabilities WorkspaceCapabilities `json:"workspace_capabilities,omitzero"`
 
 	PlanNudges bool `json:"plan_nudges,omitempty"`
+	// WorkspaceFileChunks: this server reassembles workspace_file_chunk frames.
+	WorkspaceFileChunks bool `json:"workspace_file_chunks,omitempty"`
 	// RecoveryHold keeps marked recovered children paused until daemon_recovery_ready.
 	RecoveryHold bool   `json:"recovery_hold,omitempty"`
 	Type         string `json:"type"` // "daemon_welcome"
@@ -544,7 +568,7 @@ type SessionStarted struct {
 	Model       string `json:"model,omitempty"`
 	Cols        int    `json:"cols"`
 	Rows        int    `json:"rows"`
-	Kind        string `json:"kind,omitempty"` // "" (tmux) | "agent"
+	Kind        string `json:"kind,omitempty"` // "agent"; legacy rows may contain "tmux"
 }
 
 // SessionOutput carries terminal output from a running session.
@@ -599,6 +623,13 @@ type SessionNotice struct {
 	URL       string `json:"url"`
 }
 
+// SessionColorChanged syncs a named theme color after an authorized edit.
+type SessionColorChanged struct {
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	Color     string `json:"color"`
+}
+
 // SessionTitleChanged notifies that a session's title has changed.
 type SessionTitleChanged struct {
 	Type      string `json:"type"` // "session_title_changed"
@@ -635,6 +666,7 @@ type SessionPausedChanged struct {
 	Type         string `json:"type"` // "session_paused_changed"
 	SessionID    string `json:"session_id"`
 	PausedReason string `json:"paused_reason"`
+	PausedDetail string `json:"paused_detail,omitempty"`
 }
 
 // SessionEnded is sent when a session's process exits.
@@ -658,6 +690,18 @@ type SessionEnded struct {
 
 // SpawnSession instructs the daemon to start a new session.
 type SpawnSession struct {
+	SkillPolicy  *skills.Policy           `json:"skill_policy,omitempty"`
+	CommandSteps *commandsteps.Definition `json:"command_steps,omitempty"`
+	// RecoverQuestions: a resumed pod's earlier host is gone, with its question waiters.
+	// Set by the pod itself; it never crosses the wire.
+	RecoverQuestions bool `json:"-"`
+	// HostGeneration orders this hosting after the session's earlier ones. The daemon mints it
+	// before the engine starts; it never crosses the wire.
+	HostGeneration int64 `json:"-"`
+	// HostGenerationFloor: the session's highest generation the server has seen. Set by a resumed
+	// pod, which keeps nothing from its earlier host; it never crosses the wire.
+	HostGenerationFloor   int64                 `json:"-"`
+	WorkBranch            string                `json:"work_branch,omitempty"`
 	Workspace             *WorkspaceManifest    `json:"workspace,omitempty"`
 	WorkspaceCapabilities WorkspaceCapabilities `json:"workspace_capabilities,omitzero"`
 
@@ -699,11 +743,8 @@ type SpawnSession struct {
 	// ExtraEnv is caller-supplied env for the session (board-driven starts);
 	// never BLERG_RUNNER_* or the engine credential.
 	ExtraEnv map[string]string `json:"extra_env,omitempty"`
-	Kind     string            `json:"kind,omitempty"` // "" (tmux) | "agent"
-	// Sandbox runs the session's tmux server inside a throwaway Docker
-	// container (mounting only the target repo) instead of directly on the
-	// daemon host. Daemon-routed like the default runtime; the daemon itself
-	// decides how to spawn, no server-side involvement (unlike "cluster").
+	Kind     string            `json:"kind,omitempty"` // "agent"; legacy rows may contain "tmux"
+	// Sandbox runs the agent engine inside a hardened Docker container.
 	Sandbox bool `json:"sandbox,omitempty"`
 	// Engine picks which CLI actually drives the session: "" (default) is
 	// Claude Code, "codex" is OpenAI's Codex CLI, "hermes" is Nous Research's
@@ -763,6 +804,7 @@ type SpawnSession struct {
 	// Empty from a server older than the field, which a daemon reads as interactive; a daemon
 	// older than the field ignores it.
 	Interaction string `json:"interaction,omitempty"`
+	Verbosity   string `json:"verbosity,omitempty"`
 }
 
 // MCPGatewayConfig is a session's MCP gateway grant as delivered to a daemon
@@ -838,9 +880,7 @@ type SessionTokenResult struct {
 	Error     string `json:"error,omitempty"`
 }
 
-// InjectNoteReply is sent from the server to the daemon to inject a note reply
-// into a session's PTY. The daemon gates injection on classifyScreen == "idle";
-// otherwise it queues it in a single-slot pending map (latest-wins).
+// InjectNoteReply delivers a note reply as agent input.
 type InjectNoteReply struct {
 	Type      string `json:"type"` // "inject_note_reply"
 	SessionID string `json:"session_id"`
@@ -1005,12 +1045,7 @@ type BrowserSessionStateChanged = SessionStateChanged
 // (Shares the same wire type as SessionEnded.)
 type BrowserSessionEnded = SessionEnded
 
-// HistoryDone is sent to the browser after history replay is complete for a
-// subscribe_session. The browser uses it to trigger a resize, ensuring the
-// SIGWINCH-triggered PTY redraw happens after history is rendered, not before.
-// Cols carries the session's current PTY width so the browser can detect a
-// width mismatch (desktop history replayed on a narrow mobile terminal) and
-// discard the garbled scrollback before requesting a fresh tmux repaint.
+// HistoryDone marks the end of saved output replay. Cols preserves its recorded width.
 type HistoryDone struct {
 	Type      string `json:"type"` // "history_done"
 	SessionID string `json:"session_id"`
@@ -1075,23 +1110,6 @@ type UnsubscribeSession struct {
 // (Same wire shape as SendInput; aliased for clarity.)
 type BrowserSendInput = SendInput
 
-// BrowserSpawnSession asks the server to create a new session via a daemon.
-type BrowserSpawnSession struct {
-	Type          string `json:"type"` // "spawn_session"
-	DaemonID      string `json:"daemon_id"`
-	Repo          string `json:"repo"`
-	Title         string `json:"title"`
-	InitialPrompt string `json:"initial_prompt"`
-	// Assist fields: forwarded to the daemon's SpawnSession.
-	Assist   bool   `json:"assist,omitempty"`
-	BoardID  string `json:"board_id,omitempty"`
-	TicketID string `json:"ticket_id,omitempty"`
-	Kind     string `json:"kind,omitempty"` // "" (tmux) | "agent"
-	Model    string `json:"model,omitempty"`
-	// Interaction: "interactive" (the default for a browser's start) or "unattended".
-	Interaction string `json:"interaction,omitempty"`
-}
-
 // BrowserResizeSession asks the server to resize a session.
 // (Same wire shape as ResizeSession; aliased for clarity.)
 type BrowserResizeSession = ResizeSession
@@ -1150,17 +1168,25 @@ type UnsubscribeBoard struct {
 // pointers because answer is overloaded: nil (an update), "" (closed/expired/ended),
 // or real text (a reply).
 type MessageInfo struct {
+	QuestionTurn     string `json:"question_turn,omitempty"`
+	QuestionRevision int64  `json:"question_revision"`
+	// Decision marks a server-bound approval, independent of transcript loading.
+	Decision   bool    `json:"decision,omitempty"`
 	ID         string  `json:"id"`
 	SessionID  string  `json:"session_id"`
 	Kind       string  `json:"kind"` // "update" | "ask" | "note"
 	Body       string  `json:"body"`
-	Status     string  `json:"status"` // "open" | "answered"
+	Status     string  `json:"status"` // "open" | "answered" | "withdrawn"
 	Answer     *string `json:"answer,omitempty"`
 	CreatedAt  string  `json:"created_at"`
 	AnsweredAt *string `json:"answered_at,omitempty"`
 	// NoWait: a question the agent does not wait on (`blerg-runner ask --no-wait`).
 	NoWait bool `json:"no_wait,omitempty"`
-	// Answerable (no_wait questions only): set per viewer, true for the session's owner signed in
+	// WaiterEnded: the child stopped waiting; the question stays with the person.
+	WaiterEnded bool `json:"waiter_ended,omitempty"`
+	// OwnerOnly distinguishes command approvals (without NoWait) from dismissible questions.
+	OwnerOnly bool `json:"owner_only,omitempty"`
+	// Answerable (child and no_wait questions): set per viewer, true for the session's owner signed in
 	// as themselves, who alone answers it. Only they are notified (bell, toast); everyone else
 	// who can see the session sees it there, read-only.
 	Answerable bool `json:"answerable,omitempty"`
@@ -1235,7 +1261,8 @@ type StartStagePayload struct {
 // agent loop. Seq is 0 from the daemon; the SERVER assigns it on append and
 // echoes it in AgentEventAck and in the browser broadcast.
 type AgentEvent struct {
-	Type          string          `json:"type"` // "agent_event"
+	Replayed      bool            `json:"replayed,omitempty"` // history reads, never a live navigation request
+	Type          string          `json:"type"`               // "agent_event"
 	SessionID     string          `json:"session_id"`
 	ClientEventID string          `json:"client_event_id"`
 	Seq           int64           `json:"seq,omitempty"`
@@ -1256,12 +1283,13 @@ type AgentEventAck struct {
 // AgentUserMessage delivers a user message to an agent session
 // (browser → server → daemon).
 type AgentUserMessage struct {
-	PlanNudge      string `json:"plan_nudge,omitempty"`
-	ExpectedTurnID string `json:"expected_turn_id,omitempty"`
-	Type           string `json:"type"` // "agent_user_message"
-	SessionID      string `json:"session_id"`
-	Text           string `json:"text"`
-	Source         string `json:"source,omitempty"` // "" → "chat"
+	PersonTime     *persontime.Account `json:"person_time,omitempty"`
+	PlanNudge      string              `json:"plan_nudge,omitempty"`
+	ExpectedTurnID string              `json:"expected_turn_id,omitempty"`
+	Type           string              `json:"type"` // "agent_user_message"
+	SessionID      string              `json:"session_id"`
+	Text           string              `json:"text"`
+	Source         string              `json:"source,omitempty"` // "" → "chat"
 	// ClientID is the sender's id for the message (a browser's queued bubble). The daemon echoes it
 	// as client_id on the message's user_message event, and on the error of a message it dropped.
 	ClientID string `json:"client_id,omitempty"`
@@ -1293,8 +1321,9 @@ type RefreshSessionTools struct {
 // InterruptSession cancels an agent session's in-flight turn
 // (browser → server → daemon).
 type InterruptSession struct {
-	Type      string `json:"type"` // "interrupt_session"
-	SessionID string `json:"session_id"`
+	TargetEventID string `json:"target_event_id,omitempty"` // deprecated compatibility field; ignored by current-work Stop
+	Type          string `json:"type"`                      // "interrupt_session"
+	SessionID     string `json:"session_id"`
 }
 
 // SubscribeAgentEvents requests replay + live stream of an agent session's
@@ -1369,6 +1398,7 @@ type DaemonRecoveryReady struct {
 // PlanInputRequest asks for drift metadata immediately before an initial/resume input is queued.
 // Only the daemon owning SessionID can request it; it never creates a model input itself.
 type PlanInputRequest struct {
+	ClockOnly bool   `json:"clock_only,omitempty"`
 	Type      string `json:"type"`
 	SessionID string `json:"session_id"`
 	RequestID string `json:"request_id"`
@@ -1376,10 +1406,11 @@ type PlanInputRequest struct {
 	Source    string `json:"source,omitempty"`
 }
 type PlanInputResult struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	RequestID string `json:"request_id"`
-	PlanNudge string `json:"plan_nudge,omitempty"`
+	PersonTime *persontime.Account `json:"person_time,omitempty"`
+	Type       string              `json:"type"`
+	SessionID  string              `json:"session_id"`
+	RequestID  string              `json:"request_id"`
+	PlanNudge  string              `json:"plan_nudge,omitempty"`
 }
 
 // DesktopOwnershipChanged removes previously delivered inventory for its exact recipient.
@@ -1387,4 +1418,27 @@ type DesktopOwnershipChanged struct {
 	Type              string `json:"type"`
 	DesktopID         string `json:"desktop_id"`
 	OwnershipRevision int64  `json:"ownership_revision"`
+}
+
+// SessionEmojiChanged syncs a session's optional channel emoji.
+type SessionEmojiChanged struct {
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	Emoji     string `json:"emoji"`
+}
+
+// WorkerPriorityRequest reads or changes the owner's desktop scheduling policy.
+// An absent Enabled is a read. Cluster connections never handle this message.
+type WorkerPriorityRequest struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	Enabled   *bool  `json:"enabled,omitempty"`
+}
+type WorkerPriorityResult struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	OK        bool   `json:"ok"`
+	Enabled   bool   `json:"enabled"`
+	Backend   string `json:"backend"`
+	Error     string `json:"error,omitempty"`
 }

@@ -780,7 +780,7 @@ func TestCCTurnArgsSessionGuide(t *testing.T) {
 	}
 	got := ccTurnArgs("do it", "", "", "", withSessionGuide())
 	// The guide, then the interaction mode's paragraph; no stated mode is interactive.
-	want := "--append-system-prompt=" + ccSystemPromptFor("")
+	want := "--append-system-prompt=" + ccSystemPromptForPolicy("", effectiveSkillPolicy(nil))
 	if got[len(got)-1] != want || got[0] != "-p" || got[1] != "do it" {
 		t.Fatalf("guide not appended after the existing flags with -p first: %v", got)
 	}

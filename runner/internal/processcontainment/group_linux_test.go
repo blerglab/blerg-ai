@@ -42,42 +42,35 @@ func TestMain(m *testing.M) {
 		}
 	}
 
-	if len(os.Args) > 1 && os.Args[1] == "tree-limit" {
-		cmd := exec.Command("/bin/sh", "-c", "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do sleep 5 & done; wait")
-		cmd.SysProcAttr = &syscall.SysProcAttr{Ptrace: true, Setsid: true, Pdeathsig: syscall.SIGKILL}
-		ready := make(chan error, 1)
-		_, err := NewTree().Run(cmd, cmd.Start, 4, ready)
-		switch {
-		case errors.Is(err, ErrUnproven):
-			fmt.Println("unproven:", err)
-		case errors.Is(err, ErrTaskLimit):
-			fmt.Println("task-limit")
-		default:
-			fmt.Println("other:", err)
-		}
-		os.Exit(0)
+	if len(os.Args) > 2 && os.Args[1] == "go-engine" {
+		goEngine(os.Args[2])
+	}
+	if len(os.Args) > 3 && os.Args[1] == "tree-killed-at-refusal" {
+		treeKilledAtRefusal(os.Args[2], os.Args[3])
+	}
+	if len(os.Args) > 5 && os.Args[1] == "tree-under-limit" {
+		limit, _ := strconv.Atoi(os.Args[5])
+		treeUnderLimit(os.Args[2], os.Args[3], os.Args[4], limit)
 	}
 	if len(os.Args) > 3 && os.Args[1] == "tree-census" {
 		// Runs a tree in this child (the tracer installs seccomp on its thread), lets the fixture
 		// finish its history, freezes it and compares the tracer's accounting with the kernel's.
 		cmd := exec.Command(os.Args[2], os.Args[3], os.Args[4])
-		cmd.SysProcAttr = &syscall.SysProcAttr{Ptrace: true, Setsid: true, Pdeathsig: syscall.SIGKILL}
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Pdeathsig: syscall.SIGKILL}
 		tree, ready := NewTree(), make(chan error, 1)
 		go func() { _, err := tree.Run(cmd, cmd.Start, WriterTaskLimit, ready); fmt.Println("run:", err) }()
 		if err := <-ready; err != nil {
 			fmt.Println("start:", err)
 			os.Exit(1)
 		}
-		deadline := time.Now().Add(30 * time.Second)
-		for {
-			if _, err := os.Stat(os.Args[4]); err == nil {
-				break
-			}
-			if time.Now().After(deadline) {
-				fmt.Println("fixture never became ready")
-				os.Exit(1)
-			}
-			time.Sleep(time.Millisecond)
+		marker := os.Args[4]
+		deadline := time.Now().Add(readinessGuard)
+		if err := waitForReady(time.Now, deadline, func() { time.Sleep(time.Millisecond) }, func() bool {
+			_, err := os.Stat(marker)
+			return err == nil
+		}); err != nil {
+			fmt.Println(err)
+			os.Exit(1)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		err := tree.Control(ctx, "freeze")
@@ -95,16 +88,42 @@ func TestMain(m *testing.M) {
 		cancel()
 		os.Exit(0)
 	}
-	if len(os.Args) > 1 && os.Args[1] == "initial-siginfo" {
-		fmt.Println(initialSiginfoProbe())
-		os.Exit(0)
+	if len(os.Args) > 4 && os.Args[1] == "tree-held-children" {
+		heldChildren(os.Args[2], os.Args[3], os.Args[4])
+	}
+	if len(os.Args) > 3 && os.Args[1] == "tree-protected" {
+		protectedTree(os.Args[2], os.Args[3])
+	}
+	if len(os.Args) > 1 && os.Args[1] == "group-protected" {
+		protectedGroup()
+	}
+	if len(os.Args) > 4 && os.Args[1] == "tree-case" {
+		treeCase(os.Args[2], os.Args[3], os.Args[4])
+	}
+	if len(os.Args) > 2 && os.Args[1] == "tree-shim-state" {
+		shimState(os.Args[2])
+	}
+	if len(os.Args) > 3 && os.Args[1] == "tree-spin-cost" {
+		spinCost(os.Args[2], os.Args[3])
+	}
+	if len(os.Args) > 3 && os.Args[1] == "tree-outside-reuse" {
+		outsideReuse(os.Args[0], os.Args[2], os.Args[3])
+	}
+	if len(os.Args) > 3 && os.Args[1] == "tree-outside-reuse-tracer" {
+		outsideReuseTracer(os.Args[2], os.Args[3])
+	}
+	if len(os.Args) > 4 && os.Args[1] == "tree-report-order" {
+		reportOrder(os.Args[2], os.Args[3], os.Args[4])
+	}
+	if len(os.Args) > 3 && os.Args[1] == "tree-tid-reuse" {
+		tidReuse(os.Args[2], os.Args[3])
 	}
 	if len(os.Args) > 4 && os.Args[1] == "ledger-fail" {
 		// Fails the ledger's Nth record (or reports no pidfd support) under a tree whose root writes
 		// one marker and whose forked subshell writes another.
 		failAt, _ := strconv.Atoi(os.Args[3])
 		cmd := exec.Command("/bin/sh", "-c", `echo > "$1"; (echo > "$2"); true`, "sh", os.Args[4], os.Args[5])
-		cmd.SysProcAttr = &syscall.SysProcAttr{Ptrace: true, Setsid: true, Pdeathsig: syscall.SIGKILL}
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Pdeathsig: syscall.SIGKILL}
 		tree, ready, calls := NewTree(), make(chan error, 1), 0
 		tree.Ledger = func(int) error {
 			calls++
@@ -133,7 +152,7 @@ func TestMain(m *testing.M) {
 			return fd, err
 		}
 		cmd := exec.Command(os.Args[0], "many-threads")
-		cmd.SysProcAttr = &syscall.SysProcAttr{Ptrace: true, Setsid: true, Pdeathsig: syscall.SIGKILL}
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Pdeathsig: syscall.SIGKILL}
 		tree, ready, records := NewTree(), make(chan error, 1), 0
 		tree.Ledger = func(int) error { records++; return nil }
 		code, err := tree.Run(cmd, cmd.Start, WriterTaskLimit, ready)
@@ -172,9 +191,10 @@ func TestMain(m *testing.M) {
 	}
 	if len(os.Args) > 2 && os.Args[1] == "tree-killed-in-stop" {
 		// SIGKILLs a non-root task the moment before the tracer continues it from a stop (in the event
-		// loop, or in the thaw after a freeze), so the continue always meets a task already dying.
+		// loop, or in the thaw after a freeze). Wait for death without reaping it, so the
+		// real continue gets ESRCH and the tree still has to collect the exit itself.
 		cmd := exec.Command("/bin/sh", "-c", "/bin/sleep 1 & wait; exit 7")
-		cmd.SysProcAttr = &syscall.SysProcAttr{Ptrace: true, Setsid: true, Pdeathsig: syscall.SIGKILL}
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Pdeathsig: syscall.SIGKILL}
 		tree, ready := NewTree(), make(chan error, 1)
 		var armed atomic.Bool
 		armed.Store(os.Args[2] == "event")
@@ -183,7 +203,29 @@ func TestMain(m *testing.M) {
 		continueTask = func(pid, sig int) error {
 			if armed.Load() && killed == 0 && pid != cmd.Process.Pid {
 				killed = pid
-				_ = unix.Kill(pid, unix.SIGKILL)
+				// This victim needs no more event stops: in particular TRACEEXIT would
+				// hold it alive until another continue, defeating the death handshake.
+				if err := unix.PtraceSetOptions(pid, unix.PTRACE_O_EXITKILL); err != nil {
+					fmt.Fprintln(os.Stderr, "victim options:", err)
+					os.Exit(1)
+				}
+				if err := unix.Kill(pid, unix.SIGKILL); err != nil {
+					fmt.Fprintln(os.Stderr, "kill victim:", err)
+					os.Exit(1)
+				}
+				deadline := time.Now().Add(5 * time.Second)
+				for {
+					var info unix.Siginfo
+					err := unix.Waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOWAIT|unix.WNOHANG|unix.WALL, nil)
+					if err != nil || time.Now().After(deadline) {
+						fmt.Fprintln(os.Stderr, "wait for victim death:", err)
+						os.Exit(1)
+					}
+					if info.Signo != 0 {
+						break
+					}
+					time.Sleep(time.Millisecond)
+				}
 				refused = original(pid, sig)
 				return refused
 			}
@@ -218,7 +260,7 @@ func TestMain(m *testing.M) {
 		// stop before the tracer reads the event's message, which then holds an exit status.
 		event := map[string]int{"fork": unix.PTRACE_EVENT_FORK, "exec": unix.PTRACE_EVENT_EXEC}[os.Args[2]]
 		cmd := exec.Command("/bin/sh", "-c", `(/bin/sh -c "/bin/sleep 0.3 & wait"); exit 7`)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Ptrace: true, Setsid: true, Pdeathsig: syscall.SIGKILL}
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Pdeathsig: syscall.SIGKILL}
 		tree, ready := NewTree(), make(chan error, 1)
 		killed, inExit := false, false
 		original := readEventMessage
@@ -254,9 +296,12 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if os.Getenv("BLERG_THREAD_EXEC_FIXTURE") == "1" {
+		threadExecFixture()
+	}
 	if len(os.Args) > 1 && os.Args[1] == "cluster-writer" {
 		if os.Getenv("P6_GROUP_DROP_START_ACK") == "1" {
-			time.Sleep(10 * time.Second)
+			time.Sleep(15 * time.Second)
 			os.Exit(125)
 		}
 		os.Exit(ServeCommand(os.Args[2:]))
@@ -288,6 +333,64 @@ func tracedByMe() int {
 	}
 	return n
 }
+
+// readinessGuard bounds how long tree-census waits for the storm fixture's completion marker. It
+// exists only to catch a genuinely stalled child, never to estimate how long real work takes: the
+// tracer must receive and answer thousands of ptrace stops from storm's 1,500 traced clone/fork/
+// thread iterations, and under host CPU contention (BLG-445: several workers building in
+// parallel) that round trip slows enough to blow past an idle-host duration while still making
+// genuine progress. Isolated runs complete in well under a minute; this stays generous above that.
+const readinessGuard = 5 * time.Minute
+
+// waitForReady blocks until ready reports true, polling on tick while clock stays before deadline.
+// deadline exists to catch a genuinely stalled child; it must never substitute for the explicit
+// completion signal ready reports, so it should stay generous rather than reflect an idle-host
+// duration for the work ready is waiting on.
+func waitForReady(clock func() time.Time, deadline time.Time, tick func(), ready func() bool) error {
+	for {
+		if ready() {
+			return nil
+		}
+		if !clock().Before(deadline) {
+			return errors.New("fixture never became ready")
+		}
+		tick()
+	}
+}
+
+// TestWaitForReadyGuardsStalledChildWithoutLimitingSlowButRealProgress reproduces BLG-445 by
+// controlling ordering deterministically, with no real sleep and no host load: a fake clock
+// advances only when tick is called, and the fixture's completion is wired to a simulated elapsed
+// time the real census child hit under CPU contention (storm's 1,500 traced clone/fork/thread
+// iterations outrunning readinessGuard's idle-host budget). readinessGuard must stay generous
+// enough to tolerate that genuine, eventual completion rather than fail it as if it were a hang.
+func TestWaitForReadyGuardsStalledChildWithoutLimitingSlowButRealProgress(t *testing.T) {
+	fakeNow := time.Unix(0, 0)
+	clock := func() time.Time { return fakeNow }
+	tick := func() { fakeNow = fakeNow.Add(time.Second) }
+	readyAt := time.Unix(0, 0).Add(45 * time.Second)
+	ready := func() bool { return !clock().Before(readyAt) }
+
+	deadline := time.Unix(0, 0).Add(readinessGuard)
+	if err := waitForReady(clock, deadline, tick, ready); err != nil {
+		t.Fatalf("readinessGuard must tolerate genuine completion that lands at 45s under load: %v", err)
+	}
+}
+
+// TestWaitForReadyFailsWhenReadyNeverSignals proves the deadline still guards a genuinely stalled
+// child: if ready never reports true, waitForReady must not block forever.
+func TestWaitForReadyFailsWhenReadyNeverSignals(t *testing.T) {
+	fakeNow := time.Unix(0, 0)
+	clock := func() time.Time { return fakeNow }
+	tick := func() { fakeNow = fakeNow.Add(time.Second) }
+	ready := func() bool { return false }
+
+	deadline := time.Unix(0, 0).Add(readinessGuard)
+	if err := waitForReady(clock, deadline, tick, ready); err == nil {
+		t.Fatal("expected an error for a child that never becomes ready")
+	}
+}
+
 func until(t *testing.T, f func() bool) {
 	t.Helper()
 	untilWithin(t, 5*time.Second, f)
@@ -302,6 +405,182 @@ func untilWithin(t *testing.T, limit time.Duration, f func() bool) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// proveHeld reads from the kernel, independently of the tracer's accounting, that pid and every
+// descendant can run no user code, and that they stay where they are. A task qualifies in a ptrace
+// stop, as a zombie, past exit, or inside vfork with its child (a descendant, so checked here too)
+// stopped: a vfork parent cannot report a stop until its child execs or exits, and it runs nothing
+// of its own before its VFORK_DONE stop.
+func proveHeld(t *testing.T, pid int) {
+	t.Helper()
+	places := map[int]string{}
+	deadline := time.Now().Add(2 * time.Second)
+	moving := map[int]string{}
+	for pending := []int{pid}; len(pending) != 0; {
+		task := pending[0]
+		place, settled, why := heldPlace(task)
+		if !settled {
+			// The tracer has continued some tasks it counts as held: a vfork parent on its way into
+			// the wait, and a task past its EXIT event. Both are inside the kernel, on the way to
+			// vfork or to exit. Nothing else may be seen moving, or it was running at the acknowledgement.
+			if time.Now().After(deadline) {
+				t.Fatalf("task %d is not held after an acknowledged freeze: %s", task, why)
+			}
+			moving[task] = why
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		if why, seen := moving[task]; seen && place != "" && !inVfork(place) {
+			t.Fatalf("task %d was running at an acknowledged freeze: %s, then %s", task, why, place)
+		}
+		pending = pending[1:]
+		if place != "" {
+			places[task] = place
+		}
+		pending = append(pending, taskChildren(task)...)
+	}
+	time.Sleep(30 * time.Millisecond)
+	for task, place := range places {
+		if now, settled, why := heldPlace(task); !settled || now != place {
+			t.Fatalf("task %d moved during a freeze: %s -> %s %s", task, place, now, why)
+		}
+	}
+}
+
+// heldPlace says where a task is held: its syscall state with stack and instruction pointers. No
+// place means it needs no watching: it is gone, a zombie, or past its exit.
+func heldPlace(pid int) (place string, settled bool, why string) {
+	status, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if os.IsNotExist(err) {
+		return "", true, ""
+	}
+	if err != nil {
+		return "", false, err.Error()
+	}
+	state := ""
+	for line := range strings.Lines(string(status)) {
+		if value, ok := strings.CutPrefix(line, "State:"); ok {
+			state = strings.TrimSpace(value)
+		}
+	}
+	const pfExiting = 0x4
+	stat, _ := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if _, after, ok := strings.Cut(string(stat), ") "); ok {
+		if fields := strings.Fields(after); len(fields) > 6 {
+			flags, _ := strconv.ParseUint(fields[6], 10, 64)
+			if flags&pfExiting != 0 {
+				return "", true, ""
+			}
+		}
+	}
+	syscallLine, err := os.ReadFile(fmt.Sprintf("/proc/%d/syscall", pid))
+	if err != nil {
+		return "", false, state + ": " + err.Error()
+	}
+	line := strings.TrimSpace(string(syscallLine))
+	switch {
+	case strings.HasPrefix(state, "Z"):
+		return "", true, ""
+	case strings.Contains(state, "tracing stop"), inVfork(line):
+		return line, true, ""
+	}
+	return "", false, state + " syscall " + line
+}
+
+// inVfork reads a /proc/<pid>/syscall line: a blocked task inside vfork, or clone with CLONE_VFORK.
+func inVfork(line string) bool {
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return false
+	}
+	number, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return false
+	}
+	flags, _ := strconv.ParseUint(strings.TrimPrefix(fields[1], "0x"), 16, 64)
+	switch runtime.GOARCH {
+	case "amd64":
+		return number == 58 || (number == 56 && flags&unix.CLONE_VFORK != 0)
+	case "arm64":
+		return number == 220 && flags&unix.CLONE_VFORK != 0
+	}
+	return false
+}
+
+func taskChildren(pid int) []int {
+	var children []int
+	threads, _ := filepath.Glob(fmt.Sprintf("/proc/%d/task/[0-9]*/children", pid))
+	for _, thread := range threads {
+		raw, _ := os.ReadFile(thread)
+		for _, field := range strings.Fields(string(raw)) {
+			if child, err := strconv.Atoi(field); err == nil {
+				children = append(children, child)
+			}
+		}
+	}
+	return children
+}
+
+// A freeze under a tree that writes through the disk and spawns as it goes acknowledges only what the
+// kernel confirms: no task in the middle of a write, and nothing written while frozen. Every round
+// lands somewhere else: in a synchronous write, in vfork, at an exec, in an exit.
+func TestGroupFreezeNeverAcknowledgesATaskInAWrite(t *testing.T) {
+	dir := t.TempDir()
+	data, pidPath := filepath.Join(dir, "data"), filepath.Join(dir, "pid")
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := NewGroup(binary, uint32(os.Getuid()), uint32(os.Getgid()))
+	cmd := exec.Command("sh", "-c", `echo $$ > "$2"; i=0; while :; do dd if=/dev/zero of="$1" bs=4096 count=64 oflag=dsync,append conv=notrunc 2>/dev/null; echo x >> "$1"; i=$((i+1)); [ $((i%16)) = 0 ] && : > "$1"; done`, "sh", data, pidPath)
+	if err = group.Start(cmd); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = group.Stop(ctx)
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+	until(t, func() bool { s, e := os.Stat(data); return e == nil && s.Size() > 0 })
+	raw, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 40 {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := group.Freeze(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("freeze %d: %v", i, err)
+		}
+		before, err := os.Stat(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proveHeld(t, pid)
+		after, err := os.Stat(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+			t.Fatalf("freeze %d: the file changed: %d -> %d bytes", i, before.Size(), after.Size())
+		}
+		ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+		err = group.Thaw(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("thaw %d: %v", i, err)
+		}
+		time.Sleep(time.Duration(i%7) * time.Millisecond)
+	}
+}
+
 func TestGroupFreezesDetachedWritersAndProvesStop(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "heartbeat")
@@ -332,13 +611,7 @@ func TestGroupFreezesDetachedWritersAndProvesStop(t *testing.T) {
 	if err = group.Freeze(ctx); err != nil {
 		t.Fatal("freeze:", err)
 	}
-	status, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(status), "tracing stop") {
-		t.Fatalf("detached writer was not kernel-stopped: %s", status)
-	}
+	proveHeld(t, pid)
 	before, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
@@ -526,64 +799,6 @@ func TestGroupLostHelperWithoutLedgerFailsClosed(t *testing.T) {
 	if err := group.Stop(ctx); !errors.Is(err, ErrUnproven) {
 		t.Fatalf("a lost helper without a ledger was proven gone: %v", err)
 	}
-}
-
-// The tracer tells a new task's first stop from its own freeze stops by siginfo; check that on the
-// running kernel.
-func TestInitialStopSiginfoOnThisKernel(t *testing.T) {
-	binary, _ := os.Executable()
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, binary, "initial-siginfo").CombinedOutput()
-	if err != nil || strings.TrimSpace(string(out)) != "initial=true tkill=false" {
-		t.Fatalf("auto-attach stop not recognized, or a freeze stop mistaken for one: %v: %s", err, out)
-	}
-}
-
-// initialSiginfoProbe traces a shell, takes its forked child's auto-attach stop, then a tkill stop.
-func initialSiginfoProbe() string {
-	runtime.LockOSThread()
-	cmd := exec.Command("/bin/sh", "-c", "sleep 2 & wait")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Ptrace: true, Pdeathsig: syscall.SIGKILL}
-	if err := cmd.Start(); err != nil {
-		return err.Error()
-	}
-	root := cmd.Process.Pid
-	defer func() { _ = unix.Kill(root, unix.SIGKILL) }()
-	var status unix.WaitStatus
-	if _, err := unix.Wait4(root, &status, 0, nil); err != nil {
-		return err.Error()
-	}
-	if err := unix.PtraceSetOptions(root, unix.PTRACE_O_TRACEFORK|unix.PTRACE_O_TRACEVFORK|unix.PTRACE_O_TRACECLONE|unix.PTRACE_O_EXITKILL); err != nil {
-		return err.Error()
-	}
-	_ = unix.PtraceCont(root, 0)
-	child, result := 0, ""
-	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
-		pid, err := unix.Wait4(-1, &status, unix.WALL, nil)
-		if err != nil {
-			return err.Error()
-		}
-		if !status.Stopped() {
-			continue
-		}
-		if pid != root && status.StopSignal() == unix.SIGSTOP { // event stops carry SIGTRAP
-			if child == 0 {
-				child = pid
-				result = fmt.Sprintf("initial=%t", initialStop(pid))
-				_ = unix.PtraceCont(pid, 0)
-				_, _, _ = unix.Syscall(unix.SYS_TKILL, uintptr(pid), uintptr(unix.SIGSTOP), 0)
-				continue
-			}
-			if pid == child {
-				result += fmt.Sprintf(" tkill=%t", initialStop(pid))
-				_ = unix.Kill(child, unix.SIGKILL)
-				return result
-			}
-		}
-		_ = unix.PtraceCont(pid, 0)
-	}
-	return "timed out: " + result
 }
 
 // A record the tracer could not send keeps its process from ever running; no pidfd support at
@@ -908,35 +1123,6 @@ func TestGroupCommandWithManyThreadsSurvives(t *testing.T) {
 	}
 	if err = cmd.Wait(); err != nil {
 		t.Fatalf("a 300-thread command was ended under the writer limit %d: %v", WriterTaskLimit, err)
-	}
-}
-
-func TestTreeOverTaskLimitReportsReasonAndEnds(t *testing.T) {
-	binary, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The tracer installs a seccomp filter on its thread: run it in a child, never in this process.
-	start := time.Now()
-	var stderr strings.Builder
-	child := exec.Command(binary, "tree-limit")
-	child.Stderr = &stderr
-	out, err := child.Output()
-	if err != nil {
-		t.Fatalf("tree-limit child: %v: %s%s", err, out, stderr.String())
-	}
-	// The tracer says why, with its count and the kernel's, so a runaway tree is told from accounting.
-	if !strings.Contains(stderr.String(), "task limit 4 passed (tracked=5 live=5)") {
-		t.Fatalf("limit kill not reported with counts: %q", stderr.String())
-	}
-	if got := strings.TrimSpace(string(out)); got != "task-limit" {
-		t.Fatalf("over the limit: got %q, want a proven-empty ErrTaskLimit end", got)
-	}
-	if time.Since(start) > 4*time.Second {
-		t.Fatal("the tree was not ended when it passed its limit")
-	}
-	if msg := TaskLimitMessage(4, "shell"); !strings.Contains(msg, "process limit reached") || !strings.Contains(msg, "this shell") {
-		t.Fatalf("message: %q", msg)
 	}
 }
 

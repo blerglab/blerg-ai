@@ -43,17 +43,17 @@ import (
 
 // Messages a refused permission answers with.
 const (
-	msgPermNotActive   = "This session is not active, so it cannot be given permissions."
-	msgPermCron        = "A cron session's proposals always wait for you; session permissions are not available for crons."
-	msgPermRestricted  = "A restricted session's proposals always wait for you; session permissions are not available for it."
-	msgPermBoardRun    = "A board session's proposals always wait for you; session permissions are not available for it."
-	msgPermStarter     = "Only sessions you started, and the sessions they start, can have session permissions."
-	msgPermKind        = "Only agent sessions can have session permissions."
-	msgPermSignIn      = "Session permissions need your current sign-in: sign in again and retry."
-	msgPermPlugin      = "A plugin request is always decided by you; it cannot be allowed for the session."
-	msgPermBoardCreate = "A proposed board is always decided by you; it cannot be allowed for the session."
-	msgPermMCPTool     = "That tool is not one this session must ask about (it is not in approval mode for this session)."
-	msgPermBuiltin     = "Built-in connections cannot be allowed for the session."
+	msgPermNotActive   = "Permissions are only available while the channel or worker is active."
+	msgPermCron        = "A scheduled run's proposals always wait for you; permissions are not available for runs."
+	msgPermRestricted  = "Restricted channels and workers always wait for you to approve proposals; permissions are not available for them."
+	msgPermBoardRun    = "A board run's proposals always wait for you; permissions are not available for it."
+	msgPermStarter     = "Only channels you started, and their workers, can have permissions."
+	msgPermKind        = "Only agent channels and workers can have permissions."
+	msgPermSignIn      = "Permissions need your current sign-in: sign in again and retry."
+	msgPermPlugin      = "A plugin request is always decided by you; it cannot be allowed in advance."
+	msgPermBoardCreate = "A proposed board is always decided by you; it cannot be allowed in advance."
+	msgPermMCPTool     = "That tool is not in approval mode for this channel or worker."
+	msgPermBuiltin     = "Built-in connections cannot be allowed in advance."
 )
 
 // proposalGrantProblem is why the session cannot hold a proposal permission, or "". It does not
@@ -456,6 +456,9 @@ func (a *API) grantFromProposal(ctx context.Context, who grantRequester, p *db.P
 	if db.IsSessionPluginProposal(p) {
 		return nil, apiErrorf(http.StatusUnprocessableEntity, "%s", msgPermPlugin)
 	}
+	if db.IsBoardMetadataProposal(p) {
+		return nil, apiErrorf(422, "Board metadata changes always need your approval.")
+	}
 	if db.IsBoardCreateProposal(p) {
 		return nil, apiErrorf(http.StatusUnprocessableEntity, "%s", msgPermBoardCreate)
 	}
@@ -481,7 +484,7 @@ func (a *API) grantFromProposal(ctx context.Context, who grantRequester, p *db.P
 // an MCP call, the tool's pinned definition (hash) it was made with.
 func proposalGrantScope(p *db.Proposal) (kind, board, connection, tool, hash string, ok bool) {
 	switch {
-	case db.IsSessionPluginProposal(p), db.IsBoardCreateProposal(p):
+	case db.IsSessionPluginProposal(p), db.IsBoardCreateProposal(p), db.IsBoardMetadataProposal(p):
 		return "", "", "", "", "", false
 	case db.IsBoardFilingProposal(p):
 		var args filingArguments
@@ -585,6 +588,9 @@ func (a *API) settleNewProposal(ctx context.Context, p *db.Proposal) (*db.Propos
 func proposalEventKind(p *db.Proposal) string {
 	if db.IsBoardFilingProposal(p) {
 		return "board_file"
+	}
+	if db.IsBoardMetadataProposal(p) {
+		return "board_metadata"
 	}
 	if db.IsBoardCreateProposal(p) {
 		return "board_create"

@@ -15,6 +15,7 @@ import (
 
 	"github.com/blerglab/blerg-ai/runner/internal/agent"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/topics"
 )
 
 func (fx *topicFx) mark(sid, token string, body any, key ...string) (int, map[string]any) {
@@ -55,17 +56,20 @@ func (fx *topicFx) markEvents(sid string) []agent.MarkPayload {
 
 type strokeReply struct {
 	Strokes []struct {
-		ID         string `json:"id"`
-		Kind       string `json:"kind"`
-		Source     string `json:"source"`
-		By         string `json:"by"`
-		RecordedAs string `json:"recorded_as"`
-		Text       string `json:"text"`
-		State      string `json:"state"`
-		Outcome    string `json:"outcome"`
-		TopicID    string `json:"topic_id"`
-		Backdated  bool   `json:"backdated"`
-		Jump       *struct {
+		ClaimedBy   string `json:"claimed_by"`
+		FailureType string `json:"type"`
+		RerunPassed bool   `json:"rerun_passed"`
+		ID          string `json:"id"`
+		Kind        string `json:"kind"`
+		Source      string `json:"source"`
+		By          string `json:"by"`
+		RecordedAs  string `json:"recorded_as"`
+		Text        string `json:"text"`
+		State       string `json:"state"`
+		Outcome     string `json:"outcome"`
+		TopicID     string `json:"topic_id"`
+		Backdated   bool   `json:"backdated"`
+		Jump        *struct {
 			EventID    string `json:"event_id"`
 			ProposalID string `json:"proposal_id"`
 		} `json:"jump"`
@@ -338,16 +342,26 @@ func TestPostMarkCapCountsOnlyNewMarks(t *testing.T) {
 			t.Fatalf("import = %d %v", code, b)
 		}
 	}
-	// At the cap (500): the same lines again are all duplicates.
+	// Main must be able to record beyond the old 500-mark cap.
+	if code, b := fx.mark(fx.sess, fx.sessTok, map[string]any{"marks": lines(500, 1)}); code != http.StatusCreated {
+		t.Fatalf("long-lived Main = %d %v", code, b)
+	}
+	// Seed the remaining capacity without thousands of HTTP requests.
+	if _, err := fx.pool.Exec(t.Context(), `INSERT INTO agent_events(session_id,seq,client_event_id,kind,payload)
+ SELECT $1, -n, gen_random_uuid(), 'mark', '{"kind":"finding","text":"seed"}'::jsonb
+ FROM generate_series(1, $2::int) n`, fx.sess, topics.MaxMarks-501); err != nil {
+		t.Fatal(err)
+	}
+	// At the cap: the same lines again are all duplicates.
 	if code, b := fx.mark(fx.sess, fx.sessTok, map[string]any{"marks": lines(300, 200)}); code != http.StatusCreated || b["duplicates"] != float64(200) {
 		t.Fatalf("re-import at the cap = %d %v", code, b)
 	}
 	// One new line among duplicates passes the cap: refused, nothing kept.
-	mixed := append(lines(450, 50), lines(500, 1)...)
+	mixed := append(lines(450, 50), lines(501, 1)...)
 	if code, b := fx.mark(fx.sess, fx.sessTok, map[string]any{"marks": mixed}); code != http.StatusConflict || !strings.Contains(b["error"].(string), "nothing was recorded") {
 		t.Fatalf("over the cap = %d %v", code, b)
 	}
-	if got := fx.markEvents(fx.sess); len(got) != 500 {
+	if got := fx.markEvents(fx.sess); len(got) != topics.MaxMarks {
 		t.Errorf("held %d marks", len(got))
 	}
 }
@@ -437,6 +451,299 @@ func TestPostMarkKeyedImportKeepsContentDeduplication(t *testing.T) {
 		code, reply := fx.mark(fx.sess, fx.sessTok, body, key)
 		if code != http.StatusCreated || reply["recorded"] != float64(1-i) {
 			t.Fatalf("%s = %d %v", key, code, reply)
+		}
+	}
+}
+
+func TestReviewMarkFromWorkerIsStoredAndShown(t *testing.T) {
+	fx := newTopicFx(t)
+	if _, err := fx.pool.Exec(context.Background(), `UPDATE sessions SET parent_session_id=$2 WHERE id=$1`, fx.sess, fx.ended); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.pool.Exec(context.Background(), `INSERT INTO session_card_links(session_id,board_id,card_number,source,linked_at) VALUES($1,'board-a',7,'pin',now())`, fx.ended); err != nil {
+		t.Fatal(err)
+	}
+	code, body := fx.mark(fx.sess, fx.sessTok, map[string]any{"kind": "review", "text": "Review complete", "by": "codex", "board_id": "board-a", "card": 7, "verdict": "changes", "findings": []string{"high", "high"}, "target": "abcdef1", "round": 2})
+	if code != 201 {
+		t.Fatalf("review: %d %v", code, body)
+	}
+	got := fx.markEvents(fx.sess)
+	if len(got) != 1 || got[0].Verdict != "changes" || got[0].Round != 2 || len(got[0].Findings) != 2 {
+		t.Fatalf("stored: %+v", got)
+	}
+	strokes := fx.strokes(fx.sess)
+	if len(strokes.Strokes) != 1 || strokes.Strokes[0].Kind != "review" || strokes.Strokes[0].By != "codex" {
+		t.Fatalf("history: %+v", strokes)
+	}
+}
+
+func TestFailureMarkFromWorkerIsStoredAndShown(t *testing.T) {
+	fx := newTopicFx(t)
+	if _, err := fx.pool.Exec(context.Background(), `UPDATE sessions SET parent_session_id=$2 WHERE id=$1`, fx.sess, fx.ended); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.pool.Exec(context.Background(), `INSERT INTO session_card_links(session_id,board_id,card_number,source,linked_at) VALUES($1,'board-a',7,'pin',now())`, fx.ended); err != nil {
+		t.Fatal(err)
+	}
+	code, body := fx.mark(fx.sess, fx.sessTok, map[string]any{"kind": "failure", "text": "Gate failed", "board_id": "board-a", "card": 7, "type": "gate", "severity": "high", "suite": "db", "rerun_passed": true})
+	if code != 201 {
+		t.Fatalf("failure: %d %v", code, body)
+	}
+	got := fx.markEvents(fx.sess)
+	if len(got) != 1 || got[0].FailureType != "gate" || got[0].Severity != "high" || got[0].Suite != "db" || !got[0].RerunPassed {
+		t.Fatalf("stored: %+v", got)
+	}
+	strokes := fx.strokes(fx.sess)
+	if len(strokes.Strokes) != 1 || strokes.Strokes[0].FailureType != "gate" || !strokes.Strokes[0].RerunPassed {
+		t.Fatalf("history: %+v", strokes)
+	}
+}
+
+func TestStructuredMarksRequireCardContext(t *testing.T) {
+	fx := newTopicFx(t)
+	for _, kind := range []string{"review", "failure"} {
+		body := map[string]any{"kind": kind, "text": "Unrelated card", "board_id": "unrelated", "card": 7, "by": "codex"}
+		if kind == "review" {
+			body["verdict"] = "approved"
+			body["round"] = 1
+			body["target"] = "abcdef1"
+		} else {
+			body["type"] = "gate"
+			body["severity"] = "high"
+			body["suite"] = "unit"
+		}
+		code, reply := fx.mark(fx.sess, fx.sessTok, body)
+		if code != http.StatusForbidden {
+			t.Errorf("%s unrelated card = %d %v", kind, code, reply)
+		}
+	}
+	if len(fx.markEvents(fx.sess)) != 0 {
+		t.Fatal("unauthorized marks were stored")
+	}
+}
+
+func TestFailurePersonAttributionRemainsAnAgentClaim(t *testing.T) {
+	fx := newTopicFx(t)
+	if _, err := fx.pool.Exec(context.Background(), `INSERT INTO session_card_links(session_id,board_id,card_number,source,linked_at) VALUES($1,'board-a',7,'pin',now())`, fx.sess); err != nil {
+		t.Fatal(err)
+	}
+	code, reply := fx.mark(fx.sess, fx.sessTok, map[string]any{"kind": "failure", "text": "Reported by person", "by": "person", "board_id": "board-a", "card": 7, "type": "test", "severity": "low", "suite": "unit"})
+	if code != 201 {
+		t.Fatalf("failure = %d %v", code, reply)
+	}
+	got := fx.markEvents(fx.sess)
+	if len(got) != 1 || got[0].PostedBy != "agent" || got[0].By != "agent" || got[0].ClaimedBy != "person" {
+		t.Fatalf("claim became authority: %+v", got)
+	}
+}
+
+func TestStructuredMarksRejectAnotherOwnersAncestor(t *testing.T) {
+	fx := newTopicFx(t)
+	if _, err := fx.pool.Exec(context.Background(), `UPDATE sessions SET parent_session_id=$2 WHERE id=$1`, fx.sess, fx.privSess); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.pool.Exec(context.Background(), `INSERT INTO session_card_links(session_id,board_id,card_number,source,linked_at) VALUES($1,'board-a',7,'pin',now())`, fx.privSess); err != nil {
+		t.Fatal(err)
+	}
+	code, reply := fx.mark(fx.sess, fx.sessTok, map[string]any{"kind": "failure", "text": "Unrelated ancestor", "board_id": "board-a", "card": 7, "type": "gate", "severity": "high", "suite": "unit"})
+	if code != 403 {
+		t.Fatalf("another owner's ancestor authorized mark: %d %v", code, reply)
+	}
+}
+
+func TestStructuredMarksAllowBoardGrantAndKeepPersonReviewAsClaim(t *testing.T) {
+	fx := newTopicFx(t)
+	grant := db.MCPGrant{SessionID: fx.sess, ConnectionID: newUUID(), Name: "Board", AccountID: topicOwner, Tools: map[string]db.MCPGrantTool{}, ProofKind: "session_id", ProofValue: fx.sess, TokenHash: []byte("structured-mark-fixture"), Builtin: "board", BuiltinRef: "board-a"}
+	if err := db.InsertMCPGrants(context.Background(), fx.pool, []db.MCPGrant{grant}); err != nil {
+		t.Fatal(err)
+	}
+	code, reply := fx.mark(fx.sess, fx.sessTok, map[string]any{"kind": "review", "text": "Claimed person review", "by": "person", "board_id": "board-a", "card": 7, "verdict": "approved", "round": 1, "target": "abcdef1"})
+	if code != 201 {
+		t.Fatalf("board grant review: %d %v", code, reply)
+	}
+	got := fx.markEvents(fx.sess)
+	if len(got) != 1 || got[0].PostedBy != "agent" || got[0].By != "agent" || got[0].ClaimedBy != "person" {
+		t.Fatalf("review claim became authority: %+v", got)
+	}
+	strokes := fx.strokes(fx.sess)
+	if len(strokes.Strokes) != 1 || strokes.Strokes[0].By != "agent" || strokes.Strokes[0].ClaimedBy != "person" || strokes.Strokes[0].RecordedAs != "" {
+		t.Fatalf("history claim became authority: %+v", strokes)
+	}
+}
+
+func TestStructuredMarksRespectLoweredLaunchBoard(t *testing.T) {
+	fx := newTopicFx(t)
+	grant := db.MCPGrant{SessionID: fx.sess, ConnectionID: newUUID(), Name: "Board", AccountID: topicOwner, Tools: map[string]db.MCPGrantTool{}, ProofKind: "session_id", ProofValue: fx.sess, TokenHash: []byte("lowered-mark-fixture"), Builtin: "board", BuiltinRef: "board-a"}
+	if err := db.InsertMCPGrants(context.Background(), fx.pool, []db.MCPGrant{grant}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := db.InsertProposalGrant(context.Background(), fx.pool, db.ProposalGrant{SessionID: fx.sess, AccountID: topicOwner, Kind: db.ProposalGrantBoard, BoardID: "board-a", Level: db.BoardLevelPropose, ProofSessionID: fx.sess, CreatedVia: "panel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, reply := fx.mark(fx.sess, fx.sessTok, map[string]any{"kind": "failure", "text": "Lowered board", "board_id": "board-a", "card": 7, "type": "gate", "severity": "high", "suite": "unit"})
+	if code != 403 {
+		t.Fatalf("lowered board authorized mark: %d %v", code, reply)
+	}
+}
+
+func TestMarkCapacityWarning(t *testing.T) {
+	for _, tc := range []struct {
+		before, after int
+		want          bool
+	}{
+		{0, 1, false}, {39999, 40000, true}, {40000, 40001, false},
+		{44999, 45000, true}, {47499, 47500, true}, {39999, 47600, true},
+		{50000, 50000, false},
+	} {
+		text := markCapacityWarning(tc.before, tc.after)
+		if (text != "") != tc.want {
+			t.Errorf("%d → %d: %q", tc.before, tc.after, text)
+		}
+		if tc.want && !strings.Contains(text, "50000") {
+			t.Errorf("missing limit: %q", text)
+		}
+	}
+	if !reservedMessageSource(markCapacitySource) || answersAsk(markCapacitySource) {
+		t.Fatal("capacity warning must be a protected notice, never an answer")
+	}
+}
+
+// Exercise the actual mark route and delivery transport at the first warning threshold.
+func TestPostMarkCapacityNotice(t *testing.T) {
+	fx := newDelegFx(t)
+	fx.hub.SetSessionOwner(fx.parent, fx.dc.ID)
+	mux := http.NewServeMux()
+	fx.api.RegisterMarkRoutes(mux)
+	client := &topicFx{t: t, mux: mux}
+	if _, err := fx.pool.Exec(t.Context(), `INSERT INTO agent_events(session_id,seq,client_event_id,kind,payload)
+ SELECT $1, -n, gen_random_uuid(), 'mark', '{"kind":"finding","text":"seed"}'::jsonb
+ FROM generate_series(1, 39999) n`, fx.parent); err != nil {
+		t.Fatal(err)
+	}
+	if code, b := client.mark(fx.parent, fx.parentTok, map[string]any{"kind": "finding", "text": "threshold"}); code != http.StatusCreated {
+		t.Fatalf("%d %v", code, b)
+	}
+	note := fx.parentNote(fx.parent, time.Second)
+	if note.Source != markCapacitySource || !strings.Contains(note.Text, "10000 remaining") {
+		t.Fatalf("notice = %+v", note)
+	}
+	if code, b := client.mark(fx.parent, fx.parentTok, map[string]any{"kind": "finding", "text": "after threshold"}); code != http.StatusCreated {
+		t.Fatalf("%d %v", code, b)
+	}
+	select {
+	case raw := <-fx.dc.send:
+		t.Fatalf("repeated warning: %s", raw)
+	default:
+	}
+}
+
+func TestHistoryPagesTwentyThousandMarks(t *testing.T) {
+	fx := newTopicFx(t)
+	var pending string
+	if err := fx.pool.QueryRow(t.Context(), `INSERT INTO messages(session_id,kind,body,status) VALUES($1,'ask','Still waiting','open') RETURNING id::text`, fx.sess).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	fx.event(fx.sess, "ask", map[string]any{"message_id": pending, "body": "Still waiting"})
+	fx.event(fx.sess, "review_requested", map[string]any{"request_id": "old-review", "artifact_name": "old.md"})
+	if _, err := fx.pool.Exec(t.Context(), `INSERT INTO agent_events(session_id,seq,client_event_id,kind,payload,ts)
+ SELECT $1,n+2,gen_random_uuid(),'mark',jsonb_build_object('kind','finding','text','mark '||n),now()+n*interval '1 second'
+ FROM generate_series(1,20000) n`, fx.sess); err != nil {
+		t.Fatal(err)
+	}
+	read := func(cursor, etag string) (topicsReply, string) {
+		req := httptest.NewRequest(http.MethodGet, "/api/sessions/"+fx.sess+"/topics?cursor="+cursor, nil)
+		req.Header.Set("Authorization", "Bearer "+fx.token(topicOwner, "human"))
+		req.Header.Set("If-None-Match", etag)
+		rec := httptest.NewRecorder()
+		fx.mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("page %s: %d %.200s", cursor, rec.Code, rec.Body.String())
+		}
+		var reply topicsReply
+		if err := json.Unmarshal(rec.Body.Bytes(), &reply); err != nil {
+			t.Fatal(err)
+		}
+		return reply, rec.Header().Get("ETag")
+	}
+	first, tag := read("", "")
+	if first.NextCursor == "" || len(first.Strokes) > 301 {
+		t.Fatalf("initial page: cursor=%q rows=%d", first.NextCursor, len(first.Strokes))
+	}
+	if first.Strokes[0].Text != "mark 20000" {
+		t.Fatalf("newest = %+v", first.Strokes[0])
+	}
+	fx.event(fx.sess, "mark", map[string]any{"kind": "finding", "text": "Recorded after the snapshot"})
+	fx.event(fx.sess, "review_decided", map[string]any{"request_id": "old-review", "state": "approved"})
+	second, _ := read(first.NextCursor, tag) // A different page must not answer 304.
+	if second.ThroughSeq != first.ThroughSeq {
+		t.Fatal("new events shifted the page snapshot")
+	}
+	for _, st := range second.Strokes {
+		if st.Text == "Recorded after the snapshot" {
+			t.Fatal("new mark leaked into an older snapshot")
+		}
+	}
+	firstMarks := map[string]bool{}
+	for _, st := range first.Strokes {
+		if st.Source == "mark" {
+			firstMarks[st.ID] = true
+		}
+	}
+	for _, st := range second.Strokes {
+		if st.Source == "mark" && firstMarks[st.ID] {
+			t.Fatal("duplicate mark across pages")
+		}
+	}
+	oldest, oldestTag := read(fmt.Sprintf("%d:301", first.ThroughSeq), "")
+	resolved, waiting := false, false
+	for _, st := range oldest.Strokes {
+		if st.Source == "review" && st.Text == "Review old.md" {
+			resolved = st.State == "resolved"
+		}
+		if st.Source == "ask" && st.Text == "Still waiting" {
+			waiting = st.State == "open"
+		}
+	}
+	if !resolved || !waiting {
+		t.Fatalf("cross-page lifecycle: resolved=%v pending=%v", resolved, waiting)
+	}
+	waiting = false
+	for _, st := range first.Strokes {
+		if st.Text == "Still waiting" && st.State == "open" {
+			waiting = true
+		}
+	}
+	if !waiting {
+		t.Fatal("old pending ask disappeared from the initial page")
+	}
+	if oldest.NextCursor != "" {
+		t.Fatalf("unexpected older cursor: %s", oldest.NextCursor)
+	}
+	fx.event(fx.sess, "review_decided", map[string]any{"request_id": "old-review", "state": "changes_requested"})
+	refreshed, _ := read(fmt.Sprintf("%d:301", first.ThroughSeq), oldestTag)
+	declined := false
+	for _, st := range refreshed.Strokes {
+		if st.Source == "review" && st.State == "declined" {
+			declined = true
+		}
+	}
+	if !declined {
+		t.Fatal("older-page ETag hid a newer review decision")
+	}
+
+}
+
+func TestHistoryRejectsInvalidPageCursor(t *testing.T) {
+	fx := newTopicFx(t)
+	fx.event(fx.sess, "mark", map[string]any{"kind": "finding", "text": "first"})
+	for _, cursor := range []string{"junk", "1:0", "2:1", "1:2", "-1:1"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/sessions/"+fx.sess+"/topics?cursor="+cursor, nil)
+		req.Header.Set("Authorization", "Bearer "+fx.token(topicOwner, "human"))
+		rec := httptest.NewRecorder()
+		fx.mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%q: got %d", cursor, rec.Code)
 		}
 	}
 }

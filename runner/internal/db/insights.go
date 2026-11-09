@@ -12,32 +12,46 @@ import (
 // The loaders below feed the Insights page and the Prometheus endpoint. They only read; owner "" means every
 // session, otherwise only sessions started by that account.
 
+// The workspace subtree is restricted to the same owner at every recursive step.
+// Only fixed aliases and parameter positions are formatted into this SQL.
+const insightWorkspaceFilter = ` AND ($%d = '' OR %s.id IN (WITH RECURSIVE tree AS (SELECT id FROM sessions WHERE id::text=$%d UNION SELECT s.id FROM sessions s JOIN tree p ON s.parent_session_id=p.id WHERE s.spawning_account_id=$%d) SELECT id FROM tree))`
+
+func insightWorkspace(workspace []string) string {
+	if len(workspace) > 0 {
+		return workspace[0]
+	}
+	return ""
+}
+
 // InsightSession is one session as the aggregates need it.
 type InsightSession struct {
-	ID        string
-	Title     string
-	Runtime   string
-	Kind      string
-	Status    string
-	EndReason string
-	Account   string // spawning account id
-	Private   bool
-	StartedAt time.Time
-	EndedAt   *time.Time
-	CronID    string
+	ID            string
+	Engine        string
+	Title         string
+	Runtime       string
+	Kind          string
+	Status        string
+	EndReason     string
+	Account       string // spawning account id
+	Private       bool
+	StartedAt     time.Time
+	EndedAt       *time.Time
+	CronID        string
+	ParentID      string // "" for a workspace root (Main)
+	StartedByKind string // "" (a person), "session" | "agent" | "runner_key" (a worker) or "cron" (a run)
 }
 
 // ListInsightSessions returns the sessions alive at any point in [from, to): started before its end and not
 // ended before its start. Callers count "started" and "ended" themselves by date.
-func ListInsightSessions(ctx context.Context, pool *pgxpool.Pool, from, to time.Time, owner string) ([]InsightSession, error) {
+func ListInsightSessions(ctx context.Context, pool *pgxpool.Pool, from, to time.Time, owner string, workspace ...string) ([]InsightSession, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT id::text, COALESCE(title, ''), COALESCE(runtime, ''), kind, status,
+		SELECT id::text, COALESCE(engine, ''), COALESCE(title, ''), COALESCE(runtime, ''), kind, status,
 		       COALESCE(NULLIF(end_reason, ''), ''), COALESCE(spawning_account_id, ''), private,
-		       started_at, ended_at, COALESCE(cron_id::text, '')
+		       started_at, ended_at, COALESCE(cron_id::text, ''), COALESCE(parent_session_id::text, ''), COALESCE(started_by_kind, '')
 		  FROM sessions
 		 WHERE started_at < $2 AND (ended_at IS NULL OR ended_at >= $1)
 		   AND ($3 = '' OR spawning_account_id = $3)
-		 ORDER BY started_at`, from, to, owner)
+		 `+fmt.Sprintf(insightWorkspaceFilter, 4, "sessions", 4, 3)+` ORDER BY started_at`, from, to, owner, insightWorkspace(workspace))
 	if err != nil {
 		return nil, fmt.Errorf("list insight sessions: %w", err)
 	}
@@ -45,8 +59,8 @@ func ListInsightSessions(ctx context.Context, pool *pgxpool.Pool, from, to time.
 	var out []InsightSession
 	for rows.Next() {
 		var s InsightSession
-		if err := rows.Scan(&s.ID, &s.Title, &s.Runtime, &s.Kind, &s.Status, &s.EndReason, &s.Account,
-			&s.Private, &s.StartedAt, &s.EndedAt, &s.CronID); err != nil {
+		if err := rows.Scan(&s.ID, &s.Engine, &s.Title, &s.Runtime, &s.Kind, &s.Status, &s.EndReason, &s.Account,
+			&s.Private, &s.StartedAt, &s.EndedAt, &s.CronID, &s.ParentID, &s.StartedByKind); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -57,7 +71,7 @@ func ListInsightSessions(ctx context.Context, pool *pgxpool.Pool, from, to time.
 // GetInsightSessions returns the sessions with these ids, whatever their dates.
 func GetInsightSessions(ctx context.Context, pool *pgxpool.Pool, ids []string) ([]InsightSession, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT id::text, COALESCE(title, ''), COALESCE(runtime, ''), kind, status,
+		SELECT id::text, COALESCE(engine, ''), COALESCE(title, ''), COALESCE(runtime, ''), kind, status,
 		       COALESCE(NULLIF(end_reason, ''), ''), COALESCE(spawning_account_id, ''), private,
 		       started_at, ended_at, COALESCE(cron_id::text, '')
 		  FROM sessions WHERE id::text = ANY($1)`, ids)
@@ -68,7 +82,7 @@ func GetInsightSessions(ctx context.Context, pool *pgxpool.Pool, ids []string) (
 	var out []InsightSession
 	for rows.Next() {
 		var s InsightSession
-		if err := rows.Scan(&s.ID, &s.Title, &s.Runtime, &s.Kind, &s.Status, &s.EndReason, &s.Account,
+		if err := rows.Scan(&s.ID, &s.Engine, &s.Title, &s.Runtime, &s.Kind, &s.Status, &s.EndReason, &s.Account,
 			&s.Private, &s.StartedAt, &s.EndedAt, &s.CronID); err != nil {
 			return nil, err
 		}
@@ -106,14 +120,14 @@ type InsightEvent struct {
 }
 
 // ListInsightEvents returns events of the given kinds in [from, to), ordered by session and sequence.
-func ListInsightEvents(ctx context.Context, pool *pgxpool.Pool, from, to time.Time, owner string, kinds []string) ([]InsightEvent, error) {
+func ListInsightEvents(ctx context.Context, pool *pgxpool.Pool, from, to time.Time, owner string, kinds []string, workspace ...string) ([]InsightEvent, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT e.session_id::text, e.seq, e.kind, e.ts, e.payload::text
 		  FROM agent_events e
 		  JOIN sessions s ON s.id = e.session_id
 		 WHERE e.kind = ANY($1) AND e.ts >= $2 AND e.ts < $3
 		   AND ($4 = '' OR s.spawning_account_id = $4)
-		 ORDER BY e.session_id, e.seq`, kinds, from, to, owner)
+		 `+fmt.Sprintf(insightWorkspaceFilter, 5, "s", 5, 4)+` ORDER BY e.session_id, e.seq`, kinds, from, to, owner, insightWorkspace(workspace))
 	if err != nil {
 		return nil, fmt.Errorf("list insight events: %w", err)
 	}
@@ -135,6 +149,7 @@ type TokenRow struct {
 	SessionID  string
 	Model      string
 	Day        time.Time
+	Hour       time.Time
 	Turns      int64
 	Input      int64
 	Output     int64
@@ -189,17 +204,17 @@ const (
 
 // ListTokenUsage sums turn_done and subagent_done usage per session, model and UTC day in
 // [from, to). A subagent_done without usage (a background launch, the native loop's) adds nothing.
-func ListTokenUsage(ctx context.Context, pool *pgxpool.Pool, from, to time.Time, owner string) ([]TokenRow, error) {
+func ListTokenUsage(ctx context.Context, pool *pgxpool.Pool, from, to time.Time, owner string, workspace ...string) ([]TokenRow, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT e.session_id::text, u.model,
-		       date_trunc('day', e.ts AT TIME ZONE 'UTC'),
+		       date_trunc('day', e.ts AT TIME ZONE 'UTC'), date_trunc('hour',e.ts AT TIME ZONE 'UTC'),
 		       count(*) FILTER (WHERE e.kind = 'turn_done' AND u.turn_marker), `+usageSums+`
 		  FROM agent_events e
 		  JOIN sessions s ON s.id = e.session_id `+usageRows+`
 		 WHERE `+usageEvents+`
 		   AND e.ts >= $1 AND e.ts < $2
 		   AND ($3 = '' OR s.spawning_account_id = $3)
-		 GROUP BY 1, 2, 3`, from, to, owner)
+		 `+fmt.Sprintf(insightWorkspaceFilter, 4, "s", 4, 3)+` GROUP BY 1, 2, 3, 4`, from, to, owner, insightWorkspace(workspace))
 	if err != nil {
 		return nil, fmt.Errorf("list token usage: %w", err)
 	}
@@ -208,13 +223,79 @@ func ListTokenUsage(ctx context.Context, pool *pgxpool.Pool, from, to time.Time,
 	for rows.Next() {
 		var r TokenRow
 		var day time.Time
-		if err := rows.Scan(&r.SessionID, &r.Model, &day, &r.Turns, &r.Input, &r.Output, &r.CacheRead, &r.CacheWrite); err != nil {
+		if err := rows.Scan(&r.SessionID, &r.Model, &day, &r.Hour, &r.Turns, &r.Input, &r.Output, &r.CacheRead, &r.CacheWrite); err != nil {
 			return nil, err
 		}
 		r.Day = day.UTC()
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// ContextFillRow is one turn's context-window reading (BLG-463): how full the conversation was
+// against the model's window when a turn_done reported it (contextMeter, live_usage.go), and
+// whether the engine compacted in that turn. Not every turn reports one.
+type ContextFillRow struct {
+	SessionID string    `json:"session_id"`
+	At        time.Time `json:"at"`
+	Percent   float64   `json:"percent"`
+	Compacted bool      `json:"compacted"`
+}
+
+// contextFillPerSessionCap bounds how many readings one conversation contributes, oldest-first
+// kept. The cap is per conversation, not overall (BLG-464 round 2): a workspace with many
+// conversations should not have one long-lived conversation crowd out the rest.
+const contextFillPerSessionCap = 500
+
+// ListContextFill reads each turn_done's context report in [from, to), ordered by time. A turn
+// that reported no context, or a window of zero, cannot produce a percent and is skipped.
+// Truncated is true when any one conversation had more than contextFillPerSessionCap readings;
+// its oldest contextFillPerSessionCap are kept.
+func ListContextFill(ctx context.Context, pool *pgxpool.Pool, from, to time.Time, owner string, workspace ...string) (out []ContextFillRow, truncated bool, err error) {
+	rows, err := pool.Query(ctx, `
+		WITH readings AS (
+			SELECT e.session_id::text AS session_id, e.ts, e.seq,
+			       (e.payload->'context'->>'tokens')::float8 AS tokens,
+			       (e.payload->'context'->>'window')::float8 AS ctx_window,
+			       coalesce((e.payload->'context'->>'compacted')::boolean, false) AS compacted,
+			       row_number() OVER (PARTITION BY e.session_id ORDER BY e.ts, e.seq) AS rn,
+			       count(*) OVER (PARTITION BY e.session_id) AS total
+			  FROM agent_events e
+			  JOIN sessions s ON s.id = e.session_id
+			 WHERE e.kind = 'turn_done'
+			   AND e.payload->'context'->>'tokens' ~ '^[0-9]{1,15}$'
+			   AND e.payload->'context'->>'window' ~ '^[1-9][0-9]{0,15}$'
+			   AND e.ts >= $1 AND e.ts < $2
+			   AND ($3 = '' OR s.spawning_account_id = $3)
+			 `+fmt.Sprintf(insightWorkspaceFilter, 4, "s", 4, 3)+`
+		)
+		SELECT session_id, ts, tokens, ctx_window, compacted, total
+		  FROM readings
+		 WHERE rn <= $5
+		 ORDER BY ts, seq`,
+		from, to, owner, insightWorkspace(workspace), contextFillPerSessionCap)
+	if err != nil {
+		return nil, false, fmt.Errorf("list context fill: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r ContextFillRow
+		var tokens, ctxWindow float64
+		var total int
+		if err := rows.Scan(&r.SessionID, &r.At, &tokens, &ctxWindow, &r.Compacted, &total); err != nil {
+			return nil, false, err
+		}
+		r.At = r.At.UTC()
+		r.Percent = tokens / ctxWindow * 100
+		out = append(out, r)
+		if total > contextFillPerSessionCap {
+			truncated = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	return out, truncated, nil
 }
 
 // ─── one session ──────────────────────────────────────────────────────────────
@@ -289,7 +370,7 @@ func GetSessionActivity(ctx context.Context, pool *pgxpool.Pool, sessionID strin
 		SELECT e.kind, COALESCE(e.payload->>'tool', ''), COALESCE(e.payload->>'parent_call_id', '') <> '', count(*)
 		  FROM agent_events e
 		 WHERE e.session_id = $1
-		   AND (e.kind = 'tool_call' OR (e.kind = 'user_message' AND COALESCE(e.payload->>'source', '') NOT IN ('system', 'runner', 'blerg-board', 'session', 'cron', 'review', 'proposal', 'child_turn', 'plan_drift', 'usage_limit')))
+		   AND (e.kind = 'tool_call' OR (e.kind = 'user_message' AND COALESCE(e.payload->>'source', '') NOT IN ('system', 'runner', 'blerg-board', 'session', 'cron', 'review', 'proposal', 'child_turn', 'plan_drift', 'usage_limit', 'process_limit')))
 		 GROUP BY 1, 2, 3`, sessionID)
 	if err != nil {
 		return out, fmt.Errorf("session activity: %w", err)
@@ -383,14 +464,14 @@ type CronRunRow struct {
 }
 
 // ListInsightCronRuns returns the firings claimed in [from, to) for crons owned by owner ("" = all).
-func ListInsightCronRuns(ctx context.Context, pool *pgxpool.Pool, from, to time.Time, owner string) ([]CronRunRow, error) {
+func ListInsightCronRuns(ctx context.Context, pool *pgxpool.Pool, from, to time.Time, owner string, workspace ...string) ([]CronRunRow, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT r.status, r.late, r.manual, s.started_at, s.ended_at
 		  FROM cron_runs r
 		  JOIN crons c ON c.id = r.cron_id
 		  LEFT JOIN sessions s ON s.id = r.session_id
 		 WHERE r.claimed_at >= $1 AND r.claimed_at < $2
-		   AND ($3 = '' OR c.owner_account_id = $3)`, from, to, owner)
+		   AND ($3 = '' OR c.owner_account_id = $3)`+fmt.Sprintf(insightWorkspaceFilter, 4, "s", 4, 3), from, to, owner, insightWorkspace(workspace))
 	if err != nil {
 		return nil, fmt.Errorf("list cron runs: %w", err)
 	}

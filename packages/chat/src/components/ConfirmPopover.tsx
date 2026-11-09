@@ -22,6 +22,7 @@ export interface ConfirmPopoverProps {
   /** Neutral actions (Retry) share the confirmation surface. */
   danger?: boolean
   busy?: boolean
+  cancelWhileBusy?: boolean
   closeOnConfirm?: boolean
   onConfirm: () => void
   onCancel: () => void
@@ -32,7 +33,7 @@ export interface ConfirmPopoverProps {
 const GAP = 6
 const EDGE = 8
 
-export default function ConfirmPopover({ placement = 'responsive', anchor, title, description, confirmLabel, cancelLabel = 'Cancel', danger = true, busy = false, closeOnConfirm = true, onConfirm, onCancel, testId = 'confirm-popover' }: ConfirmPopoverProps) {
+export default function ConfirmPopover({ placement = 'responsive', anchor, title, description, confirmLabel, cancelLabel = 'Cancel', danger = true, busy = false, cancelWhileBusy = false, closeOnConfirm = true, onConfirm, onCancel, testId = 'confirm-popover' }: ConfirmPopoverProps) {
   const titleId = useId()
   const textId = useId()
   const box = useRef<HTMLDivElement | null>(null)
@@ -106,7 +107,7 @@ export default function ConfirmPopover({ placement = 'responsive', anchor, title
   useEffect(() => { onCancelRef.current = onCancel })
   useEffect(() => {
     const back = () => {
-      if (busy) return
+      if (busy && !cancelWhileBusy) return
       closing.current = true
       releaseInert(inerted.current)
       onCancelRef.current()
@@ -114,11 +115,11 @@ export default function ConfirmPopover({ placement = 'responsive', anchor, title
     }
     const key = (e: KeyboardEvent) => {
       if (e.key === 'Tab') {
-        if (busy) { e.preventDefault(); e.stopPropagation(); box.current?.focus(); return }
+        if (busy && !cancelWhileBusy) { e.preventDefault(); e.stopPropagation(); box.current?.focus(); return }
         // Two buttons: Tab and Shift+Tab move between them and never leave.
         e.preventDefault()
         e.stopPropagation()
-        const next = document.activeElement === cancel.current ? confirm.current : cancel.current
+        const next = busy ? cancel.current : document.activeElement === cancel.current ? confirm.current : cancel.current
         next?.focus()
         return
       }
@@ -147,7 +148,7 @@ export default function ConfirmPopover({ placement = 'responsive', anchor, title
       document.removeEventListener('pointerdown', away, true)
       document.removeEventListener('focusin', keep, true)
     }
-  }, [anchor, busy])
+  }, [anchor, busy, cancelWhileBusy])
 
   return createPortal(
     <>
@@ -167,7 +168,7 @@ export default function ConfirmPopover({ placement = 'responsive', anchor, title
         <h2 id={titleId} className="confirm-popover-title">{title}</h2>
         <p id={textId} className="confirm-popover-text">{description}</p>
         <div className="confirm-popover-actions">
-          <button ref={cancel} disabled={busy} type="button" className="confirm-popover-btn" onClick={() => done(() => { onCancel(); anchor.current?.focus() })}>{cancelLabel}</button>
+          <button ref={cancel} disabled={busy && !cancelWhileBusy} type="button" className="confirm-popover-btn" onClick={() => done(() => { onCancel(); anchor.current?.focus() })}>{cancelLabel}</button>
           <button ref={confirm} disabled={busy} type="button" className={`confirm-popover-btn${danger ? ' danger' : ''}`} data-testid={`${testId}-confirm`} onClick={() => closeOnConfirm ? done(onConfirm) : onConfirm()}>{confirmLabel}</button>
         </div>
       </div>

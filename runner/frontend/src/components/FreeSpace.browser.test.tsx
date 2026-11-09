@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import {useState} from 'react'
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {act, fireEvent, render, waitFor, within} from '@testing-library/react'
@@ -38,7 +39,7 @@ beforeEach(async () => {await resetKeptAttachments()})
 afterEach(async () => {await resetKeptAttachments(); await page.viewport(1280, 800)})
 
 describe('waiting for session space', () => {
-  for (const width of [390, 3840]) it(`preselects oldest attachments, deletes, and resumes automatically at ${width}px`, async () => {
+  for (const width of browserWidths([390, 3840])) it(`preselects oldest attachments, deletes, and resumes automatically at ${width}px`, async () => {
     await page.viewport(width, 1000)
     const {files, upload, remove} = fixture()
     const ui = render(<Harness files={files} />)
@@ -116,7 +117,7 @@ describe('waiting for session space', () => {
     fireEvent.click(ui.getByRole('button', {name: 'Files panel'}))
     fireEvent.click(ui.getByRole('button', {name: 'Free up space…'}))
     const dialog = ui.getByRole('dialog', {name: 'Free up space'})
-    await waitFor(() => expect(within(dialog).getByRole('status')).toHaveTextContent('Only the session’s owner'))
+    await waitFor(() => expect(within(dialog).getByRole('status')).toHaveTextContent('Only the workspace’s owner'))
     expect(within(dialog).getByRole('button', {name: 'Delete selected files'})).toBeDisabled()
     for (const box of within(dialog).getAllByRole('checkbox')) expect(box).toBeDisabled()
     expect(remove).not.toHaveBeenCalled()

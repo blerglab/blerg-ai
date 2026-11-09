@@ -66,7 +66,7 @@ export default function McpSignIn({ item, ctx }: { item: CapabilityItem; ctx: Mc
       <div className="caps-auth" data-testid="caps-mcp-connect">
         <a className="caps-auth-btn" href={CLAUDE_AI_CONNECTORS_URL} target="_blank" rel="noopener noreferrer"
           aria-label={`Connect ${item.name} on claude.ai (opens in a new tab)`}>Connect ↗</a>
-        <p className="caps-auth-note">After connecting, restart the session to load it.</p>
+        <p className="caps-auth-note">After connecting, restart the workspace to load it.</p>
       </div>
     )
   }
@@ -74,7 +74,7 @@ export default function McpSignIn({ item, ctx }: { item: CapabilityItem; ctx: Mc
   if (ctx.runtime === 'docker' || ctx.runtime === 'cluster') {
     return (
       <div className="caps-auth" data-testid="caps-mcp-sandboxed">
-        <p className="caps-auth-note">Sign-in for sandboxed sessions is coming.</p>
+        <p className="caps-auth-note">Sign-in for sandboxed workspaces is coming.</p>
       </div>
     )
   }
@@ -141,7 +141,7 @@ export default function McpSignIn({ item, ctx }: { item: CapabilityItem; ctx: Mc
       {result?.kind === 'url' && (
         <p className="caps-auth-note" role="status">
           {result.callback
-            ? 'Finish in a browser on the machine that runs this session: the sign-in returns there. This row turns connected when it is done.'
+            ? 'Finish in a browser on the machine that runs this workspace: the sign-in returns there. This row turns connected when it is done.'
             : 'Finish the sign-in in the new tab. This row turns connected when it is done.'}
         </p>
       )}

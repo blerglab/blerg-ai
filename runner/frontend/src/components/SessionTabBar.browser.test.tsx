@@ -1,7 +1,10 @@
+import { useLayoutEffect } from 'react'
+import { layoutLibraryKey } from '../lib/workspaceLayouts'
+import { browserWidths } from '../test/browserWidths'
 import { beforeEach, afterEach, expect, it, vi } from 'vitest'
-import { act, render, screen, waitFor, within } from '@testing-library/react'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { page, userEvent } from 'vitest/browser'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { BrowserRouter, Route, Routes, useNavigate, useLocation } from 'react-router-dom'
+import { commands, page, userEvent } from 'vitest/browser'
 import { useTranscriptStore, type AgentEvent } from '@blerglab/chat'
 import SessionDetail from './SessionDetail'
 import { sessionTabDragType } from './SessionGroups'
@@ -80,9 +83,12 @@ func main() {
 }
 const PATCH = 'diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1,2 +1,2 @@\n package main\n-func main() {}\n+func main() { println("hello") }\n'
 const json = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } })
+let originalLocation: { path: string; state: unknown }
 beforeEach(() => {
+  originalLocation = { path: location.pathname + location.search, state: history.state }
   shellCounter.value = 0
   localStorage.clear()
+  localStorage.setItem('blerg-runner.session-dock.windows', JSON.stringify({ active: 'files', panels: [], ratio: .5 }))
   document.documentElement.setAttribute('data-theme', 'dark')
   useTranscriptStore.setState({ sessions: {} })
   const transcript = useTranscriptStore.getState()
@@ -108,14 +114,23 @@ beforeEach(() => {
     : String(url).endsWith('/raw') ? new Response(String(url).includes('/patch/') ? 'diff --git a/app.ts b/app.ts\n--- a/app.ts\n+++ b/app.ts\n@@ -1 +1 @@\n-before\n+after\n' : '# Deployment notes\n\nAll checks passed.')
     : json(String(url).endsWith('/artifacts') ? { artifacts: [{ id: 'report', name: 'report.md', size: 42, view: 'markdown', content_type: 'text/markdown', version: 1, latest_version: 1 }, { id: 'patch', name: 'changes.diff', size: 100, view: 'diff', content_type: 'text/plain' }] } : [])))
 })
-afterEach(() => { invalidateChatTransport(); vi.unstubAllGlobals(); document.documentElement.removeAttribute('data-theme') })
+afterEach(() => { cleanup(); history.replaceState(originalLocation.state, '', originalLocation.path); invalidateChatTransport(); vi.unstubAllGlobals(); document.documentElement.removeAttribute('data-theme') })
+let routerNavigate: ReturnType<typeof useNavigate>
+let routerState: { workspaceTab?: { id: string; depth: number } } | null
+function RouterHistory() {
+  const navigate = useNavigate()
+  const state = useLocation().state
+  useLayoutEffect(() => { routerNavigate = navigate; routerState = state }, [navigate, state])
+  return null
+}
 function mount(width: number) {
-  return render(<MemoryRouter initialEntries={['/sessions/sess-a']}><CommandPaletteProvider>
+  history.replaceState(null, '', '/sessions/sess-a')
+  return render(<BrowserRouter><CommandPaletteProvider><RouterHistory />
     <div data-testid="dock-layout" style={{ display: 'flex', height: '100vh' }}>
       {width >= 900 && <SessionList variant="sidebar" onNewSession={() => {}} />}
       <div style={{ flex: 1, minWidth: 0 }}><Routes><Route path="/sessions/:id" element={<SessionDetail />} /></Routes></div>
     </div>
-  </CommandPaletteProvider></MemoryRouter>)
+  </CommandPaletteProvider></BrowserRouter>)
 }
 
 async function drawShell(sample = '/workspace/demo-app $ git diff --stat\r\n src/app.ts | 2 +-\r\n 1 file changed, 1 insertion(+), 1 deletion(-)\r\n/workspace/demo-app $ ') {
@@ -128,6 +143,14 @@ async function drawShell(sample = '/workspace/demo-app $ git diff --stat\r\n src
     await waitFor(() => expect(shell.output).toBeDefined())
     act(() => shell.emit(sample))
   }
+}
+
+// New shell is a direct header control at a normal width, and a menu item inside the header's
+// collapsed Open menu below a narrow width (card BLG-450) — open it whichever way it currently shows.
+async function clickNewShell() {
+  const openMenu = screen.queryByTestId('open-tab-menu')
+  if (openMenu) await userEvent.click(openMenu)
+  await userEvent.click(await screen.findByRole(openMenu ? 'menuitem' : 'button', { name: 'New shell' }))
 }
 
 for (const [width, height] of [[390, 844], [1440, 900], [3840, 2160]]) {
@@ -157,37 +180,42 @@ for (const [width, height] of [[390, 844], [1440, 900], [3840, 2160]]) {
     expect(screen.queryByRole('button', { name: 'Exit tab focus' })).toBeNull()
     if (width === 390) await userEvent.click(explorer)
     await userEvent.click(await screen.findByRole('treeitem', { name: /package.json/ }))
-    await screen.findAllByTestId('workspace-code')
+    await waitFor(() => expect(screen.getByRole('region', { name: 'package.json' })).toBeVisible())
+    await waitForRoute('workspace:package.json')
     if (width > 390) {
       expect(screen.getAllByRole('tab', { name: /README.md|package.json/ })).toHaveLength(2)
       await userEvent.dblClick(screen.getByRole('tab', { name: /package.json/ }))
     }
     if (width === 390) {
-      act(() => history.back())
-      await waitFor(() => expect(document.querySelector('.hosted-view:not([hidden]) h2')?.textContent).toBe('README.md'))
-      act(() => history.forward())
-      await waitFor(() => expect(document.querySelector('.hosted-view:not([hidden]) h2')?.textContent).toBe('package.json'))
+      act(() => routerNavigate(-1))
+      await waitFor(() => expect(screen.getByRole('region', { name: 'README.md' })).toBeVisible())
+      act(() => routerNavigate(1))
+      await waitFor(() => expect(screen.getByRole('region', { name: 'package.json' })).toBeVisible())
     } else {
       const last = screen.getByRole('tab', { name: /package.json/ })
       last.focus()
       await userEvent.keyboard('{Alt>}{Shift>}{ArrowLeft}{/Shift}{/Alt}')
-      expect(screen.getAllByRole('tab').slice(0, 3).map(t => t.dataset.tabId)).toEqual(['chat', 'workspace:package.json', 'workspace:README.md'])
-      await userEvent.dragAndDrop(screen.getByRole('tab', { name: /README.md/ }).closest<HTMLElement>('.session-tab')!, last.closest<HTMLElement>('.session-tab')!)
-      expect(screen.getAllByRole('tab').slice(0, 3).map(t => t.dataset.tabId)).toEqual(['chat', 'workspace:README.md', 'workspace:package.json'])
+      expect(within(screen.getByRole('tablist', { name: 'Workspace tabs' })).getAllByRole('tab').slice(0, 3).map(t => t.dataset.tabId)).toEqual(['chat', 'workspace:package.json', 'workspace:README.md'])
+      const source = screen.getByRole('tab', { name: /README.md/ }).closest<HTMLElement>('.session-tab')!
+      const destination = last.closest<HTMLElement>('.session-tab')!, dataTransfer = new DataTransfer()
+      act(() => source.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer })))
+      act(() => destination.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer, clientX: destination.getBoundingClientRect().left })))
+      act(() => source.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer })))
+      expect(within(screen.getByRole('tablist', { name: 'Workspace tabs' })).getAllByRole('tab').slice(0, 3).map(t => t.dataset.tabId)).toEqual(['chat', 'workspace:README.md', 'workspace:package.json'])
     }
     if (shotDir && width > 390) { await userEvent.click(await screen.findByRole('button', { name: 'New shell' })); await drawShell() }
     if (shotDir) await page.screenshot({ path: `${shotDir}/tabs-${width}x${height}.png` })
     const store = useTranscriptStore.getState()
     act(() => store.ingest({ session_id: 'sess-a', client_event_id: 'new-output', seq: 3, ts: '2026-10-25T12:00:00Z', kind: 'assistant_text', payload: { text: 'New agent output', done: true } } as AgentEvent))
     await screen.findByLabelText('New agent output')
-    await userEvent.click(width === 390 ? screen.getByRole('button', { name: /← Chat/ }) : screen.getByRole('tab', { name: /Chat/ }))
+    await userEvent.click(width === 390 ? screen.getByRole('button', { name: /← Main/ }) : screen.getByRole('tab', { name: /Main/ }))
     expect(document.querySelector('.agent-composer textarea')).toBe(composer)
     if (width === 390) expect(composer).not.toHaveFocus()
     else expect(document.activeElement).toBe(composer)
     expect(screen.queryByLabelText('New agent output')).toBeNull()
     expect(openSessionFile({ session: 'another-session', account: 'person-a', path: 'other.ts' })).toBe(false)
     act(() => { expect(openSessionFile({ session: 'sess-a', account: 'person-a', path: 'quick.ts' })).toBe(true) })
-    await waitFor(() => expect(document.querySelector('.hosted-view:not([hidden]) h2')?.textContent).toBe('quick.ts'))
+    await waitFor(() => expect(screen.getByRole('region', { name: 'quick.ts' })).toBeVisible())
     await userEvent.click(screen.getByRole('button', { name: 'Close quick.ts' }))
     view.unmount()
     mount(width)
@@ -201,20 +229,21 @@ for (const [width, height] of [[390, 844], [1440, 900], [3840, 2160]]) {
     }
     if (width === 390) {
       await userEvent.keyboard('{Escape}')
-      const shellToggle = await screen.findByRole('button', { name: 'New shell' })
-      await userEvent.click(shellToggle)
+      await clickNewShell()
       const terminal = await waitFor(() => { const node = document.querySelector('.shell-terminal textarea'); expect(node).toBeTruthy(); return node! })
       if (shotDir) { await drawShell(); await page.screenshot({ path: `${shotDir}/shell-390x844.png` }) }
-      await userEvent.click(screen.getByRole('button', { name: /← Chat/ }))
+      await userEvent.click(screen.getByRole('button', { name: /← Main/ }))
       await userEvent.click(screen.getByRole('button', { name: /open tab/ }))
       await userEvent.click(screen.getByRole('menuitem', { name: 'Shell' }))
       expect(document.querySelector('.shell-terminal textarea')).toBe(terminal)
-      await userEvent.click(screen.getByRole('button', { name: /← Chat/ }))
-      await userEvent.click(screen.getByRole('button', { name: 'Search commands and files' }))
+      await userEvent.click(screen.getByRole('button', { name: /← Main/ }))
+      // On a phone (review round 2 of card BLG-450), Search joins Star inside the collapsed Open menu.
+      await userEvent.click(screen.getByTestId('open-tab-menu'))
+      await userEvent.click(screen.getByRole('menuitem', { name: 'Search commands and files' }))
       const palette = screen.getByRole('dialog', { name: 'Command palette' })
-      await userEvent.fill(within(palette).getByRole('combobox'), '>End session')
+      await userEvent.fill(within(palette).getByRole('combobox'), '>End workspace')
       await userEvent.keyboard('{ArrowDown}{Enter}')
-      const confirm = screen.getByRole('alertdialog', { name: 'End this session?' })
+      const confirm = screen.getByRole('alertdialog', { name: 'End this workspace?' })
       expect(within(confirm).getByRole('button', { name: 'Cancel' })).toHaveFocus()
       await userEvent.click(within(confirm).getByRole('button', { name: 'Cancel' }))
       expect(apiFetch.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false)
@@ -243,10 +272,16 @@ it('opens published Markdown and diffs in tabs with their existing renderers', a
   expect(screen.getByRole('tab', { name: /changes.diff/ })).toHaveAttribute('aria-selected', 'true')
 })
 
+// A visible retained pane can precede the router commit; it must settle in this interaction.
+async function waitForRoute(id: string) {
+  await waitFor(() => expect(routerState?.workspaceTab?.id).toBe(id), { timeout: 100, interval: 5 })
+}
+
 async function openFile(path: string, keep = false) {
   act(() => { expect(openSessionFile({ session: 'sess-a', account: 'person-a', path })).toBe(true) })
-  await waitFor(() => expect(document.querySelector('.hosted-view:not([hidden]) h2')?.textContent).toBe(path))
+  await waitFor(() => expect(screen.getByRole('region', { name: path })).toBeVisible())
   await screen.findAllByTestId('workspace-code')
+  await waitForRoute(`workspace:${path}`)
   if (keep) await userEvent.dblClick(document.querySelector<HTMLButtonElement>('.session-tab.active [role="tab"]')!)
 }
 
@@ -257,7 +292,7 @@ for (const [width, height] of [[1440, 900], [3840, 2160]]) {
     await userEvent.fill(composer, 'Unsent draft')
     await openFile('one.ts', true)
     const one = screen.getByRole('tab', { name: /one.ts/ })
-    const chat = screen.getByRole('tab', { name: /Chat/ })
+    const chat = screen.getByRole('tab', { name: /Main/ })
     one.focus()
     await userEvent.keyboard('{ArrowLeft}')
     expect(chat).toHaveAttribute('aria-selected', 'true')
@@ -286,10 +321,10 @@ for (const [width, height] of [[1440, 900], [3840, 2160]]) {
       expect(one).toHaveAttribute('aria-selected', 'true')
       expect(one).toHaveFocus()
       await userEvent.keyboard('{ArrowLeft}')
-      expect(screen.getByRole('tab', { name: /Chat/ })).toHaveFocus()
+      expect(screen.getByRole('tab', { name: /Main/ })).toHaveFocus()
       await userEvent.keyboard('{ArrowRight}{Delete}')
       expect(screen.queryByRole('tab', { name: /one.ts/ })).toBeNull()
-      expect(screen.getByRole('tab', { name: /Chat/ })).toHaveFocus()
+      expect(screen.getByRole('tab', { name: /Main/ })).toHaveFocus()
     })
   }
 }
@@ -302,18 +337,18 @@ for (const replacePreview of [false, true]) {
     if (replacePreview) await openFile('discarded-preview.ts')
     await openFile('three.ts')
     await userEvent.click(screen.getByRole('button', { name: 'Close three.ts' }))
-    await waitFor(() => expect(document.querySelector('.hosted-view:not([hidden]) h2')?.textContent).toBe('two.ts'))
-    expect(history.state.sessionTab.id).toBe('workspace:two.ts')
-    await userEvent.click(screen.getByRole('button', { name: 'Back to Chat' }))
-    await waitFor(() => expect(document.querySelector('.hosted-view:not([hidden]) h2')?.textContent).toBe('one.ts'))
-    act(() => history.forward())
-    await waitFor(() => expect(document.querySelector('.hosted-view:not([hidden]) h2')?.textContent).toBe('two.ts'))
+    await waitFor(() => expect(screen.getByRole('region', { name: 'two.ts' })).toBeVisible())
+    await waitForRoute('workspace:two.ts')
+    await userEvent.click(screen.getByRole('button', { name: 'Back to Main' }))
+    await waitFor(() => expect(screen.getByRole('region', { name: 'one.ts' })).toBeVisible())
+    act(() => routerNavigate(1))
+    await waitFor(() => expect(screen.getByRole('region', { name: 'two.ts' })).toBeVisible())
     await userEvent.click(screen.getByRole('button', { name: 'Close two.ts' }))
-    await waitFor(() => expect(document.querySelector('.hosted-view:not([hidden]) h2')?.textContent).toBe('one.ts'))
-    await userEvent.click(screen.getByRole('button', { name: 'Back to Chat' }))
+    await waitFor(() => expect(screen.getByRole('region', { name: 'one.ts' })).toBeVisible())
+    await userEvent.click(screen.getByRole('button', { name: 'Back to Main' }))
     await waitFor(() => expect(document.querySelector('.agent-composer textarea')).toBeVisible())
-    act(() => history.forward())
-    await waitFor(() => expect(document.querySelector('.hosted-view:not([hidden]) h2')?.textContent).toBe('one.ts'))
+    act(() => routerNavigate(1))
+    await waitFor(() => expect(screen.getByRole('region', { name: 'one.ts' })).toBeVisible())
   })
 }
 
@@ -335,7 +370,7 @@ it('supplies real labeled tabpanels for terminal sessions', async () => {
   expect(document.getElementById('session-view-chat')).not.toBeVisible()
   await userEvent.click(screen.getByRole('button', { name: 'Close one.ts' }))
   selectedPanel()
-  expect(screen.getByRole('tab', { name: /Chat/ })).toHaveFocus()
+  expect(screen.getByRole('tab', { name: /Main/ })).toHaveFocus()
 })
 
 for (const [width, height] of [[390, 844], [3840, 2160]]) {
@@ -344,7 +379,7 @@ for (const [width, height] of [[390, 844], [3840, 2160]]) {
     for (const [path, [view, text]] of Object.entries(sources)) {
       act(() => { openSessionFile({ session: 'sess-a', account: 'person-a', path }) })
       const region = await screen.findByRole('region', { name: path })
-      if (view !== 'text' || path.endsWith('.mmd')) await userEvent.click(await within(region).findByRole('button', { name: 'Raw' }))
+      if (view !== 'text' || path.endsWith('.mmd')) await page.elementLocator(region).getByRole('button', { name: 'Raw' }).click()
       await waitFor(() => expect(region.querySelector('[class*="hljs-"]'), path).not.toBeNull(), { timeout: 10000 })
       expect(region.querySelector('code')?.textContent).toBe(text)
       const token = region.querySelector<HTMLElement>('[class*="hljs-"]')!
@@ -354,7 +389,7 @@ for (const [width, height] of [[390, 844], [3840, 2160]]) {
     // Kept tabs stay mounted; their display preference must survive switching.
     act(() => { openSessionFile({ session: 'sess-a', account: 'person-a', path: 'remember.md' }) })
     const notes = await screen.findByRole('region', { name: 'remember.md' })
-    await userEvent.click(await within(notes).findByRole('button', { name: 'Raw' }))
+    await page.elementLocator(notes).getByRole('button', { name: 'Raw' }).click()
     act(() => { openSessionFile({ session: 'sess-a', account: 'person-a', path: 'main.go' }) })
     await screen.findByRole('region', { name: 'main.go' })
     act(() => { openSessionFile({ session: 'sess-a', account: 'person-a', path: 'remember.md' }) })
@@ -364,7 +399,7 @@ for (const [width, height] of [[390, 844], [3840, 2160]]) {
   })
 }
 
-it('middle-closes file, diff, commit and preview tabs while keeping Chat and focus at 3840', async () => {
+it('middle-closes file, diff, commit, preview and Main tabs at 3840', async () => {
   await page.viewport(3840, 2160)
   const views = [
     { kind: 'workspace' as const, path: 'one.ts' },
@@ -375,18 +410,17 @@ it('middle-closes file, diff, commit and preview tabs while keeping Chat and foc
   const tabs = views.map((view, i) => ({ id: viewId(view), view, preview: i === 3 }))
   localStorage.setItem(sessionTabsKey('person-a', 'sess-a'), JSON.stringify({ tabs, active: tabs[3].id, unread: 0 }))
   mount(3840)
-  const chat = screen.getByRole('tab', { name: /Chat/ })
-  const state = history.state
-  for (const target of [chat, screen.getByRole('tablist', { name: 'Session tabs' })]) {
+  const chat = screen.getByRole('tab', { name: /Main/ })
+  const historyLength = history.length
+  for (const target of [screen.getByRole('tablist', { name: 'Workspace tabs' })]) {
     for (const type of ['mousedown', 'auxclick']) {
       const event = new MouseEvent(type, { button: 1, bubbles: true, cancelable: true })
       target.dispatchEvent(event)
       expect(event.defaultPrevented).toBe(true)
     }
   }
-  await userEvent.click(chat, { button: 'middle' })
   expect(chat).toHaveAttribute('aria-selected', 'false')
-  for (const [name, survivor] of [['preview.ts', 'abcdef12'], ['abcdef12', 'changes.diff'], ['changes.diff', 'one.ts'], ['one.ts', 'Chat']]) {
+  for (const [name, survivor] of [['preview.ts', 'abcdef12'], ['abcdef12', 'changes.diff'], ['changes.diff', 'one.ts'], ['one.ts', 'Main']]) {
     const tab = screen.getByRole('tab', { name: new RegExp(name) })
     const down = new MouseEvent('mousedown', { button: 1, bubbles: true, cancelable: true })
     tab.dispatchEvent(down)
@@ -397,18 +431,21 @@ it('middle-closes file, diff, commit and preview tabs while keeping Chat and foc
     expect(selected).toHaveAttribute('aria-selected', 'true')
     expect(selected).toHaveFocus()
   }
-  expect(history.state).toEqual(state)
+  await userEvent.click(chat, { button: 'middle' })
+  expect(screen.queryByRole('tab', { name: /Main/ })).toBeNull()
+  expect(screen.getByText('Open a channel from the sidebar, or a file from the explorer.')).toBeVisible()
+  expect(history.length).toBe(historyLength)
 })
 it('middle-closes a kept phone tab with the close-button history rules at 390', async () => {
   await page.viewport(390, 844); mount(390)
   await openFile('one.ts', true)
   await openFile('two.ts', true)
-  const depth = history.state.sessionTab.depth
+  const depth = routerState!.workspaceTab!.depth
   await userEvent.click(screen.getByRole('button', { name: '2 open files' }))
   await userEvent.click(screen.getByRole('menuitem', { name: 'two.ts' }), { button: 'middle' })
-  await waitFor(() => expect(document.querySelector('.hosted-view:not([hidden]) h2')?.textContent).toBe('one.ts'))
-  expect(history.state.sessionTab.id).toBe('workspace:one.ts')
-  expect(history.state.sessionTab.depth).toBe(depth)
+  await waitFor(() => expect(screen.getByRole('region', { name: 'one.ts' })).toBeVisible())
+  await waitForRoute('workspace:one.ts')
+  expect(routerState!.workspaceTab!.depth).toBe(depth)
   // Closing the menu returns focus to content; Escape then returns to Chat.
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(document.querySelector('.agent-composer textarea')).toBeVisible())
@@ -423,7 +460,7 @@ it('middle-closes an inactive tab without activating it', async () => {
   expect(screen.getByRole('tab', { name: /two.ts/ })).toHaveFocus()
 })
 
-for (const width of [390, 3840]) it(`keeps one Insights entry and no duplicate in the session panel at ${width}`, async () => {
+for (const width of browserWidths([390, 3840])) it(`keeps one Insights entry and no duplicate in the session panel at ${width}`, async () => {
   await page.viewport(width, 900); localStorage.setItem(RAIL_TAB_KEY, 'live'); mount(width)
   if (width === 390) await userEvent.click(screen.getByTestId('rail-toggle'))
   await screen.findByTestId('rail-session')
@@ -431,9 +468,11 @@ for (const width of [390, 3840]) it(`keeps one Insights entry and no duplicate i
   if (width === 3840) expect(screen.getAllByRole('button', { name: 'Insights' })).toHaveLength(1)
   else {
     await userEvent.keyboard('{Escape}')
-    await userEvent.click(screen.getByRole('button', { name: 'Search commands and files' }))
-    await userEvent.fill(screen.getByRole('combobox', { name: /^Search commands/ }), '>Session insights')
-    expect(screen.getAllByRole('option', { name: 'Session insights' })).toHaveLength(1)
+    // On a phone (review round 2 of card BLG-450), Search joins Star inside the collapsed Open menu.
+    await userEvent.click(screen.getByTestId('open-tab-menu'))
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Search commands and files' }))
+    await userEvent.fill(screen.getByRole('combobox', { name: /^Search commands/ }), '>Workspace insights')
+    expect(screen.getAllByRole('option', { name: 'Workspace insights' })).toHaveLength(1)
   }
   expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
 })
@@ -451,24 +490,27 @@ for (const [width, height] of [[390, 844], [1024, 900], [3840, 2160]]) {
     expect(within(region).queryByRole('button', { name: 'Close' })).toBeNull()
     const toolbar = within(region).getByRole('toolbar', { name: 'File actions' })
     const code = within(region).getByTestId('workspace-code')
-    const top = screen.getByRole('navigation', { name: width === 390 ? 'Session navigation' : 'Workspace' }).getBoundingClientRect().bottom
+    const top = screen.getByRole('navigation', { name: width === 390 ? 'Workspace navigation' : 'Workspace' }).getBoundingClientRect().bottom
     expect(toolbar.getBoundingClientRect().top).toBeCloseTo(top, 0)
     expect(code.getBoundingClientRect().top).toBeCloseTo(toolbar.getBoundingClientRect().bottom, 0)
     expect(toolbar.getBoundingClientRect().height).toBeLessThanOrEqual(40)
     if (width === 390) expect(code.scrollWidth).toBeGreaterThan(code.clientWidth)
     expect(region.getBoundingClientRect().bottom).toBeCloseTo(screen.getByTestId('session-chat-column').getBoundingClientRect().bottom, 0)
+    const more = within(toolbar).queryByRole('button', { name: 'More' })
+    if (more) await userEvent.click(more)
     for (const name of ['Copy path', 'Download', 'Save a copy to Files']) {
       const action = within(toolbar).getByRole('button', { name })
       expect(action.title).toBe(name)
       expect(action.tabIndex).toBe(0)
     }
+    if (more) await userEvent.click(more)
     region.focus()
     await userEvent.keyboard('{Tab}')
-    expect(within(toolbar).getByRole('button', { name: 'Copy main.go path' })).toHaveFocus()
-    await userEvent.keyboard('{Tab}')
     expect(within(toolbar).getByRole('button', { name: 'Copy path' })).toHaveFocus()
+    await userEvent.keyboard('{Tab}')
+    expect(within(toolbar).getByRole('button', { name: 'Review' })).toHaveFocus()
     expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
-    await userEvent.click(width === 390 ? screen.getByRole('button', { name: /← Chat/ }) : screen.getByRole('tab', { name: /Chat/ }))
+    await userEvent.click(width === 390 ? screen.getByRole('button', { name: /← Main/ }) : screen.getByRole('tab', { name: /Main/ }))
     expect(document.querySelector('.agent-composer textarea')).toBe(composer)
     expect(composer).toBeVisible()
     if (width === 390) expect(composer).not.toHaveFocus()
@@ -523,7 +565,7 @@ for (const [width, height] of [[390, 844], [1024, 900], [3840, 2160]]) {
       }
       if (fileShotDir) await page.screenshot({ path: `${fileShotDir}/${label}-${width}.png` })
       if (index === 1 || index === 2) {
-        await userEvent.click(within(toolbar).getByRole('button', { name: 'Raw' }))
+        await page.elementLocator(toolbar).getByRole('button', { name: 'Raw' }).click()
         await within(region).findByTestId('workspace-code')
         expect(within(toolbar).getByRole('button', { name: 'Rendered' })).toBeTruthy()
         if (fileShotDir) await page.screenshot({ path: `${fileShotDir}/${label}-raw-${width}.png` })
@@ -534,10 +576,10 @@ for (const [width, height] of [[390, 844], [1024, 900], [3840, 2160]]) {
   })
 }
 
-it.each([390, 3840])('shows a shell as a regular session tab in the complete workspace at %i', async width => {
+it.each(browserWidths([390, 3840]))('shows a shell as a regular session tab in the complete workspace at %i', async width => {
   await page.viewport(width, width === 390 ? 844 : 2160)
   mount(width)
-  await userEvent.click(await screen.findByRole('button', { name: 'New shell' }))
+  await clickNewShell()
   await drawShell()
   const input = await waitFor(() => {
     const input = document.querySelector('.shell-terminal textarea')
@@ -561,7 +603,7 @@ const lightAnsiSample = '\x1b[2J\x1b[HANSI palette: all 16 colors\r\nWhite sampl
   return `[${code}] ${name.padEnd(13)} \x1b[${code}${index === 7 || index === 15 ? ';40' : ''}mANSI sample\x1b[0m\r\n`
 }).join('') + '\r\n/workspace/demo-app $ '
 
-it.each([390, 3840].flatMap(width => ['single', 'split', 'light'].map(mode => ({ width, mode }))))('L5: renders $mode shells in the full workspace at $width', async ({ width, mode }) => {
+it.each(browserWidths([390, 3840]).flatMap(width => ['single', 'split', 'light'].map(mode => ({ width, mode }))))('L5: renders $mode shells in the full workspace at $width', async ({ width, mode }) => {
   // Establish a real standard split on desktop. The phone retains that layout,
   // showing one active shell at a time through its ordinary tab switcher.
   const initialWidth = mode === 'split' ? 3840 : width
@@ -569,7 +611,7 @@ it.each([390, 3840].flatMap(width => ['single', 'split', 'light'].map(mode => ({
   document.documentElement.dataset.theme = mode === 'light' ? 'light' : 'dark'
   await userEvent.click(document.body)
   const view = mount(initialWidth)
-  await userEvent.click(await screen.findByRole('button', { name: 'New shell' }))
+  await clickNewShell()
   await drawShell(mode === 'light' ? lightAnsiSample : undefined)
   if (mode === 'split') {
     await userEvent.click(screen.getByRole('button', { name: 'New shell' }))
@@ -610,9 +652,9 @@ it.each([390, 3840].flatMap(width => ['single', 'split', 'light'].map(mode => ({
 }, 30000)
 it('L1: returning from a phone shell never raises the composer keyboard', async () => {
   await page.viewport(390, 844); await userEvent.click(document.body); mount(390)
-  await userEvent.click(await screen.findByRole('button', { name: 'New shell' }))
+  await clickNewShell()
   await screen.findByRole('tab', { name: 'Shell' })
-  await userEvent.click(screen.getByRole('button', { name: /← Chat/ }))
+  await userEvent.click(screen.getByRole('button', { name: /← Main/ }))
   const composer = document.querySelector<HTMLTextAreaElement>('.agent-composer textarea')!
   await waitFor(() => expect(composer).toBeVisible())
   expect(composer).not.toHaveFocus()
@@ -630,7 +672,7 @@ it('keeps phone keyboard tab navigation in the visible scrolling strip', async (
   expect(two).toHaveAttribute('aria-selected', 'true'); expect(two).toHaveFocus()
 })
 
-it.each([390, 1024, 3840])('navigates twenty tabs in the session workspace and focus mode at %i', async width => {
+it.each(browserWidths([390, 1024, 3840]))('navigates twenty tabs in the session workspace and focus mode at %i', async width => {
   await page.viewport(width, width === 390 ? 844 : 1000)
   const paths = Array.from({ length: 20 }, (_, i) => `module-${String(i).padStart(2, '0')}-with-a-descriptive-name-for-tab-overflow.ts`)
   localStorage.setItem(sessionTabsKey('person-a', 'sess-a'), JSON.stringify({ tabs: paths.map((path, i) => ({ id: `workspace:${path}`, view: { kind: 'workspace', path }, preview: i === 19 })), active: 'chat' }))
@@ -653,3 +695,91 @@ it.each([390, 1024, 3840])('navigates twenty tabs in the session workspace and f
   await waitFor(visible)
   if (shots) await page.screenshot({ path: `${shots}/tab-overflow-focus-${width}.png` })
 }, 30000)
+
+it('offers tab actions by keyboard and touch and routes bulk closes through the tab controls', async () => {
+ await page.viewport(1440, 900); mount(1440)
+ await openFile('one.ts', true); await openFile('two.ts', true)
+ const first = screen.getByRole('tab', { name: 'one.ts' })
+ fireEvent.keyDown(first, { key: 'F10', shiftKey: true })
+ expect(screen.getByRole('menuitem', { name: 'Duplicate' })).toBeTruthy()
+ fireEvent.click(screen.getByRole('menuitem', { name: 'Close tabs to the right' }))
+ expect(screen.queryByRole('tab', { name: 'two.ts' })).toBeNull()
+ fireEvent.contextMenu(screen.getByRole('tab', { name: 'Main' }), { clientX: 100, clientY: 100 })
+ expect(screen.queryByRole('menuitem', { name: 'Duplicate' })).toBeNull()
+ fireEvent.keyDown(screen.getByRole('menu', { name: 'Tab actions' }), { key: 'Escape' })
+ fireEvent.touchStart(first, { touches: [new Touch({ identifier: 1, target: first, clientX: 200, clientY: 100 })] })
+ await screen.findByRole('menu', { name: 'Tab actions' })
+ fireEvent.touchEnd(first)
+ fireEvent.click(screen.getByRole('menuitem', { name: 'Close others' }))
+ expect(screen.queryByRole('tab', { name: 'Main' })).toBeNull()
+ expect(screen.getByRole('tab', { name: 'one.ts' })).toBeTruthy()
+})
+
+it.each([390, 3840])('saves, loads and renames layouts in a viewport-sized modal at %i px', async width => {
+  await page.viewport(width, width === 390 ? 844 : 2160)
+  const group = (id: string, tabs: string[], active = tabs[0]) => ({ type: 'group', id, tabs, active })
+  localStorage.setItem(layoutLibraryKey('person-a'), JSON.stringify({ entries: [
+    { id: 'research', name: 'Research', savedAt: Date.now() - 3_600_000, layout: { tabs: [{ id: 'blackboard:plan', view: { kind: 'blackboard', blackboardId: 'plan', path: { level: 'project' }, label: 'Blackboard' } }, { id: 'insights', view: { kind: 'insights' } }], layout: { type: 'split', id: 'research-split', axis: 'vertical', ratio: .4, first: group('main', ['chat', 'blackboard:plan'], 'blackboard:plan'), second: group('reports', ['insights']) }, active: 'blackboard:plan', focused: 'main', viewport: { width: 1440, height: 900 }, panels: { 'session-panel': { open: true, width: 340 } } } },
+    { id: 'deep-work', name: 'Deep work', savedAt: Date.now() - 86_400_000, layout: { tabs: [{ id: 'workspace:main.ts', view: { kind: 'workspace', path: 'main.ts' } }], layout: { type: 'split', id: 'work-split', axis: 'horizontal', ratio: .65, first: group('main', ['chat']), second: group('code', ['workspace:main.ts']) }, active: 'workspace:main.ts', focused: 'code', viewport: { width: 1440, height: 900 }, panels: { explorer: { open: true, width: 280 } } } },
+  ], lastUsed: 'research' }))
+  mount(width)
+  act(() => { openSessionFile({ session: 'sess-a', account: 'person-a', path: 'README.md' }) })
+  await screen.findByRole('region', { name: 'README.md' })
+  if (width === 390) await userEvent.click(screen.getByRole('button', { name: 'Open' }))
+  await userEvent.click(await screen.findByRole(width === 390 ? 'menuitem' : 'button', { name: 'Layouts' }))
+  const dialog = screen.getByRole('dialog', { name: 'Layouts' })
+  await userEvent.type(within(dialog).getByRole('textbox', { name: 'Layout name' }), 'Review')
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+  expect(within(dialog).getByText('Last used')).toBeVisible()
+  expect(within(dialog).getByRole('article', { name: 'Recover last layout' })).toBeVisible()
+  expect(within(dialog).getAllByRole('article')).toHaveLength(4)
+  expect(within(dialog).getByRole('article', { name: 'Recover last layout' }).getBoundingClientRect().height).toBeGreaterThan(140)
+  expect(within(dialog).getByRole('status')).toHaveTextContent('Saved “Review”')
+  expect(dialog.getBoundingClientRect().width).toBeLessThanOrEqual(width - 32)
+  // Owner, 2026-11-06: a 66vw dialog spans too much at 4K; it stops at a readable 1280 px.
+  if (width === 3840) expect(dialog.getBoundingClientRect().width).toBe(1280)
+  const shots = (import.meta.env as Record<string, string | undefined>).VITE_TAB_SHOT_DIR
+  const list = dialog.querySelector<HTMLElement>('.workspace-layout-list')!
+  list.scrollTop = 0
+  for (const theme of ['light', 'dark', 'colorblind-dark']) {
+    document.documentElement.setAttribute('data-theme', theme)
+    if (shots) {
+      await commands.layoutScreenshot(width, theme)
+      if (width === 390) await commands.layoutScreenshot(width, theme, 'layouts-saved')
+    }
+  }
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Rename Review' }))
+  const rename = within(dialog).getByRole('textbox', { name: 'Rename Review' })
+  await userEvent.clear(rename)
+  await userEvent.type(rename, 'Planning')
+  fireEvent.blur(rename)
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Load Planning' }))
+  expect(screen.queryByRole('dialog', { name: 'Layouts' })).toBeNull()
+})
+
+it('returns focus to Open after dismissing phone Layouts', async () => {
+  await page.viewport(390, 844); mount(390)
+  const open = screen.getByRole('button', { name: 'Open' })
+  await userEvent.click(open)
+  await userEvent.click(screen.getByRole('menuitem', { name: 'Layouts' }))
+  const dialog = screen.getByRole('dialog', { name: 'Layouts' })
+  expect(within(dialog).getByRole('textbox', { name: 'Layout name' })).toHaveFocus()
+  await userEvent.keyboard('{Escape}')
+  expect(screen.queryByRole('dialog', { name: 'Layouts' })).toBeNull()
+  expect(open).toHaveFocus()
+})
+
+it('reopens a closed tab through the app shortcut and exposes the focus escape', async () => {
+  await page.viewport(1440, 900)
+  mount(1440)
+  act(() => { openSessionFile({ session: 'sess-a', account: 'person-a', path: 'main.ts' }) })
+  await screen.findByRole('tab', { name: 'main.ts' })
+  await userEvent.click(screen.getByRole('button', { name: 'Close main.ts' }))
+  await userEvent.keyboard('{Control>}{Shift>}T{/Shift}{/Control}')
+  expect(await screen.findByRole('tab', { name: 'main.ts' })).toBeVisible()
+  await userEvent.keyboard('{Control>}{Shift>}{Enter}{/Shift}{/Control}')
+  const exit = screen.getByRole('button', { name: 'Exit tab focus' })
+  expect(exit).toHaveTextContent('Exit focus')
+  await userEvent.click(exit)
+  expect(screen.queryByRole('button', { name: 'Exit tab focus' })).toBeNull()
+})

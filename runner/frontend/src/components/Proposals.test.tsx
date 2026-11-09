@@ -69,6 +69,14 @@ const APPROVE = '/api/proposals/p1/approve'
 const OPEN = '/api/proposals?scope=open'
 
 describe('Proposals list', () => {
+  it('shows the pending deadline once, without an elapsed-time label for a future date', async () => {
+    items = [prop({ expires_at: '2099-10-06T10:00:00Z' })]
+    renderPage()
+    const card = await screen.findByTestId('proposal-p1')
+    expect(card.textContent?.match(/Expires/g)).toHaveLength(1)
+    expect(card).not.toHaveTextContent('Expires just now')
+    expect(card.querySelector('time[datetime="2099-10-06T10:00:00Z"]')).toBeTruthy()
+  })
   it('explains proposals in an empty state', async () => {
     renderPage()
     expect(await screen.findByTestId('proposals-empty')).toBeTruthy()
@@ -90,7 +98,7 @@ describe('Proposals list', () => {
     expect(await screen.findByTestId('proposal-p1')).toBeTruthy()
     expect(screen.queryByTestId('proposal-p3')).toBeNull()
     const note = screen.getByTestId('proposals-session-filter')
-    expect(note.textContent).toContain('Showing proposals for this session')
+    expect(note.textContent).toContain('Showing proposals for this workspace')
     expect(within(note).getByRole('link', { name: 'Show all' }).getAttribute('href')).toBe('/proposals')
   })
 
@@ -108,9 +116,9 @@ describe('Proposals list', () => {
     items = [prop({ cron_id: 'cr1' })]
     renderPage()
     const card = await screen.findByTestId('proposal-p1')
-    expect(card.textContent).toContain('send_invite')
-    expect(card.textContent).toContain('calendar')
-    expect(within(card).getByRole('link', { name: /session/i }).getAttribute('href')).toBe('/sessions/s1')
+    expect(card.textContent?.match(/send_invite/g)).toHaveLength(1)
+    expect(card.textContent?.match(/calendar/g)).toHaveLength(1)
+    expect(within(card).getByRole('link', { name: /workspace/i }).getAttribute('href')).toBe('/sessions/s1')
     expect(within(card).getByTestId('proposal-cron-badge')).toBeTruthy()
     expect(within(card).getByTestId('proposal-summary').textContent).toBe('Summary (unverified): Invite Alice')
     expect(within(card).getByTestId('proposal-state').textContent).toBe('pending')
@@ -329,7 +337,7 @@ describe('Approve', () => {
     action = url => (url === APPROVE ? new Promise(r => { finish = r }) : null)
     renderPage()
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }))
-    const confirm = screen.getByRole('button', { name: 'Run it' })
+    const confirm = screen.getByRole('button', { name: 'Confirm approve' })
     fireEvent.click(confirm)
     fireEvent.click(confirm)
     const busy = await screen.findByRole('button', { name: /Running/ })
@@ -349,7 +357,7 @@ describe('Approve', () => {
     action = url => (url === APPROVE ? res({ error }, status) : null)
     renderPage()
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Run it' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm approve' }))
     return (await screen.findByTestId('proposal-error-p1')).textContent ?? ''
   }
 
@@ -433,12 +441,18 @@ describe('Board filing proposals', () => {
     items = [prop({ kind: 'board_file', connection_name: 'Board', tool: 'file_ticket', arguments: draft })]
     action = url => url === '/api/session-boards' ? res({ configured: true, boards: [{ id: 'b1', name: 'First board' }, { id: 'b2', name: 'Second board' }] }) : null
   })
-  it('does not file on edit and sends approved exact arguments only after confirmation', async () => {
+  it('shows all estimates before approval', async () => {
+    items = [prop({ kind: 'board_file', arguments: { ...draft, size: 'M', risk: 'high', complexity: 'low' } })]
     renderPage()
-    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }))
-    expect(posts()).toHaveLength(0)
+    const preview = await screen.findByRole('article', { name: 'Card the agent proposes' })
+    expect(preview).toHaveTextContent('SizeM')
+    expect(preview).toHaveTextContent('Riskhigh')
+    expect(preview).toHaveTextContent('Complexitylow')
+  })
+  it('files the exact draft with one click', async () => {
+    renderPage()
     action = url => url === APPROVE ? res({}) : null
-    fireEvent.click(screen.getByRole('button', { name: 'Run it' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }))
     await waitFor(() => expect(posts()).toHaveLength(1))
     expect(posts()[0].body).toEqual({ expected_arguments_raw: JSON.stringify(draft) })
   })
@@ -450,13 +464,16 @@ describe('Board filing proposals', () => {
     expect(screen.getByLabelText('Target board')).toHaveValue('b1')
     fireEvent.change(screen.getByLabelText('Target board'), { target: { value: 'b2' } })
     fireEvent.change(screen.getByLabelText('Ticket title'), { target: { value: 'Edited title' } })
+    fireEvent.change(screen.getByLabelText('Size'), { target: { value: 'L' } })
+    fireEvent.change(screen.getByLabelText('Risk'), { target: { value: 'high' } })
+    fireEvent.change(screen.getByLabelText('Complexity'), { target: { value: 'medium' } })
     fireEvent.change(screen.getByLabelText('Target repositories (optional)'), { target: { value: 'other/repo, second/repo' } })
     const updated = { ...draft, board_id: 'b2', board_name: 'Second board', title: 'Edited title', repos: ['other/repo', 'second/repo'] }
     action = url => url.endsWith('/draft') ? res(prop({ kind: 'board_file', arguments: updated })) : null
     fireEvent.click(screen.getByRole('button', { name: 'Save draft' }))
     await waitFor(() => expect(calls.some(c => c.method === 'PATCH')).toBe(true))
     const patch = calls.find(c => c.method === 'PATCH')!
-    expect(patch.body).toEqual({ expected_arguments_raw: before, draft: { board_id: 'b2', title: 'Edited title', body: 'Reproduction', type: 'bug', sensitive: true, repos: ['other/repo', 'second/repo'] } })
+    expect(patch.body).toEqual({ expected_arguments_raw: before, draft: { board_id: 'b2', title: 'Edited title', body: 'Reproduction', type: 'bug', sensitive: true, size: 'L', risk: 'high', complexity: 'medium', repos: ['other/repo', 'second/repo'] } })
     expect(posts()).toHaveLength(0)
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Save draft' })).not.toBeInTheDocument())
     expect(screen.getByTestId('proposal-args-p1')).toHaveTextContent('Edited title')
@@ -472,19 +489,17 @@ describe('Board filing proposals', () => {
     expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
     expect(posts()).toHaveLength(0)
   })
-  it('requires a fresh confirmation when a poll returns a changed draft', async () => {
+  it('approves the current exact draft when a poll returns changed arguments', async () => {
     renderPage()
-    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }))
-    expect(screen.getByRole('button', { name: 'Run it' })).toBeInTheDocument()
+    await screen.findByRole('button', { name: 'Approve' })
     const updated = { ...draft, title: 'Changed elsewhere' }
-    items = [prop({ kind: 'board_file', arguments: updated })]
+    items = [prop({ kind: 'board_file', tool: 'file_ticket', arguments: updated })]
     fireEvent(window, new Event('focus'))
     await waitFor(() => expect(screen.getByTestId('proposal-args-p1')).toHaveTextContent('Changed elsewhere'))
-    expect(screen.queryByRole('button', { name: 'Run it' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Confirm approve' })).not.toBeInTheDocument()
     expect(posts()).toHaveLength(0)
-    fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
     action = url => url === APPROVE ? res({}) : null
-    fireEvent.click(screen.getByRole('button', { name: 'Run it' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
     await waitFor(() => expect(posts()).toHaveLength(1))
     expect(posts()[0].body).toEqual({ expected_arguments_raw: JSON.stringify(updated) })
   })
@@ -523,9 +538,9 @@ describe('plugin request approval',()=>{
   renderPage()
   const card=await screen.findByTestId('proposal-p1')
   fireEvent.click(within(card).getByRole('button',{name:'Approve'}))
-  expect(within(card).getByRole('option',{name:'This session only'})).toBeDisabled()
+  expect(within(card).getByRole('option',{name:'This workspace only'})).toBeDisabled()
   expect(within(card).getByLabelText('Apply plugin')).toHaveValue('always')
-  expect(within(card).getByText(/new sessions/)).toBeInTheDocument()
+  expect(within(card).getByText(/new workspaces/)).toBeInTheDocument()
  })
 })
 
@@ -564,7 +579,7 @@ describe('readable proposal attention and history', () => {
     await waitFor(() => expect(screen.getByRole('tab', { name: 'Decided' }).getAttribute('aria-selected')).toBe('true'))
     expect(await screen.findByText('Decided by you')).toBeTruthy()
     const permission = screen.getByTestId('proposal-permission-p1')
-    expect(permission.textContent).toMatch(/Product · file · set by you in the session’s Permissions/)
+    expect(permission.textContent).toMatch(/Product · file · set by you in the workspace’s Permissions/)
     expect(permission.textContent).toMatch(/since revoked/)
     expect(within(screen.getByTestId('proposal-extensions-p1')).getByText(/Extended by you/)).toBeTruthy()
     expect(document.body.textContent).not.toMatch(/account-fixture|permission-fixture/)
@@ -586,14 +601,14 @@ describe('a proposed board on the Proposals page', () => {
     expect(preview.textContent).toContain('team/app primary')
     expect(preview.textContent).toContain('team/web')
     expect(preview.textContent).toContain('Todo · Done')
-    expect(screen.getByTestId('proposal-board-access-p1').textContent).toBe('File without asking, for this session only')
+    expect(screen.getByTestId('proposal-board-access-p1').textContent).toBe('File without asking, for this workspace only')
   })
 
   it('approves the exact arguments with the access asked for, or a lower one, never a higher one', async () => {
     items = [board()]
     renderPage()
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }))
-    const select = screen.getByLabelText('Session access to the new board') as HTMLSelectElement
+    const select = screen.getByLabelText('Workspace access to the new board') as HTMLSelectElement
     expect([...select.options].map(o => o.value)).toEqual(['full', 'file', 'read', 'propose'])
     expect(select.value).toBe('full')
     fireEvent.click(screen.getByRole('button', { name: 'Create board' }))
@@ -605,7 +620,7 @@ describe('a proposed board on the Proposals page', () => {
     items = [board('file')]
     renderPage()
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }))
-    const select = screen.getByLabelText('Session access to the new board') as HTMLSelectElement
+    const select = screen.getByLabelText('Workspace access to the new board') as HTMLSelectElement
     expect([...select.options].map(o => o.value)).toEqual(['file', 'read', 'propose'])
     fireEvent.change(select, { target: { value: 'read' } })
     fireEvent.click(screen.getByRole('button', { name: 'Create board' }))
@@ -613,3 +628,33 @@ describe('a proposed board on the Proposals page', () => {
     expect(posts()[0].body).toEqual({ expected_arguments_raw: items[0].arguments_raw, access: 'read' })
   })
 })
+
+it('approves board metadata with the exact reviewed configuration', async () => {
+  const args = { board_id: 'board-fixture', require_repo: false, columns: [{ name: 'Review' }], tags: [{ from: 'old', delete: true }] }
+  items = [prop({ kind: 'board_metadata', connection_name: 'Board metadata', tool: 'update_board_metadata', arguments: args, arguments_raw: JSON.stringify(args) })]
+  renderPage()
+  fireEvent.click(await screen.findByRole('button', { name: 'Approve' }))
+  expect(screen.getByTestId('proposal-args-p1').textContent).toContain('"require_repo": false')
+  expect(screen.queryByRole('button', { name: 'Allow for this workspace' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm approve' }))
+  await waitFor(() => expect(posts()).toHaveLength(1))
+  expect(posts()[0]).toEqual({ url: APPROVE, method: 'POST', body: { expected_arguments_raw: items[0].arguments_raw } })
+})
+
+ it.each(['blerg_card_archive', 'unknown_tool'])('requires confirmation before posting %s', async tool => {
+  items = [prop({ kind: 'mcp', tool })]
+  renderPage()
+  fireEvent.click(await screen.findByRole('button', { name: 'Approve' }))
+  expect(posts()).toHaveLength(0)
+  action = url => url === APPROVE ? res({}) : null
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm approve' }))
+  await waitFor(() => expect(posts()).toHaveLength(1))
+ })
+ it('files a card with one approval click', async () => {
+  items = [prop({ kind: 'board_file', tool: 'file_ticket' })]
+  action = url => url === APPROVE ? res({}) : null
+  renderPage()
+  fireEvent.click(await screen.findByRole('button', { name: 'Approve' }))
+  await waitFor(() => expect(posts()).toHaveLength(1))
+  expect(screen.queryByRole('button', { name: 'Confirm approve' })).toBeNull()
+ })

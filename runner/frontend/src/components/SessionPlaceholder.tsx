@@ -10,7 +10,7 @@ export default function SessionPlaceholder() {
       }}
     >
       <span style={{ color: 'var(--fog-dim)', fontSize: '1rem' }}>
-        Select a session
+        Select a workspace
       </span>
     </div>
   )

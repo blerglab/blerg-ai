@@ -306,9 +306,11 @@
   color: var(--lichen);
 }
 
-.rail-ask {
-  border-color: color-mix(in srgb, var(--amber) 45%, var(--stone));
-}
+/* Pending questions read like the inbox: flat one-line rows with hairline dividers (owner:
+   cards were too big and cluttered). The full text is in each row's hovercard and dialog. */
+.rail-ask { padding: 0; border: 0; border-radius: 0; background: transparent; }
+.rail-ask + .rail-ask, .question-queue > .question-card + .question-card { border-top: 1px solid var(--scree-2); }
+.rail-ask .question-card-open, .question-queue .question-card-open { padding-block: 6px; }
 
 .rail-ask-text {
   color: var(--chalk);
@@ -330,10 +332,9 @@
 
 .rail-reply .ask-reply-send {
   padding: 5px 12px;
-  border: 1px solid var(--accent-border);
+  border-width: 1px;
+  border-style: solid;
   border-radius: 6px;
-  background: var(--accent-bg);
-  color: var(--accent);
   font: inherit;
   font-size: var(--text-xs);
   font-weight: 700;
@@ -570,7 +571,7 @@
   border-color: var(--accent);
   /* A fixed dark ink, not --basalt (light in the light theme): AA on the accent in both themes
      (6.7:1 on the dark theme's blaze, 4.7:1 on the light theme's). */
-  color: #0d1117;
+  color: var(--button-fg, #0d1117);
   font-weight: 600;
 }
 
@@ -1650,8 +1651,33 @@ button.rail-work-item:hover { color: var(--chalk); text-decoration: underline; }
 .session-panel-pane .rail-header { padding-left: 16px; min-height: 45px; box-sizing: border-box; }
 
 .history-window { display: flex; flex-wrap: wrap; gap: 6px 10px; padding: 6px 0; font-size: 12px; color: var(--fog); }
+.history-pages { padding: 6px 16px 12px; }
 .reel-stroke-count { font-size: 10px; white-space: nowrap; }
 
 /* The panel owns its vertical scroll; its content cannot grow the session columns. */
 .session-panel-pane > .rail-header { flex-shrink: 0; }
 .session-panel-pane > .rail-body { min-width: 0; overflow-x: hidden; }
+
+.reel-card-title { overflow-wrap: anywhere; white-space: normal; }
+
+/* Small workspace options retain their natural size inside the panel. */
+.rail-options .reveal-controls { font-size: var(--text-xs); }
+.rail-options .reveal-controls label { display: inline-flex; align-items: center; gap: 6px; }
+.rail-verbosity { align-self: flex-start; max-width: 100%; }
+.rail-verbosity .settings-field { width: auto; display: block; }
+
+.question-modal .rail-item-kicker { justify-content: flex-start; gap: 8px; color: var(--chat-muted); font-weight: 400; letter-spacing: normal; text-transform: none; }
+.question-modal .rail-item-kicker { flex-wrap: wrap; }
+.question-modal .rail-wait { white-space: nowrap; }
+/* A worker card's second line never overflows its card: the glyphs stay whole, and the card
+   assignment after them truncates (its full text is in the tooltip/hovercard). */
+.rail-run-second .rail-run-glyphs { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.rail-run-second .rail-run-glyphs > :not(.rail-run-glyph):not([class*="glyph"]) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-run-second .rail-run-glyphs > .rail-work { display: inline-flex; align-items: center; gap: 4px; }
+.rail-run-second .rail-run-glyphs > .rail-work > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Question rows never expand: drop the tree's empty chevron slot so they start at the left edge. */
+.question-card .workspace-chevron { display: none; }
+.rail-ask .workspace-row, .question-queue .workspace-row { padding-inline-start: 6px; }
+
+/* Answerable content must never disappear behind a line clamp. */
+.rail-ask .rail-item-title { display: block; -webkit-line-clamp: unset; overflow: visible; }

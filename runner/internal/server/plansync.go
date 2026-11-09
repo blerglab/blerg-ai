@@ -10,11 +10,11 @@ package server
 //     pinned, filled from the Board. With five pinned already, the oldest pin whose card is done is
 //     unpinned first; when none is done the card is not pinned and the next nudge says so.
 //   - A card the session moves into a done column is unpinned, and every open checklist item whose
-//     text names it (#N as a whole token, the same parsing as the chat's card chips, on the
+//     text names it (#N or the bound board's current key as a whole token, on the
 //     session's one board) is ticked with the note "ticked: #N done".
 //   - A board-started session pins the card it was started for.
-//   - A child session started with a title or prompt naming #N is assigned to the parent's open
-//     checklist item naming #N.
+//   - A child session started with a title or prompt naming a card is assigned to the parent's open
+//     checklist item naming the same card.
 //   - A Blerg Board card pinned with `blerg-runner pin` is filled from the Board (title,
 //     description, column, type, priority, tags); what the agent sent stays only where the Board
 //     has nothing.
@@ -35,6 +35,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"slices"
@@ -45,6 +46,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 
 	"github.com/blerglab/blerg-ai/runner/internal/checklist"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
@@ -59,37 +62,45 @@ const planDriftSource = "plan_drift"
 // planCheckTimeout bounds one turn's check: its reads, the board reads and the relay.
 const planCheckTimeout = 45 * time.Second
 
-// ─── #N in text ───────────────────────────────────────────────────────────────
+// ─── Card references in text ──────────────────────────────────────────────────
 
 func isWordByte(b byte) bool {
 	return b == '_' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
-// cardRefs are the card numbers text names as whole tokens, in order, each once: "#147", not
+// cardRefs recognizes #N and the bound board's key as whole tokens, in order, each once, not
 // "&#147", "a#1", "/#1", "##1", "#1a", "#1-2" or a number of more than 7 digits (the chat's rule,
 // packages/chat/src/model/refs.ts).
-func cardRefs(text string) []int {
+func cardRefs(text string, boardKey ...string) []int {
+	prefix := ""
+	if len(boardKey) > 0 && boardKeyReference.MatchString(boardKey[0]) {
+		prefix = boardKey[0] + "-"
+	}
 	var out []int
 	for i := 0; i < len(text); i++ {
+		start := i + 1
 		if text[i] != '#' {
-			continue
+			if prefix == "" || !strings.HasPrefix(text[i:], prefix) {
+				continue
+			}
+			start = i + len(prefix)
 		}
 		if i > 0 {
 			if p := text[i-1]; isWordByte(p) || p == '&' || p == '#' || p == '/' {
 				continue
 			}
 		}
-		j := i + 1
+		j := start
 		for j < len(text) && text[j] >= '0' && text[j] <= '9' {
 			j++
 		}
-		if j == i+1 || j-i-1 > 7 {
+		if j == start || j-start > 7 {
 			continue
 		}
 		if j < len(text) && (isWordByte(text[j]) || text[j] == '-') {
 			continue
 		}
-		n, _ := strconv.Atoi(text[i+1 : j])
+		n, _ := strconv.Atoi(text[start:j])
 		if n > 0 && !slices.Contains(out, n) {
 			out = append(out, n)
 		}
@@ -288,6 +299,11 @@ func (a *API) appendWorkEvents(ctx context.Context, tx pgx.Tx, sid string, event
 		if err != nil {
 			return err
 		}
+		if ev.kind == "checklist" {
+			if err = tx.QueryRow(ctx, `SELECT payload FROM agent_events WHERE session_id=$1 AND seq=$2`, sid, seq).Scan(&raw); err != nil {
+				return err
+			}
+		}
 		done = append(done, stored{seq, id, at, workEvent{ev.kind, raw}})
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -410,7 +426,7 @@ func (a *API) planPinCard(ctx context.Context, row *db.SessionRow, card *liveBoa
 	if rows, err = db.ListTicketRows(ctx, tx, row.ID, 1<<62); err != nil {
 		return err
 	}
-	if len(rows) >= ticket.MaxEvents-1 {
+	if n, err := db.CountRecentWork(ctx, tx, row.ID, "ticket"); err != nil || n >= ticket.MaxEventsPerMinute-1 {
 		return nil
 	}
 	pinned := ticket.Pinned(rows)
@@ -430,8 +446,8 @@ func (a *API) planPinCard(ctx context.Context, row *db.SessionRow, card *liveBoa
 		}
 		if drop == nil {
 			key := fmt.Sprintf("cap:%s#%d", card.BoardID, card.Number)
-			text := fmt.Sprintf("#%d moved to %s but was not pinned: %d tickets are pinned and none of them is done. Unpin one you are not working on (`blerg-runner unpin %s`), then pin #%d (`blerg-runner pin`).",
-				card.Number, quotedName(card.ColumnName), ticket.MaxPinned, "<source>:<key>", card.Number)
+			text := fmt.Sprintf("#%d was not pinned: %d tickets are pinned and none of them is done. Unpin one you are not working on (`blerg-runner unpin %s`), then pin #%d (`blerg-runner pin`).",
+				card.Number, ticket.MaxPinned, "<source>:<key>", card.Number)
 			if err := db.AddPlanFact(ctx, tx, row.ID, key, text); err != nil {
 				return err
 			}
@@ -489,13 +505,14 @@ func (a *API) planTickCard(ctx context.Context, sid string, number int) error {
 	if err != nil || row == nil {
 		return err
 	}
+	key := a.planBoardKey(ctx, row, a.planSessionBoard(ctx, row))
 	ws, err := readWorkState(ctx, a.dbPool, sid, 1<<62)
 	if err != nil {
 		return err
 	}
 	if ws.Checklist != nil {
 		for _, it := range ws.Checklist.Items {
-			refs := cardRefs(it.Text)
+			refs := cardRefs(it.Text, key)
 			if it.Done || !slices.Contains(refs, number) {
 				continue
 			}
@@ -531,7 +548,7 @@ func (a *API) planTickCard(ctx context.Context, sid string, number int) error {
 	items := cur.Items
 	var events []workEvent
 	for _, it := range cur.Items {
-		if it.Done || !slices.Contains(cardRefs(it.Text), number) || slices.ContainsFunc(cardRefs(it.Text), func(n int) bool { return !done[n] }) || n+len(events) >= checklist.MaxEventsPerMinute {
+		if it.Done || !slices.Contains(cardRefs(it.Text, key), number) || slices.ContainsFunc(cardRefs(it.Text, key), func(n int) bool { return !done[n] }) || n+len(events) >= checklist.MaxEventsPerMinute {
 			continue
 		}
 		p, err := checklist.Apply(items, checklist.Request{Op: "tick", ItemID: it.ID})
@@ -555,6 +572,9 @@ func (a *API) planTickCard(ctx context.Context, sid string, number int) error {
 // planBoardToolDone reads a successful blerg_card_move's result (the moved card) and applies the
 // rules before the tool reply, so turn-end sees them. tool and result are the board tool's name and MCP result.
 func (a *API) planBoardToolDone(parent context.Context, sid, boardID, tool string, result json.RawMessage) {
+	if a != nil && a.dbPool != nil && invariantMutation(tool) && boardToolResult(result, nil) == nil {
+		go a.scheduleBoardEventInvariants(parent, sid)
+	}
 	if (tool != "blerg_card_move" && tool != "blerg_card_archive") || a == nil || a.dbPool == nil {
 		return
 	}
@@ -602,7 +622,13 @@ func (a *API) planSessionStarted(ctx context.Context, sid, parentID, boardID, ti
 		}
 	}
 	if parentID != "" {
-		if err := a.planAssignChild(ctx, parentID, sid, preferredPlanRefs(title, prompt)); err != nil {
+		parent, err := db.GetSession(ctx, a.dbPool, parentID)
+		if err != nil || parent == nil {
+			slog.Warn("plan: child assignment unavailable", "cause", "parent_read_failed")
+			return
+		}
+		key := a.planBoardKey(ctx, parent, a.planSessionBoard(ctx, parent))
+		if err := a.planAssignChild(ctx, parentID, sid, preferredPlanRefs(title, prompt, key), key); err != nil {
 			log.Printf("plan: assign child %s of %s: %v", sid, parentID, err)
 		}
 	}
@@ -611,6 +637,9 @@ func (a *API) planSessionStarted(ctx context.Context, sid, parentID, boardID, ti
 // planPinStarted pins the card a board-started session was started for, filled from the Board when
 // the session can read it, else from what the start said.
 func (a *API) planPinStarted(ctx context.Context, sid, boardID string, number int, title string) error {
+	if _, err := a.dbPool.Exec(ctx, `INSERT INTO session_capture_launch_cards(session_id,board_id,card_number) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, sid, boardID, number); err != nil {
+		return err
+	}
 	raw, _ := json.Marshal(map[string]any{"source": ticket.SourceBoard, "key": "#" + strconv.Itoa(number), "board_id": boardID, "title": title})
 	t, err := ticket.Clean(raw)
 	if err != nil {
@@ -638,7 +667,7 @@ func (a *API) planPinStarted(ctx context.Context, sid, boardID string, number in
 }
 
 // planAssignChild assigns child to the parent's first open checklist item naming one of numbers.
-func (a *API) planAssignChild(ctx context.Context, parentID, child string, numbers []int) error {
+func (a *API) planAssignChild(ctx context.Context, parentID, child string, numbers []int, key string) error {
 	if len(numbers) == 0 {
 		return nil
 	}
@@ -663,7 +692,7 @@ func (a *API) planAssignChild(ctx context.Context, parentID, child string, numbe
 	}
 	matches := 0
 	for _, it := range cur.Items {
-		if !it.Done && slices.ContainsFunc(cardRefs(it.Text), func(n int) bool { return slices.Contains(numbers, n) }) {
+		if !it.Done && slices.ContainsFunc(cardRefs(it.Text, key), func(n int) bool { return slices.Contains(numbers, n) }) {
 			matches++
 		}
 	}
@@ -671,7 +700,7 @@ func (a *API) planAssignChild(ctx context.Context, parentID, child string, numbe
 		return nil
 	}
 	for _, it := range cur.Items {
-		if it.Done || !slices.ContainsFunc(cardRefs(it.Text), func(n int) bool { return slices.Contains(numbers, n) }) {
+		if it.Done || !slices.ContainsFunc(cardRefs(it.Text, key), func(n int) bool { return slices.Contains(numbers, n) }) {
 			continue
 		}
 		worker := checklist.Assignee{Kind: "child_session", ID: child}
@@ -736,6 +765,10 @@ func (a *API) onPlanTurnEnded(sessionID string, seq int64, at time.Time, stopRea
 		ctx, cancel := context.WithTimeout(context.Background(), planCheckTimeout)
 		defer cancel()
 		a.checkPlanTurn(ctx, sessionID, seq, at, stopReason)
+		// Closing this flight never waits for telemetry. Incoming messages and
+		// existing plan nudges have no dependency on process/history accounting.
+		go a.queueTelemetryTurn(sessionID, seq)
+
 	}()
 }
 
@@ -748,12 +781,35 @@ type planFact struct {
 // nudge told yet, holds each fact for the next input. It never sends an input.
 func (a *API) checkPlanTurn(ctx context.Context, sid string, seq int64, at time.Time, stopReason string) {
 	if stopReason == "interrupted" || stopReason == "error" {
+		slog.Info("board_code", "operation", "board_code", "session_id", sid, "outcome", "turn_not_completed")
 		return
 	}
 	row, err := db.GetSession(ctx, a.dbPool, sid)
-	if err != nil || row == nil || row.Kind != "agent" || parentEnded(row) || row.ArchivedAt != nil || row.DiscardRequestedAt != nil {
+	if err != nil {
+		boardCodeError("session_read_failed", err)
+		slog.Info("board_code", "operation", "board_code", "session_id", sid, "outcome", "session_read_failed")
 		return
 	}
+	skipped := ""
+	switch {
+	case row == nil:
+		skipped = "session_missing"
+	case row.Kind != "agent":
+		skipped = "not_agent"
+	case parentEnded(row):
+		skipped = "session_ended"
+	case row.ArchivedAt != nil:
+		skipped = "session_archived"
+	case row.DiscardRequestedAt != nil:
+		skipped = "session_discarded"
+	}
+	if skipped != "" {
+		slog.Info("board_code", "operation", "board_code", "session_id", sid, "outcome", skipped)
+		return
+	}
+	ctx = boardReconcileContext(ctx)
+	codeFacts := a.reconcileBoardInvariants(ctx, row)
+	codeFacts = append(codeFacts, a.reconcileBoardCode(ctx, row, at)...)
 	if on, err := db.PlanNudgesOn(ctx, a.dbPool, sid); err != nil || !on {
 		return
 	}
@@ -761,7 +817,22 @@ func (a *API) checkPlanTurn(ctx context.Context, sid string, seq int64, at time.
 	if !a.planTurns.first(clientID) {
 		return
 	}
+
+	// Card-time budget crossing (BLG-444) is no longer checked from here. Codex round 3 (H): a
+	// read made independently at turn-end races BLG-424's own async materialization of this
+	// session's timing (agentevents.go queues it; the queue is drained on its own goroutine) —
+	// reading before that refresh lands sees "pending" and nothing ever retried, so a worker
+	// finishing its last turn above budget could produce no notice at all. The check now runs
+	// from db.CheckCardTimeCrossing, invoked only once this session's timing has actually been
+	// materialized: from the insight-timing queue drain (internal/db/insights_timing_cache.go's
+	// ProcessQueuedInsightTimings) and from the ended-session backfill
+	// (backfillInsightTiming) — both already run off their own goroutine, so M3/H2 (never
+	// suppress or delay this turn's other drift facts) hold without checkPlanTurn doing anything
+	// here at all.
+
 	facts, err := a.planDrift(ctx, row, seq, at)
+	facts = append(facts, codeFacts...)
+	facts = append(facts, a.planIdleWork(ctx, row, seq)...)
 	if err != nil {
 		a.planTurns.forget(clientID)
 		log.Printf("plan drift %s: %v", sid, err)
@@ -772,6 +843,7 @@ func (a *API) checkPlanTurn(ctx context.Context, sid string, seq int64, at time.
 	}
 	for _, f := range facts {
 		if err := db.AddPlanFact(ctx, a.dbPool, sid, f.key, f.text); err != nil {
+			slog.Warn("plan_drift", "operation", "plan_fact_save", "cause", failurelog.Cause(err))
 			return
 		}
 	}
@@ -781,13 +853,17 @@ func (a *API) checkPlanTurn(ctx context.Context, sid string, seq int64, at time.
 func (a *API) preparePlanNudge(dc *DaemonConn, raw []byte) ([]byte, func(bool)) {
 	return a.preparePlanNudgeMode(dc, raw, false)
 }
-func (a *API) preparePlanNudgeMode(dc *DaemonConn, raw []byte, initial bool) ([]byte, func(bool)) {
+func (a *API) preparePlanNudgeMode(dc *DaemonConn, raw []byte, initial bool) (out []byte, finish func(bool)) {
+	defer func() { out = a.attachPersonTime(out) }()
 	var in protocol.AgentUserMessage
 	if json.Unmarshal(raw, &in) != nil || in.Type != "agent_user_message" {
 		return raw, nil
 	}
 	in.PlanNudge = "" // The transport field is never accepted from a caller or a saved client frame.
 	raw, _ = json.Marshal(in)
+	if initial && in.Source == "clock_metadata" {
+		return raw, nil
+	} // Clock refresh must not claim plan facts without a carrying turn.
 	dc.liveMu.Lock()
 	capable := dc.planNudges
 	dc.liveMu.Unlock()
@@ -911,7 +987,7 @@ func (a *API) preparePlanNudgeMode(dc *DaemonConn, raw []byte, initial bool) ([]
 			return raw, nil
 		}
 	}
-	out, err := json.Marshal(in)
+	out, err = json.Marshal(in)
 	if err != nil {
 		_ = tx.Rollback(context.Background())
 		return raw, nil
@@ -937,8 +1013,27 @@ func (a *API) attachPlanNudge(dc *DaemonConn, raw []byte) []byte {
 	return out
 }
 
+// telemetryFactStale says a held worker fact names a worker that has already finished.
+func telemetryFactStale(key string, children []db.PlanChild) bool {
+	for _, prefix := range []string{"telemetry:gates:", "telemetry:idle:", "telemetry:long:"} {
+		ref, ok := strings.CutPrefix(key, prefix)
+		if !ok {
+			continue
+		}
+		for _, c := range children {
+			if c.ID == ref && (c.Status == "stopped" || c.Status == "ended" || c.Status == "discarded" || c.Status == "failed") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // planNudgeText is the nudge: what drifted, one line each, with the commands that fix it.
 func planNudgeText(facts []planFact) string {
+	if len(facts) == 1 && strings.HasPrefix(facts[0].key, "telemetry:snapshot") {
+		return facts[0].text
+	}
 	var b strings.Builder
 	b.WriteString("Your plan drifted from what you are doing:\n")
 	for _, f := range facts {
@@ -1032,8 +1127,7 @@ func (a *API) planDriftAt(ctx context.Context, row *db.SessionRow, seq int64, at
 						}
 						if done {
 							facts = append(facts, planFact{key: fmt.Sprintf("closed:%s#%d", p.BoardID, n), text: fmt.Sprintf(
-								"#%d %s is closed on the board (%s). Unpin it: `blerg-runner unpin %s`%s.",
-								n, quotedName(c.Title), quotedName(c.ColumnName), pinRef(p), tickHint(items, n))})
+								"#%d is closed on the board. Read your pinned cards and update your checklist.", n)})
 						}
 					}
 				}
@@ -1155,7 +1249,7 @@ func (a *API) planDriftAt(ctx context.Context, row *db.SessionRow, seq int64, at
 		} else if asked < planMergedChecksPerTurn {
 			asked++
 			if merged, _ := a.planChildMergedCheck(ctx, row, c.ID); merged {
-				why = "its branch wip/" + c.ID + " is merged"
+				why = "its branch " + a.recordedWorkBranch(ctx, c.ID) + " is merged"
 			}
 		}
 		if why == "" {
@@ -1181,6 +1275,38 @@ func (a *API) planDriftAt(ctx context.Context, row *db.SessionRow, seq int64, at
 			c, err := a.planReadCard(ctx, row, board, n)
 			if err == nil && columnInProgress(c.ColumnName) && !cardDone(c) {
 				facts = append(facts, planFact{key: f.Key, text: f.Text})
+			}
+		}
+	}
+
+	if delivery {
+		for _, held := range pending {
+			switch {
+			case strings.HasPrefix(held.Key, "telemetry:"):
+				if strings.HasPrefix(held.Key, "telemetry:snapshot:") && held.Key != fmt.Sprintf("telemetry:snapshot:%d", seq) {
+					continue
+				}
+				if telemetryFactStale(held.Key, children) {
+					continue
+				}
+				facts = append(facts, planFact{key: held.Key, text: held.Text})
+			case strings.HasPrefix(held.Key, "idle:"):
+				// Recheck only the latest idle turn; delivery never creates a turn.
+				if held.Key == fmt.Sprintf("idle:%d", seq) {
+					facts = append(facts, a.planIdleWorkMode(ctx, row, seq, false)...)
+				}
+			case strings.HasPrefix(held.Key, "code:"):
+				if !a.heldBoardCodeFact(ctx, row, held.Key) {
+					continue
+				}
+				facts = append(facts, planFact{key: held.Key, text: strings.TrimSuffix(held.Text, " Main commit: .")})
+			case strings.HasPrefix(held.Key, "cardtime:"):
+				// A card-time budget crossing (BLG-444) is computed once, atomically with its own
+				// dedup row, at the worker's turn-end — never recomputed here (M4: this delivery
+				// path must stay cheap, and the crossing is a one-time historical fact, not a
+				// live state to re-validate on every attempt). Pass it through unconditionally,
+				// the same way "telemetry:" facts already do.
+				facts = append(facts, planFact{key: held.Key, text: held.Text})
 			}
 		}
 	}
@@ -1221,7 +1347,7 @@ func (a *API) planChildMergedCheck(ctx context.Context, row *db.SessionRow, chil
 	if dc == nil {
 		return false, time.Time{}
 	}
-	requests := []protocol.ReadCommit{{SessionID: row.ID, MergedChild: child}}
+	requests := []protocol.ReadCommit{{SessionID: row.ID, MergedChild: child, ChildBranch: a.recordedWorkBranch(ctx, child)}}
 	if a.dbPool != nil {
 		parentWS, err := db.GetSessionWorkspace(ctx, a.dbPool, row.ID)
 		if err != nil {
@@ -1247,7 +1373,7 @@ func (a *API) planChildMergedCheck(ctx context.Context, row *db.SessionRow, chil
 				if !protocol.ValidSessionOriginCommit(base) {
 					return false, time.Time{}
 				}
-				requests = append(requests, protocol.ReadCommit{SessionID: row.ID, MergedChild: child, ChildLaunchGeneration: childWS.Manifest.LaunchGeneration, ChildBase: base, WorkspaceGitRef: protocol.WorkspaceGitRef{WorkspaceRuntimeRef: binding.WorkspaceRuntimeRef, MemberID: member.ID}})
+				requests = append(requests, protocol.ReadCommit{SessionID: row.ID, MergedChild: child, ChildBranch: a.recordedWorkBranch(ctx, child), ChildLaunchGeneration: childWS.Manifest.LaunchGeneration, ChildBase: base, WorkspaceGitRef: protocol.WorkspaceGitRef{WorkspaceRuntimeRef: binding.WorkspaceRuntimeRef, MemberID: member.ID}})
 			}
 			if len(requests) == 0 {
 				return false, time.Time{}
@@ -1266,28 +1392,9 @@ func (a *API) planChildMergedCheck(ctx context.Context, row *db.SessionRow, chil
 }
 
 func childLabel(c db.PlanChild) string {
-	if t := strings.TrimSpace(c.Title); t != "" {
-		return t
-	}
+	// A plan nudge is trusted model input too. Worker-set titles belong only
+	// in explicit data reads, never in this alternate notice path.
 	return c.ID
-}
-
-// tickHint names the open checklist items about card n, when there are some.
-func tickHint(items []checklist.Item, n int) string {
-	var nums []string
-	for i, it := range items {
-		if !it.Done && len(cardRefs(it.Text)) == 1 && slices.Contains(cardRefs(it.Text), n) {
-			nums = append(nums, strconv.Itoa(i+1))
-		}
-	}
-	if len(nums) == 0 {
-		return ""
-	}
-	cmds := make([]string, len(nums))
-	for i, s := range nums {
-		cmds[i] = "`blerg-runner checklist tick " + s + "`"
-	}
-	return ", and tick its item (" + strings.Join(cmds, ", ") + ")"
 }
 
 // ─── The setting ──────────────────────────────────────────────────────────────
@@ -1349,10 +1456,10 @@ func planChecklistKey(items []checklist.Item) string {
 func validPlanWorkerID(id string) bool {
 	return regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`).MatchString(id)
 }
-func preferredPlanRefs(title, prompt string) []int {
-	refs := cardRefs(title)
+func preferredPlanRefs(title, prompt string, key ...string) []int {
+	refs := cardRefs(title, key...)
 	if len(refs) == 0 {
-		refs = cardRefs(prompt)
+		refs = cardRefs(prompt, key...)
 	}
 	if len(refs) != 1 {
 		return nil
@@ -1414,4 +1521,34 @@ func (s *planMergeScan) offset(sid string, seq int64, n int) int {
 	}
 	s.windows[sid] = w
 	return w.offset % n
+}
+
+// planBoardKey reads only the bound board's current key with the session's access.
+// Failed discovery retains numeric references; it never guesses another prefix.
+func (a *API) planBoardKey(ctx context.Context, row *db.SessionRow, board string) string {
+	if board == "" {
+		return ""
+	}
+	level, err := a.effectiveBoardLevel(ctx, row, board)
+	if err != nil {
+		slog.Warn("plan: board key unavailable", "cause", "access_check_failed")
+		return ""
+	}
+	proof, ok := level.proof()
+	if !ok || !mcpgw.BoardLevelAllows(level.Level, "blerg_card_get") {
+		slog.Warn("plan: board key unavailable", "cause", "access_denied")
+		return ""
+	}
+	boards, err := a.filingBoards(ctx, proof, board)
+	if err != nil {
+		slog.Warn("plan: board key unavailable", "cause", "discovery_failed")
+		return ""
+	}
+	for _, b := range boards {
+		if b.ID == board {
+			return b.Key
+		}
+	}
+	slog.Warn("plan: board key unavailable", "cause", "board_not_found")
+	return ""
 }

@@ -2,10 +2,10 @@ package api
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"strings"
 
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	cid "github.com/blerglab/blerg-ai/contracts/identity"
 )
 
@@ -56,6 +56,7 @@ func verifyBearer(w http.ResponseWriter, r *http.Request, deps Deps) (cid.Princi
 	}
 	keys, err := deps.Identity.JWKS(r.Context())
 	if err != nil {
+		failurelog.SetCause(w, err)
 		http.Error(w, "key lookup failed", http.StatusInternalServerError)
 		return cid.Principal{}, false
 	}
@@ -66,6 +67,7 @@ func verifyBearer(w http.ResponseWriter, r *http.Request, deps Deps) (cid.Princi
 	// empty revocation view.
 	checker, err := deps.revChecker(r.Context())
 	if err != nil {
+		failurelog.SetCause(w, err)
 		http.Error(w, "revocation check unavailable", http.StatusServiceUnavailable)
 		return cid.Principal{}, false
 	}
@@ -73,8 +75,8 @@ func verifyBearer(w http.ResponseWriter, r *http.Request, deps Deps) (cid.Princi
 	if err != nil {
 		// The real verification error (malformed/expired/wrong-audience/revoked/...) is never
 		// echoed to the caller (audit M-7) — that's a distinguishing oracle for someone probing
-		// tokens. Log it for operators; the caller gets one generic message regardless of cause.
-		log.Printf("verifyBearer: %v", err)
+		// tokens. Attach a safe cause to the shared, rate-limited middleware entry.
+		failurelog.SetCause(w, err)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return cid.Principal{}, false
 	}

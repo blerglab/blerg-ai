@@ -20,6 +20,7 @@ import (
 	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/testsupport"
 	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -67,14 +68,22 @@ func privPool(t *testing.T) *pgxpool.Pool {
 
 func newPrivFixture(t *testing.T) *privFixture {
 	t.Helper()
-	pool := privPool(t)
-	daemonID := "0d0d0d0d-0d0d-4d0d-8d0d-0d0d0d0d0d0d"
+	return newPrivFixtureWithPool(t, privPool(t), "0d0d0d0d-0d0d-4d0d-8d0d-0d0d0d0d0d0d")
+}
+
+// A matrix may own one private database while each case owns fresh daemon and
+// session rows. Ordinary privacy tests still allocate their own database above.
+func newPrivFixtureWithPool(t *testing.T, pool *pgxpool.Pool, daemonID string) *privFixture {
+	t.Helper()
+	seedPhase := testsupport.Phase(t, "seed")
 	if err := db.UpsertDaemon(context.Background(), pool, daemonID, "laptop", "local", "/repos"); err != nil {
 		t.Fatal(err)
 	}
 	hub := NewHub()
 	dc := &DaemonConn{ID: daemonID, Name: "laptop", ReposRoot: "/repos", send: make(chan []byte, 8)}
+	dc.SetAuthoritativeAnswers(true)
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	hub.Register(dc)
 	api := NewAPI(hub, pool, spawnTokenDaemonTok, nil, "")
 	fixtureOwnDesktop(t, pool, dc, privAcctA)
@@ -118,6 +127,9 @@ func newPrivFixture(t *testing.T) *privFixture {
 	if f.pubMsg, err = db.CreateMessage(ctx, pool, f.pubSession, "ask", "public question"); err != nil {
 		t.Fatal(err)
 	}
+	seedPhase.End()
+	bodyPhase := testsupport.Phase(t, "body")
+	bodyPhase.Cleanup()
 	return f
 }
 
@@ -410,13 +422,14 @@ func TestPrivateSession_CompletionWebhook(t *testing.T) {
 	}
 }
 
-// Push: a private session's notification is never sent (the subscription has no account).
-func TestPrivateSession_NoPush(t *testing.T) {
+// Push checks private-session ownership even if a caller chooses the wrong account.
+func TestPrivateSession_PushOnlyOwner(t *testing.T) {
 	f := newPrivFixture(t)
+	livePushCore(t)
 	t.Setenv("BLERG_RUNNER_VAPID_PUBLIC_KEY", "x")
 	t.Setenv("BLERG_RUNNER_VAPID_PRIVATE_KEY", "y")
 	ctx := context.Background()
-	if err := db.UpsertPushSubscription(ctx, f.pool, "http://127.0.0.1:1/never", "p", "a"); err != nil {
+	if err := db.UpsertPushSubscription(ctx, f.pool, "http://127.0.0.1:1/never", "p", "a", privAcctB, testSID); err != nil {
 		t.Fatal(err)
 	}
 	var sent atomic.Int32
@@ -427,24 +440,27 @@ func TestPrivateSession_NoPush(t *testing.T) {
 	}
 	t.Cleanup(func() { sendWebPush = saved })
 
-	SendPush(f.pool, "t", "b", "/sessions/"+f.privSession)
+	SendPushToAccount(f.pool, privAcctB, "t", "b", "/sessions/"+f.privSession)
 	if sent.Load() != 0 {
 		t.Fatal("SendPush attempted a delivery for a private session")
 	}
-	SendPush(f.pool, "t", "b", "/sessions/"+f.pubSession)
+	SendPushToAccount(f.pool, privAcctB, "t", "b", "/sessions/"+f.pubSession)
 	if sent.Load() == 0 {
 		t.Fatal("SendPush must still attempt delivery for a non-private session")
 	}
 
-	// The two callers skip on their own, before ever reaching SendPush.
+	// The real message sender resolves the private session owner.
 	row, err := db.GetSession(ctx, f.pool, f.privSession)
 	if err != nil || row == nil || !row.Private {
 		t.Fatalf("row: %+v %v", row, err)
 	}
+	if err := db.UpsertPushSubscription(ctx, f.pool, "https://push.example.com/owner", "p", "a", privAcctA, testSID); err != nil {
+		t.Fatal(err)
+	}
 	before := sent.Load()
 	f.api.pushForMessage(*row, db.MessageRow{Kind: "ask", Body: "q"})
-	if sent.Load() != before {
-		t.Error("pushForMessage pushed for a private session")
+	if sent.Load() != before+1 {
+		t.Error("pushForMessage did not notify the private session owner")
 	}
 }
 
@@ -630,8 +646,14 @@ func TestPrivateSession_BrowserSocketInbound(t *testing.T) {
 	}
 
 	// The owner, by contrast, is served (subscribe, replay, input).
+	// Close the fixture's question so the next chat message is a new prompt,
+	// rather than an answer held in the question outbox.
+	if answered, err := db.AnswerMessage(context.Background(), f.pool, f.privMsg, "fixture answer"); err != nil || !answered {
+		t.Fatalf("answer fixture question: %v %v", answered, err)
+	}
+
 	a.send(t, map[string]any{"type": "subscribe_agent_events", "session_id": psid, "after_seq": 0})
-	a.send(t, map[string]any{"type": "send_input", "session_id": psid, "data": "ls"})
+	a.send(t, map[string]any{"type": "agent_user_message", "session_id": psid, "text": "ls"})
 	ga := a.until(t, "agent_events_replay_done")
 	if !anyContains(ga, protocol.CapabilitiesKind) {
 		t.Errorf("owner's replay missed the persisted events: %v", ga)
@@ -639,7 +661,7 @@ func TestPrivateSession_BrowserSocketInbound(t *testing.T) {
 	select {
 	case <-f.dc.send:
 	case <-time.After(15 * time.Second):
-		t.Fatal("the owner's send_input never reached the daemon")
+		t.Fatal("the owner's agent message never reached the daemon")
 	}
 }
 
@@ -742,5 +764,74 @@ func TestPrivacyLoadedAtStartupAndFailsClosed(t *testing.T) {
 	}
 	if blind.accountCanSee(privAcctA, f.pubSession) {
 		t.Error("accountCanSee must fail closed when the hub cannot tell")
+	}
+}
+
+// ServeBrowser enforces privacy without relying on an API constructor configuring its hub.
+func TestBrowserStandalonePrivateCommands(t *testing.T) {
+	for _, upper := range []bool{false, true} {
+		name := "canonical"
+		if upper {
+			name = "uppercase"
+		}
+		t.Run(name, func(t *testing.T) { testBrowserStandalonePrivateCommands(t, upper) })
+	}
+}
+
+func testBrowserStandalonePrivateCommands(t *testing.T, upper bool) {
+	f := newPrivFixture(t)
+	if upper {
+		f.privSession = strings.ToUpper(f.privSession)
+	}
+	hub := NewHub()
+	hub.Register(f.dc)
+	hub.SetSessionOwner(f.privSession, f.dc.ID)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/browser", hub.ServeBrowser(f.pool, f.api.AuthorizeBrowserWS))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	a := f.dial(t, srv, f.tok(t, "human", privAcctA, coreAuthBrowserCap))
+	b := f.dial(t, srv, f.tok(t, "human", privAcctB, coreAuthBrowserCap))
+	a.until(t, "initial_state")
+	b.until(t, "initial_state")
+	ctx := context.Background()
+	if err := db.SetSessionUnread(ctx, f.pool, f.privSession, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, typ := range []string{"subscribe_session", "unsubscribe_session", "subscribe_agent_events", "send_input", "resize_session", "request_scrollback", "agent_user_message", "set_session_model", "release_held_prompt", "interrupt_session", "mark_session_read", "set_session_star"} {
+		b.send(t, map[string]any{"type": typ, "session_id": f.privSession, "starred": true, "data": "ignored", "text": "ignored", "model": "opus", "cols": 80, "rows": 24})
+	}
+	// A replay on the same socket fences completion of the preceding commands.
+	b.send(t, map[string]any{"type": "subscribe_agent_events", "session_id": f.pubSession})
+	if got := b.until(t, "agent_events_replay_done"); anyContains(got, f.privSession) {
+		t.Errorf("non-owner observed private id: %v", got)
+	}
+	select {
+	case raw := <-f.dc.send:
+		t.Fatalf("non-owner command reached daemon: %s", raw)
+	default:
+	}
+	row, err := db.GetSession(ctx, f.pool, f.privSession)
+	if err != nil || row == nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if !row.Unread || row.Starred {
+		t.Errorf("non-owner changed private flags: unread=%v starred=%v", row.Unread, row.Starred)
+	}
+	for _, typ := range []string{"mark_session_read", "set_session_star"} {
+		a.send(t, map[string]any{"type": typ, "session_id": f.privSession, "starred": true})
+	}
+	a.until(t, "session_star_changed")
+	// Fence the owner's read pump too: its broadcasts must have finished
+	// enqueueing for every browser before B's final replay marker.
+	a.send(t, map[string]any{"type": "subscribe_agent_events", "session_id": f.pubSession})
+	a.until(t, "agent_events_replay_done")
+	b.send(t, map[string]any{"type": "subscribe_agent_events", "session_id": f.pubSession})
+	if got := b.until(t, "agent_events_replay_done"); anyContains(got, f.privSession) {
+		t.Errorf("owner's update leaked private id: %v", got)
+	}
+	row, err = db.GetSession(ctx, f.pool, f.privSession)
+	if err != nil || row == nil || row.Unread || !row.Starred {
+		t.Fatalf("owner flags not persisted: %+v, %v", row, err)
 	}
 }

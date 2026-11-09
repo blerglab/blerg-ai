@@ -256,3 +256,72 @@
     padding: 2px 14px;
   }
 }
+/* The live ticket dialog takes the chat's bounded sheet (worklist.css: min(1120px, 90vw)); maximize
+   (⤢) still goes edge to edge on an ultrawide workspace. */
+
+/* Measure the sheet, including a narrow pane in a wide workspace. */
+.ticket-modal:has(.board-ticket-actions) {
+  container-type: inline-size;
+}
+.board-ticket-actions { display: contents; }
+.board-ticket-open-icon { display: none; }
+.ticket-modal:has(.board-ticket-actions) .ticket-key {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@container (max-width: 640px) {
+  .ticket-modal-header:has(.board-ticket-actions) {
+    column-gap: 8px;
+    padding: 8px 12px;
+  }
+  .ticket-modal-header:has(.board-ticket-actions) .ticket-line {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    flex-wrap: nowrap;
+    min-width: 0;
+  }
+  .ticket-modal-header:has(.board-ticket-actions) .ticket-modal-actions {
+    grid-column: 1 / -1;
+    grid-row: 1;
+    justify-self: end;
+    gap: 6px;
+  }
+  .ticket-modal-header:has(.board-ticket-actions) .ticket-modal-title {
+    grid-row: 3;
+    margin-top: 6px;
+    font-size: 19px;
+  }
+  .ticket-modal-header .ticket-modal-actions .board-ticket-open { background: transparent; border-color: transparent; }
+  .board-ticket-open-label { display: none; }
+  .board-ticket-open-icon { display: inline; }
+  .ticket-modal-header:has(.board-ticket-actions) .ticket-open-link {
+    border-color: transparent;
+    font-size: 0;
+    gap: 0;
+    padding: 0;
+    justify-content: center;
+  }
+  .ticket-modal-header:has(.board-ticket-actions) .ticket-open-link span { font-size: 18px; }
+  .ticket-modal-header:has(.board-ticket-actions) :is(button, .ticket-open-link) {
+    box-sizing: border-box;
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .board-card-columns {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+  }
+  .board-card-column { flex: none; padding-inline: 8px; min-height: 44px; }
+  .board-card-side .board-card-field:has(.board-card-columns) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .board-card-chip { padding: 1px 7px; line-height: 18px; }
+}
+/* Let even long titles scroll out of the way on phones. */
+@media (max-width: 640px) {
+  .ticket-modal:has(.board-ticket-actions) { overflow-y: auto; }
+  .ticket-modal:has(.board-ticket-actions) .ticket-modal-body { overflow: visible; flex: none; }
+}

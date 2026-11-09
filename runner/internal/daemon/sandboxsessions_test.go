@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -159,166 +158,6 @@ func TestSandboxSessionInANewFolder(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(proj); len(entries) != 1 || entries[0].Name() != ".git" {
 		t.Fatalf("the new folder's working tree was written to: %v", entries)
-	}
-}
-
-// A sandboxed terminal session works in its own clone too: the container is started on the clone,
-// never on the checkout, and a clone whose sandbox failed to start is removed.
-func TestSandboxTerminalWorksInItsOwnClone(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv(DaemonStateDirEnv, t.TempDir())
-	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
-	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-	t.Setenv("PATH", fakeClaude(t)+":"+os.Getenv("PATH"))
-	repo := filepath.Join(root, "app")
-	initChildRepo(t, repo)
-	var mounted string
-	old := startTerminalSandbox
-	startTerminalSandbox = func(_, hostProjectPath string, _, _ []string, _ SandboxOptions) error {
-		mounted = hostProjectPath
-		return errors.New("no docker in this test")
-	}
-	t.Cleanup(func() { startTerminalSandbox = old })
-	sender := newRecordingSender(8)
-	mgr := newManagerWithSender(sender, ManagerConfig{ReposRoot: root})
-	mgr.sandboxImagePresent = func() bool { return true }
-	raw, _ := json.Marshal(protocol.SpawnSession{Type: "spawn_session", SessionID: "s-term", Repo: "app", Sandbox: true})
-	mgr.handleSpawnSession(raw)
-	if want := filepath.Join(sandboxCloneRoot(), "s-term"); mounted != want {
-		t.Fatalf("the terminal sandbox was started on %q, not its clone %q", mounted, want)
-	}
-	if _, err := os.Stat(mounted); !os.IsNotExist(err) {
-		t.Fatal("the clone of a terminal whose sandbox failed was left behind")
-	}
-	if got := childRepoGit(t, repo, "for-each-ref", "--format=%(refname)", "refs/heads/wip/"); got != "" {
-		t.Fatalf("a branch was left behind: %q", got)
-	}
-}
-
-// At reattach a running terminal sandbox is kept only when the daemon's own record names the
-// session's recorded clone and docker, when it can say, agrees. One an older daemon started (the
-// person's folder), one with no record, and one whose container mounts anything else are stopped
-// and told why; a failed docker inspect alone does not keep a legacy container running.
-func TestLegacyTerminalSandboxIsStopped(t *testing.T) {
-	dockerDir, _ := fakeDocker(t)
-	t.Setenv("PATH", dockerDir+":"+os.Getenv("PATH"))
-	t.Setenv("FAKE_DOCKER_LOG", filepath.Join(t.TempDir(), "docker.log"))
-	t.Setenv("FAKE_DOCKER_EXEC_NOOP", "1")
-	stubCloneProbe(t, false, false)
-	cloned := sandboxTestClone(t, "cloned")
-	unread := sandboxTestClone(t, "unread")
-	other := sandboxTestClone(t, "other")
-	sender := newRecordingSender(16)
-	mgr := newManagerWithSender(sender, ManagerConfig{ReposRoot: t.TempDir()})
-	for id, path := range map[string]string{"legacy": "/home/someone/repos/app", "legacy-unread": "/home/someone/repos/app", "cloned": cloned, "unread": unread, "other": other} {
-		if err := mgr.writeRecord(SessionRecord{Version: recordSchemaVersion, SessionID: id, ProjectPath: path, Sandbox: true}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	sources := map[string]string{
-		dockerContainerName("legacy"): "/home/someone/repos/app",
-		dockerContainerName("cloned"): cloned,
-		dockerContainerName("other"):  "/home/someone/repos/app",
-		// "legacy-unread", "unread" and "norecord": docker inspect fails.
-	}
-	old := containerWorkspaceSource
-	containerWorkspaceSource = func(name string) (string, bool) { return sources[name], sources[name] != "" }
-	t.Cleanup(func() { containerWorkspaceSource = old })
-	kept := mgr.stopLegacySandboxes([]string{"legacy", "legacy-unread", "cloned", "unread", "other", "norecord"})
-	if strings.Join(kept, ",") != "cloned,unread" {
-		t.Fatalf("kept %v, want cloned,unread", kept)
-	}
-	msgs := strings.Join(sender.messages(), "\n")
-	for _, id := range []string{"legacy", "legacy-unread", "other", "norecord"} {
-		if !strings.Contains(msgs, `"`+id+`"`) {
-			t.Fatalf("%s was not told why it stopped: %s", id, msgs)
-		}
-		if _, err := readSessionRecord(mgr.reposRoot(), id); err == nil {
-			t.Fatalf("%s's record was kept", id)
-		}
-	}
-	if !strings.Contains(msgs, "older daemon that mounted your checkout") {
-		t.Fatalf("no reason given: %s", msgs)
-	}
-}
-
-// A recovery record an older daemon wrote for a sandboxed terminal names the person's folder: it is
-// never recovered onto (no container is started), the record goes so it is not retried at every
-// reconnect, and the session says why. A record whose clone lost its own record is refused too.
-func TestLegacySandboxRecordIsNotRecovered(t *testing.T) {
-	t.Setenv(DaemonStateDirEnv, t.TempDir())
-	var started []string
-	old := startTerminalSandbox
-	startTerminalSandbox = func(id, path string, _, _ []string, _ SandboxOptions) error {
-		started = append(started, id+"="+path)
-		return errors.New("not in this test")
-	}
-	t.Cleanup(func() { startTerminalSandbox = old })
-	sender := newRecordingSender(16)
-	mgr := newManagerWithSender(sender, ManagerConfig{ReposRoot: t.TempDir()})
-	broken := sandboxTestClone(t, "rec-broken")
-	_, brokenRecord, _ := sandboxClonePaths("rec-broken")
-	if err := os.Remove(brokenRecord); err != nil {
-		t.Fatal(err)
-	}
-	for id, path := range map[string]string{"rec-legacy": t.TempDir(), "rec-broken": broken} {
-		rec := SessionRecord{Version: recordSchemaVersion, SessionID: id, ProjectPath: path, Sandbox: true}
-		if err := mgr.writeRecord(rec); err != nil {
-			t.Fatal(err)
-		}
-		mgr.recoverSession(rec)
-		if _, err := readSessionRecord(mgr.reposRoot(), id); err == nil {
-			t.Fatalf("%s: the record was kept, so it would be retried at every reconnect", id)
-		}
-	}
-	if len(started) != 0 {
-		t.Fatalf("a sandbox was started from a record with no clone of its own: %v", started)
-	}
-	msgs := strings.Join(sender.messages(), "\n")
-	if !strings.Contains(msgs, "names a folder of yours, not a clone of its own") || !strings.Contains(msgs, "the record of its clone is missing") {
-		t.Fatalf("the sessions were not told why: %s", msgs)
-	}
-}
-
-// A tmux probe that never answers (the session's own tmux, made to hang) is bounded: the reattach
-// listing and the orphan sweep skip that container instead of blocking, and nothing is removed.
-func TestHungTmuxProbeIsSkipped(t *testing.T) {
-	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
-	oldTimeout := sandboxProbeTimeout
-	sandboxProbeTimeout = 300 * time.Millisecond
-	t.Cleanup(func() { sandboxProbeTimeout = oldTimeout })
-	start := time.Now()
-	if has, known := tmuxProbe("blerg-sandbox-hung"); has || known {
-		t.Fatalf("a hung probe reported has=%v known=%v", has, known)
-	}
-	if took := time.Since(start); took > 5*time.Second {
-		t.Fatalf("the probe took %s", took)
-	}
-
-	// The passes that use it: the hung container is neither listed nor swept.
-	origOut, origRun, origProbe := dockerOutput, dockerRun, dockerProbe
-	var removed []string
-	dockerOutput = func(args ...string) ([]byte, error) {
-		return []byte(sandboxContainerPrefix + "hung\t" + sandboxOwner() + "\n"), nil
-	}
-	dockerRun = func(args ...string) error {
-		if args[0] == "rm" {
-			removed = append(removed, args[len(args)-1])
-		}
-		return nil
-	}
-	dockerProbe = func(time.Duration, ...string) (bool, error) { return true, errors.New("timed out") }
-	t.Cleanup(func() { dockerOutput, dockerRun, dockerProbe = origOut, origRun, origProbe })
-	if got := listSandboxedTmuxSessions(nil); len(got) != 0 {
-		t.Fatalf("a container whose probe hung was listed: %v", got)
-	}
-	sweepOrphanSandboxContainers(nil, nil)
-	if len(removed) != 0 {
-		t.Fatalf("a container whose probe hung was swept: %v", removed)
 	}
 }
 
@@ -483,7 +322,7 @@ func sandboxTestClone(t *testing.T, sessionID string) string {
 	if tempRoot == "" {
 		tempRoot = os.TempDir()
 	}
-	if state := os.Getenv(DaemonStateDirEnv); state == "" || !strings.HasPrefix(state, filepath.Clean(tempRoot)+string(filepath.Separator)) {
+	if state := os.Getenv(DaemonStateDirEnv); state == "" || state == os.Getenv(testStateDirEnv) || !strings.HasPrefix(state, filepath.Clean(tempRoot)+string(filepath.Separator)) {
 		t.Setenv(DaemonStateDirEnv, t.TempDir())
 	}
 	repo := filepath.Join(t.TempDir(), "proj")

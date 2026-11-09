@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 // Card #142: End session asks in a small confirmation anchored to the header's ✕ (a bottom sheet on a
 // phone), in real Chromium at 390 and 3840 px: the ✕ never arms for a second press, the focus starts
 // on Cancel, Esc and a press outside cancel with the focus back on the ✕, End session ends, and its
@@ -65,10 +66,10 @@ describe.each([
   { width: 3840, height: 2160 },
 ])('End session at $width px', ({ width, height }) => {
   beforeEach(async () => { await page.viewport(width, height) })
+  // The ✕ is a real header control at every width now (card BLG-450); no palette detour on a phone.
   async function requestEnd() {
-    const end = width === 390 ? screen.getByRole('button', { name: 'Search commands and files' }) : screen.getByTestId('stop-session')
+    const end = screen.getByTestId('stop-session')
     await userEvent.click(end)
-    if (width === 390) { await userEvent.fill(screen.getByRole('combobox', { name: /^Search commands/ }), '>End session'); await userEvent.keyboard('{ArrowDown}{Enter}') }
     return end
   }
 
@@ -76,19 +77,19 @@ describe.each([
   it('asks in an alertdialog anchored to the ✕, never by arming the ✕', async () => {
     mount()
     const end = await requestEnd()
-    const dialog = screen.getByRole('alertdialog', { name: 'End this session?' })
+    const dialog = screen.getByRole('alertdialog', { name: 'End this workspace?' })
     expect(dialog.getAttribute('aria-describedby')).toBeTruthy()
     expect(document.getElementById(dialog.getAttribute('aria-describedby')!)!.textContent).toBe('The agent stops. The conversation and files are kept.')
     // No arming: the ✕ keeps its name, its look is the selected blue (not a filled red), nothing ended.
-    expect(end.getAttribute('aria-label')).toBe(width === 390 ? 'Search commands and files' : 'End session')
+    expect(end.getAttribute('aria-label')).toBe('End workspace')
     expect(end.className).not.toContain('armed')
     // (after the button's 0.15 s color transition)
     const blue = color(cssVar('--selected-border'))
-    if (width > 390) await waitFor(() => expect(getComputedStyle(end).borderTopColor).toBe(blue))
+    await waitFor(() => expect(getComputedStyle(end).borderTopColor).toBe(blue))
     expect(deletes()).toHaveLength(0)
     // The focus starts on Cancel; End session is the only red.
     const cancel = within(dialog).getByRole('button', { name: 'Cancel' })
-    const confirm = within(dialog).getByRole('button', { name: 'End session' })
+    const confirm = within(dialog).getByRole('button', { name: 'End workspace' })
     await waitFor(() => expect(document.activeElement).toBe(cancel))
     const red = color(cssVar('--danger'))
     expect(getComputedStyle(confirm).backgroundColor).toBe(red)
@@ -139,13 +140,13 @@ describe.each([
     // The focus starts on Cancel.
     await waitFor(() => expect(document.activeElement).toBe(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' })))
     await userEvent.keyboard('{Tab}')
-    expect(document.activeElement).toBe(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'End session' }))
+    expect(document.activeElement).toBe(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'End workspace' }))
     await userEvent.keyboard('{Tab}')
     expect(document.activeElement).toBe(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
     await userEvent.keyboard('{Escape}')
     expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(document.activeElement).toBe(end)
-    if (width > 390) expect(end.getAttribute('aria-expanded')).toBe('false')
+    expect(end.getAttribute('aria-expanded')).toBe('false')
     expect(end.closest('[inert]')).toBeNull()
     expect(deletes()).toHaveLength(0)
   })
@@ -153,8 +154,19 @@ describe.each([
   it('End session ends the session', async () => {
     mount()
     await requestEnd()
-    await userEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'End session' }))
+    await userEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'End workspace' }))
     await waitFor(() => expect(deletes()).toHaveLength(1))
     expect(await screen.findByText('HOME')).toBeTruthy()
   })
+})
+
+for (const width of browserWidths([390, 3840])) for (const role of ['worker', 'channel'] as const) it(`ends a ${role} using its own noun at ${width}px`, async () => {
+  await page.viewport(width, width === 390 ? 844 : 2160)
+  useSessionStore.setState({ sessions: [makeSession({ id: 'root', title: 'Coordinator' }), makeSession({ id: 'sess-a', title: 'Focused work', parent_session_id: 'root', ...(role === 'worker' ? { started_by: { kind: 'session' } } : {}), status: 'running' })] })
+  mount()
+  // The ✕ is a real header control at every width now (card BLG-450); no palette detour on a phone.
+  await userEvent.click(screen.getByRole('button', { name: `End ${role}` }))
+  const dialog = await screen.findByRole('alertdialog', { name: `End this ${role}?` })
+  expect(within(dialog).getByRole('button', { name: `End ${role}` })).toBeVisible()
+  expect(apiFetch.mock.calls.filter(([, init]) => init?.method === 'DELETE')).toHaveLength(0)
 })

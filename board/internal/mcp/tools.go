@@ -3,6 +3,12 @@ package mcp
 // toolDefs is the MCP tool catalog. Descriptions are prescriptive about WHEN
 // to call — agents follow trigger conditions in descriptions.
 var toolDefs = []map[string]any{
+
+	{"name": "blerg_release_list", "description": "List releases on a board.", "inputSchema": obj(props{"board_id": str("board uuid")}, req("board_id"))},
+	{"name": "blerg_release_get", "description": "Read release progress by column and all cards, including archived Done cards and blockers.", "inputSchema": obj(props{"board_id": str("board uuid"), "release_id": str("release uuid"), "evidence_only": map[string]any{"type": "boolean", "description": "compact consistent cut receipt or pre-cut preview"}}, req("board_id", "release_id"))},
+	{"name": "blerg_release_save", "description": "Create or edit an active release. Requires a person behind Full board access. To mark released, use release_close.", "inputSchema": obj(props{"board_id": str("board uuid"), "release_id": str("existing release uuid; omit to create"), "name": str("release name"), "target_date": str("YYYY-MM-DD; empty clears"), "status": str("planned or in progress")}, req("board_id", "name", "status"))},
+	{"name": "blerg_release_close", "description": "Cut a release: archive its Done cards in its record and move open cards to the chosen next release atomically. Requires a person behind Full board access. Stop active card sessions first.", "inputSchema": obj(props{"board_id": str("board uuid"), "release_id": str("release uuid"), "next_release_id": str("active release on this board; required when open cards remain"), "cut_ask_id": str("runner server-held authorization id; never an agent approval claim"), "card_digest": str("exact server-held pre-cut card/version digest"), "execution_deadline": str("server authorization deadline in RFC 3339")}, req("board_id", "release_id"))},
+	{"name": "blerg_release_delete", "description": "Delete a mistaken active release and clear its card assignments. Released records cannot be deleted. Requires a person behind Full access.", "inputSchema": obj(props{"board_id": str("board uuid"), "release_id": str("active release uuid")}, req("board_id", "release_id"))},
 	{"name": "blerg_board_launch_options", "description": "Discover currently available engines, models and efforts for this board under its configured automation identity and execution target. No credentials are returned.", "inputSchema": obj(props{"board_id": str("board uuid"), "refresh": boolean("request an asynchronous refresh")}, req("board_id"))},
 	{
 		"name":        "blerg_board_list",
@@ -12,7 +18,7 @@ var toolDefs = []map[string]any{
 	{
 		"name":        "blerg_board_get",
 		"description": "Get one board: name, repos, gate policy, field schema.",
-		"inputSchema": obj(props{"board_id": str("board uuid")}, req("board_id")),
+		"inputSchema": obj(props{"board_id": str("board uuid"), "events_from": str("optional RFC3339 start of deployment and release history; requires events_to, at most 180 days"), "events_to": str("exclusive RFC3339 end of history"), "card_numbers": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "maxItems": 1000, "description": "Optional card numbers for compact Insights metadata; requires the event range."}}, req("board_id")),
 	},
 	{
 		"name":        "blerg_board_schema",
@@ -23,54 +29,58 @@ var toolDefs = []map[string]any{
 		"name":        "blerg_board_create",
 		"description": "Create a board (requires board.admin). Optionally declare repos, initial columns, and a field schema.",
 		"inputSchema": obj(props{
-			"name":            str("board name"),
-			"key":             str("unique 2–5 uppercase letters or digits, starting with a letter; suggested when omitted"),
-			"description":     str("what this board tracks"),
-			"repos":           arrStr("repos cards may reference"),
-			"columns":         arrStr("initial column names in order"),
-			"field_schema":    fieldSchemaProp("declared custom fields for cards on this board"),
-			"require_repo":    boolean("require ≥1 repo per card (default true)"),
-			"gate_enabled":    boolean("run the admission gate on agent writes"),
-			"concurrency":     integer("how many cards a board run works at once (default 1). 0 parks the board: the run stays active and in-flight cards finish, but nothing new is dispatched. Negatives are rejected. Shapes ONE board, and is not a spend ceiling — there is no global cap across boards, and it counts cards in the work column, not live sessions."),
-			"model":           str("model for this board's configured engine (empty = native default)"),
-			"reviewer_effort": str("effort for review sessions; empty uses model default"),
-			"effort":          str("default model effort; empty uses native default"),
-			"discuss_effort":  str("effort for discussion sessions"),
-			"chat_effort":     str("effort for board chat sessions"),
-			"reviewer_model":  str("model for adversarial review sessions (empty = same as model)"),
-			"discuss_model":   str("model for discuss-mode card sessions (empty = same as model)"),
-			"chat_model":      str("model for board-header chat sessions (empty = same as model)"),
-			"git_base":        str("git base URL for this board's repos, e.g. https://github.com/myorg — empty uses the server default"),
-			"deploy_url":      str("where the project runs, if deployed (rendered as a LIVE link)"),
-			"ci_policy":       str("what auto-merge does when a PR head reports NO CI at all: \"required\" (default) waits for a green check, so a repo with no CI workflow never auto-merges; \"if_present\" treats absent checks as nothing to fail and merges on the adversarial approval alone. Governs ABSENCE only — a red or still-running check blocks under both."),
-			"driven_by":       str("name of the external system that owns this board's card lifecycle, e.g. \"blerg-ops\" — cards become read-only mirrors here (no sessions, no review flow). Empty = blerg-board-native board."),
+			"name":                   str("board name"),
+			"key":                    str("unique 2–5 uppercase letters or digits, starting with a letter; suggested when omitted"),
+			"description":            str("what this board tracks"),
+			"repos":                  arrStr("repos cards may reference"),
+			"columns":                arrStr("initial column names in order"),
+			"field_schema":           fieldSchemaProp("declared custom fields for cards on this board"),
+			"require_repo":           boolean("require ≥1 repo per card (default true)"),
+			"gate_enabled":           boolean("run the admission gate on agent writes"),
+			"auto_archive_keep_tags": arrStr("keep cards with any of these tags; default to-test"),
+			"auto_archive_done_days": integer("archive explicitly terminal cards after this many days in the column; 0 disables (default), maximum 36500; for boards without releases"),
+			"concurrency":            integer("how many cards a board run works at once (default 1). 0 parks the board: the run stays active and in-flight cards finish, but nothing new is dispatched. Negatives are rejected. Shapes ONE board, and is not a spend ceiling — there is no global cap across boards, and it counts cards in the work column, not live sessions."),
+			"model":                  str("model for this board's configured engine (empty = native default)"),
+			"reviewer_effort":        str("effort for review sessions; empty uses model default"),
+			"effort":                 str("default model effort; empty uses native default"),
+			"discuss_effort":         str("effort for discussion sessions"),
+			"chat_effort":            str("effort for board chat sessions"),
+			"reviewer_model":         str("model for adversarial review sessions (empty = same as model)"),
+			"discuss_model":          str("model for discuss-mode card sessions (empty = same as model)"),
+			"chat_model":             str("model for board-header chat sessions (empty = same as model)"),
+			"git_base":               str("git base URL for this board's repos, e.g. https://github.com/myorg — empty uses the server default"),
+			"deploy_url":             str("where the project runs, if deployed (rendered as a LIVE link)"),
+			"ci_policy":              str("what auto-merge does when a PR head reports NO CI at all: \"required\" (default) waits for a green check, so a repo with no CI workflow never auto-merges; \"if_present\" treats absent checks as nothing to fail and merges on the adversarial approval alone. Governs ABSENCE only — a red or still-running check blocks under both."),
+			"driven_by":              str("name of the external system that owns this board's card lifecycle, e.g. \"blerg-ops\" — cards become read-only mirrors here (no sessions, no review flow). Empty = blerg-board-native board."),
 		}, req("name")),
 	},
 	{
 		"name":        "blerg_board_update",
 		"description": "Update board settings, repos, or field schema (requires board.admin).",
 		"inputSchema": obj(props{
-			"board_id":          str("board uuid"),
-			"name":              str("new name"),
-			"key":               str("unique 2–5 uppercase letters or digits, starting with a letter; old keys remain aliases"),
-			"field_schema":      fieldSchemaProp("replacement field schema"),
-			"repos":             arrStr("replacement repo list"),
-			"gate_enabled":      boolean("toggle the admission gate"),
-			"concurrency":       integer("how many cards this board's run works at once (default 1). Takes effect on the run already going, not just the next one — this is the cross-board priority dial: raise the board being pushed on, leave the rest at 1. 0 parks the board (run stays active, in-flight cards finish, nothing new dispatched). Negatives are rejected. NOT a spend or resource ceiling: there is no global cap above it, so total parallelism is the SUM across running boards (eleven boards at 3 is up to 33, not 3), and it bounds cards in the work column, not live sessions — reviewer, discuss and board-chat sessions are invisible to it."),
-			"deploy_url":        str("where the project runs, if deployed"),
-			"git_base":          str("git base URL for this board's repos (empty = server default)"),
-			"model":             str("model for the configured engine (empty = native default)"),
-			"reviewer_effort":   str("effort for review sessions; empty uses model default"),
-			"effort":            str("default model effort; empty uses native default"),
-			"discuss_effort":    str("effort for discussion sessions"),
-			"chat_effort":       str("effort for board chat sessions"),
-			"reviewer_model":    str("model for adversarial reviews (empty = same as model)"),
-			"discuss_model":     str("model for discuss-mode card sessions (empty = same as model)"),
-			"chat_model":        str("model for board-header chat sessions (empty = same as model)"),
-			"description":       str("board description"),
-			"driven_by":         str("name of the external system that owns this board's card lifecycle, e.g. \"blerg-ops\" — empty clears it back to blerg-board-native"),
-			"ci_policy":         str("what auto-merge does when a PR head reports NO CI at all: \"required\" (default) waits for a green check, so cards on a repo with no CI workflow pile up in review; \"if_present\" treats absent checks as nothing to fail and merges on the adversarial approval alone. Governs ABSENCE only — a red or still-running check blocks under both."),
-			"automation_engine": str("implemented engine every session this board starts runs; discover available choices with blerg_board_launch_options. Sessions run on the credential of whoever owns the board's automation token; that token is set by a person in the board UI, never through this tool."),
+			"board_id":               str("board uuid"),
+			"name":                   str("new name"),
+			"key":                    str("unique 2–5 uppercase letters or digits, starting with a letter; old keys remain aliases"),
+			"field_schema":           fieldSchemaProp("replacement field schema"),
+			"repos":                  arrStr("replacement repo list"),
+			"gate_enabled":           boolean("toggle the admission gate"),
+			"auto_archive_keep_tags": arrStr("keep cards with any of these tags; default to-test"),
+			"auto_archive_done_days": integer("archive explicitly terminal cards after this many days in the column; 0 disables (default), maximum 36500; for boards without releases"),
+			"concurrency":            integer("how many cards this board's run works at once (default 1). Takes effect on the run already going, not just the next one — this is the cross-board priority dial: raise the board being pushed on, leave the rest at 1. 0 parks the board (run stays active, in-flight cards finish, nothing new dispatched). Negatives are rejected. NOT a spend or resource ceiling: there is no global cap above it, so total parallelism is the SUM across running boards (eleven boards at 3 is up to 33, not 3), and it bounds cards in the work column, not live sessions — reviewer, discuss and board-chat sessions are invisible to it."),
+			"deploy_url":             str("where the project runs, if deployed"),
+			"git_base":               str("git base URL for this board's repos (empty = server default)"),
+			"model":                  str("model for the configured engine (empty = native default)"),
+			"reviewer_effort":        str("effort for review sessions; empty uses model default"),
+			"effort":                 str("default model effort; empty uses native default"),
+			"discuss_effort":         str("effort for discussion sessions"),
+			"chat_effort":            str("effort for board chat sessions"),
+			"reviewer_model":         str("model for adversarial reviews (empty = same as model)"),
+			"discuss_model":          str("model for discuss-mode card sessions (empty = same as model)"),
+			"chat_model":             str("model for board-header chat sessions (empty = same as model)"),
+			"description":            str("board description"),
+			"driven_by":              str("name of the external system that owns this board's card lifecycle, e.g. \"blerg-ops\" — empty clears it back to blerg-board-native"),
+			"ci_policy":              str("what auto-merge does when a PR head reports NO CI at all: \"required\" (default) waits for a green check, so cards on a repo with no CI workflow pile up in review; \"if_present\" treats absent checks as nothing to fail and merges on the adversarial approval alone. Governs ABSENCE only — a red or still-running check blocks under both."),
+			"automation_engine":      str("implemented engine every session this board starts runs; discover available choices with blerg_board_launch_options. Sessions run on the credential of whoever owns the board's automation token; that token is set by a person in the board UI, never through this tool."),
 		}, req("board_id")),
 	},
 	{
@@ -119,23 +129,27 @@ var toolDefs = []map[string]any{
 		"inputSchema": obj(props{
 			"board_id": str("board uuid"),
 			"query":    str("free text over title+body (typo-tolerant), or KEY-N / #N / N"),
+			"numbers":  map[string]any{"type": "array", "items": map[string]any{"type": "integer", "minimum": 1}, "minItems": 1, "maxItems": 100, "description": "Exact card numbers on this board; missing cards are omitted."},
 			"type":     str("filter: card type"),
 			"tag":      str("filter: tag"),
 			// A plain array: some clients flatten anyOf when they convert tool schemas. The server
 			// also accepts a single string.
-			"column":           arrStr("filter: column names (case-insensitive, exact) or UUIDs on this board; matches any listed column; unknown columns are rejected with the available names"),
-			"priority":         str("filter: low|medium|high|urgent"),
+			"column":     arrStr("filter: column names (case-insensitive, exact) or UUIDs on this board; matches any listed column; unknown columns are rejected with the available names"),
+			"priority":   str("filter: low|medium|high|urgent"),
+			"release_id": str("release uuid; none searches unassigned cards"),
+			"size":       str("filter: S|M|L|XL"), "risk": str("filter: low|medium|high"), "complexity": str("filter: low|medium|high"),
 			"fields":           objectProp("equality filters on declared fields keys, e.g. {\"severity\":\"sev1\"}"),
 			"include_archived": boolean("include archived cards"),
 			"limit":            num("page size (default 20, maximum 100)"),
 			"page":             boolean("return {cards, next_cursor} instead of an array; follow next_cursor until empty"),
 			"cursor":           str("opaque next_cursor from the previous page, with the same query and filters"),
+			"summary":          boolean("omit card bodies, for lists and board views; read a body with blerg_card_get"),
 		}, req("board_id")),
 	},
 	{
 		"name":        "blerg_card_get",
 		"description": "Get one card with repos, tags, links, dependencies, and version. Address by card_id, or by board_id + number (#42). with_trail also returns column_name, the board's columns and the card's latest trail events (moves, comments, runs), newest last.",
-		"inputSchema": cardRef(props{"with_trail": boolean("also return column_name, columns and the latest trail events")}, nil),
+		"inputSchema": cardRef(props{"title_fallback": boolean("for a bare number only: if no card has that number, match its numeric title; ambiguous matches list card references"), "with_trail": boolean("also return column_name, columns and the latest trail events")}, nil),
 	},
 	{
 		"name":        "blerg_card_create",
@@ -146,7 +160,8 @@ var toolDefs = []map[string]any{
 			"body":       str("details, evidence, acceptance criteria"),
 			"type":       str("feature|bug|task|chore|incident|… (lowercased)"),
 			"priority":   str("low|medium|high|urgent"),
-			"size":       str("XS|S|M|L|XL"),
+			"release_id": str("active release uuid; empty clears assignment"),
+			"size":       str("S|M|L|XL"), "risk": str("low|medium|high"), "complexity": str("low|medium|high"),
 			"repos":      arrStr("repos this card touches (first = primary working dir)"),
 			"tags":       arrStr("board-scoped tags"),
 			"fields":     objectProp("custom fields matching the board schema"),
@@ -160,12 +175,14 @@ var toolDefs = []map[string]any{
 	},
 	{
 		"name":        "blerg_card_update",
-		"description": "Update a card's content/fields/tags/repos. Pass if_match=<version> to fail (409) if someone changed it since you read it.",
+		"description": "Update a card's content/fields/tags/repos. When work lands, publish commit_summary before ending its workspace: commit metadata and file counts become readable by everyone who can read the card; never include patches. Pass if_match=<version> to fail (409) if someone changed it since you read it.",
 		"inputSchema": cardRef(props{
-			"title":    str("new title"),
-			"body":     str("new body"),
-			"priority": str("low|medium|high|urgent"),
-			"size":     str("XS|S|M|L|XL"),
+			"commit_summary": commitSummaryProp(),
+			"title":          str("new title"),
+			"body":           str("new body"),
+			"priority":       str("low|medium|high|urgent"),
+			"release_id":     str("active release uuid; empty clears assignment"),
+			"size":           str("S|M|L|XL"), "risk": str("low|medium|high"), "complexity": str("low|medium|high"),
 			"fields":   objectProp("custom fields matching the board schema"),
 			"model":    str("model for THIS card's configured engine, overriding the board's (\"\" clears it)"),
 			"effort":   str("effort override for this card; empty uses the selected model default"),
@@ -295,3 +312,28 @@ func objectProp(desc string) map[string]any {
 	return map[string]any{"type": "object", "description": desc}
 }
 func req(names ...string) []string { return names }
+
+func commitSummaryProp() map[string]any {
+	array := func(item map[string]any, limit int) map[string]any {
+		return map[string]any{"type": "array", "items": item, "maxItems": limit}
+	}
+	commit := obj(props{"sha": str("full 40 or 64 lowercase hex SHA"), "message": str("subject, up to 512 bytes"), "author": str("author, up to 256 bytes"), "date": str("RFC3339 author date")}, req("sha", "message", "author", "date"))
+	file := obj(props{"path": str("repository relative path"), "old_path": str("previous path for a rename"), "adds": integer("added lines, zero for binary"), "dels": integer("deleted lines, zero for binary"), "binary": boolean("binary file")}, req("path", "adds", "dels"))
+	item := obj(props{
+		"repository":        str("repository label without host credentials or local absolute paths"),
+		"session_id":        str("linked runner session UUID for live full diffs"),
+		"member_id":         str("immutable repository member ID for a multi-repository workspace"),
+		"generation":        integer("current workspace generation, required with member_id"),
+		"launch_generation": str("workspace launch generation, required with member_id"),
+		"branch":            str("landed tip ref; use the full commit SHA for a stable diff"),
+		"base":              str("comparison base; use the full commit SHA for a stable diff"),
+		"commits":           array(commit, 100), "files": array(file, 300),
+		"truncated": boolean("true if commits or file counts were truncated"),
+	}, req("repository", "session_id", "branch", "base", "commits", "files"))
+	for _, schema := range []map[string]any{item, commit, file} {
+		schema["additionalProperties"] = false
+	}
+	out := array(item, 20)
+	out["description"] = "Replace saved metadata for all repositories (128 KiB maximum); [] clears it. Published card content survives workspace deletion. No full diffs."
+	return out
+}

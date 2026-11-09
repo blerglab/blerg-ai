@@ -7,26 +7,33 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 )
 
 const inputReceiptLimit = 256
+const inputReceiptMaxAge = 7 * 24 * time.Hour
+
+type inputAcceptError string
+
+func (e inputAcceptError) Error() string { return string(e) }
 
 type inputReceipt struct {
-	ID      string          `json:"id"`
-	Hash    string          `json:"hash"`
-	Acked   bool            `json:"acked,omitempty"`
-	EventID string          `json:"event_id,omitempty"`
-	Kind    string          `json:"kind,omitempty"`
-	Ts      time.Time       `json:"ts,omitempty"`
-	Payload json.RawMessage `json:"payload,omitempty"`
+	ID           string          `json:"id"`
+	IdentityHash string          `json:"identity_hash,omitempty"`
+	Hash         string          `json:"hash"`
+	Acked        bool            `json:"acked,omitempty"`
+	EventID      string          `json:"event_id,omitempty"`
+	Kind         string          `json:"kind,omitempty"`
+	Ts           time.Time       `json:"ts,omitempty"`
+	Payload      json.RawMessage `json:"payload,omitempty"`
 }
 type inputJournalState struct {
 	SessionID string         `json:"session_id"`
@@ -110,28 +117,42 @@ func receiptEvent(r inputReceipt) (*agent.Event, error) {
 	}
 	return &agent.Event{ClientEventID: r.EventID, Ts: r.Ts, Kind: r.Kind, Payload: payload}, nil
 }
-func (j *inputJournal) accept(in agent.Input) (bool, *agent.Event, error) {
+func (j *inputJournal) accept(in agent.Input) (send bool, event *agent.Event, err error) {
+	defer func() {
+		if err != nil {
+			failurelog.Default.Event("input_accept/"+j.state.SessionID+"/"+err.Error(), slog.LevelError, "operation", "input_accept", "session", j.state.SessionID, "cause", err.Error())
+		}
+	}()
 	if j == nil || in.ClientID == "" {
 		return true, nil, nil
 	}
 	raw, _ := json.Marshal(in)
 	sum := sha256.Sum256(raw)
 	digest := hex.EncodeToString(sum[:])
+	// Server-owned context can change on redelivery; it is not the caller's identity.
+	in.PlanNudge = ""
+	in.PersonTime = nil
+	identityRaw, _ := json.Marshal(in)
+	identitySum := sha256.Sum256(identityRaw)
+	identity := hex.EncodeToString(identitySum[:])
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.closed {
-		return false, nil, errors.New("session is stopping")
+		return false, nil, inputAcceptError("session_stopping")
 	}
 	for _, r := range j.state.Receipts {
 		if r.ID != in.ClientID {
 			continue
 		}
-		if r.Hash != digest {
-			return false, nil, errors.New("message id was already used for another input")
+		if (r.IdentityHash != "" && r.IdentityHash != identity) || (r.IdentityHash == "" && r.Hash != digest) {
+			return false, nil, inputAcceptError("client_id_conflict")
 		}
 		if r.EventID != "" {
 			ev, err := receiptEvent(r)
-			return false, ev, err
+			if err != nil {
+				return false, nil, inputAcceptError("invalid_receipt")
+			}
+			return false, ev, nil
 		}
 		if j.queued[in.ClientID] {
 			return false, nil, nil
@@ -140,23 +161,32 @@ func (j *inputJournal) accept(in agent.Input) (bool, *agent.Event, error) {
 		return true, nil, nil
 	}
 	old := j.state.Receipts
-	if len(old) >= inputReceiptLimit {
+	kept := make([]inputReceipt, 0, len(old))
+	for _, r := range old {
+		if r.Acked && r.EventID != "" && !r.Ts.IsZero() && time.Since(r.Ts) > inputReceiptMaxAge {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	j.state.Receipts = kept
+	if len(kept) >= inputReceiptLimit {
 		at := -1
-		for i, r := range old {
+		for i, r := range kept {
 			if r.EventID != "" && r.Acked {
 				at = i
 				break
 			}
 		}
 		if at < 0 {
-			return false, nil, errors.New("too many pending messages")
+			j.state.Receipts = old
+			return false, nil, inputAcceptError("pending_limit")
 		}
-		j.state.Receipts = append(append([]inputReceipt(nil), old[:at]...), old[at+1:]...)
+		j.state.Receipts = append(append([]inputReceipt(nil), kept[:at]...), kept[at+1:]...)
 	}
-	j.state.Receipts = append(append([]inputReceipt(nil), j.state.Receipts...), inputReceipt{ID: in.ClientID, Hash: digest})
+	j.state.Receipts = append(append([]inputReceipt(nil), j.state.Receipts...), inputReceipt{ID: in.ClientID, Hash: digest, IdentityHash: identity})
 	if err := j.save(); err != nil {
 		j.state.Receipts = old
-		return false, nil, fmt.Errorf("saving message receipt: %w", err)
+		return false, nil, inputAcceptError("receipt_save_failed_" + failurelog.Cause(err))
 	}
 	j.queued[in.ClientID] = true
 	return true, nil, nil

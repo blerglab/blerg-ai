@@ -1,0 +1,55 @@
+.session-dock-windows { min-width: 0; display: flex; flex-direction: column; position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.session-dock-windows .session-view-target { overflow: auto; }
+.session-dock-content { display: contents; }
+.session-history-link { display: block; margin: 0 8px 4px 32px; color: var(--fog); font-size: 11px; }
+
+.session-dock-content[hidden] { display: none; }
+.repository-list { list-style: none; margin: 0; padding: 6px; }
+.repository-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; padding: 4px 8px; border-bottom: 1px solid var(--stone); }
+.repository-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.repository-branch { color: var(--fog); overflow-wrap: anywhere; max-width: 100%; }
+.repository-state { width: 100%; font-size: 12px; color: var(--fog); }
+.repository-count { flex-shrink: 0; font-size: 11px; color: var(--fog); }
+.dock-main > .workspace-row { font-weight: 650; min-height: 36px; margin-block-end: 6px; }
+.dock-section-label { padding: 8px 10px 4px; font-size: 11px; color: var(--fog); }
+.dock-worker > .workspace-row { font-size: 11px; color: var(--fog); min-height: 26px; padding-block: 3px; }
+.dock-worker-attention { margin-inline-start: 6px; font-size: 10px; color: var(--amber); overflow: hidden; text-overflow: ellipsis; }
+.dock-runtime-summary { display: inline-flex; flex-shrink: 0; gap: 2px; }
+
+.dock-needs-you { color: var(--amber); font-weight: 650; }
+.repository-branches { width: 100%; list-style: none; margin: 0; padding: 0 0 0 12px; }
+.repository-branch-link { display: block; width: 100%; text-align: start; padding: 5px 8px; border: 0; background: transparent; color: var(--chalk); font: inherit; font-size: 12px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: pointer; }
+.repository-branch-link:hover, .repository-branch-link:focus-visible { background: var(--selected-bg); }
+.repository-branch-preview { position: fixed; z-index: 3000; display: grid; gap: 5px; width: 260px; max-width: calc(100vw - 32px); padding: 12px; border: 1px solid var(--stone); border-radius: 6px; background: var(--basalt); color: var(--chalk); box-shadow: 0 4px 20px var(--shadow-5); overflow-wrap: anywhere; }
+
+.dock-category-editor { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px; }
+.dock-category-editor input { width: 100%; min-width: 0; }
+
+.dock-new-channel { padding: 8px; display: grid; gap: 8px; min-width: 0; }
+.dock-new-channel label { display: block; overflow-wrap: anywhere; }
+.dock-new-channel input:not([type="checkbox"]), .dock-new-channel select { display: block; min-width: 0; box-sizing: border-box; background: var(--basalt); color: var(--chalk); border: 1px solid var(--stone); border-radius: 4px; padding: 6px; }
+.dock-new-channel input:not([type="checkbox"]) { width: 100%; }
+.dock-new-channel select { max-width: 100%; }
+.dock-new-channel fieldset { min-width: 0; border: 1px solid var(--stone); }
+.dock-new-channel summary { cursor: pointer; overflow-wrap: anywhere; }
+.dock-new-channel p { font-size: 12px; overflow-wrap: anywhere; }
+
+.dock-new-channel .dock-channel-option { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+@media (max-width: 640px) {
+  .dock-new-channel .dock-channel-option, .dock-new-channel summary { min-height: 44px; }
+  .dock-new-channel input:not([type="checkbox"]), .dock-new-channel select { min-height: 44px; }
+}
+
+.dock-group-spinner { color: var(--fog); border-top-color: var(--fog); }
+.dock-worker .blerg-status-spinner { color: var(--fog) !important; border-top-color: var(--fog) !important; }
+
+.dock-channel-emoji { width: 16px; flex-shrink: 0; text-align: center; }
+
+.session-dock-windows .session-tabbar { min-height: 46px; }
+
+.workspace-row[data-visible="true"]:not([aria-selected="true"]){background:var(--selected-bg);}
+
+/* Reserve the same trailing columns for short and truncated worker titles. */
+.dock-worker > .workspace-row > .runtime-icon { margin-inline-start: auto; width: 16px; justify-content: center; }
+.dock-worker > .workspace-row > .workspace-codes { width: 16px; justify-content: center; }
+.dock-worker > .workspace-row > .runtime-icon + .workspace-codes { margin-inline-start: 0; }

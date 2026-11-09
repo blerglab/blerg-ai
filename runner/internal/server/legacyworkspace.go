@@ -19,7 +19,7 @@ func (e legacyWorkspaceRefusal) Error() string { return string(e) }
 
 // errLegacyWorkspaceBusy is retryable: the desktop had no free attachment slot until the
 // caller's deadline. It says nothing about the workspace and must never fence anything.
-var errLegacyWorkspaceBusy = legacyWorkspaceRefusal("The desktop is busy attaching other session workspaces. Try again in a moment.")
+var errLegacyWorkspaceBusy = legacyWorkspaceRefusal("The desktop is busy attaching other workspaces. Try again in a moment.")
 
 // Attachment is idempotent. A desktop that answers "busy" is asked again after a short,
 // growing pause, within the caller's own deadline.
@@ -99,17 +99,17 @@ func (a *API) ensureLegacyWorkspace(ctx context.Context, id string) error {
 		return errWorkspaceUnavailable
 	}
 	if row.Runtime != nil && *row.Runtime == "cluster" {
-		return legacyWorkspaceRefusal("This session started without a workspace. Start a new cluster session to browse its files.")
+		return legacyWorkspaceRefusal("This " + strings.ToLower(personWorkNoun(row)) + " started without file browsing. Start a new cluster " + strings.ToLower(personWorkNoun(row)) + " to browse its files.")
 	}
 	dc := a.hub.FindDaemonForSession(id)
 	if dc == nil {
-		return legacyWorkspaceRefusal("The session's daemon is disconnected. Reconnect it, then Refresh.")
+		return legacyWorkspaceRefusal("The workspace's daemon is disconnected. Reconnect it, then Refresh.")
 	}
 	if dc.DesktopBinding == nil && !dc.Compatibility {
 		return legacyWorkspaceRefusal("The desktop's ownership could not be verified. Reconnect the desktop, then Refresh.")
 	}
 	if dc.WorkspaceCapabilities.ManifestVersion != protocol.WorkspaceVersion {
-		return legacyWorkspaceRefusal("This daemon needs an update before it can browse session workspaces.")
+		return legacyWorkspaceRefusal("This daemon needs an update before it can browse workspaces.")
 	}
 	// Busy retries never outlive the caller, and never exceed a short bound of their own.
 	ctx, cancel := context.WithTimeout(ctx, legacyAttachBusyBudget)
@@ -139,13 +139,13 @@ func (a *API) ensureLegacyWorkspace(ctx context.Context, id string) error {
 func legacyAttachmentRefusal(code string) error {
 	switch code {
 	case "project_missing":
-		return legacyWorkspaceRefusal("The session is still resuming or has no project directory. Wait for recovery, then Refresh.")
+		return legacyWorkspaceRefusal("The workspace is still recovering or has no project directory. Wait for recovery, then Refresh.")
 	case "project_changed":
-		return legacyWorkspaceRefusal("The session's project directory was removed or replaced. Restore its original directory, then Refresh.")
+		return legacyWorkspaceRefusal("The workspace's project directory was removed or replaced. Restore its original directory, then Refresh.")
 	case "unsupported":
-		return legacyWorkspaceRefusal("This daemon does not support browsing this session's workspace.")
+		return legacyWorkspaceRefusal("This daemon does not support browsing this workspace.")
 	case "ownership_changed":
-		return legacyWorkspaceRefusal("The session's workspace ownership or directory binding changed. Reconnect its desktop, then Refresh.")
+		return legacyWorkspaceRefusal("The workspace ownership or directory binding changed. Reconnect its desktop, then Refresh.")
 	default:
 		return legacyWorkspaceRefusal("The daemon could not attach the workspace reader and shell. Check that recovery has finished, then Refresh.")
 	}

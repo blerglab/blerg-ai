@@ -4,7 +4,7 @@ import type { AgentEvent, MarkPayload, SubagentPayload, ToolCallPayload, ToolRes
 import { markRowText } from './topicMarker'
 import { isShownUserMessage } from './userMessages'
 import { reviewRounds } from './reviewRounds'
-import { foldTicketRun } from './worklist'
+import { foldTicketRun, readChecklist, applyChecklistDelta } from './worklist'
 
 // Event kinds hidden from the timeline (raw context plumbing).
 // start_stage renders as the start panel, capabilities as the Skills &
@@ -13,15 +13,16 @@ import { foldTicketRun } from './worklist'
 export const HIDDEN_KINDS = new Set([
   'usage_updated',
   'provider_blocks', 'status_changed', 'start_stage', 'capabilities', 'subagent_update',
-  'background_task_started', 'background_task_done', 'mcp_status',
+  'background_task_started', 'background_task_done', 'background_wait_stopped', 'mcp_status',
 ])
 
 // Kinds the timeline renders as a card of their own. Anything else renders
 // nothing, so it must not split a run of tool calls either.
 const CARD_KINDS = new Set([
+  'inbox_item', 'ui_reveal', 'cron_command_result',
   'user_message', 'assistant_text', 'assistant_thinking', 'check_in', 'ask', 'update', 'note',
   'model_changed', 'subagent_started', 'subagent_done', 'turn_done', 'error', 'compaction', 'artifact',
-  'topic', 'mark', 'checklist', 'ticket', 'delegation_request', 'proposal_request', 'review_requested', 'session_upload',
+  'stop_result', 'topic', 'mark', 'checklist', 'ticket', 'delegation_request', 'proposal_request', 'channel_recommendation', 'blackboard_recommendation', 'review_requested', 'session_upload',
 ])
 
 // Tools whose result is a link or image worth seeing at once: they stay full
@@ -313,8 +314,7 @@ function fold(
     if (ev.kind === 'user_message' && !isShownUserMessage(ev.payload)) continue
     if (ev.kind === 'mark' && !isDrawnMark(ev)) continue
     flush()
-    // Consecutive checklist changes with nothing drawn between them are one row: the latest (its
-    // payload holds the whole list).
+    // Consecutive checklist changes share the latest row, with its state folded below.
     const last = items[items.length - 1]
     if (ev.kind === 'checklist' && last?.type === 'event' && last.ev.kind === 'checklist') {
       items[items.length - 1] = { type: 'event', ev }
@@ -389,6 +389,25 @@ function subagentEntry(
 // Given the previous timeline, a group whose calls and results are unchanged
 // keeps its previous entries array, so the memoised row drawing it is skipped
 // (and a subagent that did not change keeps its entry).
+const checklistRows = new WeakMap<AgentEvent, { previous?: AgentEvent; row: AgentEvent }>()
+function withChecklistRows(events: AgentEvent[]): AgentEvent[] {
+ let previous: AgentEvent | undefined
+ return events.map(ev => {
+  if (ev.kind !== 'checklist') return ev
+  const p = readChecklist(ev.payload, ev.client_event_id)
+  if (!p || (p.delta && !previous)) return ev
+  const cached = checklistRows.get(ev)
+  let row = cached?.previous === previous ? cached?.row : undefined
+  if (!row) {
+   const before = previous ? readChecklist(previous.payload)?.items ?? [] : []
+   row = p.delta ? {...ev, payload: {...p, delta: false, items: applyChecklistDelta(before, p)}} : ev
+   checklistRows.set(ev, {previous, row})
+  }
+  previous = row
+  return row
+ })
+}
+
 export function buildTimeline(events: AgentEvent[], prev?: readonly TimelineItem[], opts: TimelineOptions = {}): TimelineItem[] {
   const results = new Map<string, ToolCompletion>()
   for (const [order, ev] of events.entries()) {
@@ -397,7 +416,7 @@ export function buildTimeline(events: AgentEvent[], prev?: readonly TimelineItem
       results.set(p.call_id, {result: p, order})
     }
   }
-  return fold(events, results, prev, opts.groupTools ?? true, true, reviewRounds(events).hidden)
+  return fold(withChecklistRows(events), results, prev, opts.groupTools ?? true, true, reviewRounds(events).hidden)
 }
 
 // The last timeline built for each session (and grouping), with the events it was built from: the

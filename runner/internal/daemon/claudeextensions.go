@@ -156,7 +156,7 @@ func (w *pluginWorkshop) addMarketplace(ctx context.Context, source string) erro
 // refused), opened with O_NONBLOCK|O_NOFOLLOW (a FIFO or a symlink swapped in after the Lstat
 // cannot hold the open, nor redirect it), and checked again on the open file.
 func readCatalogFile(path string, limit int64) ([]byte, error) {
-	if li, err := os.Lstat(path); err != nil || !li.Mode().IsRegular() || li.Size() > limit { //nolint:gosec // G703: callers pass paths under an engine home or workspace they resolved; nothing here follows or writes
+	if li, err := os.Lstat(path); err != nil || !li.Mode().IsRegular() || li.Size() > limit {
 		return nil, errors.New("not a regular file within the size cap")
 	}
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0) //nolint:gosec // G304: callers pass paths under an engine home they resolved
@@ -186,7 +186,7 @@ func readCatalogFile(path string, limit int64) ([]byte, error) {
 // a regular file owned by the person the daemon runs as. A FIFO, a device or a file of someone else
 // is still refused, and the target is opened with the same non-blocking, no-follow check.
 func readHomeFile(path string, limit int64) ([]byte, error) {
-	li, err := os.Lstat(path) //nolint:gosec // G703: callers pass paths under an engine home or workspace they resolved; nothing here follows or writes
+	li, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +195,7 @@ func readHomeFile(path string, limit int64) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		ti, err := os.Lstat(target) //nolint:gosec // G703: callers pass paths under an engine home or workspace they resolved; nothing here follows or writes
+		ti, err := os.Lstat(target)
 		if err != nil || !ti.Mode().IsRegular() || !ownedByDaemon(ti) {
 			return nil, errors.New("symlink target is not a regular file of this user")
 		}

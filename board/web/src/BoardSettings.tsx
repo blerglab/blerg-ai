@@ -1,8 +1,9 @@
+import { IconButton } from '@blerglab/chat'
 import { BoardKeySettings } from "./BoardKeySettings";
 import "../../../packages/settings/settings.css";
 import BoardRunTarget from "./BoardRunTarget";
 import { modelDisplayName } from "@blerglab/chat";
-import { FormEvent, Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, Board } from "./api";
 import { coreOrigin } from "./authClient";
 import { useBoardAdmin, useMe } from "./me";
@@ -31,7 +32,8 @@ function expiryNote(iso: string | null): string {
 // service accounts, and is the only way on an install that cannot mint.
 function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () => void }) {
   const me = useMe();
-  const canEdit = !!me?.is_admin && !!me?.is_human;
+  const boardAdmin = useBoardAdmin(board.id);
+  const canEdit = boardAdmin && !!me?.is_human;
   const canRunAsMe = canEdit && !!me?.run_as_me_available;
   const discovery = useBoardLaunchOptions(board.id, canEdit && board.automation_token_set);
   const label = (id: string) => discovery.engines.find(e => e.id === id)?.name ?? id;
@@ -49,6 +51,13 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
     setEngine(board.automation_engine || "claude");
   }
 
+  const [ownerName, setOwnerName] = useState('');
+  useEffect(() => {
+    if (!board.automation_token_set) return;
+    let live = true;
+    void api<{ username?: string }>(`/api/boards/${board.id}/automation/identity`).then(value => { if (live) setOwnerName(value.username || ''); }, () => {});
+    return () => { live = false; };
+  }, [board.id, board.automation_account_id, board.automation_token_set]);
   const selected = discovery.state === "known" ? (discovery.engines.find(e => e.id === engine)?.id ?? discovery.engines[0]?.id ?? "") : "";
   const expiry = expiryNote(board.automation_token_expires_at);
   const mine = !!board.automation_account_id && me?.account_id === board.automation_account_id;
@@ -96,27 +105,27 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
   return (
     <>
       <h3 className="settings-heading">Automation</h3>
-      <p className="settings-description">Choose whose account and which engine this board uses to run sessions.</p>
+      <p className="settings-description">Choose whose account and which engine this board uses to run workspaces.</p>
       <dl className="settings-grid">
-        <dt title="the blerg-core agent token every session this board starts runs under">runs as</dt>
+        <dt title="The person whose credentials this board uses">Runs as</dt>
         <dd>
           {board.automation_token_set ? (
             <>
               <span className="mono" title="the blerg-core account this token acts for">
-                {board.automation_account_id ? `account ${board.automation_account_id}` : "token set"}
+                {board.automation_account_id ? mine ? `You${ownerName ? ` (${ownerName})` : ""}` : ownerName || "Another person (name unavailable)" : "Token owner"}
               </span>
-              {mine && <span className="inherit"> (you)</span>}
+
               {board.automation_token_minted && (
                 <span className="inherit" title="minted by Run as me; listed in blerg-core Settings → Agent tokens"> · Run as me</span>
               )}
             </>
           ) : (
-            <span className="unset warn">no token — this board cannot start sessions</span>
+            <span className="unset warn">no token — this board cannot start workspaces</span>
           )}
           {expiry && <span className={`inherit${expiry === "expired" ? " warn" : ""}`}> ({expiry})</span>}
         </dd>
         <BoardRunTarget board={board} editable={canEdit && mine && board.automation_token_set} onChanged={() => { discovery.retry(); onChanged?.(); }} />
-        <dt title="the engine every session this board starts runs">engine</dt>
+        <dt title="the engine every workspace this board starts runs">engine</dt>
         <dd><span className="mono">{label(board.automation_engine || "claude")}</span></dd>
       </dl>
       {offerRunAsMe && (
@@ -126,8 +135,8 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
           </button>
           <p className="pop-foot">
             {board.automation_token_set
-              ? "Make this board's sessions run as you instead, on your own credentials."
-              : "One click: sessions this board starts run as you, on your own credentials."}{" "}
+              ? "Make this board's workspaces run as you instead, on your own credentials."
+              : "One click: workspaces this board starts run as you, on your own credentials."}{" "}
             A run-sessions token is created for you in blerg-core and saved here; you can revoke it in{" "}
             <a href={`${coreOrigin()}/settings`} target="_blank" rel="noopener noreferrer">Settings → Agent tokens</a>.
           </p>
@@ -142,7 +151,7 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
         <form className="automation-form" onSubmit={submit}>
           {showPaste && (
             <p className="pop-foot">
-              Sessions this board starts run as the person whose token this is, on their
+              Workspaces this board starts run as the person whose token this is, on their
               own {label(selected || engine)} credential. To set it: in{" "}
               <a href={`${coreOrigin()}/settings`} target="_blank" rel="noopener noreferrer">
                 blerg-core Settings → Agent tokens
@@ -153,7 +162,7 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
             </p>
           )}
           {(discovery.state === "loading" || (discovery.refreshing && discovery.state !== "known")) && <p role="status">Loading available engines…</p>}
-          {discovery.error && <p role="alert">{discovery.error} <button className="settings-action" type="button" onClick={discovery.retry}>Retry engine discovery</button></p>}
+          {discovery.error && <p role="alert">{discovery.error} <IconButton label="Retry engine discovery" onClick={discovery.retry} /></p>}
           {board.automation_token_set && discovery.state === "known" && discovery.engines.length === 0 && <p role="status">No engines are available for this board's automation account and target.</p>}
           {discovery.engines.length > 1 && (
             <label className="settings-field field">Engine
@@ -163,7 +172,7 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
             </label>
           )}
           {discovery.engines.length === 1 && <p>Available engine: {discovery.engines[0].name}</p>}
-          {selected && selected !== (board.automation_engine || "claude") && <p role="status">Save to use {label(selected)} for new sessions. Changing engines clears model and effort overrides for this board and its cards. Existing sessions keep their engine.</p>}
+          {selected && selected !== (board.automation_engine || "claude") && <p role="status">Save to use {label(selected)} for new workspaces. Changing engines clears model and effort overrides for this board and its cards. Existing workspaces keep their engine.</p>}
           {token.trim() && <p>Save the token first, then choose from its available engines.</p>}
           {showPaste && (
             <label className="settings-field field">
@@ -197,7 +206,7 @@ function AutomationSection({ board, onChanged }: { board: Board; onChanged?: () 
 }
 
 function ComponentVersionSetting({ board, onChanged }: { board: Board; onChanged?: () => void }) {
-  const me = useMe();
+  const canEdit = useBoardAdmin(board.id);
   const [enabled, setEnabled] = useState(board.include_component_version === true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -211,12 +220,53 @@ function ComponentVersionSetting({ board, onChanged }: { board: Board; onChanged
     finally { setBusy(false); }
   }
   return <section className="settings-section">
-    <h3 className="settings-heading">Filed ticket context</h3>
-    {me?.is_admin ? <label className="settings-field" style={{ display: "flex", gap: 8, fontSize: 13 }}>
+    <h3 className="settings-heading">Filed tickets</h3>
+    {canEdit ? <label className="settings-field" style={{ display: "flex", gap: 8, fontSize: 13 }}>
       <input className="settings-toggle-control" type="checkbox" checked={enabled} disabled={busy} onChange={e => void change(e.target.checked)} />
       Include component version on filed tickets
     </label> : <p>Component version collection: {board.include_component_version ? "on" : "off"}</p>}
     <p className="settings-description">Include the Blerg version when filing tickets on this board.</p>
+    {error && <p role="alert">{error}</p>}
+  </section>;
+}
+
+function ArchiveSetting({ board, onChanged }: { board: Board; onChanged?: () => void }) {
+  const canEdit = useBoardAdmin(board.id);
+  const [days, setDays] = useState(String(board.auto_archive_done_days ?? 0));
+  const [tags, setTags] = useState((board.auto_archive_keep_tags ?? ["to-test"]).join(", "));
+  const [preview, setPreview] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function save(e: FormEvent) {
+    e.preventDefault(); setBusy(true); setError("");
+    const json = { auto_archive_done_days: Number(days), auto_archive_keep_tags: [...new Set(tags.split(",").map(t => t.trim()).filter(Boolean))] };
+    try {
+      if (Number(days) > 0 && preview === null) {
+        const result = await api<{ count: number }>(`/api/boards/${board.id}/archive-preview`, { method: "POST", json });
+        setPreview(result?.count ?? 0);
+      } else {
+        await api(`/api/boards/${board.id}`, { method: "PATCH", json });
+        setPreview(null); onChanged?.();
+      }
+    } catch (e) { setError(e instanceof Error ? e.message : "Couldn't save archiving."); }
+    finally { setBusy(false); }
+  }
+  return <section className="settings-section">
+    <h3 className="settings-heading">Done cards</h3>
+    <p className="settings-description">The board shows cards from the last 14 days in done. Expand older cards at any time.</p>
+    {board.driven_by ? <p>Automatic archiving is unavailable on mirrored boards.</p> : canEdit ? <form onSubmit={e => void save(e)}>
+      <label className="settings-field">Auto-archive done after (days)
+        <input className="settings-field" type="number" min="0" max="36500" step="1" required value={days} disabled={busy}
+          onChange={e => { setDays(e.target.value); setPreview(null); }} />
+      </label>
+      <label className="settings-field">Keep cards with tags
+        <input className="settings-field" value={tags} disabled={busy} onChange={e => { setTags(e.target.value); setPreview(null); }} />
+      </label>
+      <p className="settings-description">Separate tags with commas. Use 0 to turn off archiving. Time starts when a card enters done. Stuck cards and cards with running sessions are kept. Archived cards stay searchable.</p>
+      {preview !== null && <p role="status">{preview} cards eligible now. Future eligible cards will also be archived.</p>}
+      <button className="settings-action btn small" type="submit" disabled={busy}>{preview === null ? "Save archiving" : "Confirm archiving"}</button>
+      {preview !== null && <button className="settings-action btn small" type="button" disabled={busy} onClick={() => setPreview(null)}>Cancel</button>}
+    </form> : <p>Automatic archiving: {board.auto_archive_done_days ? `after ${board.auto_archive_done_days} days in done` : "off"}</p>}
     {error && <p role="alert">{error}</p>}
   </section>;
 }
@@ -230,152 +280,128 @@ interface RoleModel { key: string; label: string; set: string; effort?: string; 
 
 function roleModels(board: Board): RoleModel[] {
   return [
-    { key: "worker", label: "worker", set: board.model, effort: board.effort, what: "sessions that work a card" },
-    { key: "reviewer", label: "reviewer", set: board.reviewer_model, effort: board.reviewer_effort || (board.reviewer_model ? "" : board.effort), what: "adversarial review sessions" },
-    { key: "discuss", label: "discuss", set: board.discuss_model, effort: board.discuss_effort || (board.discuss_model ? "" : board.effort), what: "per-card discussion sessions" },
-    { key: "chat", label: "board chat", set: board.chat_model, effort: board.chat_effort || (board.chat_model ? "" : board.effort), what: "the board session in the header" },
+    { key: "worker", label: "worker", set: board.model, effort: board.effort, what: "workers that work a card" },
+    { key: "reviewer", label: "reviewer", set: board.reviewer_model, effort: board.reviewer_effort || (board.reviewer_model ? "" : board.effort), what: "review workers" },
+    { key: "discuss", label: "discuss", set: board.discuss_model, effort: board.discuss_effort || (board.discuss_model ? "" : board.effort), what: "per-card discussion channels" },
+    { key: "chat", label: "board chat", set: board.chat_model, effort: board.chat_effort || (board.chat_model ? "" : board.effort), what: "the board channel in the header" },
   ];
 }
 
-// BoardSettings: the board's configured models, the repo wiring sessions clone
-// from, and the run dispatcher's concurrency — read-only; board admin for
-// those is REST/MCP-only. This exists so a human can answer "is this board on
-// Opus?" or "why is this board only working one card?" without curl. The
-// editable controls are the automation identity and the per-board opt-in for
-// recording component versions on filed tickets.
+// Models remain one click away; the rest of the configuration has room to grow.
 export function BoardSettings({ board, onChanged }: { board: Board; onChanged?: () => void }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState<'models' | 'settings' | null>(null);
   const ref = useRef<HTMLDivElement>(null);
-  const popRef = useRef<HTMLDivElement>(null);
-  // The panel hangs off the chip's left edge, which on a phone-width viewport
-  // (or a board with a long name pushing the chip right) puts its right edge
-  // past the screen. Measure once on open and slide it back inside, never
-  // further than the left margin.
-  const [shift, setShift] = useState(0);
-  useLayoutEffect(() => {
-    if (!open) return;
-    const el = popRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    const over = r.right - (window.innerWidth - 12);
-    if (over > 0) setShift(-Math.min(over, Math.max(0, r.left - 12)));
-  }, [open]);
-
-  // Something elsewhere on the board (the board session's start error) asks for the settings.
+  const trigger = useRef<HTMLButtonElement>(null);
+  const modelTrigger = useRef<HTMLButtonElement>(null);
+  const dialog = useRef<HTMLDivElement>(null);
+  const canAdmin = useBoardAdmin(board.id);
+  const close = useCallback(() => { setOpen(null); (open === 'models' ? modelTrigger : trigger).current?.focus(); }, [open]);
   useEffect(() => {
-    const onOpen = () => { setShift(0); setOpen(true); };
+    const onOpen = () => setOpen('settings');
     window.addEventListener("blerg-board:open-settings", onOpen);
     return () => window.removeEventListener("blerg-board:open-settings", onOpen);
   }, []);
-
   useEffect(() => {
     if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    dialog.current?.focus();
+    const onDown = (e: MouseEvent) => { if (open === 'models' && !ref.current?.contains(e.target as Node)) close(); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); close(); }
+      if (e.key === 'Tab' && open === 'settings') {
+        const controls = dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href]');
+        if (!controls?.length) return;
+        const first = controls[0], last = controls[controls.length - 1];
+        if (e.shiftKey && (document.activeElement === first || document.activeElement === dialog.current)) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
     };
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  const canAdminKey = useBoardAdmin(board.id);
-  const roles = roleModels(board);
-  const worker = board.model;
-  const reviewer = board.reviewer_model || worker;
-  // The chip carries the worker model; the reviewer only earns space when it
-  // actually differs (the common case is one model for the whole board).
-  const chipLabel = worker ? modelDisplayName(worker) : "runner default";
-  const reviewerDiffers = reviewer !== worker;
-
-  return (
-    <div className="board-settings" ref={ref}>
-      <button
-        className={'settings-action ' + (`chip model-chip${open ? " open" : ""}`)}
-        aria-expanded={open}
-        onClick={() => {
-          setShift(0); // measure a fresh opening from the unshifted position
-          setOpen((o) => !o);
-        }}
-        title={`Board settings — worker: ${worker || "runner default"} · reviewer: ${reviewer || "runner default"}. Click for all four${board.automation_token_set ? "" : " — and to set the automation token this board needs to start sessions"}.`}
-      >
-        <span className="lede">model</span>
-        {!board.key && canAdminKey && <span className="mono"> · confirm board key</span>}
-        <span className="mono">{chipLabel}</span>
-        {!board.automation_token_set && <span className="warn-dot" aria-label="no automation token" />}
-        {reviewerDiffers && (
-          <span className="mono rev">rev {modelDisplayName(reviewer) || "runner default"}</span>
-        )}
-      </button>
-      {open && (
-        <div className="settings-pop" role="dialog" aria-label="Board settings"
-          ref={popRef} style={shift ? { marginLeft: shift } : undefined}>
+    return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey); };
+  }, [open, close]);
+  return <div className="board-settings" ref={ref}>
+    <button ref={modelTrigger} className="settings-action chip model-chip" aria-expanded={open === 'models'} onClick={() => setOpen(open === 'models' ? null : 'models')}>
+      <span className="lede">model</span><span className="mono">{modelDisplayName(board.model || "") || "runner default"}</span>
+    </button>
+    <button ref={trigger} className="settings-action chip" onClick={() => setOpen('settings')}>Board settings{!board.automation_token_set && <span className="warn-dot" aria-label="no automation token" />}{!board.key && canAdmin && <span> · confirm board key</span>}</button>
+    {open === 'models' && <div className="settings-pop board-model-pop" role="dialog" aria-label="Board models" ref={dialog} tabIndex={-1}>
+      <ModelSettings board={board} onChanged={onChanged} />
+    </div>}
+    {open === 'settings' && <div className="board-settings-overlay">
+      <div className="settings-pop board-settings-page" role="dialog" aria-modal="true" aria-label="Board settings" ref={dialog} tabIndex={-1}>
+        <header><h2>Board settings</h2><button className="settings-action" onClick={close}>Close settings</button></header>
+        {!canAdmin && <p className="settings-description">Only board admins can edit these settings.</p>}
+        <section className="settings-section"><h3 className="settings-heading">General</h3>
+          <BoardFields board={board} onChanged={onChanged} group="general" />
           <BoardKeySettings board={board} onChanged={onChanged} />
-          <h3 className="settings-heading">Board models</h3>
-          <p className="settings-description">See which model each type of session uses.</p>
-          <dl className="settings-grid">
-            {roles.map((r) => {
-              const effective = r.set || worker;
-              return (
-                <Fragment key={r.key}>
-                  <dt title={r.what}>{r.label}</dt>
-                  <dd>
-                    <span className={`mono${effective ? "" : " unset"}`}
-                      title={effective ? effective : "no model configured anywhere — the runner picks"}>
-                      {effective || "runner default"}{r.effort ? ` · ${r.effort}` : ""}
-                    </span>
-                    {!r.set && r.key !== "worker" && (
-                      <span className="inherit"> (inherited)</span>
-                    )}
-                  </dd>
-                </Fragment>
-              );
-            })}
-          </dl>
-          <h3 className="settings-heading">Repos</h3>
-          <p className="settings-description">See the repositories available to this board.</p>
-          <dl className="settings-grid">
-            <dt title="sessions clone the first repo as their working directory">repos</dt>
-            <dd className="mono">{board.repos?.length ? board.repos.join(", ") : <span className="unset">none</span>}</dd>
-            <dt title="sessions clone from git_base/<repo>.git">git base</dt>
-            <dd className="mono">{board.git_base || <span className="unset">server default</span>}</dd>
-          </dl>
-          <h3 className="settings-heading">Board run</h3>
-          <p className="settings-description">See how this board runs and checks its work.</p>
-          <dl className="settings-grid">
-            <dt title="how many cards the run dispatcher keeps in flight on this board at once — the cross-board priority dial. Applies to the run already going.">
-              concurrency
-            </dt>
-            <dd>
-              <span className="mono">{board.concurrency}</span>
-              {board.concurrency === 0 && (
-                <span className="inherit"> (parked — run stays on, nothing dispatched)</span>
-              )}
-            </dd>
-            <dt title="what auto-merge does when a pull request head reports no CI at all. Only ever about ABSENT checks: a red or still-running check blocks under either setting.">
-              ci policy
-            </dt>
-            <dd>
-              <span className="mono">{board.ci_policy}</span>
-              <span className="inherit">
-                {board.ci_policy === "if_present"
-                  ? " (no checks reported = nothing to fail; the review is the gate)"
-                  : " (a green check is required, so a repo with no CI never auto-merges)"}
-              </span>
-            </dd>
-          </dl>
-          <ComponentVersionSetting key={`${board.id}:${board.include_component_version}`} board={board} onChanged={onChanged} />
+        </section>
+        <section className="settings-section"><h3 className="settings-heading">Repos</h3>
+          <BoardFields board={board} onChanged={onChanged} group="repos" />
+        </section>
+        <section className="settings-section"><h3 className="settings-heading">Runs</h3>
+          <BoardFields board={board} onChanged={onChanged} group="runs" />
           <AutomationSection board={board} onChanged={onChanged} />
-          <p className="pop-foot">
-            Models, repos and the run settings are read-only here. A card can
-            override the worker model for its own sessions; board settings change
-            through the REST/MCP API or a board session.
-          </p>
-        </div>
-      )}
-    </div>
-  );
+        </section>
+        <ComponentVersionSetting key={`version:${board.id}:${board.include_component_version}`} board={board} onChanged={onChanged} />
+        <section className="settings-section"><h3 className="settings-heading">Models</h3><ModelSettings board={board} onChanged={onChanged} /></section>
+        <ArchiveSetting key={`archive:${board.id}:${board.auto_archive_done_days}`} board={board} onChanged={onChanged} />
+      </div>
+    </div>}
+  </div>;
+}
+
+function ModelSettings({ board, onChanged }: { board: Board; onChanged?: () => void }) {
+  const canEdit = useBoardAdmin(board.id);
+  return <>{!canEdit && <dl className="settings-grid">{roleModels(board).map(r => <div key={r.key}><dt>{r.label}</dt><dd>{r.set || board.model || 'runner default'}{r.effort ? ` · ${r.effort}` : ''}</dd></div>)}</dl>}{canEdit && <BoardFields board={board} onChanged={onChanged} group="models" />}</>;
+}
+
+type Group = 'general' | 'repos' | 'runs' | 'models';
+function BoardFields({ board, group, onChanged }: { board: Board; group: Group; onChanged?: () => void }) {
+  const canEdit = useBoardAdmin(board.id);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const discovery = useBoardLaunchOptions(board.id, group === 'models' && canEdit && board.automation_token_set);
+  const roles = roleModels(board);
+  const fields = group === 'general' ? [{ key: 'name', label: 'Board name', value: board.name }, { key: 'description', label: 'Description', value: board.description || '' }]
+    : group === 'repos' ? [{ key: 'repos', label: 'Repositories (one per line)', value: board.repos?.join('\n') || '' }, { key: 'git_base', label: 'Git base', value: board.git_base || '' }]
+    : group === 'runs' ? [{ key: 'concurrency', label: 'Concurrency', value: String(board.concurrency) }, { key: 'ci_policy', label: 'CI policy', value: board.ci_policy }]
+    : roles.flatMap(r => [{ key: r.key === 'worker' ? 'model' : `${r.key}_model`, label: `${r.label} model`, value: r.set || '' }, { key: r.key === 'worker' ? 'effort' : `${r.key}_effort`, label: `${r.label} effort`, value: board[(r.key === 'worker' ? 'effort' : `${r.key}_effort`) as keyof Board] as string || '' }]);
+  const [modelValues, setModelValues] = useState<Record<string, string>>({});
+  const [seenFields, setSeenFields] = useState(JSON.stringify(fields));
+  if (seenFields !== JSON.stringify(fields)) {
+    setSeenFields(JSON.stringify(fields));
+    setModelValues({});
+  }
+  const valueOf = (key: string) => modelValues[key] ?? fields.find(f => f.key === key)?.value ?? '';
+  const models = discovery.engines.find(e => e.id === board.automation_engine)?.models.models ?? [];
+  async function save(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault(); setBusy(true); setError('');
+    const data = new FormData(e.currentTarget);
+    const json: Record<string, unknown> = {};
+    for (const f of fields) {
+      const value = String(data.get(f.key) ?? '');
+      json[f.key] = f.key === 'repos' ? value.split('\n').map(s => s.trim()).filter(Boolean) : f.key === 'concurrency' ? Number(value) : value;
+    }
+    try { await api(`/api/boards/${board.id}`, { method: 'PATCH', json }); onChanged?.(); }
+    catch (err) { setError(err instanceof Error ? err.message : "Could not save settings."); }
+    finally { setBusy(false); }
+  }
+  return <form key={JSON.stringify(fields)} className="board-fields stack" onSubmit={e => void save(e)}>
+    {fields.map(f => <label className="settings-field" key={f.key}>{f.label}
+      {!canEdit ? <span>{f.value || 'Default'}</span> : f.key === 'ci_policy' ? <select className="settings-field" name={f.key} defaultValue={f.value} disabled={busy}><option value="required">Require passing CI</option><option value="if_present">Check CI when present</option></select>
+        : group === 'models' && f.key.endsWith('model') ? <select className="settings-field" name={f.key} value={valueOf(f.key)} onChange={e => setModelValues(v => ({ ...v, [f.key]: e.target.value }))} disabled={busy}>
+          <option value="">{f.key === 'model' ? 'Runner default' : 'Inherit worker model'}</option>
+          {valueOf(f.key) && !models.some(m => m.id === valueOf(f.key)) && <option value={valueOf(f.key)}>{valueOf(f.key)}</option>}
+          {models.map(m => <option key={m.id} value={m.id}>{m.name || m.id}</option>)}
+        </select> : group === 'models' && f.key.endsWith('effort') ? <select className="settings-field" name={f.key} value={valueOf(f.key)} onChange={e => setModelValues(v => ({ ...v, [f.key]: e.target.value }))} disabled={busy}>
+          <option value="">Default</option>
+          {Array.from(new Set([...(models.find(m => m.id === (valueOf(f.key.replace('effort', 'model')) || valueOf('model')))?.efforts ?? []), ...(valueOf(f.key) ? [valueOf(f.key)] : [])])).map(effort => <option key={effort} value={effort}>{effort}</option>)}
+        </select> : ['description', 'repos'].includes(f.key) ? <textarea className="settings-field" name={f.key} defaultValue={f.value} disabled={busy} />
+          : <input className="settings-field" name={f.key} type={f.key === 'concurrency' ? 'number' : 'text'} min={f.key === 'concurrency' ? 0 : undefined} required={f.key === 'name' || f.key === 'concurrency'} defaultValue={f.value} disabled={busy} />}
+    </label>)}
+    {group === 'models' && discovery.error && <p role="alert">{discovery.error} <IconButton label="Retry models" onClick={discovery.retry} /></p>}
+    {group === 'models' && <p className="settings-description">Empty role models inherit the worker model. Existing workspaces keep their models.</p>}
+    {canEdit && <button className="settings-action" type="submit" disabled={busy}>Save {group}</button>}
+    {error && <p role="alert">{error}</p>}
+  </form>;
 }

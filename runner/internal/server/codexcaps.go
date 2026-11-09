@@ -64,3 +64,14 @@ func (dc *DaemonConn) CanPluginsFor(engine string) bool {
 	}
 	return false
 }
+
+func (dc *DaemonConn) CanWorkBranches() bool {
+	dc.liveMu.RLock()
+	defer dc.liveMu.RUnlock()
+	return dc.workBranches
+}
+func (dc *DaemonConn) SetWorkBranches(v bool) {
+	dc.liveMu.Lock()
+	dc.workBranches = v
+	dc.liveMu.Unlock()
+}

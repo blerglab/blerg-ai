@@ -1,0 +1,4 @@
+@import '../../../settings/IconButton.css';
+
+/* Format labels distinguish otherwise identical table download icons. */
+.viewer-action.refresh-control.viewer-action-labeled { width: auto; border: 0; gap: 4px; padding-inline: 6px; font: inherit; font-size: var(--chat-text-xs); }

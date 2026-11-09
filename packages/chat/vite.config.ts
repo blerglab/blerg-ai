@@ -13,7 +13,7 @@ export default defineConfig({
       name: 'copy-stylesheets',
       closeBundle() {
         mkdirSync(resolve(__dirname, 'dist'), { recursive: true })
-        for (const f of ['tokens.css', 'blerg.css']) {
+        for (const f of ['tokens.css', 'blerg.css', 'brand.css']) {
           copyFileSync(resolve(__dirname, 'src/theme', f), resolve(__dirname, 'dist', f))
         }
       },

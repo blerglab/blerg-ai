@@ -1,7 +1,9 @@
-import { FileIcon } from '../FileIcon'
-import { modelDisplayName } from '../../model/modelDisplay'
+import MessageRow from '../MessageRow'
+import InboxArrivalCard from './InboxArrivalCard'
 // One card per kind of event: how each thing the transcript holds is drawn. renderEvent is the
 // switch; the compact timeline and the legacy (one card per call) view both go through it.
+import { FileIcon } from '../FileIcon'
+import { modelDisplayName } from '../../model/modelDisplay'
 import { memo, useRef, useState, type ReactNode } from 'react'
 import type { CardRegistry } from '../../cards/registry'
 import { isRetryNotice } from '../../model/notices'
@@ -32,15 +34,20 @@ import type {
 import ArtifactCard from '../ArtifactCard'
 import { ReviewRoundLine } from '../ReviewRoundLine'
 import AskReply from '../AskReply'
+import QuestionCard from '../QuestionCard'
 import DelegationCard from './DelegationCard'
 import ProposalCard from './ProposalCard'
+import ChannelRecommendationCard from './ChannelRecommendationCard'
+import BlackboardRecommendationCard from './BlackboardRecommendationCard'
 import ReviewRequestCard from './ReviewRequestCard'
 import { useAsks } from '../askContext'
 import { useRestartRows } from '../restartContext'
 import { MessageText } from '../AttachmentChips'
 import CopyMessage from '../CopyMessage'
+import PopOutMessage from '../PopOutMessage'
 import Markdown from '../Markdown'
 import { TimeLabel } from '../TimeLabel'
+import { absoluteLabel } from '../../model/timeLabel'
 import { ChecklistRow, TicketCard } from './WorkCards'
 
 /** What the host may add under a user or assistant card (ChatView's `slots.messageFooter`). */
@@ -81,6 +88,17 @@ export interface RenderOptions {
   /** Which subagent cards the person opened or closed, by call id: kept by the transcript so a card
    *  drawn again (scrolled out of the window and back) keeps it. */
   subagentFolds?: Map<string, boolean>
+  /** This conversation's own name, for a popped-out message with no heading of its own
+   *  (PopOutMessage's "<chatName> · <time>" fallback). */
+  chatName?: string
+}
+
+/** A popped-out message's fallback tab name, when its text has no heading: the chat's own name
+ *  and when it was sent, in the reader's locale (BLG-449). */
+function popOutFallback(chatName: string | undefined, ts: string): string {
+  const ms = parseTs(ts)
+  const at = ms === null ? '' : absoluteLabel(ms)
+  return [chatName || 'Chat', at].filter(Boolean).join(' · ')
 }
 
 // A restart row that paused the session: "Paused after a restart" with Resume, which sends the
@@ -113,7 +131,7 @@ function PausedRestartRow({ ev, detail }: { ev: AgentEvent; detail?: string }) {
       ) : <span className="system-text">{text}</span>}
       {resume && (
         <button type="button" className="artifact-btn restart-resume" data-testid="restart-resume" disabled={pending} aria-busy={pending || undefined} onClick={onResume}
-          title="Continue the session where the restart cut it off">
+          title="Continue the workspace where the restart cut it off">
           Resume
         </button>
       )}
@@ -139,37 +157,39 @@ function BriefLine({ label, text, cards, eventId }: { label: string; text: strin
 // The agent's question. Open, it has a reply box (when the transport can address an answer) or
 // points at the composer; answered or closed, it says so. Drawn without a chat around it (a host
 // rendering events itself), it is a plain card with the composer hint.
-function AskCard({ ev, cards }: { ev: AgentEvent; cards?: CardRegistry }) {
+function AskCard({ ev }: { ev: AgentEvent; cards?: CardRegistry }) {
   const asks = useAsks()
+  const [draft, setDraft] = useState('')
   const p = (ev.payload ?? {}) as Partial<MessagingPayload>
-  const body = typeof p.body === 'string' ? p.body : ''
   const state = asks?.states.get(ev.client_event_id)
+  const body = state?.question ?? (typeof p.body === 'string' ? p.body : '')
   const open = asks ? state?.open === true : true
   const ownerOnly = p.owner_only === true ? asks?.ownerOnly ?? 'elsewhere' : 'yes'
   const blocked = ownerOnly !== 'yes'
   const answer = blocked ? undefined : asks?.answer
   const what = p.no_wait ? 'question' : 'approval'
-  const blockedHint = ownerOnly === 'no' ? `Only the session owner can answer this ${what}.`
-    : ownerOnly === 'elsewhere' ? `Only the session owner can answer this ${what}, from the session in Runner.`
+  const blockedHint = ownerOnly === 'no' ? `Only the workspace owner can answer this ${what}.`
+    : ownerOnly === 'elsewhere' ? `Only the workspace owner can answer this ${what}, from the workspace in Runner.`
     : null
   // A question the agent did not wait on is answered here (or in the host's Needs you): the
   // composer's messages go to the agent as themselves.
-  const hint = p.no_wait ? 'the agent keeps working; your answer is sent to it' : 'answer in the composer'
+  const hint = p.no_wait ? 'the agent keeps working; your answer is sent to it' : p.message_id ? answer ? 'answer on this question' : 'Open this question in Runner to answer' : 'answer in the composer'
   return (
     <div className={`agent-card message kind-ask${open ? ' open' : ' closed'}`} data-testid="ask-card" data-event-id={ev.client_event_id}>
+      <QuestionCard turn={state?.turn} decisionButtons={open && !!answer && (p.decision === true || p.bound === true || p.live_binding === true)} approval={p.decision === true || p.bound === true || p.live_binding === true} id={p.message_id || ev.client_event_id} question={body + (state?.note ? '\n\n' + state.note : '')} status={open ? 'open' : state?.withdrawn ? 'withdrawn' : 'closed'}>
       <div className="ask-head">
-        <span className="message-kind">{p.owner_only && !p.no_wait ? 'owner-only approval' : 'question'}</span>
-        <Markdown text={body} className="message-body" cards={cards} />
+        {p.owner_only && !p.no_wait && <span className="message-kind">owner-only approval</span>}
+
         {open
           ? blocked ? blockedHint && <span className="ask-hint" data-testid="ask-owner-only">{blockedHint}</span> : (!answer || p.no_wait) && <span className="ask-hint">{hint}</span>
-          : !state?.answer && !state?.dismissed ? <span className="ask-hint" data-testid="ask-closed">closed</span> : null}
+          : !state?.answer && !state?.dismissed && !state?.withdrawn ? <span className="ask-hint" data-testid="ask-closed">closed</span> : null}
         <TimeLabel ts={ev.ts} className="card-time-end" />
       </div>
       {!open && state?.answer && (
         // Answered in place: what, by whom and when (the chat draws the answer as one short row).
         <div className="ask-outcome" data-testid="ask-closed">
           <span className="ask-outcome-label">Answered:</span> <span className="ask-outcome-text">{state.answer}</span>
-          <span className="ask-outcome-meta"> · {state.by === 'parent' ? 'by the parent session' : 'by you'}{state.at && <> · <TimeLabel ts={state.at} /></>}</span>
+          <span className="ask-outcome-meta"> · {state.by === 'parent' ? 'by Main' : 'by you'}{state.at && <> · <TimeLabel ts={state.at} /></>}</span>
         </div>
       )}
       {!open && !state?.answer && state?.dismissed && (
@@ -177,7 +197,9 @@ function AskCard({ ev, cards }: { ev: AgentEvent; cards?: CardRegistry }) {
           {state.by === 'you' ? 'Dismissed by you' : state.by === 'other' ? 'Dismissed by another person' : 'Dismissed'} (maybe answered in the chat)
         </div>
       )}
-      {open && answer && <AskReply answer={answer} messageId={p.message_id || undefined} />}
+      {open && answer && <AskReply binary={p.decision === true || p.bound === true || p.live_binding === true} answer={answer} messageId={p.message_id || undefined} draft={draft} onDraft={setDraft} />}
+      </QuestionCard>
+      {!open && state?.withdrawn && <div className="ask-outcome" data-testid="ask-closed">Withdrawn · workspace discarded without an answer</div>}
     </div>
   )
 }
@@ -247,13 +269,15 @@ function usageCost(p: TurnDonePayload): string {
   return `${u.input_tokens} in · ${u.output_tokens} out${u.cache_read_tokens ? ` · ${u.cache_read_tokens} cached` : ''}`
 }
 
-// The turn footer line: stop reason, model, usage, when, and how long it took.
+// The turn footer describes the outcome without exposing the engine's protocol values.
 export function turnDoneText(ev: AgentEvent, turnStart?: number) {
   const p = ev.payload as TurnDonePayload
   const d = turnDuration(turnStart ?? null, parseTs(ev.ts))
+  const outcome = p.stop_reason === 'end_turn' ? 'Turn finished' : p.stop_reason === 'interrupted' ? 'Interrupted'
+    : p.stop_reason === 'error' ? 'Failed' : p.stop_reason === 'max_tokens' ? 'Response limit reached' : 'Turn ended'
   return (
     <>
-      {p.stop_reason} · <span title={p.model}>{modelDisplayName(p.model)}</span> · {usageCost(p)}
+      {outcome} · <span title={p.model}>{modelDisplayName(p.model)}</span> · {usageCost(p)}
       {p.check_in_missing ? ' · ⚠ no completion check-in' : ''}
       {' · '}<TimeLabel ts={ev.ts} />
       {d ? ` · ${d}` : ''}
@@ -307,6 +331,24 @@ export function renderEvent(
       const shape = userMessageShape(p)
       if (shape.as === 'hidden') return null
       if (shape.as === 'notice' && shape.restart === 'paused') return <PausedRestartRow key={key} ev={ev} detail={shape.detail} />
+      if (shape.as === 'worker-notice') {
+        // Named by the worker's own title (untrusted, so shown as plain text, never Markdown) with
+        // a plain-word kind and a link the host resolves from the id; the short id goes in the
+        // row's tooltip only, never in the visible text (BLG-476).
+        const look = options.describeUserMessage?.(ev, p, { first: false })
+        const name = look?.author ?? 'A worker'
+        return (
+          <div key={key} className="agent-card system-note worker-notice" data-testid="worker-notice" title={`worker ${shape.workerId.slice(0, 8)}`}>
+            <span className="system-label">Blerg</span>
+            <span className="system-text">
+              {look?.authorHref
+                ? <a className="card-author-link" href={look.authorHref} onClick={look.onAuthorOpen ? (e) => { e.preventDefault(); look.onAuthorOpen!() } : undefined}>{name}</a>
+                : name} {shape.word}
+            </span>
+            <TimeLabel ts={ev.ts} className="card-time-end" />
+          </div>
+        )
+      }
       if (shape.as === 'notice') {
         return (
           <div key={key} className="agent-card system-note" data-testid={shape.label === '↻' ? 'restart-notice' : 'system-note'}>
@@ -334,7 +376,7 @@ export function renderEvent(
       }
       const look = options.describeUserMessage?.(ev, p, { first: !!options.firstUserMessage && ev.client_event_id === options.firstUserMessage })
       if (look?.brief) {
-        return <BriefLine key={key} label={typeof look.brief === 'string' ? look.brief : 'session brief'} text={p.text} cards={options.cards} eventId={key} />
+        return <BriefLine key={key} label={typeof look.brief === 'string' ? look.brief : 'workspace brief'} text={p.text} cards={options.cards} eventId={key} />
       }
       const answer = p.source === 'ask_answer'
       // A board, a parent session or a cron wrote it, or the parent answered its child's question:
@@ -344,30 +386,32 @@ export function renderEvent(
       const label = author ?? 'You'
       const open = look?.onAuthorOpen
       return (
-        <div key={key} className={`agent-card user source-${p.source}${author ? ' other-author' : ''}${parent ? ' from-parent' : ''}`} data-event-id={key}>
+        <MessageRow key={key} author="user" className={`source-${p.source}${author ? ' other-author' : ''}${parent ? ' from-parent' : ''}`} eventId={key}>
           <span className="card-author" data-testid="message-author">
             {look?.authorHref
               ? <a className="card-author-link" href={look.authorHref} onClick={open ? (e) => { e.preventDefault(); open() } : undefined}>{label}</a>
               : label}
             {answer && <span className="card-author-note"> · Answer</span>}
           </span>
-          <MessageText text={p.text} cards={options.cards} at={ev.ts} />
+          {p.source === 'cron' ? <pre className="system-pre">{p.text}</pre> : <MessageText text={p.text} cards={options.cards} at={ev.ts} />}
           <CopyMessage text={p.text} />
+          <PopOutMessage text={p.text} messageId={key} fallbackLabel={popOutFallback(options.chatName, ev.ts)} />
           <div className="card-foot"><TimeLabel ts={ev.ts} /></div>
           {options.messageFooter?.(ev)}
-        </div>
+        </MessageRow>
       )
     }
     case 'assistant_text': {
       const p = ev.payload as AssistantTextPayload
       return (
-        <div key={key} className="agent-card assistant">
+        <MessageRow key={key} author="assistant">
           <Markdown text={p.text} cards={options.cards} workspaceLinks />
           <CopyMessage text={p.text} />
+          <PopOutMessage text={p.text} messageId={key} fallbackLabel={popOutFallback(options.chatName, ev.ts)} workspaceLinks />
           <div className="card-foot"><TimeLabel ts={ev.ts} /></div>
           {footer && <div className="turn-foot" data-testid="turn-done">{turnDoneText(footer, footerStart)}</div>}
           {options.messageFooter?.(ev)}
-        </div>
+        </MessageRow>
       )
     }
     case 'assistant_thinking': {
@@ -390,16 +434,25 @@ export function renderEvent(
         </div>
       )
     }
+    case 'inbox_item': {
+      const p = ev.payload as { id?: unknown; subject?: unknown }
+      if (typeof p?.id !== 'string' || typeof p?.subject !== 'string') return null
+      return <InboxArrivalCard key={key} subject={p.subject} onOpen={() => window.dispatchEvent(new CustomEvent('blerg-open-inbox', { detail: { id: p.id } }))} />
+    }
     case 'session_upload': {
       const p = ev.payload as Partial<SessionUploadPayload> | null
       const name = typeof p?.name === 'string' ? p.name : 'a file'
-      const parent = typeof p?.from_title === 'string' && p.from_title ? p.from_title : 'another session'
+      const parent = typeof p?.from_title === 'string' && p.from_title ? p.from_title : 'another workspace'
       return <div key={key} className="agent-card marker" data-testid="session-upload" data-event-id={key}><FileIcon name={name} /> {name} · from {parent}{typeof p?.size === 'number' && Number.isFinite(p.size) && p.size >= 0 ? ` · ${p.size.toLocaleString()} bytes` : ''}<TimeLabel ts={ev.ts} className="card-time-end" /></div>
     }
     case 'delegation_request':
       return <DelegationCard key={key} ev={ev} />
     case 'delegation_decided':
       return null // folded into its request's card
+    case 'channel_recommendation':
+      return <ChannelRecommendationCard key={key} ev={ev} />
+    case 'blackboard_recommendation':
+      return <BlackboardRecommendationCard key={key} ev={ev} />
     case 'proposal_request':
       return <ProposalCard key={key} ev={ev} />
     case 'proposal_decided':
@@ -410,9 +463,28 @@ export function renderEvent(
       return null // folded into its request's card
     case 'ask':
       return <AskCard key={key} ev={ev} cards={options.cards} />
+    case 'cron_command_result': {
+      const p = ev.payload as { index?: number; argv?: string[]; exit_code?: number; timed_out?: boolean; truncated?: boolean; output?: string; error?: string; defined_by?: string }
+      return <div key={key} className="agent-card marker" data-testid="cron-command-result">
+        <details><summary>Fixed command {p.index} · exit {p.exit_code}{p.timed_out ? ' · timed out' : ''}{p.truncated ? ' · output truncated' : ''}</summary>
+          <p>Defined by {p.defined_by}</p><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{JSON.stringify(p.argv)}</pre>
+          <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{typeof p.output === 'string' ? p.output : ''}</pre>{p.error && <p>{p.error}</p>}
+        </details>
+      </div>
+    }
+    case 'ui_reveal': {
+      const p = ev.payload as { action?: string; target?: string }
+      if (typeof p?.target !== 'string' || !['reveal', 'open', 'attachment', 'panel'].includes(p.action ?? '')) return null
+      return <div key={key} className="agent-card marker" data-testid="ui-reveal">
+        <span>Agent suggests: {p.action === 'reveal' ? 'show in Explorer' : p.action === 'attachment' ? 'open an attachment' : p.action === 'panel' ? 'show panel' : 'open file'}{p.action !== 'attachment' && <> {p.target}</>}</span>{' '}
+        <button type="button" className="artifact-btn" onClick={() => window.dispatchEvent(new CustomEvent('blerg-ui-reveal', { cancelable: true, detail: { session: ev.session_id, action: p.action, target: p.target } }))}>Show</button>
+        <TimeLabel ts={ev.ts} className="card-time-end" />
+      </div>
+    }
     case 'update':
     case 'note': {
       const p = ev.payload as MessagingPayload
+      if (p.question_withdrawn) return <div key={key} className="agent-card system-note" data-testid="question-withdrawn">Question withdrawn <TimeLabel ts={ev.ts} className="card-time-end" /></div>
       return (
         <div key={key} className={`agent-card message kind-${ev.kind}`} data-testid={`message-${ev.kind}`}>
           <span className="message-kind">{ev.kind}</span>
@@ -452,6 +524,8 @@ export function renderEvent(
         </div>
       )
     }
+    case 'stop_result':
+      return <div key={key} className="agent-card marker" data-testid="stop-result">{(ev.payload as { message: string }).message}</div>
     case 'error': {
       if ((ev.payload as ErrorPayload)?.code === 'session_recovery') return null
       const p = ev.payload as ErrorPayload

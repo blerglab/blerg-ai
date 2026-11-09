@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
@@ -13,5 +14,10 @@ func TestMain(m *testing.M) {
 	if _, set := os.LookupEnv("BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS"); !set {
 		_ = os.Setenv("BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS", "true")
 	}
-	os.Exit(testsupport.Run(m))
+	code := testsupport.Run(m)
+	if err := sharedCutBoardBinary.cleanup(); err != nil {
+		fmt.Fprintln(os.Stderr, "remove shared cut board executable:", err)
+		code = 1
+	}
+	os.Exit(code)
 }

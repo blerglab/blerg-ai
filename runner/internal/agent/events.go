@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/blerglab/blerg-ai/runner/internal/persontime"
 )
 
 // Event is one transcript event. Payload types are per-kind structs below.
@@ -28,11 +30,14 @@ type Emitter interface{ Emit(Event) }
 // browser's queued bubble), echoed so the sender can match it; MessageID, on an ask_answer, is the
 // id of the ask it answers.
 type UserMessagePayload struct {
-	TurnID    string `json:"turn_id,omitempty"`
-	Text      string `json:"text"`
-	Source    string `json:"source"`
-	ClientID  string `json:"client_id,omitempty"`
-	MessageID string `json:"message_id,omitempty"`
+	// StoppedTurn is an internal receipt drained from a stopped engine. It must
+	// settle the input without clearing Stop intent as if a new turn accepted it.
+	StoppedTurn bool   `json:"-"`
+	TurnID      string `json:"turn_id,omitempty"`
+	Text        string `json:"text"`
+	Source      string `json:"source"`
+	ClientID    string `json:"client_id,omitempty"`
+	MessageID   string `json:"message_id,omitempty"`
 	// AnsweredBy, on an ask_answer, is "session" when the parent session answered (its message
 	// came with source "session", which only the runner sets); absent for the person's answer.
 	AnsweredBy string `json:"answered_by,omitempty"`
@@ -42,7 +47,9 @@ type UserMessagePayload struct {
 // is what the transcript records instead (a slash skill: the person typed "/review x", the engine
 // gets the skill's instructions). ClientID is echoed on the user_message (UserMessagePayload).
 type Input struct {
-	PlanNudge      string `json:",omitempty"`
+	PersonTime     *persontime.Account `json:",omitempty"`
+	PlanNudge      string              `json:",omitempty"`
+	ProcessLimit   string              `json:"-"` // the daemon's own: carried with this input, never one of its own
 	ExpectedTurnID string
 	Text           string
 	Shown          string
@@ -235,6 +242,17 @@ type TopicPayload struct {
 // moment it records, RFC 3339 UTC; the chat draws no row for it, History anchors it by time.
 // PostedBy is who posted it: "agent" (the session's own token) or "owner" (the person, signed in).
 type MarkPayload struct {
+	ClaimedBy   string `json:"claimed_by,omitempty"`
+	FailureType string `json:"type,omitempty"`
+	Severity    string `json:"severity,omitempty"`
+	Suite       string `json:"suite,omitempty"`
+	RerunPassed bool   `json:"rerun_passed,omitempty"`
+
+	Verdict  string   `json:"verdict,omitempty"`
+	Findings []string `json:"findings,omitempty"`
+	Target   string   `json:"target,omitempty"`
+	Round    int      `json:"round,omitempty"`
+
 	ID       string        `json:"id"`
 	Kind     string        `json:"kind"`
 	By       string        `json:"by"`
@@ -381,6 +399,8 @@ const (
 	// the session takes no more turns and ends. `blerg-runner session watch`
 	// returns on it.
 	ErrorCodeRuntimeStopped = "runtime_stopped"
+	// ErrorCodeStopFailed leaves the turn and queued input intact; Stop may be retried.
+	ErrorCodeStopFailed = "stop_failed"
 )
 
 // CompactionPayload — kind "compaction". Summary is the full replacement

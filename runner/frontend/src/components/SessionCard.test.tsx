@@ -31,15 +31,30 @@ describe('SessionCard', () => {
     apiFetch.mockReset()
   })
 
+  it.each(['workspace', ''])('names workspace repositories with the full list available (legacy repo=%s)', repo => {
+    renderCard(makeSession({ title: 'Review', repo, workspace: { members: [
+      { name: 'blerg', path: 'blerg' }, { name: 'board', path: 'board' }, { name: 'chat', path: 'chat' },
+    ] } }))
+    expect(screen.getByTestId('session-repo')).toHaveTextContent('blerg + 2')
+    expect(screen.getByTestId('session-repo')).toHaveAttribute('title', 'blerg, board, chat')
+  })
+
+  it('keeps a different workspace subset visible on a nested card', () => {
+    const workspace = (names: string[]) => ({ members: names.map(name => ({ name, path: name })) })
+    useSessionStore.setState({ sessions: [makeSession({ id: 'parent', repo: 'workspace', workspace: workspace(['blerg', 'board']) })] })
+    render(<MemoryRouter><SessionCard nested session={makeSession({ parent_session_id: 'parent', repo: 'workspace', workspace: workspace(['board']) })} daemon={makeDaemon()} /></MemoryRouter>)
+    expect(screen.getByTestId('session-repo')).toHaveTextContent('board')
+  })
+
   it('offers confirmed discard only in a child card menu and waits for authoritative data',async()=>{
     apiFetch.mockResolvedValue({ok:true})
-    renderCard(makeSession({id:'child /',parent_session_id:'parent /',title:'Review child'}))
+    renderCard(makeSession({id:'child /',parent_session_id:'parent /',started_by:{kind:'session'},title:'Review child'}))
     fireEvent.click(screen.getByRole('button',{name:'Actions for Review child'}))
-    fireEvent.click(screen.getByRole('menuitem',{name:'Discard child session'}))
-    expect(screen.getByRole('alertdialog',{name:'Discard child session?'})).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('menuitem',{name:'Discard worker'}))
+    expect(screen.getByRole('alertdialog',{name:'Discard worker?'})).toBeInTheDocument()
     expect(screen.getByTestId('location')).toHaveTextContent('/')
     expect(apiFetch).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByRole('button',{name:'Discard child session'}))
+    fireEvent.click(screen.getByRole('button',{name:'Discard worker'}))
     await waitFor(()=>expect(apiFetch).toHaveBeenCalledWith('/api/sessions/parent%20%2F/children/child%20%2F/discard',{method:'POST'}))
     expect(screen.getByText('Review child')).toBeInTheDocument()
     expect(screen.getByTestId('location')).toHaveTextContent('/')
@@ -48,13 +63,13 @@ describe('SessionCard', () => {
     apiFetch.mockResolvedValue({ok: true,json:async()=>({status:'discarded',session_id:'parent /',archived_at:'2026-10-20T12:00:00Z'})})
     renderCard(makeSession({id:'parent /',title:'Parent'}))
     fireEvent.click(screen.getByRole('button',{name:'Actions for Parent'}))
-    expect(screen.queryByRole('menuitem',{name:'Discard child session'})).toBeNull()
-    fireEvent.click(screen.getByRole('menuitem',{name:'Discard session and children'}))
-    expect(screen.getByRole('alertdialog',{name:'Discard session and all children?'})).toBeInTheDocument()
-    expect(screen.getByText(/including children marked Keep running and work in progress/)).toBeInTheDocument()
+    expect(screen.queryByRole('menuitem',{name:'Discard worker'})).toBeNull()
+    fireEvent.click(screen.getByRole('menuitem',{name:'Discard workspace'}))
+    expect(screen.getByRole('alertdialog',{name:'Discard workspace and all workers and channels?'})).toBeInTheDocument()
+    expect(screen.getByText(/including those marked Keep running and work in progress/)).toBeInTheDocument()
     expect(screen.getByText(/Conversations, files, history and insights remain available/)).toBeInTheDocument()
     expect(apiFetch).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByRole('button',{name:'Discard session and children'}))
+    fireEvent.click(screen.getByRole('button',{name:'Discard workspace'}))
     await waitFor(()=>expect(apiFetch).toHaveBeenCalledWith('/api/sessions/parent%20%2F/discard',{method:'POST'}))
     expect(screen.getByTestId('location')).toHaveTextContent('/')
     expect(screen.getByText('Parent')).toBeInTheDocument()
@@ -255,6 +270,12 @@ describe('SessionCard', () => {
   })
 
   describe('unread dot', () => {
+    it('preserves unread and waiting signals when a worker has no live Main', () => {
+      renderCard(makeSession({ status: 'waiting', unread: true, started_by: { kind: 'session' } }))
+      expect(screen.getByTestId('unread-dot')).toBeVisible()
+      expect(document.querySelector('.blerg-runner-waiting-flash')).not.toBeNull()
+    })
+
     it('an idle unread session renders the unread dot', () => {
       const { container } = renderCard(makeSession({ status: 'idle', unread: true }))
       expect(container.querySelector('[data-testid="unread-dot"]')).toBeInTheDocument()
@@ -351,7 +372,7 @@ describe('SessionCard', () => {
     it('labels a sandboxed session', () => {
       renderCard(makeSession({ runtime: 'docker', kind: 'tmux' }))
       expect(screen.getByTestId('runtime-chip').querySelector('[data-runtime]')).toHaveAttribute('data-runtime', 'sandbox')
-      expect(screen.getByTestId('kind-chip')).toHaveTextContent('Terminal')
+      expect(screen.getByTestId('kind-chip')).toHaveTextContent('Terminal history')
     })
 
     it('labels an unsandboxed host session', () => {
@@ -361,7 +382,7 @@ describe('SessionCard', () => {
 
     it('labels only an explicit tmux session as a terminal (terminal sessions were removed in 0.5.0)', () => {
       renderCard(makeSession({ kind: 'tmux' }))
-      expect(screen.getByTestId('kind-chip')).toHaveTextContent('Terminal')
+      expect(screen.getByTestId('kind-chip')).toHaveTextContent('Terminal history')
     })
 
     it('gives a session with an empty kind no terminal label', () => {
@@ -378,7 +399,7 @@ describe('SessionCard', () => {
   describe('cron badge', () => {
     it('marks a session a cron started', () => {
       renderCard(makeSession({ cron_id: 'c1' }))
-      expect(screen.getByTestId('cron-badge')).toHaveTextContent('cron')
+      expect(screen.getByTestId('cron-badge')).toHaveTextContent('Run')
     })
 
     it('shows no badge on an ordinary session', () => {
@@ -401,4 +422,14 @@ it.each([undefined, 'example-org/widget', 'example-org/another-widget'])('puts t
   expect([...row().children].map(item => item.getAttribute('data-testid'))).toEqual([...expected, 'background-chip'])
   view.rerender(card(0))
   expect([...row().children].map(item => item.getAttribute('data-testid'))).toEqual(expected)
+})
+
+it.each(['worker', 'channel'] as const)('discards a %s with its own role wording', role => {
+  const child = makeSession({ id: 'role-child', title: 'Focused work', parent_session_id: 'parent', ...(role === 'worker' ? { started_by: { kind: 'session' } } : {}) })
+  useSessionStore.setState({ sessions: [makeSession({ id: 'parent' }), child] })
+  renderCard(child)
+  fireEvent.click(screen.getByRole('button', { name: 'Actions for Focused work' }))
+  fireEvent.click(screen.getByRole('menuitem', { name: `Discard ${role}` }))
+  expect(screen.getByRole('alertdialog', { name: `Discard ${role}?` })).toBeVisible()
+  expect(apiFetch.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false)
 })

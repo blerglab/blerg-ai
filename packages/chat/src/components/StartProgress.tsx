@@ -92,24 +92,24 @@ export default function StartProgress({ attempt, session, onStop, clockOffset = 
 
   const title = resuming
     ? (gaveUp
-      ? "Couldn't resume the session"
+      ? "Couldn't resume the workspace"
       : retrying
-        ? 'Resuming session — a step is failing, still retrying'
+        ? 'Resuming workspace — a step is failing, still retrying'
         : attempt.ready
-        ? 'Session ready'
-        : 'Resuming session — your message is delivered when it is ready')
+        ? 'Workspace ready'
+        : 'Resuming workspace — your message is delivered when it is ready')
     : gaveUp
-    ? "Couldn't start the session"
+    ? "Couldn't start the workspace"
     : retrying
-      ? 'Starting session — a step is failing, still retrying'
+      ? 'Starting workspace — a step is failing, still retrying'
       : attempt.ready
-      ? 'Session ready'
-      : 'Starting session'
+      ? 'Workspace ready'
+      : 'Starting workspace'
 
   return (
     <section
       className={`start-progress${gaveUp ? ' failed' : retrying ? ' retrying' : ''}${resuming ? ' resuming' : ''}`}
-      aria-label="Session start progress"
+      aria-label="Workspace start progress"
       data-testid="start-progress"
     >
       <header className="sp-header">
@@ -156,7 +156,7 @@ export default function StartProgress({ attempt, session, onStop, clockOffset = 
               from assistive tech, which hears a fixed "over 2 minutes". */}
           Still starting after <span aria-hidden="true">{formatElapsed(elapsed)}</span>
           <span className="sp-sr-only">over 2 minutes</span>. {current ? `It is on “${current.label}”.` : ''}
-          {' '}Starts can take a few minutes (a cold node pulling the image, a large clone); if nothing moves, view the details or stop the session.
+          {' '}Starts can take a few minutes (a cold node pulling the image, a large clone); if nothing moves, view the details or stop the workspace.
         </div>
       )}
 
@@ -168,19 +168,19 @@ export default function StartProgress({ attempt, session, onStop, clockOffset = 
           <button ref={stopButton} type="button" className="sp-btn sp-stop" aria-haspopup="dialog" aria-expanded={confirmStop}
             disabled={stopping} aria-busy={stopping || undefined} onClick={() => setConfirmStop(true)}>
             {/* A failed start is ended the same way (its history stays): never "delete". */}
-            {live ? 'Stop session' : 'End session'}
+            {live ? 'Stop workspace' : 'End workspace'}
           </button>
         )}
         {stopError && <span className="sp-stop-error">Stop failed: {stopError}</span>}
       </div>
       {confirmStop && (
-        <ConfirmPopover anchor={stopButton} title="End this session?" description={endSessionText(session?.runtime || attempt.runtime)}
-          confirmLabel="End session" onConfirm={() => void stop()} onCancel={() => setConfirmStop(false)} testId="start-stop-confirm" />
+        <ConfirmPopover anchor={stopButton} title="End this workspace?" description={endSessionText(session?.runtime || attempt.runtime)}
+          confirmLabel="End workspace" onConfirm={() => void stop()} onCancel={() => setConfirmStop(false)} testId="start-stop-confirm" />
       )}
       {showDetails && (
         <div className="sp-meta">
           {attempt.runtime && <span>runtime: {attempt.runtime}</span>}
-          {session && <span>session: {session.id}</span>}
+          {session && <span>Workspace ID: {session.id}</span>}
           <span>started {new Date(attempt.startedAt).toLocaleTimeString()}</span>
         </div>
       )}

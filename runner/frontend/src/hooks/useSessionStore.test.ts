@@ -172,8 +172,10 @@ describe('useSessionStore', () => {
 
   it('follows a session paused by a restart until it runs again', () => {
     wsMock.emit({ type: 'initial_state', daemons: [], sessions: [makeSession({ status: 'idle' }), makeSession({ id: 'sess-b' })] })
-    wsMock.emit({ type: 'session_paused_changed', session_id: 'sess-a', paused_reason: 'restart' })
+    wsMock.emit({ type: 'session_paused_changed', session_id: 'sess-a', paused_reason: 'restart', paused_detail: 'Workspace stop interrupted; work retained.' })
     expect(get().sessions.map(s => s.paused_reason)).toEqual(['restart', undefined])
+    expect(get().sessions[0].status).toBe('waiting')
+    expect(get().sessions[0].paused_detail).toBe('Workspace stop interrupted; work retained.')
     wsMock.emit({ type: 'session_state_changed', session_id: 'sess-a', status: 'waiting', unread: false })
     expect(get().sessions[0].paused_reason).toBe('restart')
     wsMock.emit({ type: 'session_state_changed', session_id: 'sess-a', status: 'running', unread: false })
@@ -212,6 +214,22 @@ describe('useSessionStore', () => {
   it('adds a session on session_started', () => {
     wsMock.emit({ type: 'session_started', session: makeSession({ id: 'new-1' }) })
     expect(get().sessions.map(s => s.id)).toContain('new-1')
+  })
+
+  it('updates verbosity across connected views', () => {
+    useSessionStore.setState({sessions:[makeSession({id:'sess-a',verbosity:'standard'})]})
+    wsMock.emit({type:'session_verbosity_changed',session_id:'sess-a',verbosity:'terse'})
+    expect(useSessionStore.getState().sessions[0].verbosity).toBe('terse')
+  })
+
+  it('syncs and clears the channel emoji without changing the title', () => {
+    wsMock.emit({ type: 'initial_state', daemons: [], sessions: [makeSession()] })
+    const title = get().sessions[0].title
+    for (const emoji of ['👩🏽‍💻', '']) {
+      wsMock.emit({type: 'session_emoji_changed', session_id: 'sess-a', emoji})
+      expect(get().sessions[0].emoji).toBe(emoji)
+      expect(get().sessions[0].title).toBe(title)
+    }
   })
 
   it('updates a title on session_title_changed', () => {
@@ -355,4 +373,34 @@ describe('useSessionStore', () => {
     wsMock.emit({ type: 'session_state_changed', session_id: 'sess-a', status: 'idle', unread: false })
     expect(get().sessions[0].starred).toBe(true)
   })
+})
+
+it('syncs session colors from another device', () => {
+ useSessionStore.setState({sessions:[makeSession({id:'color-sync'})]})
+ wsMock.emit({type:'session_color_changed',session_id:'color-sync',color:'purple'})
+ expect(useSessionStore.getState().sessions.find(s=>s.id==='color-sync')?.color).toBe('purple')
+})
+
+it('keeps a chosen color when the resumed daemon announces an empty color', () => {
+ useSessionStore.setState({sessions:[makeSession({id:'resumed',color:'blue',status:'stopped'})]})
+ wsMock.emit({type:'session_started',session:makeSession({id:'resumed',status:'starting',color:''})})
+ expect(useSessionStore.getState().sessions[0].color).toBe('blue')
+})
+
+it('replaces repository attention on a full session snapshot from another browser', () => {
+  const session = makeSession({ repository_request: { id: 'operation', kind: 'add', member_name: 'Web', proposed_digest: 'proposal' } })
+  useSessionStore.setState({ sessions: [session] })
+  const changed = vi.fn()
+  window.addEventListener('blerg:repository-requests-changed', changed)
+  const decided = makeSession()
+  wsMock.emit({ type: 'session_started', session: decided })
+  expect(get().sessions[0].repository_request).toBeUndefined()
+  expect(changed).toHaveBeenCalledTimes(1)
+  window.removeEventListener('blerg:repository-requests-changed', changed)
+})
+
+it('clears repository approvals when desktop access is removed', () => {
+  useSessionStore.setState({ sessions: [makeSession({ daemon_id: 'desktop-a', repository_request: { id: 'operation', kind: 'remove', member_name: 'API', proposed_digest: 'proposal' } })] })
+  wsMock.emit(ownershipEvent as import('../types').DesktopOwnershipChanged)
+  expect(get().sessions[0].repository_request).toBeUndefined()
 })

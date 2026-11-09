@@ -4,73 +4,84 @@ package hostgit
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
-	"os/exec"
-	"strconv"
-	"strings"
+	"syscall"
 	"time"
 )
 
+const memorySampleTimeout = 100 * time.Millisecond
+
+// These are Darwin's proc_info ABI constants. proc_taskinfo is six uint64s
+// followed by twelve int32s on both amd64 and arm64; resident bytes start at 8.
+// See https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc_info.h
+// and https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.c.
 const (
-	memorySampleTimeout = 100 * time.Millisecond
-	memorySampleOutput  = 64 << 10
+	procInfoListPIDs = 1
+	procInfoPIDInfo  = 2
+	procPgrpOnly     = 2
+	procPIDTaskInfo  = 4
+	procTaskInfoSize = 96
+	maxGroupPIDBytes = 64 << 10
 )
 
-// Darwin ps selects process groups with -g (Linux ps uses a different selector). Keep the
-// construction/parser available on Linux for fake-ps tests, without using it for Linux Git.
-// Only numeric RSS is requested: no repository paths, argv or environment are collected.
-func darwinRSSCommand(ctx context.Context, pgid int) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "/bin/ps", "-o", "rss=", "-g", strconv.Itoa(pgid)) //nolint:gosec // G204: fixed system binary/flags; the only variable is our started child's numeric process group.
-	cmd.Env = []string{"PATH=/usr/bin:/bin", "LC_ALL=C"}
-	cmd.WaitDelay = memorySampleTimeout
-	return cmd
-}
+type procInfo func(call, pid, flavor int, buf []byte) (int, error)
 
-func readGroupRSS(ctx context.Context, pgid int, command func(context.Context, int) *exec.Cmd) (uint64, error) {
+// nativeGroupRSS is shared with Linux tests, but only used on Darwin.
+// A full PID buffer could hide helpers, so fail closed instead of accepting
+// a truncated group. This bound covers 16K processes (above our group limit).
+func nativeGroupRSS(ctx context.Context, pgid int, info procInfo) (uint64, error) {
 	ctx, cancel := context.WithTimeout(ctx, memorySampleTimeout)
 	defer cancel()
-	cmd := command(ctx, pgid)
-	stdout := &capped{max: memorySampleOutput}
-	stderr := &capped{max: 4 << 10}
-	cmd.Stdout, cmd.Stderr = stdout, stderr
-	err := cmd.Run()
-	if ctx.Err() != nil {
-		return 0, ctx.Err()
+	if pgid <= 0 || pgid > 1<<31-1 {
+		return 0, errors.New("invalid RSS process group")
 	}
-	if stdout.overflow || stderr.overflow {
-		return 0, errors.New("RSS sample output exceeded its limit")
+	if err := ctx.Err(); err != nil {
+		return 0, err
 	}
-	if stderr.buf.Len() != 0 {
-		// Darwin ps can report a sysctl failure on stderr while returning success.
-		return 0, errors.New("RSS sample command reported an error")
-	}
+	pids := make([]byte, maxGroupPIDBytes)
+	n, err := info(procInfoListPIDs, procPgrpOnly, pgid, pids)
 	if err != nil {
-		// ps exits 1 with no output when the group has just exited. Do not turn a short-lived
-		// successful Git command into a refusal while Wait is completing.
-		var exit *exec.ExitError
-		if errors.As(err, &exit) && exit.ExitCode() == 1 && stdout.buf.Len() == 0 && stderr.buf.Len() == 0 {
-			return 0, nil
-		}
-		return 0, errors.New("RSS sample command failed")
+		return 0, err
 	}
-	if strings.TrimSpace(stdout.buf.String()) == "" {
-		return 0, errors.New("RSS sample command returned no data")
+	if n < 0 || n >= len(pids) || n%4 != 0 {
+		return 0, errors.New("incomplete RSS process group sample")
 	}
-	return parseGroupRSS(stdout.buf.String())
-}
-
-func parseGroupRSS(raw string) (uint64, error) {
 	var total uint64
-	for _, line := range strings.Split(raw, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	for offset := 0; offset < n; offset += 4 {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		pid := binary.LittleEndian.Uint32(pids[offset:])
+		if pid == 0 || pid > 1<<31-1 {
+			return 0, errors.New("invalid RSS process ID")
+		}
+		var task [procTaskInfoSize]byte
+		size, err := info(procInfoPIDInfo, int(pid), procPIDTaskInfo, task[:])
+		// A member may exit between enumeration and observation. Only the kernel's
+		// explicit "no such process" is safe to omit; permissions/short reads fail.
+		if errors.Is(err, syscall.ESRCH) {
 			continue
 		}
-		rss, err := strconv.ParseUint(line, 10, 64)
-		if err != nil || rss > ^uint64(0)-total {
-			return 0, errors.New("invalid RSS sample")
+		if err != nil {
+			return 0, err
+		}
+		if size != len(task) {
+			return 0, errors.New("incomplete RSS task sample")
+		}
+		rss := binary.LittleEndian.Uint64(task[8:16])
+		if rss > ^uint64(0)-total {
+			return 0, errors.New("RSS sample overflow")
 		}
 		total += rss
 	}
-	return total, nil
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	// Round the sum up to KiB, preserving even sub-KiB observations.
+	kb := total / 1024
+	if total%1024 != 0 {
+		kb++
+	}
+	return kb, nil
 }

@@ -85,13 +85,13 @@ func TestBoardLevelsEachAllowExactlyTheirOperations(t *testing.T) {
 		} else if !strings.Contains(body, "needs read access") {
 			t.Fatalf("%s: get refusal %s", level, body)
 		}
-		code, body = boardTool(fx, fx.sessTok, "board-a", "blerg_card_create", map[string]any{"title": "x"})
+		code, body = boardTool(fx, fx.sessTok, "board-a", "blerg_card_create", map[string]any{"title": "x", "size": "M", "risk": "high", "complexity": "low"})
 		if (code == 200) != write {
 			t.Fatalf("%s: create = %d %s", level, code, body)
 		}
 		if write {
 			c := fb.last()
-			if c.ReadOnly || !strings.Contains(string(c.Arguments), `"board_id":"board-a"`) {
+			if c.ReadOnly || !strings.Contains(string(c.Arguments), `"board_id":"board-a"`) || !strings.Contains(string(c.Arguments), `"risk":"high"`) || !strings.Contains(string(c.Arguments), `"complexity":"low"`) {
 				t.Fatalf("%s: write call %+v %s", level, c, c.Arguments)
 			}
 		} else if !strings.Contains(body, "needs full access") || !strings.Contains(body, "Permissions") {
@@ -144,7 +144,7 @@ func TestBoardLevelsEachAllowExactlyTheirOperations(t *testing.T) {
 		t.Fatalf("by name: %d %s", code, body)
 	}
 	// Tools outside the fixed set are never callable, at any level.
-	for _, tool := range []string{"blerg_card_archive", "blerg_board_update", "blerg_board_create", "nope"} {
+	for _, tool := range []string{"blerg_board_update", "blerg_board_create", "nope"} {
 		if code, _ := boardTool(fx, fx.sessTok, "board-a", tool, nil); code != 400 {
 			t.Fatalf("%s: %d", tool, code)
 		}
@@ -275,6 +275,7 @@ func TestColumnToolsFollowTheBoardLevel(t *testing.T) {
 	human := fx.token(topicOwner, "human")
 	tools := map[string]map[string]any{
 		"blerg_column_create": {"name": "0.5.0 to do"},
+		"blerg_card_archive":  {"card_id": "card-a"},
 		"blerg_column_update": {"column_id": "col-1", "name": "Next", "is_terminal": true},
 		"blerg_column_move":   {"column_id": "col-1", "before_id": "col-2"},
 		"blerg_column_delete": {"column_id": "col-1", "move_cards_to": "col-2"},
@@ -316,17 +317,22 @@ func TestColumnToolsNeedAPersonsAccess(t *testing.T) {
 	if code, body := boardTool(fx, fx.sessTok, "board-a", "blerg_card_create", map[string]any{"title": "x"}); code != 200 {
 		t.Fatalf("card write on the untouched launch board: %d %s", code, body)
 	}
-	before := fb.count()
-	code, body := boardTool(fx, fx.sessTok, "board-a", "blerg_column_create", map[string]any{"name": "x"})
-	if code != 403 || fb.count() != before || !strings.Contains(body, "Full access the person gave") {
-		t.Fatalf("token launch column create: %d %s", code, body)
+	for _, tool := range []string{"blerg_column_create", "blerg_card_archive"} {
+		before := fb.count()
+		code, body := boardTool(fx, fx.sessTok, "board-a", tool, map[string]any{"name": "x", "card_id": "card-a"})
+		if code != 403 || fb.count() != before || !strings.Contains(body, "Full access the person gave") {
+			t.Fatalf("token launch %s: %d %s", tool, code, body)
+		}
 	}
 	if code, body := setLevel(fx, fx.token(topicOwner, "human"), "board-a", db.BoardLevelFull); code != 200 {
 		t.Fatalf("set full: %d %s", code, body)
 	}
-	if code, body := boardTool(fx, fx.sessTok, "board-a", "blerg_column_create", map[string]any{"name": "x"}); code != 200 {
-		t.Fatalf("after the person set full: %d %s", code, body)
+	for _, tool := range []string{"blerg_column_create", "blerg_card_archive"} {
+		if code, body := boardTool(fx, fx.sessTok, "board-a", tool, map[string]any{"name": "x", "card_id": "card-a"}); code != 200 {
+			t.Fatalf("after the person set full, %s: %d %s", tool, code, body)
+		}
 	}
+
 }
 
 func TestLaunchBoardShowsAsFullAndCanBeLoweredOrRevoked(t *testing.T) {

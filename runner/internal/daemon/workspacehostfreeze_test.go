@@ -3,10 +3,13 @@ package daemon
 import (
 	"context"
 	"errors"
+	"github.com/blerglab/blerg-ai/runner/internal/activity"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
@@ -21,11 +24,38 @@ func (f *freezeFailWriters) Freeze(context.Context) error {
 	return errors.New("waiting for freeze acknowledgement: context deadline exceeded")
 }
 func (f *freezeFailWriters) Thaw(context.Context) error { f.thaws++; return f.thawErr }
+func (*freezeFailWriters) OnLimit(func(string))         {}
 func (f *freezeFailWriters) Stop(context.Context) error { return nil }
 
 type phaseRecorder struct {
 	protocol.RuntimeSupervisor
-	phases []string
+	phases     []string
+	privileged bool
+}
+
+func (p *phaseRecorder) PrivilegedShellOpen(string) (bool, bool) { return p.privileged, true }
+
+func TestHostSyncCarriesPrivilegedCopyNote(t *testing.T) {
+	sup := &phaseRecorder{privileged: true}
+	w := &LocalWorkspace{mu: new(sync.Mutex), record: filepath.Join(t.TempDir(), "record.json"), state: workspacePrivateManifest{Session: "session", Members: []workspacePrivateMember{{Result: protocol.WorkspaceMemberResult{WorkspaceMemberRef: protocol.WorkspaceMemberRef{MemberID: "member"}}}}}}
+	w.authorize = func(context.Context) error { return nil }
+	h := &hostWorkspace{writers: &countingWriters{}, w: w, service: &LocalWorkspaceService{Supervisor: sup}}
+	w.host = h
+	results, err := h.sync(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || !strings.Contains(results[0].SyncNote, "may include in-flight writes") {
+		t.Fatalf("missing turn copy note: %+v", results)
+	}
+	sup.privileged = false
+	results, err = h.sync(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].SyncNote != "" {
+		t.Fatal("new ordinary copy kept privileged note")
+	}
 }
 
 func (p *phaseRecorder) Notify(_ context.Context, _ protocol.SupervisorLaunch, phase protocol.SupervisorPhase) error {
@@ -54,7 +84,12 @@ func TestHostSyncThawsAndReopensAfterAFailedFreeze(t *testing.T) {
 			w.authorize = func(context.Context) error { return nil }
 			h := &hostWorkspace{writers: writers, w: w, service: svc}
 			w.host = h
-			_, err := h.sync(t.Context())
+			ctx, work := activity.NewWork(t.Context())
+			_, err := h.sync(ctx)
+			measured := work.Seconds(time.Second)
+			if measured["freeze"] <= 0 || measured["thaw"] <= 0 {
+				t.Fatalf("lifecycle intervals missing: %+v", measured)
+			}
 			if err == nil || !strings.Contains(err.Error(), "host workspace writer freeze") {
 				t.Fatalf("sync after a failed freeze: %v", err)
 			}
@@ -76,6 +111,7 @@ type countingWriters struct{ freezes, thaws int }
 func (c *countingWriters) Start(*exec.Cmd) error        { return nil }
 func (c *countingWriters) Freeze(context.Context) error { c.freezes++; return nil }
 func (c *countingWriters) Thaw(context.Context) error   { c.thaws++; return nil }
+func (*countingWriters) OnLimit(func(string))           {}
 func (c *countingWriters) Stop(context.Context) error   { return nil }
 
 // After a proven freeze the sync checks its authority again. A definitive refusal (the launch was
@@ -112,7 +148,13 @@ func TestHostSyncAuthorityFailureAfterFreeze(t *testing.T) {
 			}
 			h := &hostWorkspace{writers: writers, w: w, service: svc}
 			w.host = h
-			_, err := h.sync(t.Context())
+			ctx, work := activity.NewWork(t.Context())
+			_, err := h.sync(ctx)
+			measured := work.Seconds(time.Second)
+			_, thawed := measured["thaw"]
+			if measured["freeze"] <= 0 || thawed != (c.wantThaws > 0) {
+				t.Fatalf("lifecycle intervals missing: %+v", measured)
+			}
 			if err == nil || !strings.Contains(err.Error(), c.wantText) {
 				t.Fatalf("sync: %v, want it to say %q", err, c.wantText)
 			}
@@ -134,5 +176,21 @@ func TestHostSyncAuthorityFailureAfterFreeze(t *testing.T) {
 				t.Fatalf("retry: freezes=%d thaws=%d checks=%d, want 2, 2, 4", writers.freezes, writers.thaws, checks)
 			}
 		})
+	}
+}
+
+func TestHostMembershipFenceWaitsForPrivilegedShell(t *testing.T) {
+	sup := &phaseRecorder{privileged: true}
+	writers := &countingWriters{}
+	svc := &LocalWorkspaceService{Supervisor: sup}
+	w := &LocalWorkspace{state: workspacePrivateManifest{Session: "session"}, host: &hostWorkspace{writers: writers}}
+	err := svc.fenceMembership(t.Context(), w)
+	var waiting *membershipWaiting
+	if !errors.As(err, &waiting) || waiting.code != protocol.MembershipWaitShell || writers.freezes != 0 {
+		t.Fatalf("fence must wait without accepting freeze proof: err=%v freezes=%d", err, writers.freezes)
+	}
+	sup.privileged = false
+	if err := svc.fenceMembership(t.Context(), w); err != nil || writers.freezes != 1 {
+		t.Fatalf("closed shell must allow fence: err=%v freezes=%d", err, writers.freezes)
 	}
 }

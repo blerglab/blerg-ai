@@ -8,24 +8,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strings"
 
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
-// EngineSpec centralizes what varies per non-Claude CLI engine (Codex,
-// Hermes, OpenClaw, ...) — the tmux-terminal invocation and the headless
-// Agent-kind driver constructor — so adding a new engine touches this one
-// registry instead of a string-literal branch in manager.go's spawn/recover
-// switches and agentsession.go's API-key gate/model-default guard/driver
-// switch. Claude (msg.Engine == "") is deliberately NOT in this registry:
-// it's the fallback default, drives the native tool-calling loop or the
-// claude-code driver, and is the one engine allowed to guess a default
-// model ("claude-sonnet-5") when none is given — every registered engine
-// here shells to its own CLI, billed to its own account/config, and uses
-// that CLI's own configured default when Model is empty.
+// EngineSpec registers CLI engines and their agent drivers.
 type EngineSpec struct {
 	// NativeSessionVersion enables the private typed host-recovery identity hook.
 	NativeSessionVersion int
@@ -36,18 +25,13 @@ type EngineSpec struct {
 	ID          string
 	DisplayName string
 	// Binary is the CLI name resolved via resolveEngineBinary for the
-	// tmux-hosted interactive invocation.
+	// agent driver invocation.
 	Binary string
-	// ExtraArgs are static args always included right after Binary — e.g.
-	// OpenClaw's "chat" subcommand.
-	ExtraArgs []string
 	// ModelFlag is the flag this CLI takes a model override with (e.g.
 	// "--model" for Codex, "-m" for Hermes). Empty means the CLI has no
 	// documented per-invocation model flag (OpenClaw's chat/tui) — Model is
 	// then never passed on the command line at all.
 	ModelFlag string
-	// TerminalModelProblem refuses unsupported interactive selections before launch/recovery.
-	TerminalModelProblem func(string) string
 	// AgentModelFlag is the model flag of the headless agent-kind invocation
 	// when it differs from ModelFlag (OpenClaw: its `agent exec` takes
 	// --model although its interactive chat has none). Empty = ModelFlag.
@@ -68,6 +52,9 @@ type EngineSpec struct {
 	// good list. It must bound its own work (the prober also passes a
 	// deadline) and treat everything it reads as untrusted.
 	ListModels func(ctx context.Context) ([]models.Model, error)
+	// RefreshHostLogin renews only the host-owned login using a native auth-only mechanism.
+	// It must not start a model turn or read a sandbox directory. Nil means manual renewal.
+	RefreshHostLogin func(ctx context.Context, source string) error
 	// SkipPermsFlag is the flag this CLI takes to bypass its permission/
 	// approval prompts (e.g. "--yolo" for Hermes). Empty means no
 	// per-invocation equivalent exists (OpenClaw's policy is config-driven,
@@ -156,42 +143,26 @@ type EngineConfigVar struct {
 var engineOrder = []string{"codex", "hermes", "openclaw"}
 
 var engineRegistry = map[string]EngineSpec{
-	// Unlike Claude, Codex assigns its own session identity on first spawn —
-	// there is no equivalent of --session-id to pin one upfront — so there
-	// is no "resume" form for tmux-kind sessions (see recoverSession).
-	// Interactive codex reads its initial prompt from the terminal like
-	// claude does, so none is passed here; queueInitialPrompt injects it
-	// after spawn either way.
 	"codex": {
 		ID: "codex", DisplayName: "Codex",
 		ConfigBundle: &EngineConfigBundle{Directory: ".codex", HomeEnv: "CODEX_HOME", Roots: []string{"AGENTS.md", "AGENTS.override.md", "skills"}},
 		Binary:       "codex", ModelFlag: "--model", SkipPermsFlag: "--dangerously-bypass-approvals-and-sandbox",
 		// A config override: the value is TOML-parsed, and a bare level
 		// (already one of the rules table's tokens) parses as that string.
-		EffortArgs:      func(effort string) []string { return []string{"-c", "model_reasoning_effort=" + effort} },
-		ListModels:      probeCodexModels,
-		NewAgentDriver:  func(o AgentDriverOpts) sessionDriver { return newCodexDriver(o) },
-		PreparePlugins:  prepareCodexPluginEngine,
-		DetectAvailable: codexAlreadyLoggedIn,
-		Capabilities:    codexCapabilities,
+		EffortArgs:       func(effort string) []string { return []string{"-c", "model_reasoning_effort=" + effort} },
+		ListModels:       probeCodexModels,
+		RefreshHostLogin: refreshCodexHostLogin,
+		NewAgentDriver:   func(o AgentDriverOpts) sessionDriver { return newCodexDriver(o) },
+		PreparePlugins:   prepareCodexPluginEngine,
+		DetectAvailable:  codexAlreadyLoggedIn,
+		Capabilities:     codexCapabilities,
 	},
-	// Like Codex, Hermes assigns its own session identity on first spawn —
-	// its --continue/-c <name> resolver exists but pairing it with
-	// --create-if-missing (needed to pin an upfront id) is only wired on the
-	// `chat` subcommand, not plain interactive `hermes` — so every tmux-kind
-	// hermes session (including post-crash recovery) starts fresh too.
 	"hermes": {
 		ID: "hermes", DisplayName: "Hermes", NativeSessionVersion: 2, NativeSessionMinVersion: 1,
 		ConfigBundle: &EngineConfigBundle{Directory: ".hermes", Roots: []string{"config.yaml"}},
 		Binary:       "hermes", ModelFlag: "-m", SkipPermsFlag: "--yolo",
-		EffortArgs: func(effort string) []string { return []string{"--reasoning", effort} },
-		ListModels: probeHermesModels,
-		TerminalModelProblem: func(model string) string {
-			if strings.HasPrefix(model, "custom:") {
-				return "Use agent mode for named-provider model selection; Hermes terminal routing is not verified"
-			}
-			return ""
-		},
+		EffortArgs:      func(effort string) []string { return []string{"--reasoning", effort} },
+		ListModels:      probeHermesModels,
 		NewAgentDriver:  func(o AgentDriverOpts) sessionDriver { return newHermesDriver(o) },
 		DetectAvailable: hermesAlreadyConfigured,
 		DetectLocal:     hermesLocal,
@@ -204,7 +175,7 @@ var engineRegistry = map[string]EngineSpec{
 	// either (OpenClaw's approval policy is config-driven).
 	"openclaw": {
 		ID: "openclaw", DisplayName: "OpenClaw",
-		Binary: "openclaw", ExtraArgs: []string{"chat"},
+		Binary: "openclaw",
 		// ...but its headless `agent exec` does take --model.
 		AgentModelFlag: "--model",
 		NewAgentDriver: func(o AgentDriverOpts) sessionDriver { return newOpenclawDriver(o) },
@@ -298,21 +269,6 @@ func (m *engineModel) args() []string {
 		spec.ModelFlag = spec.AgentModelFlag
 	}
 	return modelEffortArgs(spec, m.model, m.effort)
-}
-
-// buildTerminalCommand renders spec's tmux-hosted interactive invocation
-// from its declarative fields — one generic builder instead of a bespoke
-// xCommand function per engine, so a new engine's CLI flags are a registry
-// entry, not a new function. sandboxed skips resolving Binary to an
-// absolute host path (see resolveEngineBinary).
-func buildTerminalCommand(spec EngineSpec, model, effort string, skipPerms, sandboxed bool) []string {
-	cmd := []string{resolveEngineBinary(spec.Binary, sandboxed)}
-	cmd = append(cmd, spec.ExtraArgs...)
-	cmd = append(cmd, modelEffortArgs(spec, model, effort)...)
-	if skipPerms && spec.SkipPermsFlag != "" {
-		cmd = append(cmd, spec.SkipPermsFlag)
-	}
-	return cmd
 }
 
 // logEngineConfig prints every registered engine's resolved ConfigVars once

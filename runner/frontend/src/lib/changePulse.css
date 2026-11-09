@@ -1,0 +1,7 @@
+@keyframes change-pulse { from { background-color: var(--selected-bg, #584a28); } to { background-color: transparent; } }
+.change-pulse { animation: change-pulse 1.8s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+ @keyframes change-pulse { from, to { background-color: var(--selected-bg, #584a28); } }
+ .change-pulse { animation-timing-function: step-end; }
+}
+.reveal-controls { font-size: .8rem; overflow-wrap: anywhere; padding: .35rem .5rem; }

@@ -111,11 +111,18 @@ var newBoardBeforeRecheck func()
 // no board scope and no other capability, Board consumes its intent atomically, and it never reaches
 // an agent.
 func (d Deps) handleInternalNewBoardExchange(w http.ResponseWriter, r *http.Request) {
+	d.exchangeBoardAdminIntent(w, r, false)
+}
+func (d Deps) handleInternalBoardMetadataExchange(w http.ResponseWriter, r *http.Request) {
+	d.exchangeBoardAdminIntent(w, r, true)
+}
+func (d Deps) exchangeBoardAdminIntent(w http.ResponseWriter, r *http.Request, metadata bool) {
 	var body struct {
 		internalMCPProof
 		SessionRef string `json:"session_ref,omitempty"`
 		Intent     string `json:"intent"`
 		Digest     string `json:"digest"`
+		BoardID    string `json:"board_id,omitempty"`
 	}
 	svc, ok := d.internalTokenGate(w, r, &body)
 	if !ok {
@@ -126,6 +133,16 @@ func (d Deps) handleInternalNewBoardExchange(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	capability, err := boardfiling.BoardCapability(body.Intent, body.Digest)
+	if metadata {
+		capability, err = boardfiling.MetadataCapability(body.Intent, body.Digest)
+		if !uuidShape.MatchString(body.BoardID) {
+			http.Error(w, "invalid board", 400)
+			return
+		}
+	} else if body.BoardID != "" {
+		http.Error(w, "unexpected board", 400)
+		return
+	}
 	if err != nil || (body.SessionRef != "" && !validExchangeString(body.SessionRef, maxExchangeSessionRefLn)) {
 		http.Error(w, "invalid board creation intent or digest", http.StatusBadRequest)
 		return
@@ -152,7 +169,7 @@ func (d Deps) handleInternalNewBoardExchange(w http.ResponseWriter, r *http.Requ
 			// route (the mux's plain-text 404).
 			writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "not_live"})
 		case !admin:
-			http.Error(w, "only an administrator can create boards", http.StatusForbidden)
+			http.Error(w, "only an administrator can approve board administration", http.StatusForbidden)
 		default:
 			return true
 		}
@@ -162,7 +179,7 @@ func (d Deps) handleInternalNewBoardExchange(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	expiresAt := time.Now().Add(30 * time.Second)
-	raw, err := svc.MintAgentToken(ctx, identity.AgentTokenInput{Sub: body.Intent, Aud: "blerg-board", Caps: []string{capability}, OnBehalfOf: body.AccountID, Lineage: body.AccountID, ExpiresAt: expiresAt})
+	raw, err := svc.MintAgentToken(ctx, identity.AgentTokenInput{Sub: body.Intent, Aud: "blerg-board", Project: body.BoardID, Caps: []string{capability}, OnBehalfOf: body.AccountID, Lineage: body.AccountID, ExpiresAt: expiresAt})
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 		return
@@ -174,7 +191,7 @@ func (d Deps) handleInternalNewBoardExchange(w http.ResponseWriter, r *http.Requ
 	if !check() {
 		return
 	}
-	log.Printf("internal tokens: board creation capability for account %s (intent %s, runner session %q)", body.AccountID, body.Intent, body.SessionRef)
+	log.Printf("internal tokens: board administration capability for account %s (intent %s, runner session %q)", body.AccountID, body.Intent, body.SessionRef)
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, internalTokenExchangeResponse{Token: raw, ExpiresAt: expiresAt.Format(time.RFC3339)})
 }

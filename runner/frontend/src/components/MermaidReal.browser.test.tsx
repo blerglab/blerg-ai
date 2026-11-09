@@ -3,7 +3,7 @@
 // a published .mmd draws in the chat with a View link; a tall diagram is fully visible in the
 // viewer at 390, 1920 and 3840 px.
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, waitFor } from '@testing-library/react'
+import { render, waitFor, within } from '@testing-library/react'
 import { page, userEvent } from 'vitest/browser'
 import { ArtifactCard, ArtifactViewer, ChatContext, VisualBlock, localStorageChatStorage, type ArtifactInfo, type ChatContextValue, type TransportFiles } from '@blerglab/chat'
 import { BROKEN, CLASSDEF_AND_CLASS, IMAGE_WORD_LABEL, serviceGraph, tallDiagram } from '../../../../packages/chat/src/visual/mermaidSamples'
@@ -70,7 +70,11 @@ describe('real Mermaid diagrams', () => {
     const { findByTestId } = render(<VisualBlock kind="mermaid" source={BROKEN} />)
     const failed = await findByTestId('visual-failed', {}, { timeout: 30_000 })
     expect(failed.textContent).toMatch(/Couldn’t draw this diagram: Mermaid: Parse error on line 3/)
-    expect(failed.textContent).toContain('B --> --> C')
+    expect(failed.querySelector('code')).toBeNull()
+    await userEvent.click(within(failed).getByRole('button', { name: 'Show source' }))
+    expect(failed.querySelector('code')?.textContent).toBe(BROKEN)
+    await userEvent.click(within(failed).getByRole('button', { name: 'Show the drawing' }))
+    expect(failed.querySelector('code')).toBeNull()
   }, 40_000)
 
   it('shows a refused diagram\'s source with the line and what is not allowed', async () => {
@@ -78,7 +82,11 @@ describe('real Mermaid diagrams', () => {
     const { findByTestId } = render(<VisualBlock kind="mermaid" source={source} />)
     const failed = await findByTestId('visual-failed', {}, { timeout: 30_000 })
     expect(failed.textContent).toContain('Couldn’t draw this diagram: line 3: url() not allowed')
-    expect(failed.textContent).toContain('classDef x fill:url(#a)')
+    expect(failed.querySelector('code')).toBeNull()
+    await userEvent.click(within(failed).getByRole('button', { name: 'Show source' }))
+    expect(failed.querySelector('code')?.textContent).toBe(source)
+    await userEvent.click(within(failed).getByRole('button', { name: 'Show the drawing' }))
+    expect(failed.querySelector('code')).toBeNull()
   }, 40_000)
 
   it('draws a published .mmd in the chat, with View', async () => {

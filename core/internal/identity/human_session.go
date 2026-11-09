@@ -181,22 +181,28 @@ func (s *Service) mintHumanAccessToken(ctx context.Context, q rowQuerier, accoun
 // ordinary outcome, indistinguishable to the caller. Like AgentTokenLive it is the "this
 // account's owner still stands behind it" check, not token verification.
 func (s *Service) HumanSessionLive(ctx context.Context, accountID, sessionID string) (string, bool, error) {
+	id, _, live, err := s.HumanSessionDeadline(ctx, accountID, sessionID)
+	return id, live, err
+}
+
+// HumanSessionDeadline checks the same exact live refresh chain and returns its
+// absolute login deadline without accepting or exposing a refresh credential.
+func (s *Service) HumanSessionDeadline(ctx context.Context, accountID, sessionID string) (string, time.Time, bool, error) {
 	if !agentTokenIDShape.MatchString(sessionID) || !agentTokenIDShape.MatchString(accountID) {
-		return "", false, nil
+		return "", time.Time{}, false, nil
 	}
 	var id string
-	err := s.st.Pool().QueryRow(ctx,
-		`SELECT hs.id::text FROM human_sessions hs JOIN accounts a ON a.id = hs.account_id
-		  WHERE hs.chain_id = $1 AND hs.account_id = $2 AND hs.revoked_at IS NULL
-		    AND hs.expires_at > now() AND a.disabled_at IS NULL
-		  ORDER BY hs.created_at DESC LIMIT 1`, sessionID, accountID).Scan(&id)
+	var deadline time.Time
+	err := s.st.Pool().QueryRow(ctx, `SELECT hs.id::text,hs.expires_at FROM human_sessions hs JOIN accounts a ON a.id=hs.account_id
+ WHERE hs.chain_id=$1 AND hs.account_id=$2 AND hs.revoked_at IS NULL AND hs.expires_at>now() AND a.disabled_at IS NULL
+ ORDER BY hs.created_at DESC LIMIT 1`, sessionID, accountID).Scan(&id, &deadline)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", false, nil
+			return "", time.Time{}, false, nil
 		}
-		return "", false, err
+		return "", time.Time{}, false, err
 	}
-	return id, true, nil
+	return id, deadline, true, nil
 }
 
 // SetSessionTTL sets how long a newly issued (or rotated) refresh session lives before
@@ -567,7 +573,11 @@ func (s *Service) revokeChainTx(ctx context.Context, tx pgx.Tx, accountID, chain
 		chainID, reason); err != nil {
 		return err
 	}
-	return revokeSid(ctx, tx, chainID)
+	if err := revokeSid(ctx, tx, chainID); err != nil {
+		return err
+	}
+	suspendMCPBindings(ctx, tx, accountID, chainID)
+	return nil
 }
 
 // revokeSid writes (or refreshes) the chain's "sid" entry in the shared revocations table, so
@@ -727,6 +737,7 @@ func (s *Service) revokeAllSessionsOnce(ctx context.Context, accountID string) e
 		accountID); err != nil {
 		return err
 	}
+	suspendMCPBindings(ctx, tx, accountID, "")
 	return tx.Commit(ctx)
 }
 
@@ -793,6 +804,9 @@ func (s *Service) RevokeAccountEverywhereTx(ctx context.Context, tx pgx.Tx, acco
 		 ON CONFLICT (kind, value) DO UPDATE SET revoked_at = now()`, accountID); err != nil {
 		return sessionBusy(err)
 	}
+	if _, err := tx.Exec(ctx, `UPDATE accounts SET live_data_epoch=live_data_epoch+1 WHERE id=$1`, accountID); err != nil {
+		return sessionBusy(err)
+	}
 	s.sessionHook("logout_all")
 	// The lineage entry is what actually stops those tokens verifying; this marks the ROWS
 	// revoked too, so the owner's token list says what is true instead of showing a page of
@@ -801,5 +815,6 @@ func (s *Service) RevokeAccountEverywhereTx(ctx context.Context, tx pgx.Tx, acco
 		`UPDATE agent_tokens SET revoked_at = now() WHERE account_id = $1 AND revoked_at IS NULL`, accountID); err != nil {
 		return sessionBusy(err)
 	}
+	suspendMCPBindings(ctx, tx, accountID, "")
 	return nil
 }

@@ -1,0 +1,85 @@
+.activity-report { margin: 20px 0; min-width: 0; }
+.activity-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; font-size: .85rem; color: var(--fog); }
+.activity-controls label { display: inline-flex; align-items: center; gap: 6px; }
+.activity-bars a { color: var(--blaze); text-decoration: underline; }
+.activity-worker-heading { display: flex; align-items: center; gap: 8px; }
+.activity-check { display: flex; gap: 8px; align-items: center; font-size: .85rem; color: var(--fog); }
+.activity-columns { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 24px; }
+.activity-metrics { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; }
+.activity-bars,.activity-spreads > ul:not(.activity-records),.activity-workers { list-style: none; padding: 0; }
+/* Share columns across rows so labels and formatted values cannot shift the scale. */
+.activity-bars { display: grid; grid-template-columns: 8rem minmax(30px,1fr) max-content; gap: 10px 12px; }
+.activity-bars li { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center; gap: 12px; font-size: .85rem; }
+.activity-bars b { font-weight: 500; font-variant-numeric: tabular-nums; }
+.activity-bar-track { background: var(--scree); height: 12px; border-radius: 3px; }
+.activity-bar-track i { display: block; background: var(--blaze); height: 100%; border-radius: inherit; }
+.activity-spreads { margin: 12px 0 30px; }
+.activity-spreads figcaption { font-size: .8rem; color: var(--fog); }
+.activity-spreads > ul:not(.activity-records) > li { display: grid; grid-template-columns: 72px minmax(0,1fr) 240px; grid-template-areas: "name plot stats"; gap: 12px; align-items: center; font-size: .8rem; }
+.activity-spreads > ul:not(.activity-records) > li>strong { grid-area: name; }
+.activity-spreads > ul:not(.activity-records) > li>.sb-plot { grid-area: plot; }
+.activity-spreads > ul:not(.activity-records) > li>span { grid-area: stats; color: var(--fog); }
+.activity-spreads .activity-axis { height: 24px; }
+.activity-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: .75rem; color: var(--fog); }
+.activity-legend>span { display: flex; align-items: center; gap: 4px; }
+.activity-swatch { width: 10px; height: 10px; border: 1px solid var(--fog-dim); }
+.activity-tests { background: var(--chart-tests); }.activity-build_lint { background: var(--chart-build); }.activity-git { background: var(--chart-git); }.activity-read { background: var(--chart-read); }.activity-edit { background: var(--chart-edit); }.activity-other { background: var(--chart-other); }.activity-model { background: var(--chart-model); }.activity-waiting_on_person { background: var(--chart-waiting); }.activity-idle { background: var(--chart-idle); }.activity-unknown { background: repeating-linear-gradient(45deg,var(--stone),var(--stone) 3px,var(--fog-dim) 3px,var(--fog-dim) 5px); }
+.activity-workers { display: grid; gap: 12px; }
+.activity-workers li { background: var(--scree); border: 1px solid var(--stone); border-radius: 8px; padding: 12px; min-width: 0; font-size: .8rem; }
+.activity-workers li>span { display: block; margin: 4px 0; color: var(--fog); }
+.activity-stack { display: flex; width: 100%; min-height: 18px; overflow: hidden; border-radius: 3px; }
+.activity-stack>span { height: 18px; min-width: 0; }
+.activity-report details { margin-top: 10px; color: var(--fog); font-size: .8rem; }
+.activity-report summary { cursor: pointer; }
+.activity-workers dl { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 4px 16px; }
+.activity-workers dl>div { display: flex; justify-content: space-between; gap: 8px; }
+.activity-workers dd { margin: 0; }
+.activity-records { padding-left: 20px; overflow-wrap: anywhere; }
+/* Keyed to the pane's own width, not the window's (a narrow pane in a wide window must collapse
+   too; see the .activity-report rule above). */
+@container (max-width:640px){
+ .activity-columns,.activity-metrics { grid-template-columns: minmax(0,1fr); }
+ .activity-spreads > ul:not(.activity-records) > li { grid-template-columns: 60px minmax(0,1fr); grid-template-areas: "name stats" ". plot"; }
+ .activity-spreads > ul:not(.activity-records) > li.activity-axis { grid-template-areas: "name plot"; }
+ .activity-spreads > ul:not(.activity-records) > li.activity-axis>span { grid-area: name; }
+ .activity-spreads > ul:not(.activity-records) > li { gap: 2px 12px; margin: 10px 0; }
+ .activity-spreads .activity-axis { margin-top: 14px; }
+}
+.activity-bars li>span:first-child { overflow-wrap: anywhere; }
+.activity-workers a { color: var(--blaze); text-decoration: none; }
+.activity-workers a:hover { text-decoration: underline; }
+
+/* Match each stack texture to its named legend swatch. The tokens are "off" by default and only
+   the three accessibility themes turn them on (brand/tokens.css), so a future accessibility theme
+   gets this by setting the same tokens, with no change here. */
+.activity-tests { background-image: var(--activity-pattern-tests); }
+.activity-build_lint { background-image: var(--activity-pattern-build); }
+.activity-git { background-image: var(--activity-pattern-git); }
+.activity-read { background-image: var(--activity-pattern-read); }
+.activity-edit { background-image: var(--activity-pattern-edit); }
+.activity-other { background-image: var(--activity-pattern-other); }
+.activity-model { background-image: var(--activity-pattern-model); }
+.activity-waiting_on_person { background-image: var(--activity-pattern-waiting); }
+.activity-idle { background-image: var(--activity-pattern-idle); }
+
+.activity-single { max-width: 22rem; }
+.activity-single > a { color: var(--blaze); }
+/* A responsive grid of sections below the chart (BLG-466): one column on a phone, two to four
+   across a wide pane. Keyed to the pane's own width (a @container query, like .insights-report),
+   not the window's: a narrow pane inside a wide window must not be squeezed by a window-wide rule. */
+.activity-report { display: grid; grid-template-columns: minmax(0,1fr); gap: 0 28px; align-items: start; }
+.activity-report > * { min-width: 0; }
+.activity-controls,.activity-report > p { grid-column: 1 / -1; }
+@container (min-width:900px) { .activity-report { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+@container (min-width:1600px) { .activity-report { grid-template-columns: repeat(3,minmax(0,1fr)); } }
+@container (min-width:2600px) { .activity-report { grid-template-columns: repeat(4,minmax(0,1fr)); } }
+.insights-how { grid-column: 1 / -1; }
+/* InsightsDetails (Pod startup, Tokens and cost, Channels/Workspaces, …) is one child of this
+   grid, with its own full set of sections inside it: it must span the row like .activity-method
+   and the other full-width children above, not sit in a single narrow column with the rest of the
+   row empty beside it (BLG-466 review). Its own sections then lay out in its own grid (Insights.css). */
+.activity-report > .insights-report { grid-column: 1 / -1; }
+/* Numeric spread summaries share the existing compact chart controls. */
+.activity-spreads > ul:not(.activity-records) > li > button:first-child { grid-area: name; justify-self: start; }
+.activity-spreads > ul:not(.activity-records) > li > button:last-child { grid-area: stats; justify-self: start; text-align: left; }
+.activity-turn_end { background: var(--chart-model); }

@@ -64,6 +64,7 @@ var proposalUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F
 // Proposal is a row of mcp_proposals. Arguments is the frozen call, the authoritative record.
 // SessionID and CronID are "" when the column is NULL.
 type Proposal struct {
+	SessionScope   *MCPSessionScope `json:"-"`
 	ID             string
 	AccountID      string
 	SessionID      string
@@ -91,7 +92,7 @@ type Proposal struct {
 const proposalColumns = `id::text, account_id, COALESCE(session_id::text, ''), COALESCE(cron_id::text, ''),
 	connection_id::text, connection_name, url_snapshot, tool, tool_hash, arguments::text,
 	COALESCE(agent_summary, ''), state, result::text, created_at, decided_at, decided_by,
-	COALESCE(approved_by_grant::text, ''), ` + proposalDeadline
+	COALESCE(approved_by_grant::text, ''), ` + proposalDeadline + `,session_scope`
 
 const proposalDeadline = `COALESCE(expires_at_override, created_at + interval '168 hours')`
 
@@ -107,10 +108,19 @@ func scanProposal(row pgx.Row) (*Proposal, error) {
 	var p Proposal
 	var args string
 	var result *string
+	var scope []byte
 	if err := row.Scan(&p.ID, &p.AccountID, &p.SessionID, &p.CronID, &p.ConnectionID, &p.ConnectionName,
 		&p.URLSnapshot, &p.Tool, &p.ToolHash, &args, &p.AgentSummary, &p.State, &result,
-		&p.CreatedAt, &p.DecidedAt, &p.DecidedBy, &p.ApprovedByGrant, &p.ExpiresAt); err != nil {
+		&p.CreatedAt, &p.DecidedAt, &p.DecidedBy, &p.ApprovedByGrant, &p.ExpiresAt, &scope); err != nil {
 		return nil, err
+	}
+	if len(scope) > 0 {
+		if err := json.Unmarshal(scope, &p.SessionScope); err != nil {
+			return nil, ErrMCPSessionScope
+		}
+	}
+	if p.SessionScope != nil && (!p.SessionScope.Valid() || p.SessionScope.AccountID != p.AccountID || p.SessionScope.RunnerSessionID != p.SessionID) {
+		return nil, ErrMCPSessionScope
 	}
 	p.Arguments = json.RawMessage(args)
 	if result != nil {
@@ -135,6 +145,14 @@ func InsertProposal(ctx context.Context, pool *pgxpool.Pool, p Proposal, maxPend
 // insert run under one per-account advisory lock, so concurrent proposals cannot overshoot a cap.
 // cron_id is taken from the session's row.
 func InsertProposalLimited(ctx context.Context, pool *pgxpool.Pool, p Proposal, lim ProposalLimits) (*Proposal, error) {
+	scope, scopeErr := scopeJSON(p.SessionScope)
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
+	if p.SessionScope != nil && (p.SessionScope.AccountID != p.AccountID || p.SessionScope.RunnerSessionID != p.SessionID || p.CronID != "") {
+		return nil, ErrMCPSessionScope
+	}
+
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("InsertProposal begin: %w", err)
@@ -144,7 +162,7 @@ func InsertProposalLimited(ctx context.Context, pool *pgxpool.Pool, p Proposal, 
 		return nil, fmt.Errorf("InsertProposal lock: %w", err)
 	}
 	// Built-in session requests recheck owner and lifecycle after remote policy checks.
-	if IsBoardFilingProposal(&p) || IsSessionPluginProposal(&p) || IsBoardCreateProposal(&p) {
+	if IsBoardFilingProposal(&p) || IsSessionPluginProposal(&p) || IsBoardCreateProposal(&p) || IsBoardMetadataProposal(&p) {
 		var account, status string
 		if err := tx.QueryRow(ctx, `SELECT COALESCE(spawning_account_id,''),status FROM sessions WHERE id=$1::uuid FOR UPDATE`, p.SessionID).Scan(&account, &status); err != nil {
 			return nil, ErrProposalState
@@ -178,6 +196,16 @@ func InsertProposalLimited(ctx context.Context, pool *pgxpool.Pool, p Proposal, 
 		if twin != nil {
 			twin.Repeated = true
 			return twin, tx.Commit(ctx)
+		}
+	}
+	if IsBoardMetadataProposal(&p) {
+		twin, err := scanProposal(tx.QueryRow(ctx, `SELECT `+proposalColumns+` FROM mcp_proposals WHERE account_id=$1 AND session_id=$2::uuid AND connection_id=$3::uuid AND arguments=$4::jsonb AND url_snapshot=$5 AND state IN ('pending','executing','done','unknown') AND created_at>now()-interval '15 minutes' ORDER BY created_at DESC LIMIT 1`, p.AccountID, p.SessionID, BoardMetadataConnectionID, string(p.Arguments), p.URLSnapshot))
+		if err == nil {
+			twin.Repeated = true
+			return twin, tx.Commit(ctx)
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
 		}
 	}
 	var pending int
@@ -219,12 +247,12 @@ func InsertProposalLimited(ctx context.Context, pool *pgxpool.Pool, p Proposal, 
 	row := tx.QueryRow(ctx, `
 		INSERT INTO mcp_proposals
 		  (account_id, session_id, cron_id, connection_id, connection_name, url_snapshot, tool, tool_hash,
-		   arguments, agent_summary)
+		   arguments, agent_summary,session_scope)
 		VALUES ($1, NULLIF($2, '')::uuid, (SELECT cron_id FROM sessions WHERE id = NULLIF($2, '')::uuid),
-		        $3::uuid, $4, $5, $6, $7, $8::jsonb, NULLIF($9, ''))
+		        $3::uuid, $4, $5, $6, $7, $8::jsonb, NULLIF($9, ''),$10)
 		RETURNING `+proposalColumns,
 		p.AccountID, p.SessionID, p.ConnectionID, p.ConnectionName, p.URLSnapshot, p.Tool, p.ToolHash,
-		string(p.Arguments), p.AgentSummary)
+		string(p.Arguments), p.AgentSummary, scope)
 	out, err := scanProposal(row)
 	if err != nil {
 		var pg *pgconn.PgError
@@ -513,7 +541,7 @@ func ReleaseProposal(ctx context.Context, pool *pgxpool.Pool, id string) (*Propo
 	return p, err
 }
 
-// FailPendingProposals marks the account's pending proposals for the given connections failed,
+// FailPendingProposals marks account-scoped pending proposals for the given connections failed,
 // with reason as the result. It is how the sweeper closes the proposals of a connection that no
 // longer exists. It returns how many it changed.
 func FailPendingProposals(ctx context.Context, pool *pgxpool.Pool, accountID string, connectionIDs []string, reason string) (int64, error) {
@@ -522,7 +550,7 @@ func FailPendingProposals(ctx context.Context, pool *pgxpool.Pool, accountID str
 	}
 	res, _ := json.Marshal(map[string]string{"error": reason})
 	tag, err := pool.Exec(ctx, `UPDATE mcp_proposals SET state = 'failed', result = $3::jsonb, decided_at = now()
-		WHERE account_id = $1 AND state = 'pending' AND connection_id = ANY($2::uuid[])`,
+		WHERE account_id = $1 AND session_scope IS NULL AND state = 'pending' AND connection_id = ANY($2::uuid[])`,
 		accountID, connectionIDs, string(res))
 	if err != nil {
 		return 0, fmt.Errorf("FailPendingProposals: %w", err)

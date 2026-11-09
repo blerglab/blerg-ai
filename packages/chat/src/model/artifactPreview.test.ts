@@ -4,10 +4,10 @@ import { INLINE_IMAGE_MAX, clearPreviewCache, loadPreviewExcerpt, loadPreviewTex
 const png = { id: 'a1', view: 'image', content_type: 'image/png' }
 
 describe('previewKind', () => {
-  it('draws a small image inline, tiles video and audio, and leaves the rest alone', () => {
+  it('draws small images and videos inline, tiles audio, and leaves the rest alone', () => {
     expect(previewKind('image', 1024)).toBe('image')
     expect(previewKind('image', INLINE_IMAGE_MAX + 1)).toBeNull()
-    expect(previewKind('video', 500 * 1024 * 1024)).toBe('media')
+    expect(previewKind('video', 500 * 1024 * 1024)).toBe('video')
     expect(previewKind('audio', 1)).toBe('media')
     expect(previewKind('pdf', 1)).toBe('pdf')
     expect(previewKind('pdf', 5 * 1024 * 1024 + 1)).toBeNull()

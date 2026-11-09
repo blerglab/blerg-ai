@@ -1,0 +1,12 @@
+.live-data-consent {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+  margin-block: 1rem;
+}
+.live-data-consent input { width: auto; margin: 0; }
+.live-data-policy select { width: fit-content; max-width: 100%; }
+
+.live-data-hash { overflow-wrap: anywhere; }
+.live-data-definition { max-width: 100%; overflow: auto; }

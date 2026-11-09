@@ -1,0 +1,44 @@
+{
+  "seconds": 4252.289,
+  "workers": 4,
+  "concurrent_suites": 1,
+  "changed": "efc7f359",
+  "complete": true,
+  "suites": [
+    {
+      "suite": "runner-go",
+      "started_at": "2026-11-03T17:46:33.785912Z",
+      "seconds": 1211.398,
+      "workers": 4,
+      "exit_code": 0,
+      "outcome": "pass",
+      "tests": {
+        "counts": {
+          "pass": 10361,
+          "fail": 0,
+          "skip": 160
+        },
+        "slowest": [
+          {
+            "package": "github.com/blerglab/blerg-ai/runner/internal/db",
+            "test": "TestBlackboardAgentFloodOneMinutePersonProgress",
+            "seconds": 60.76,
+            "result": "pass"
+          },
+          {
+            "package": "github.com/blerglab/blerg-ai/runner/internal/processcontainment",
+            "test": "TestTIDReuseAcrossPendingExec",
+            "seconds": 60.33,
+            "result": "pass"
+          },
+          {
+            "package": "github.com/blerglab/blerg-ai/runner/internal/processcontainment",
+            "test": "TestTreeAccountingMatchesKernelAfterSpawnStorm",
+            "seconds": 53.89,
+            "result": "pass"
+          }
+        ]
+      }
+    }
+  ]
+}

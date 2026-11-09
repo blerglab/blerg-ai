@@ -6,7 +6,8 @@ const api = vi.hoisted(() => ({initialize: vi.fn(), render: vi.fn()}))
 // is a stand-in that hands the config and source to a mock Mermaid.
 vi.mock('./mermaidFrame', () => ({renderInFrame: async (source: string, config: unknown) => {
   api.initialize(config)
-  return (await api.render('blerg-diagram', source)).svg
+  const {svg} = await api.render('blerg-diagram', source)
+  return {svg, measured: null}
 }}))
 const originalDecode = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'decode')
 const decode = vi.fn<() => Promise<void>>()
@@ -22,9 +23,22 @@ beforeEach(() => {
 })
 
 describe('Mermaid rendering lifetime and image errors', () => {
+  // Review finding: RenderedVisual.svg was always '' for Mermaid (BLG-451's own contract says
+  // every renderer resolves with the SVG it actually drew, so export/download works the same) —
+  // downloading a Mermaid diagram produced an empty file.
+  it('returns the actual drawn (sanitized) SVG markup, not an empty string', async () => {
+    const host = document.createElement('div')
+    const {svg, width, height, dispose} = await renderMermaid('flowchart LR; A-->B', host)
+    expect(svg).toContain('<svg')
+    expect(svg).toContain('<text>Safe</text>')
+    expect(width).toBeGreaterThanOrEqual(0)
+    expect(height).toBeGreaterThanOrEqual(0)
+    dispose()
+  })
+
   it('uses fixed strict settings, decodes an inert image and cleans scratch DOM', async () => {
     const host = document.createElement('div')
-    const dispose = await renderMermaid('flowchart LR; A-->B', host)
+    const visual = await renderMermaid('flowchart LR; A-->B', host)
     expect(api.initialize).toHaveBeenCalledWith(expect.objectContaining({
       securityLevel: 'strict', startOnLoad: false, htmlLabels: false, suppressErrorRendering: true,
       secure: expect.arrayContaining(['securityLevel', 'htmlLabels', 'themeCSS']),
@@ -32,7 +46,7 @@ describe('Mermaid rendering lifetime and image errors', () => {
     expect(decode).toHaveBeenCalledOnce()
     expect(host.querySelector('img')?.src).toMatch(/^data:image\/svg\+xml/)
     expect(document.querySelector('[aria-hidden="true"]')).toBeNull()
-    dispose()
+    visual.dispose()
     expect(host.children).toHaveLength(0)
   })
   it('propagates image decode failures to the component fallback and cleans scratch DOM', async () => {
@@ -45,11 +59,34 @@ describe('Mermaid rendering lifetime and image errors', () => {
   it('preserves bounded SVG intrinsic dimensions instead of the image 300px fallback', async () => {
     api.render.mockResolvedValueOnce({svg: '<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 800 120"><text>Readable</text></svg>'})
     const host = document.createElement('div')
-    const dispose = await renderMermaid('flowchart LR; A-->B', host)
+    const visual = await renderMermaid('flowchart LR; A-->B', host)
     const svg = new DOMParser().parseFromString(decodeURIComponent(host.querySelector('img')!.src.split(',')[1]), 'image/svg+xml').documentElement
     expect(svg.getAttribute('width')).toBe('800')
     expect(svg.getAttribute('height')).toBe('120')
-    dispose()
+    expect(visual.width).toBe(800)
+    expect(visual.height).toBe(120)
+    expect(visual.svg).toContain('viewBox="0 0 800 120"')
+    visual.dispose()
+  })
+  it('measures a frame-reported bounding box when the drawn SVG has no viewBox', async () => {
+    vi.doMock('./mermaidFrame', () => ({renderInFrame: async (source: string, config: unknown) => {
+      api.initialize(config)
+      const {svg} = await api.render('blerg-diagram', source)
+      return {svg, measured: {width: 640, height: 240}}
+    }}))
+    vi.resetModules()
+    const {renderMermaid: renderWithMeasured} = await import('./mermaid')
+    api.render.mockResolvedValueOnce({svg: '<svg xmlns="http://www.w3.org/2000/svg"><text>No viewBox</text></svg>'})
+    const host = document.createElement('div')
+    const visual = await renderWithMeasured('flowchart LR; A-->B', host)
+    expect(visual.width).toBe(640)
+    expect(visual.height).toBe(240)
+    const svg = new DOMParser().parseFromString(decodeURIComponent(host.querySelector('img')!.src.split(',')[1]), 'image/svg+xml').documentElement
+    expect(svg.getAttribute('width')).toBe('640')
+    expect(svg.getAttribute('height')).toBe('240')
+    visual.dispose()
+    vi.doUnmock('./mermaidFrame')
+    vi.resetModules()
   })
   it('rejects hostile source before touching the renderer', async () => {
     await expect(renderMermaid('%%{init:{"securityLevel":"loose"}}%%\ngraph LR; A-->B', document.createElement('div'))).rejects.toThrow()
@@ -95,13 +132,13 @@ describe('Mermaid rendering lifetime and image errors', () => {
     host.style.setProperty('--chat-surface-2', '#222222')
     document.body.append(host)
     try {
-      const dispose = await renderMermaid('flowchart LR; A-->B', host)
+      const visual = await renderMermaid('flowchart LR; A-->B', host)
       expect(api.initialize).toHaveBeenCalledWith(expect.objectContaining({
         theme: 'base', themeVariables: expect.objectContaining({
           primaryTextColor: '#eeeeee', primaryColor: '#222222', background: 'transparent',
         }), secure: expect.arrayContaining(['theme', 'themeVariables']),
       }))
-      dispose()
+      visual.dispose()
     } finally { host.remove() }
   })
   it('serializes global configuration with rendering and recovers after failure', async () => {
@@ -118,10 +155,10 @@ describe('Mermaid rendering lifetime and image errors', () => {
       rejectFirst(new Error('first failed'))
       await rejected
     }
-    const dispose = await second
+    const visual = await second
     expect(api.initialize).toHaveBeenCalledTimes(2)
     expect(api.render).toHaveBeenCalledTimes(2)
-    dispose()
+    visual.dispose()
   })
 
   it('says what Mermaid could not parse, on one line', async () => {

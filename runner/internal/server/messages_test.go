@@ -573,3 +573,51 @@ func TestHandleGetMessageAnswer(t *testing.T) {
 		t.Errorf("signal didn't wake promptly (%v)", time.Since(st))
 	}
 }
+
+func TestQuestionClosureNotice(t *testing.T) {
+	pool := connectSrvTestDB(t)
+	ctx := t.Context()
+	const sid = "00000000-0000-4000-8000-000000000540"
+	const did = "00000000-0000-4000-8000-000000000541"
+	if err := db.UpsertDaemon(ctx, pool, did, "question-fixture", "local", "/repos"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertSession(ctx, pool, sid, did, "running", "/repos/app", "app", "Question", ""); err != nil {
+		t.Fatal(err)
+	}
+	api := NewAPI(NewHub(), pool, "tok", nil, "")
+	for _, tc := range []struct{ body, kind, notice string }{
+		{`{"withdraw":true}`, "note", "Question withdrawn"},
+		{`{}`, "update", "Question closed without an answer."},
+	} {
+		id, err := db.CreateMessage(ctx, pool, sid, "ask", "Replace this question?")
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest("POST", "/api/messages/"+id+"/expire", strings.NewReader(tc.body))
+		req.SetPathValue("id", id)
+		req.Header.Set("Authorization", "Bearer tok")
+		rec := httptest.NewRecorder()
+		api.HandlePostMessageExpire(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("expire: %d %s", rec.Code, rec.Body.String())
+		}
+		events, err := db.ListAgentEvents(ctx, pool, sid, 0, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var found bool
+		for _, ev := range events {
+			var payload messagingPayload
+			if json.Unmarshal([]byte(ev.Payload), &payload) == nil && payload.MessageID == id {
+				found = true
+				if ev.Kind != tc.kind || payload.Body != tc.notice || payload.QuestionWithdrawn != (tc.kind == "note") {
+					t.Errorf("notice = %s %q, want %s %q", ev.Kind, payload.Body, tc.kind, tc.notice)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("closure notice missing")
+		}
+	}
+}

@@ -3,10 +3,32 @@
 .shell-terminal{position:relative;min-height:0;min-width:0;flex:1;overflow:hidden;padding:4px;box-sizing:border-box;background:var(--basalt);color:var(--chalk)}
 .shell-terminal-renderer{width:100%;overflow:hidden}
 .shell-connection{display:flex;align-items:center;gap:4px;flex-wrap:wrap;background:var(--scree);color:var(--chalk);padding:6px;font-size:12px}
-.shell-connection>span{flex:1}
+.shell-connection>span{flex:1;min-width:0;overflow-wrap:anywhere}
 .shell-connection button{font:inherit;background:var(--scree-2);color:var(--chalk);border:1px solid var(--stone);border-radius:4px;padding:4px 8px;cursor:pointer}
 @media(max-width:767px){.shell-terminal{padding-bottom:max(4px,env(safe-area-inset-bottom))}.shell-connection button{min-height:36px}}
 /* Keep xterm glyphs on its cell grid so mouse selection reaches every character. */
 .shell-terminal-renderer,.shell-terminal-renderer *{letter-spacing:0;text-rendering:auto;font-kerning:none;font-variant-ligatures:none}
 
 .shell-initial-loader { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+.shell-reconnect { position: absolute; top: 8px; right: 8px; z-index: 1; pointer-events: none; display: flex; padding: 4px; border-radius: 50%; background: var(--basalt); color: var(--fog); }
+.shell-reconnect .blerg-status-spinner { border-top-color: currentColor; }
+
+.shell-persistence { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; padding: .35rem .5rem; font-size: .8rem; overflow-wrap: anywhere; }
+.shell-persistence span { flex: 1 1 14rem; min-width: 0; }
+.shell-persistence button { flex: 0 0 auto; }
+.shell-output-gap { padding: .35rem .5rem; font-size: .8rem; }
+
+.shell-offline-consent { padding: .5rem; overflow: auto; }
+.shell-consent-row { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: .5rem 0; }
+.shell-consent-row span { min-width: 0; overflow-wrap: anywhere; flex: 1 1 14rem; }
+.shell-consent-row button { flex: 0 0 auto; }
+
+.shell-workspace > .shell-offline-consent { flex: 0 0 auto; max-height: 35%; }
+
+.shell-rename-backdrop { position: fixed; inset: 0; z-index: 1200; background: var(--shadow-8); display: grid; place-items: center; }
+.shell-rename-dialog { box-sizing: border-box; width: min(360px, calc(100vw - 32px)); padding: 20px; border: 1px solid var(--stone); border-radius: 8px; background: var(--bg); color: var(--text); }
+.shell-rename-dialog input { box-sizing: border-box; width: 100%; margin-top: 8px; padding: 8px; background: var(--bg); color: var(--text); border: 1px solid var(--stone); }
+.shell-rename-dialog p { font-size: 13px; }
+.shell-rename-dialog > div { display: flex; justify-content: flex-end; gap: 8px; }
+
+.shell-display-name { display: inline-block; max-width: min(260px, 100%); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }

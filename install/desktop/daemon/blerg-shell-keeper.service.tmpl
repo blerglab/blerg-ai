@@ -1,0 +1,33 @@
+[Unit]
+Description=Blerg shell keeper (Linux and WSL restart custody)
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=__BIN_PATH__ shell-keeper serve
+Environment=BLERG_RUNNER_DAEMON_STATE_DIR=__DAEMON_STATE_DIR__
+Environment=BLERG_HOST_SHELL_CGROUP=__HOST_SHELL_CGROUP__
+Restart=always
+# Unsupported containment refuses shells without repeatedly restarting.
+RestartPreventExitStatus=78
+RestartSec=5
+# Independent of the daemon unit. Never add PartOf= or BindsTo= to it.
+# A keeper death kills its per-shell helpers through Pdeathsig/EXITKILL.
+# Includes privileged cgroup-backed shells, which have no ptrace EXITKILL.
+# A keeper stop/crash must clear its descendants before a fresh custody index.
+KillMode=mixed
+UMask=0077
+LimitCORE=0
+# Includes every future shell descendant, not just broker memory/threads.
+# Existing per-shell task budget remains 1024; this unit covers every helper
+# and shell descendant. Workload sizing remains part of the host drill.
+TasksMax=8192
+MemoryMax=8G
+OOMPolicy=continue
+MemoryOOMGroup=no
+# Filesystem and privilege sandboxing would be inherited by interactive shells;
+# do not deny workspace writes or silently change their sudo semantics here.
+
+[Install]
+WantedBy=default.target

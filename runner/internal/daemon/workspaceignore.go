@@ -27,7 +27,8 @@ var workspaceHeavyDirectories = map[string]bool{
 	".turbo": true, ".gradle": true, "target": true, "bower_components": true,
 }
 
-const workspaceIgnoreTimeout = time.Second
+// Leave 250 ms of the two-second operation deadline for filesystem search.
+const workspaceIgnoreTimeout = 1750 * time.Millisecond
 
 type workspaceIgnoreRules struct {
 	root     string
@@ -37,6 +38,7 @@ type workspaceIgnoreRules struct {
 	tracked  map[string]bool // tracked ignored files and routes to independent roots
 	children map[string][]string
 	failed   bool
+	required bool // a Git root must never fall back to unfiltered search
 }
 type workspaceIgnorePolicy struct {
 	explorer *LocalExplorer
@@ -56,7 +58,11 @@ func workspaceIgnoreRequest(ctx context.Context) context.Context {
 	if ctx.Value(workspaceIgnoreBudgetKey{}) != nil {
 		return ctx
 	}
-	return context.WithValue(ctx, workspaceIgnoreBudgetKey{}, &workspaceIgnoreBudget{remaining: workspaceIgnoreTimeout})
+	remaining := workspaceIgnoreTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining = min(remaining, time.Until(deadline)-250*time.Millisecond)
+	}
+	return context.WithValue(ctx, workspaceIgnoreBudgetKey{}, &workspaceIgnoreBudget{remaining: remaining})
 }
 
 func newWorkspaceIgnorePolicy(e *LocalExplorer) *workspaceIgnorePolicy {
@@ -127,7 +133,32 @@ func (p *workspaceIgnorePolicy) forDirectory(ctx context.Context, dir string) *w
 	rules := &workspaceIgnoreRules{root: root, failed: true}
 	p.rules[root] = rules
 	defer p.addRootRoutes(rules)
-	// Leave time for the bounded filesystem fallback within Explore's deadline.
+	git, err := p.explorer.openFile(path.Join(root, ".git"))
+	rules.required = !errors.Is(err, os.ErrNotExist)
+	if git != nil {
+		_ = git.Close()
+	}
+	// A host folder can contain a protected .git directory without being a
+	// repository. Only unprepared discoveries may use this absence check;
+	// prepared members must still refuse missing or replaced metadata.
+	if rules.required && id == "" {
+		missing := true
+		for _, name := range []string{"HEAD", "config", "index"} {
+			file, err := p.explorer.openFile(path.Join(root, ".git", name))
+			if file != nil {
+				_ = file.Close()
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				missing = false
+				break
+			}
+		}
+		rules.required = !missing
+	}
+	if !rules.required {
+		return rules
+	}
+	// Share preparation time across members and retain time for the bounded walk.
 	if p.budget == nil {
 		budget, ok := ctx.Value(workspaceIgnoreBudgetKey{}).(*workspaceIgnoreBudget)
 		if !ok || budget == nil {
@@ -135,15 +166,19 @@ func (p *workspaceIgnorePolicy) forDirectory(ctx context.Context, dir string) *w
 		}
 		p.budget = budget
 	}
-	if p.budget.remaining <= 0 {
+	allowance := p.budget.remaining
+	if deadline, ok := ctx.Deadline(); ok {
+		allowance = min(allowance, time.Until(deadline)-250*time.Millisecond)
+	}
+	if allowance <= 0 {
 		return rules
 	}
 	start := time.Now()
-	gitCtx, cancel := context.WithTimeout(ctx, p.budget.remaining)
+	gitCtx, cancel := context.WithTimeout(ctx, allowance)
 	defer cancel()
 	defer func() { p.budget.remaining -= time.Since(start) }()
 	if err := rules.prepare(gitCtx, p.explorer, id); err != nil {
-		p.explorer.diagnoseStatus(ctx, "search ignore fallback", err, "")
+		p.explorer.diagnoseStatus(ctx, "search ignore preparation", err, "")
 	}
 	return rules
 }
@@ -304,11 +339,11 @@ func (r *workspaceIgnoreRules) prepare(ctx context.Context, e *LocalExplorer, id
 	}
 	out := &cappedOutput{max: 8 << 20, strict: true}
 	options := r.options(out)
-	if err := hostgit.Run(ctx, options, "ls-files", "--cached", "-z"); err != nil || out.over {
+	if err := hostgit.Run(ctx, options, "ls-files", "--cached", "--ignored", "--exclude-standard", "-z"); err != nil || out.over {
 		return errors.Join(err, errors.New("tracked ignore index unavailable"))
 	}
-	// Keep the bounded raw index until ignore discovery is complete. Only paths
-	// beneath ignored entries need the tracked-only map; source trees do not.
+	// Ask Git to filter the index instead of exporting and checking every source
+	// path in Go. Only ignored tracked paths need traversal routes.
 	cached := out.buf.String()
 	// After capturing tracked paths, omit the private index for ignore discovery.
 	// This lets Git collapse ignored directories even when they contain tracked
@@ -343,9 +378,6 @@ func (r *workspaceIgnoreRules) prepare(ctx context.Context, e *LocalExplorer, id
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-		}
-		if !r.isIgnored(name) {
-			continue
 		}
 		if clean, ok := explorerPath(name); !ok || clean != name {
 			continue

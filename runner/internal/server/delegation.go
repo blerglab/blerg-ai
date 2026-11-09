@@ -47,7 +47,10 @@ var _ = childrenChangedThrottle
 
 var delegationAllowedFields = map[string]bool{
 	"engine": true, "model": true, "effort": true, "repo": true, "repos": true, "all_repos": true, "no_repo": true,
-	"runtime": true, "title": true, "prompt": true, "keep_running": true, "boards": true,
+	"kind": true, "runtime": true, "title": true, "prompt": true, "keep_running": true, "verbosity": true, "boards": true,
+	// base is BLG-501's required --base <branch> for a host Main's explicit --runtime
+	// cluster child (design §3.3); meaningless and refused everywhere else.
+	"base": true,
 }
 
 // The refusals delegateParent and the start path answer with. The CLI shows them as they are.
@@ -125,6 +128,10 @@ func (a *API) delegateParent(w http.ResponseWriter, r *http.Request, opts delega
 		return nil, nil, false
 	}
 	*r = *r.WithContext(withDesktopViewer(r.Context(), a.desktopRecipient(r, derefOrEmpty(parent.SpawningAccountID))))
+	if parent.DelegationVia == "person" {
+		writeError(w, http.StatusForbidden, msgChannelNoWorkers)
+		return nil, nil, false
+	}
 	if isChildSession(parent) {
 		writeError(w, http.StatusForbidden, msgDelegateDepth)
 		return nil, nil, false
@@ -187,11 +194,31 @@ func (a *API) delegateTokenSession(w http.ResponseWriter, r *http.Request, raw s
 	return "", false
 }
 
-// isChildSession reports whether a session was started by another session (depth 1: a child never
-// starts sessions). Any one mark suffices: parent_session_id is SET NULL when the parent row is
+// isChildSession reports automation delegation. Person-started channels share the
+// launch machinery but retain a personal trust class. An automated child never
+// starts sessions. Any one automation mark suffices: parent_session_id is SET NULL when the parent row is
 // deleted (059), so a kept-running child whose parent is gone is still known by how it was allowed
 // and who started it.
+// hasCoordinator distinguishes worker question routing from a person's channel.
+func hasCoordinator(row *db.SessionRow) bool {
+	// Deleting Main clears the parent FK, but does not turn a worker's
+	// questions into top-level questions for the person.
+	return isChildSession(row)
+}
+
 func isChildSession(row *db.SessionRow) bool {
+	return row != nil && row.DelegationVia != "person" && (row.ParentSessionID != nil || row.DelegationVia != "" || row.StartedByKind == "session")
+}
+
+// isClusterPodWorker is isChildSession's cousin, for exactly one purpose: deciding whether a
+// cluster pod gets write-capable git credentials (BLG-460 option B). isChildSession
+// deliberately exempts DelegationVia=="person" (a channel) for notification/recovery
+// semantics elsewhere (RequireRecoveryReady compensates with its own "|| person" clause) —
+// but the standing credential rule has no such exemption: every cluster pod that is not the
+// workspace's own top-level Main is read-only, channels included. Use this, not
+// isChildSession, for any check that decides whether a pod may hold a write credential or
+// attach a write-capable MCP connection, so that rule is the same everywhere it's enforced.
+func isClusterPodWorker(row *db.SessionRow) bool {
 	return row != nil && (row.ParentSessionID != nil || row.DelegationVia != "" || row.StartedByKind == "session")
 }
 
@@ -267,16 +294,30 @@ func (a *API) delegateFor(ctx context.Context, parent *db.SessionRow, runtime, d
 }
 
 // childStart is the allowlisted start (Task 4 parses it from the body; Task 5 from the stored row).
+const msgChannelNoWorkers = "Channels cannot start workers yet. Start a worker from Main."
+
 type childStart struct {
-	Repos           []string                    `json:"repos,omitempty"`
-	AllRepos        bool                        `json:"all_repos,omitempty"`
-	WorkspaceLaunch string                      `json:"workspace_launch,omitempty"`
-	Workspace       *protocol.WorkspaceManifest `json:"-"`
+	WorkerKind         string `json:"kind,omitempty"`
+	workerKindInferred bool
+	channelInput       *channelStart
+	channelRestricted  bool
+	channelGrant       *ResolvedGrant
+	personChannel      bool
+	channelPrivate     bool
+	channelSid         string
+	Repos              []string                    `json:"repos,omitempty"`
+	AllRepos           bool                        `json:"all_repos,omitempty"`
+	WorkspaceLaunch    string                      `json:"workspace_launch,omitempty"`
+	Workspace          *protocol.WorkspaceManifest `json:"-"`
+	// Base is BLG-501's required branch for a host Main's explicit --runtime cluster
+	// child (design §3.3) — never a default, and meaningless for any other runtime.
+	Base string `json:"base,omitempty"`
 
 	// Set only by origin resolution; the child request allowlist rejects caller-supplied provider.
 	Provider    string `json:"provider,omitempty"`
 	Engine      string `json:"engine"`
 	Model       string `json:"model,omitempty"`
+	Verbosity   string `json:"verbosity,omitempty"`
 	Effort      string `json:"effort,omitempty"`
 	Repo        string `json:"repo,omitempty"`
 	NoRepo      bool   `json:"no_repo,omitempty"`
@@ -304,6 +345,9 @@ func (a *API) startChildScoped(ctx context.Context, parent *db.SessionRow, cs ch
 	if parent == nil || derefOrEmpty(parent.SpawningAccountID) == "" {
 		return StartResponse{}, apiErrorf(http.StatusForbidden, "%s", msgDelegateNoOwner)
 	}
+	if parent.DelegationVia == "person" {
+		return StartResponse{}, apiErrorf(http.StatusForbidden, "%s", msgChannelNoWorkers)
+	}
 	if isChildSession(parent) {
 		return StartResponse{}, apiErrorf(http.StatusForbidden, "%s", msgDelegateDepth)
 	}
@@ -321,13 +365,23 @@ func (a *API) startChildScoped(ctx context.Context, parent *db.SessionRow, cs ch
 			return StartResponse{}, apiErrorf(409, "parent workspace unavailable")
 		}
 		if ws != nil && ws.Manifest != nil {
-			if ws.Manifest.Runtime == "cluster" {
-				if apiErr := selectClusterChild(&cs, *ws.Manifest); apiErr != nil {
+			// BLG-501: a host Main's explicit --runtime cluster child (design §3) takes its
+			// own selection path — the pure, no-network half only; a.hostClusterChildWorkspace
+			// (startClusterChild's own dispatch) resolves each member's provider repository
+			// and checks --base once a session row exists to authorize it against.
+			if ws.Manifest.Runtime == "host" && cs.Runtime == runnerRuntimeCluster {
+				if apiErr := selectHostClusterChildSelectors(&cs, *ws.Manifest); apiErr != nil {
 					return StartResponse{}, apiErr
 				}
-			}
-			if apiErr := selectWorkspaceChild(&cs, *ws.Manifest); apiErr != nil {
-				return StartResponse{}, apiErr
+			} else {
+				if ws.Manifest.Runtime == "cluster" {
+					if apiErr := selectClusterChild(&cs, *ws.Manifest); apiErr != nil {
+						return StartResponse{}, apiErr
+					}
+				}
+				if apiErr := selectWorkspaceChild(&cs, *ws.Manifest); apiErr != nil {
+					return StartResponse{}, apiErr
+				}
 			}
 		} else if len(cs.Repos) > 0 || cs.AllRepos {
 			return StartResponse{}, apiErrorf(422, "repository member selection requires a workspace parent")
@@ -335,6 +389,13 @@ func (a *API) startChildScoped(ctx context.Context, parent *db.SessionRow, cs ch
 	}
 	req := childRunnerRequest(parent, cs, via)
 	req.IdemScope = scope
+	req.personChannel, req.channelPrivate = cs.personChannel, cs.channelPrivate
+	req.Grant = cs.channelGrant
+	req.channelInput = cs.channelInput
+	req.channelRestricted = cs.channelRestricted
+	if cs.personChannel {
+		req.Interaction = protocol.InteractionInteractive
+	}
 	var resp StartResponse
 	var apiErr *APIError
 	var boundDesktop *DaemonConn
@@ -355,7 +416,11 @@ func (a *API) startChildScoped(ctx context.Context, parent *db.SessionRow, cs ch
 		if boundDesktop != nil && a.hub.ownedHostDaemon(fenced, cs.Workspace.OwnerID, parent.DaemonID) != boundDesktop {
 			return errDiscoveryUnavailable
 		}
-		resp, apiErr = a.StartSession(fenced, a.delegateFor(fenced, parent, cs.Runtime, decidedSid), req, idemKey)
+		p := a.delegateFor(fenced, parent, cs.Runtime, decidedSid)
+		if cs.personChannel {
+			p.delegateProof = coreProof{SessionID: cs.channelSid}
+		}
+		resp, apiErr = a.StartSession(fenced, p, req, idemKey)
 		return nil
 	}
 	if cs.Workspace != nil && cs.Workspace.Runtime != "cluster" {
@@ -384,9 +449,9 @@ func delegateStartProblem(req runnerStartRequest, p runnerPrincipal) *APIError {
 		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgChildrenOnDaemon)
 	}
 	if req.ParentSessionID == "" || req.ParentSessionID != p.Sub || len(req.Env) > 0 || req.CallbackURL != "" ||
-		req.CallbackSecret != "" || req.GitURL != "" || (req.Provider != "" && (!onCluster || !req.resolvedRepoProvider)) || req.AutoStop || req.Grant != nil ||
+		req.CallbackSecret != "" || req.GitURL != "" || (req.Provider != "" && (!onCluster || !req.resolvedRepoProvider)) || req.AutoStop || (req.Grant != nil && !req.personChannel) ||
 		req.CronID != "" || req.TargetDaemonID != "" || req.NoOperatorFallback ||
-		(req.IdemScope != "" && req.IdemScope != delegateDecideScope(p.Sub)) {
+		(req.IdemScope != "" && req.IdemScope != delegateDecideScope(p.Sub) && (!req.personChannel || req.IdemScope != "channel:"+p.Sub)) {
 		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgDelegateFields)
 	}
 	return nil

@@ -1,3 +1,4 @@
+import { useChangePulses } from '../lib/changePulse'
 // The Plan tab's checklist: one line per item. The box (a spinner while doing), the title (cut with an
 // ellipsis; a click or the focus shows it whole), who it is assigned to as small glyphs (their names in
 // the tooltip and the accessible name, never an id), and its commits as one chip on the right that
@@ -5,10 +6,11 @@
 // "✓ N done · show" row. A commit set shared by several items shows its chip once (planRows).
 import { CardRefStates, CardRefText } from './ChecklistRefs'
 import { useHasCardRef } from '../lib/checklistRefs'
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useState, useRef, useMemo } from 'react'
 import { Hover, useCommitOpener, type ChecklistItem, type HoverTarget, type PatchSummary } from '@blerglab/chat'
 import { ENGINE_LABELS } from '../lib/runtimes'
 import { planRows, type PlanChip, type PlanRow } from '../lib/railPlan'
+import { cardTimeGlyphLabel, type CardTimeSummary } from '../lib/cardTime'
 
 export interface PlanAssignee { kind: string; name: string; engine?: string }
 
@@ -27,12 +29,15 @@ export interface PlanChecklistProps {
   onDoneOpen: (open: boolean) => void
   /** The session: a commit chip's hovercard reads its commit (or its diff) from it. */
   sessionId?: string
+  /** BLG-444: the worker-time/review-rounds summary for the card an item names, present only
+   *  once that card has crossed its first budget multiple. */
+  cardTimeFor?: (item: ChecklistItem) => CardTimeSummary | undefined
 }
 
 function assigneeLabel(a: PlanAssignee): string {
   if (a.kind === 'subagent') return `Subagent: ${a.name}`
   const engine = a.engine ? ENGINE_LABELS[a.engine] ?? a.engine : ''
-  return `Started session${engine ? ` (${engine})` : ''}: ${a.name}`
+  return `Started workspace${engine ? ` (${engine})` : ''}: ${a.name}`
 }
 
 /** A subagent is the panel's robot; a started session the arrow Started sessions draws. */
@@ -112,10 +117,11 @@ function Row({ row, props, hidden }: { row: PlanRow; props: PlanChecklistProps; 
   const state = it.done ? 'done' : it.in_progress ? 'doing' : 'todo'
   const hasRef = useHasCardRef(it.text)
   const titleId = useId()
+  const cardTimeLabel = cardTimeGlyphLabel(props.cardTimeFor?.(it))
   return (
     <li tabIndex={it.id ? -1 : undefined} hidden={hidden}
       ref={it.id && props.onItemElement ? element => props.onItemElement!(it.id!, element) : undefined}
-      data-checklist-id={it.id} data-testid="rail-plan-row" data-state={state}
+      data-change-key={it.id ?? `i${row.index}`} data-checklist-id={it.id} data-testid="rail-plan-row" data-state={state}
       className={['rail-plan-row', state, it.id && it.id === props.highlightedId ? 'checklist-highlight' : ''].filter(Boolean).join(' ')}>
       <span className="checklist-box" aria-hidden="true">{it.done ? '☑' : it.in_progress ? <span className={`checklist-progress${props.live ? ' animated' : ''}`} /> : '☐'}</span>
       {/* The words: a click shows the whole item (a card link may sit inside them, #157, so they are
@@ -129,19 +135,23 @@ function Row({ row, props, hidden }: { row: PlanRow; props: PlanChecklistProps; 
         onClick={() => setWhole(w => !w)}><span aria-hidden="true">{whole ? '▾' : '▸'}</span></button>
       <CardRefStates text={it.text} state={state} />
       <Assignees list={props.assignees(it)} />
+      {cardTimeLabel && <span className="rail-plan-cardtime" role="img" aria-label={cardTimeLabel} title={cardTimeLabel} data-testid="rail-plan-cardtime">⏱</span>}
       {row.chip ? <CommitChip chip={row.chip} onViewDiff={props.onViewDiff} diffSummary={props.diffSummary} sessionId={props.sessionId} /> : null}
     </li>
   )
 }
 
 export default function PlanChecklist(props: PlanChecklistProps) {
+  const root = useRef<HTMLUListElement>(null)
+  const signatures = useMemo(() => new Map([...props.items.map((item, index) => [item.id ?? `i${index}`, String(item.done)] as [string,string]), ['__done', String(props.items.filter(item => item.done).length)]]), [props.items])
+  useChangePulses(root, signatures, 'data-change-key')
   const { open, done } = planRows(props.items)
   const { doneOpen, onDoneOpen } = props
   return (
-    <ul className="checklist-items rail-plan-list" data-testid="rail-plan-list">
+    <ul ref={root} className="checklist-items rail-plan-list" data-testid="rail-plan-list">
       {open.map(r => <Row key={r.item.id ?? `i${r.index}`} row={r} props={props} />)}
       {done.length > 0 && (
-        <li className="rail-plan-done-toggle">
+        <li className="rail-plan-done-toggle" data-change-key="__done">
           <button type="button" data-testid="rail-plan-done-toggle" aria-expanded={doneOpen} onClick={() => onDoneOpen(!doneOpen)}>
             <span aria-hidden="true">✓</span> {done.length} done · {doneOpen ? 'hide' : 'show'}
           </button>

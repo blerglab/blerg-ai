@@ -121,6 +121,73 @@ describe("coreOrigin", () => {
 
 const fakeJwt = (expMs: number) => `h.${btoa(JSON.stringify({ exp: Math.floor(expMs / 1000) }))}.s`;
 
+// A fake Web Locks API, faithful to the part of the spec this module relies on: requests queue
+// behind a held lock, and a queued request that is aborted (via an AbortSignal passed in its
+// options) is dropped from the queue and rejected WITHOUT ever running its callback — it never
+// gets to be granted after the fact, no matter when the holder releases.
+function makeFakeLocks() {
+  type Entry = { cb: () => Promise<unknown>; resolve: (v: unknown) => void; reject: (e: unknown) => void; signal?: AbortSignal };
+  let held = false;
+  const queue: Entry[] = [];
+
+  const run = (entry: Entry) => {
+    held = true;
+    void Promise.resolve()
+      .then(entry.cb)
+      .then(entry.resolve, entry.reject)
+      .finally(() => {
+        held = false;
+        drain();
+      });
+  };
+
+  const drain = () => {
+    while (queue.length) {
+      const entry = queue.shift()!;
+      if (entry.signal?.aborted) continue;
+      run(entry);
+      return;
+    }
+  };
+
+  const request = vi.fn((name: string, optsOrCb: unknown, maybeCb?: () => Promise<unknown>) => {
+    expect(name).toBe(REFRESH_LOCK);
+    const cb = (typeof optsOrCb === "function" ? optsOrCb : maybeCb) as () => Promise<unknown>;
+    const signal = typeof optsOrCb === "function" ? undefined : (optsOrCb as { signal?: AbortSignal } | undefined)?.signal;
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new DOMException("aborted", "AbortError"));
+        return;
+      }
+      const entry: Entry = { cb, resolve, reject, signal };
+      if (!held) {
+        run(entry);
+        return;
+      }
+      queue.push(entry);
+      signal?.addEventListener("abort", () => {
+        const idx = queue.indexOf(entry);
+        if (idx !== -1) {
+          queue.splice(idx, 1);
+          entry.reject(new DOMException("aborted", "AbortError"));
+        }
+      });
+    });
+  });
+
+  return {
+    api: { request },
+    isHeld: () => held,
+    /** "Another tab" takes the lock directly, bypassing the module under test. */
+    grabDirectly(): () => void {
+      let release!: () => void;
+      void request(REFRESH_LOCK, () => new Promise<void>((r) => { release = r; }));
+      held = true;
+      return () => release();
+    },
+  };
+}
+
 describe("silent renewal", () => {
   let frames: HTMLIFrameElement[];
   let removed: HTMLIFrameElement[];
@@ -263,37 +330,85 @@ describe("silent renewal", () => {
   });
 
   it("takes the origin's refresh lock for the frame's whole life, so other tabs wait their turn", async () => {
-    // A fake Web Locks API: requests queue, and each callback holds the lock until it settles.
-    const waiting: Array<() => void> = [];
-    let held = false;
-    const request = vi.fn(async (name: string, cb: () => Promise<unknown>) => {
-      expect(name).toBe(REFRESH_LOCK);
-      if (held) await new Promise<void>((r) => waiting.push(r));
-      held = true;
-      try {
-        return await cb();
-      } finally {
-        held = false;
-        waiting.shift()?.();
-      }
-    });
-    vi.stubGlobal("navigator", { ...navigator, locks: { request } });
+    const locks = makeFakeLocks();
+    vi.stubGlobal("navigator", { ...navigator, locks: locks.api });
     try {
       // "Another tab" holds the lock while this tab asks.
-      let releaseOther!: () => void;
-      void request(REFRESH_LOCK, () => new Promise<void>((r) => { releaseOther = r; }));
-      await vi.advanceTimersByTimeAsync(0);
+      const releaseOther = locks.grabDirectly();
       const p = ensureFreshToken();
       await vi.advanceTimersByTimeAsync(0);
       expect(frames).toHaveLength(0); // waiting: no frame until the other tab is done
       releaseOther();
       await vi.advanceTimersByTimeAsync(0);
       expect(frames).toHaveLength(1);
-      expect(held).toBe(true); // and the lock is ours until the frame is gone
+      expect(locks.isHeld()).toBe(true); // and the lock is ours until the frame is gone
       answerWithToken(frames[0], "after-the-other-tab");
       await expect(p).resolves.toBe(true);
       await vi.advanceTimersByTimeAsync(0);
-      expect(held).toBe(false);
+      expect(locks.isHeld()).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // BLG-487: the caller's SILENT_TIMEOUT_MS bound must cover the wait for the lock, not just the
+  // frame. Before the fix, the inner timer started only once the lock was granted, so a tab queued
+  // behind another tab's lingering (up to SILENT_LINGER_MS = 120 s) frame wouldn't hear "no-answer"
+  // until lock-wait + 15 s — up to 135 s, not ~15 s.
+  it("falls back at SILENT_TIMEOUT_MS even while still queued behind another tab's lingering lock", async () => {
+    const locks = makeFakeLocks();
+    vi.stubGlobal("navigator", { ...navigator, locks: locks.api });
+    try {
+      locks.grabDirectly(); // another tab's frame is still lingering; never released in this test
+      const p = ensureFreshToken();
+      await vi.advanceTimersByTimeAsync(15_001);
+      await expect(p).resolves.toBe(false);
+      // The bound covered the lock wait: no frame was ever started for this caller.
+      expect(frames).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // A lock request that gave up waiting must not go on to start a frame nobody is waiting for,
+  // even if the lock becomes available afterward.
+  it("does not start a frame when the lock is freed after the caller already gave up", async () => {
+    const locks = makeFakeLocks();
+    vi.stubGlobal("navigator", { ...navigator, locks: locks.api });
+    try {
+      const releaseOther = locks.grabDirectly();
+      const p = ensureFreshToken();
+      await vi.advanceTimersByTimeAsync(15_001);
+      await expect(p).resolves.toBe(false);
+      expect(frames).toHaveLength(0);
+      // The other tab finally lets go, long after this caller stopped waiting.
+      releaseOther();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(frames).toHaveLength(0); // still nobody waiting: no frame should appear
+      expect(locks.isHeld()).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // A lock granted an instant before the bound fires must still get its frame's normal lifecycle
+  // (the frame may still answer after the caller's own timeout, same as the no-lock-contention case).
+  it("still lets a just-in-time grant's frame answer late, after the caller has already fallen back", async () => {
+    const locks = makeFakeLocks();
+    vi.stubGlobal("navigator", { ...navigator, locks: locks.api });
+    try {
+      const releaseOther = locks.grabDirectly();
+      const p = ensureFreshToken();
+      await vi.advanceTimersByTimeAsync(14_999);
+      releaseOther(); // granted just before the bound
+      await vi.advanceTimersByTimeAsync(0);
+      expect(frames).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(2);
+      await expect(p).resolves.toBe(false); // the caller already gave up
+      expect(removed).toHaveLength(0); // but the frame itself is never torn down early
+      answerWithToken(frames[0], "late-but-landed");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getAccessToken()).toBe("late-but-landed");
     } finally {
       vi.unstubAllGlobals();
     }
@@ -359,5 +474,106 @@ describe("silent renewal", () => {
     expect(frames.length).toBe(before + 1);
     answerCrossOrigin(frames[frames.length - 1]);
     await vi.advanceTimersByTimeAsync(0);
+  });
+
+  // Coverage gaps flagged in review of BLG-487's fix (no product change — the fix already
+  // handles all four; these just prove it).
+  it("shares one outcome between concurrent callers queued on the same lock, and a retry after giving up starts fresh", async () => {
+    const locks = makeFakeLocks();
+    vi.stubGlobal("navigator", { ...navigator, locks: locks.api });
+    try {
+      const releaseOther = locks.grabDirectly();
+      const a = renewSilently();
+      const b = renewSilently(); // a second caller while still queued behind the lock
+      await vi.advanceTimersByTimeAsync(15_001);
+      await expect(a).resolves.toBe("no-answer");
+      await expect(b).resolves.toBe("no-answer"); // shared the same outcome as `a`
+      expect(frames).toHaveLength(0); // the bound covered the wait: no frame was ever started
+      releaseOther();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(frames).toHaveLength(0); // still nobody waiting: no frame appears after the fact
+      // A retry is a fresh call: this time nothing holds the lock, so it works normally.
+      const c = renewSilently();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(frames).toHaveLength(1);
+      answerWithToken(frames[0], "after-retry");
+      await expect(c).resolves.toBe("token");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("never reports signed-out, and dispatches no signed-out event, when only the lock wait times out", async () => {
+    const locks = makeFakeLocks();
+    vi.stubGlobal("navigator", { ...navigator, locks: locks.api });
+    const signedOutEvents: Event[] = [];
+    const onSignedOut = (e: Event) => signedOutEvents.push(e);
+    window.addEventListener("blerg-signed-out", onSignedOut);
+    try {
+      locks.grabDirectly(); // another tab's frame is still lingering; never released
+      const p = renewSilently();
+      await vi.advanceTimersByTimeAsync(15_001);
+      // Exactly "no-answer", not "signed-out": a lock-wait timeout is not core saying the
+      // sign-in has ended, and must never be read as one.
+      await expect(p).resolves.toBe("no-answer");
+      expect(frames).toHaveLength(0);
+      expect(signedOutEvents).toHaveLength(0);
+    } finally {
+      window.removeEventListener("blerg-signed-out", onSignedOut);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps the lock held for the frame's whole life even after the caller's own timeout, so a queued second tab still waits for it", async () => {
+    const locks = makeFakeLocks();
+    vi.stubGlobal("navigator", { ...navigator, locks: locks.api });
+    try {
+      const p = ensureFreshToken(); // grabs the lock immediately: nothing else holds it yet
+      await vi.advanceTimersByTimeAsync(0);
+      expect(frames).toHaveLength(1);
+
+      // "Another tab" queues up behind the lock this module's own frame is holding.
+      let otherTabRan = false;
+      const otherTabDone = locks.api.request(REFRESH_LOCK, async () => {
+        otherTabRan = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(otherTabRan).toBe(false); // queued: we still hold it
+
+      await vi.advanceTimersByTimeAsync(15_001);
+      await expect(p).resolves.toBe(false); // our own caller gave up at its bound
+      expect(otherTabRan).toBe(false); // but the lock is still ours: the frame hasn't settled
+      expect(removed).toHaveLength(0); // the frame itself is never torn down early
+
+      answerWithToken(frames[0], "late-after-giveup"); // the frame finally answers; done settles
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getAccessToken()).toBe("late-after-giveup");
+      expect(otherTabRan).toBe(true); // only now does the queued tab get its turn
+      await otherTabDone;
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("leaves no pending timers once the frame answers", async () => {
+    const p = ensureFreshToken();
+    answerWithToken(frames[0], "clean");
+    await expect(p).resolves.toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("leaves no pending timers once the lock-wait bound fires", async () => {
+    const locks = makeFakeLocks();
+    vi.stubGlobal("navigator", { ...navigator, locks: locks.api });
+    try {
+      locks.grabDirectly();
+      const p = ensureFreshToken();
+      await vi.advanceTimersByTimeAsync(15_001);
+      await expect(p).resolves.toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

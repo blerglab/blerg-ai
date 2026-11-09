@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"encoding/json"
-	"log"
 	"net"
 	"net/url"
 	"os"
@@ -195,26 +194,4 @@ func ccSessionSettings(sandbox map[string]any) string {
 // withClaudeSandboxSettings gives every turn of a driver the sandbox exception (nil = none).
 func withClaudeSandboxSettings(sandbox map[string]any) ccOption {
 	return func(o *ccOptions) { o.SandboxSettings = sandbox }
-}
-
-// claudeTerminalSandboxArgs is the `--settings` argument of a terminal Claude session that needs
-// the exception (nothing otherwise). A sandboxed (Docker) session is left alone: its addresses are
-// the sandbox network's, and Claude Code's own sandbox does not run in the image. A note the person
-// should see is logged (a terminal has no other channel from here).
-func claudeTerminalSandboxArgs(sessionID string, env []string, home, workDir string, dockerSandboxed bool) []string {
-	if dockerSandboxed {
-		return nil
-	}
-	sandbox, note := claudeSandboxException(env, home, workDir)
-	if note != "" {
-		log.Printf("session %s: %s", sessionID, note)
-	}
-	if sandbox == nil {
-		return nil
-	}
-	raw, err := json.Marshal(map[string]any{"sandbox": sandbox})
-	if err != nil {
-		return nil
-	}
-	return []string{"--settings", string(raw)}
 }

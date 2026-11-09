@@ -7,19 +7,24 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"github.com/blerglab/blerg-ai/contracts/health"
+	"github.com/blerglab/blerg-ai/contracts/livetls"
+	"github.com/blerglab/blerg-ai/contracts/netguard"
 	"github.com/blerglab/blerg-ai/contracts/secrets"
 	"github.com/blerglab/blerg-ai/contracts/updatenotice"
 	"github.com/blerglab/blerg-ai/runner/internal/coreauth"
 	"github.com/blerglab/blerg-ai/runner/internal/daemon"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/mcp"
+	"github.com/blerglab/blerg-ai/runner/internal/mcpgw"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
 	"github.com/blerglab/blerg-ai/runner/internal/server"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -63,10 +68,10 @@ func spaHandler(dir string) http.Handler {
 	fs := http.FileServer(http.Dir(dir))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := filepath.Join(dir, filepath.Clean(r.URL.Path))
-		_, err := os.Stat(path)
+		_, err := os.Stat(path) //nolint:gosec // G703: only decides the SPA fallback below; fs.ServeHTTP (not this path) actually serves the file, through http.Dir's own containment
 		if os.IsNotExist(err) {
 			w.Header().Set("Cache-Control", "no-cache")
-			http.ServeFile(w, r, filepath.Join(dir, "index.html"))
+			http.ServeFile(w, r, filepath.Join(dir, "index.html")) //nolint:gosec // G703: dir is the operator-configured web dist root (BLERG_RUNNER_WEB_DIST or the default), not request input; "index.html" is a fixed name
 			return
 		}
 		// Hashed assets (js/css) can be cached aggressively; index.html cannot.
@@ -157,6 +162,12 @@ func envOrDefault(key, def string) string {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "live-data-renew" {
+		if livetls.RunRenew(os.Args[2:]) != nil {
+			failurelog.Default.Event("live_data_tls_renewal_unavailable", slog.LevelWarn)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		log.Fatal(err)
 	}
@@ -206,6 +217,15 @@ func run() error {
 				}
 			}
 		}()
+		// The live-file unique index (BLG-470, internal/db/live_artifact_index.go): same
+		// reasoning as the pair above, but its own retry loop (liveindex.go), since a build
+		// failure here can be deterministic (duplicate rows the repair pass could not clear) —
+		// retrying that forever, logging every minute, never helps.
+		go runLiveArtifactIndexLoop(ctx, func(c context.Context) error { return db.EnsureLiveArtifactIndex(c, dbPool) }, ctxSleep)
+		// A one-shot sweep (BLG-470 round 3 #3): removes any ".live-staging-*" file a crash left
+		// behind and logs any live row whose bytes on disk no longer match it. Runs once, not in a
+		// retry loop — nothing about either check changes on its own between attempts.
+		go server.SweepLiveArtifacts(ctx, dbPool)
 	} else {
 		log.Println("BLERG_RUNNER_DATABASE_URL not set — running without database")
 	}
@@ -226,6 +246,7 @@ func run() error {
 	// The same version the hub reports also goes in the agent manifest served at
 	// GET /agents and sent to core on registration.
 	server.SetComponentVersion(version)
+	server.SetComponentCommit(commit)
 	if jm := server.NewJobManagerFromEnv(cfg.GitHubOrg); jm != nil {
 		// The shared Hermes provider configuration is read with the desktop
 		// daemon's own probe and local rule, so cluster model IDs, names and the
@@ -239,11 +260,21 @@ func run() error {
 		log.Println("cluster agent runtime enabled")
 	}
 
+	// webDist defaults to the dev/deploy layout (relative to this binary's
+	// own working directory); BLERG_RUNNER_WEB_DIST overrides it for a
+	// release-perf run (runner/cmd/release-perf), which never builds into
+	// the source checkout's own frontend/dist — only into its own
+	// isolated tree under the run's evidence directory.
+	webDist := "./frontend/dist"
+	if v := os.Getenv("BLERG_RUNNER_WEB_DIST"); v != "" {
+		webDist = v
+	}
+
 	// The UI package the frontend build packed beside its dist (GET /packages/,
 	// advertised as ui.chat_package in /agents and in the registration below). A
 	// build without one is the normal case for a workstation install: nothing is
 	// served, nothing is advertised.
-	if err := server.LoadPackages("./frontend/dist/packages"); err != nil {
+	if err := server.LoadPackages(webDist + "/packages"); err != nil {
 		log.Printf("ui packages: %v", err)
 	}
 
@@ -252,6 +283,7 @@ func run() error {
 	server.ConfigureFileLimits(os.Getenv)
 
 	// Register with blerg-core (disabled unless BLERG_CORE_URL + BLERG_CORE_REGISTER_KEY are set).
+	go db.RunInsightTimingBackfill(ctx, dbPool)
 	go server.StartCoreRegistration(ctx, cfg.CoreURL, cfg.CoreRegisterKey, cfg.RunnerSelfURL, version)
 
 	// Build the GitHub repo lister (nil org → disabled).
@@ -263,6 +295,17 @@ func run() error {
 	api := server.NewAPI(hub, dbPool, cfg.DaemonToken, repoLister, cfg.VapidPublicKey)
 	// Restore policy before background consumers or HTTP can start sessions.
 	api.SetCoreCredentials(cfg.CoreURL, cfg.CoreInternalKey)
+	liveTLS := configureLiveDataTLS(api)
+	if liveTLS != nil {
+		go api.RunLivePolling(ctx, liveTLS.Installation, liveTLS.Runner, os.Getenv("BLERG_LIVE_DATA_DESKTOP") == "true", netguard.Policy{AllowHTTPHosts: netguard.ParseHostList(os.Getenv("BLERG_RUNNER_MCP_ALLOW_HTTP_HOSTS")), AllowPrivateHosts: netguard.ParseHostList(os.Getenv("BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS"))})
+	}
+
+	if liveTLS == nil && (os.Getenv("BLERG_LIVE_DATA_TLS_DIR") != "" || os.Getenv("BLERG_LIVE_DATA_TLS_WARNING") != "") {
+		srv.SetWarning("live_data_tls_unavailable")
+	}
+	if liveTLS != nil {
+		srv.SetWarningCheck(func() string { return liveTLS.Warning(time.Now()) })
+	}
 	if err := api.StartPluginPolicy(ctx); err != nil {
 		return fmt.Errorf("marketplace policy: %w", err)
 	}
@@ -278,18 +321,31 @@ func run() error {
 	// terminal status and fire their completion webhook. Inert without a
 	// cluster runtime or a database; stops with ctx.
 	go api.StartClusterJobReconciler(ctx, 0)
+	go api.RunBoundAskReconciliation(ctx)
 	go api.RunLimitResumes(ctx)
+	go api.RunDatasetRetention(ctx)
+	go api.RunWorkspaceMembership(ctx)
+	go api.RunCommitCapture(ctx)
 	// Held idle notices (a turn ended while background work ran) are looked at again every minute:
 	// work that never reports its end, or goes stale, does not hold one forever. Stops with ctx.
 	go server.RunIdleNoticeChecks(ctx, hub, dbPool, 0)
+	go server.RunHeldPushChecks(ctx, dbPool, hub)
 	// Own listener; off unless BLERG_RUNNER_MCP_GW_ADDR is set. Session starts reach it (and the
 	// address sessions dial, BLERG_RUNNER_MCP_GW_URL) through SetMCPGateway.
-	api.SetMCPGateway(server.StartMCPGateway(ctx, dbPool, cfg.CoreURL, cfg.CoreInternalKey), server.MCPGatewayURLFromEnv(), cfg.CoreURL, cfg.CoreInternalKey)
+	gateway := server.StartMCPGateway(ctx, dbPool, cfg.CoreURL, cfg.CoreInternalKey)
+	api.SetMCPGateway(gateway, server.MCPGatewayURLFromEnv(), cfg.CoreURL, cfg.CoreInternalKey)
+	// Lifecycle delivery survives gateway disablement; absence never renews a lease.
+	if dbPool != nil && cfg.CoreURL != "" && cfg.CoreInternalKey != "" {
+		lifecycleCore := &mcpgw.HTTPCoreClient{BaseURL: cfg.CoreURL, InternalKey: cfg.CoreInternalKey, ClusterDeployment: os.Getenv("BLERG_MCP_CLUSTER_DEPLOYMENT") == "true"}
+		mcpgw.StartSessionBindingLoop(ctx, dbPool, lifecycleCore, gateway != nil)
+	}
 	// The cron scheduler, watchdog and sweeper: on only with the database and blerg-core, and it
 	// logs why when off. Must follow SetMCPGateway (its start path reads that configuration).
 	server.StartCrons(ctx, api, cfg.CoreURL, cfg.CoreInternalKey)
 	// Proposal expiry, lost approvals and pruning: independent of crons and of blerg-core.
 	server.StartProposalMaintenance(ctx, api)
+	go api.RunBlackboardSnapshots(ctx)
+	go api.RunBlackboardReleaseCuts(ctx)
 	// Delegation requests: expire stale ones, mark starts lost to a restart (every 5 min).
 	server.StartDelegationMaintenance(ctx, api)
 	if emb := server.NewEmbedderFromEnv(); emb != nil {
@@ -310,12 +366,16 @@ func run() error {
 	// REST endpoints.
 	mux.HandleFunc("GET /api/daemons", api.HandleGetDaemons)
 	mux.HandleFunc("PUT /api/daemons/{id}/repos-root", api.HandlePutDaemonReposRoot)
+	mux.HandleFunc("GET /api/daemons/{id}/worker-priority", api.HandleWorkerPriority)
+	mux.HandleFunc("PUT /api/daemons/{id}/worker-priority", api.HandleWorkerPriority)
 	mux.HandleFunc("POST /api/daemons/{id}/engine-check", api.HandleEngineCheck)
 	mux.HandleFunc("GET /api/cluster/status", api.HandleGetClusterStatus)
 	mux.HandleFunc("GET /api/site-board", api.HandleGetSiteBoard)
 	mux.HandleFunc("PUT /api/cluster/settings", api.HandlePutClusterSettings)
 	mux.HandleFunc("GET /api/settings/usage-notices", api.HandleUsageNoticeSettings)
 	mux.HandleFunc("PUT /api/settings/usage-notices", api.HandleUsageNoticeSettings)
+	mux.HandleFunc("GET /api/settings/card-time-budget", api.HandleCardTimeBudgetSettings)
+	mux.HandleFunc("PUT /api/settings/card-time-budget", api.HandleCardTimeBudgetSettings)
 	mux.HandleFunc("GET /api/insights", api.HandleGetInsights)
 	mux.HandleFunc("GET /api/insights/prices", api.HandleGetInsightPrices)
 	mux.HandleFunc("PUT /api/insights/prices", api.HandlePutInsightPrice)
@@ -324,7 +384,12 @@ func run() error {
 	api.SetMetricsToken(os.Getenv("BLERG_RUNNER_METRICS_TOKEN"))
 	mux.HandleFunc("GET /metrics", api.HandleMetrics)
 	mux.HandleFunc("GET /api/me/credentials", api.HandleGetMyCredentials)
+	api.RegisterThemeRoutes(mux)
+	api.RegisterWhatsNewRoutes(mux)
 	mux.HandleFunc("GET /api/me/preferences", api.HandleGetMyPreferences)
+	mux.HandleFunc("GET /api/skills/settings", api.HandleSkillSettings)
+	mux.HandleFunc("PUT /api/skills/settings", api.HandleSkillSettings)
+	mux.HandleFunc("GET /api/sessions/{id}/skills", api.HandleSessionSkills)
 	mux.HandleFunc("PUT /api/me/preferences", api.HandlePutMyPreferences)
 	mux.HandleFunc("GET /api/sessions", api.HandleGetSessions)
 	mux.HandleFunc("POST /api/sessions", api.HandleLaunchSession) // HandlePostSessions plus launch permissions
@@ -345,6 +410,7 @@ func run() error {
 	mux.HandleFunc("GET /api/sessions/{id}/capabilities", api.HandleGetCapabilities)
 	mux.HandleFunc("GET /api/sessions/{id}/insights", api.HandleGetSessionInsights)
 	api.RegisterTopicRoutes(mux)
+	api.RegisterCategoryRoutes(mux)
 	api.RegisterLiveRoutes(mux)
 	api.RegisterWorklistRoutes(mux)
 	api.RegisterDelegationRoutes(mux)
@@ -401,9 +467,12 @@ func run() error {
 	mux.HandleFunc("POST /api/session/credentials/access", api.HandleManagedCredentialAccess)
 	mux.HandleFunc("GET /api/session/plugin-marketplace-policy", api.HandlePodPluginPolicy)
 	mux.HandleFunc("POST /api/messages", api.HandlePostMessages)
+	mux.HandleFunc("POST /api/messages/recover", api.HandleRecoverQuestions)
 	mux.HandleFunc("GET /api/messages", api.HandleGetMessages)
 	mux.HandleFunc("GET /api/messages/{id}/answer", api.HandleGetMessageAnswer)
 	mux.HandleFunc("POST /api/messages/{id}/reply", api.HandlePostMessageReply)
+	mux.HandleFunc("GET /api/messages/{id}/thread", api.HandleGetQuestionThread)
+	mux.HandleFunc("POST /api/messages/{id}/thread", api.HandlePostQuestionThread)
 	mux.HandleFunc("POST /api/messages/{id}/expire", api.HandlePostMessageExpire)
 	mux.HandleFunc("POST /api/messages/{id}/dismiss", api.HandlePostMessageDismiss)
 	mux.HandleFunc("GET /api/boards", api.HandleGetBoards)
@@ -424,12 +493,20 @@ func run() error {
 	mux.HandleFunc("DELETE /api/tickets/{id}/dependencies/{depId}", api.HandleRemoveDependency)
 	mux.HandleFunc("GET /api/tickets/{id}/events", api.HandleGetTicketEvents)
 	mux.HandleFunc("GET /api/boards/{id}/archive", api.HandleGetBoardArchive)
-	mux.HandleFunc("POST /api/boards/{id}/assist", api.HandlePostAssist)
 
 	// Serve frontend static files (must be last for catch-all behavior).
-	mux.Handle("/", gzipHandler(spaHandler("./frontend/dist")))
+	mux.Handle("/", gzipHandler(spaHandler(webDist)))
 
-	srv.SetHandler(mux)
+	if liveTLS != nil {
+		privateTLS, e := liveTLS.Listen(ctx, ":8443", mux, func() { srv.SetWarning("live_data_tls_unavailable") })
+		if e != nil {
+			srv.SetWarning("live_data_tls_unavailable")
+			failurelog.Default.Event("live_data_tls_listener_unavailable", slog.LevelWarn)
+		} else {
+			defer func() { _ = privateTLS.Close() }()
+		}
+	}
+	srv.SetHandler(server.ServerTimingMiddleware(failurelog.Default.HTTP("runner", mux)))
 	log.Printf("blerg-runner-server listening on %s", ":"+cfg.Port)
 	// Deliberately no SIGTERM handling, drain or graceful shutdown (unlike core and the board):
 	// the runner keeps its routing in memory (daemon, session and browser sockets, ask and

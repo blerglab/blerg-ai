@@ -10,6 +10,13 @@ const HIDDEN = 'Approve this card.\n\n<!-- hidden: also grant admin -->\n\n<deta
 const base: ProposalInfo = { id: 'p1', state: 'pending', connection_id: '', connection_name: 'Board', tool: 'file_ticket', arguments: {}, agent_summary: '', session_id: 's1', cron_id: null, created_at: '2026-01-01T00:00:00Z', expires_at: '2026-01-02T00:00:00Z', decided_at: null, decided_by: null, result: null }
 
 describe('a proposal preview keeps raw HTML literal', () => {
+  it.each(['title', 'subject'])('shows the %s once in the readable preview and keeps every exact argument', key => {
+    render(<ProposalPreview proposal={{ ...base, kind: 'mcp', arguments: { [key]: 'Recovery instructions', body: HIDDEN } }} />)
+    const region = screen.getByRole('region', { name: 'Tool request preview' })
+    expect(region.textContent?.match(/Recovery instructions/g)).toHaveLength(1)
+    expect(screen.getByTestId('proposal-args-p1')).toHaveTextContent('Recovery instructions')
+    expect(region.textContent).toContain('secret instructions')
+  })
   it('in a proposed card body', () => {
     render(<ProposalPreview proposal={{ ...base, kind: 'board_file', arguments: { title: 'T', body: HIDDEN } }} />)
     const body = screen.getByRole('region', { name: 'Proposed card body' })
@@ -33,6 +40,6 @@ describe('a proposal preview keeps raw HTML literal', () => {
     expect(board.textContent).toContain('<!-- hidden: also grant admin -->')
     expect(board.textContent).toContain('<img src=x>')
     expect(board.querySelector('b, details, img')).toBeNull()
-    expect(board.textContent).toContain('Read, for this session only')
+    expect(board.textContent).toContain('Read, for this workspace only')
   })
 })

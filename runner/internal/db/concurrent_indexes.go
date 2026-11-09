@@ -28,6 +28,10 @@ type concurrentIndex struct {
 
 // concurrentIndexes are built in this order.
 var concurrentIndexes = []concurrentIndex{
+	// Read a fixed newest-first History page without walking unrelated tool events.
+	{"agent_events_history_page_idx", "ON agent_events (session_id, seq) WHERE kind IN " + HistoryKindsSQL, []string{"session_id", "seq"}},
+	// Page lifecycle context must never scan the much larger retained mark history.
+	{"agent_events_stroke_context_idx", "ON agent_events (session_id, seq) WHERE kind IN " + StrokeContextKindsSQL, []string{"session_id", "seq"}},
 	// The History tab's rename rows (ListSessionRenamedEvents), as 067's index serves its card chips.
 	{"agent_events_session_renamed_idx", "ON agent_events (session_id, seq) WHERE kind = 'session_renamed'", []string{"session_id", "seq"}},
 	// The History feed's strokes (ListStrokeEvents): marks, asks, approvals, proposals and reviews.

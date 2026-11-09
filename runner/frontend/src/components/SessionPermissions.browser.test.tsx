@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 // The Permissions summary and modal in a real browser: chips that fit the panel, the modal as a
 // dialog on a laptop and a full-screen sheet on a phone, and keyboard-first use (focus trap, arrows
 // and space on lists, Esc back to Manage).
@@ -52,7 +53,7 @@ it.each([390, 1280])('shows a compact summary with chips that fit the panel at %
   expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
 })
 
-it.each([390, 1280, 3840])('opens the modal as %s px requires: a sheet on a phone, a dialog on a laptop, a wide dialog on a 4K screen', async width => {
+it.each(browserWidths([390, 1280, 3840]))('opens the modal as %s px requires: a sheet on a phone, a dialog on a laptop, a wide dialog on a 4K screen', async width => {
   await page.viewport(width, 800)
   serve()
   render(<aside className="session-rail" style={{ width: width < 600 ? width : 340 }}><SessionPermissions sessionId="s1" active delegationGrants={grants} refreshKey="" /></aside>)
@@ -156,7 +157,7 @@ it('is keyboard-first: focus starts in the search, lists take arrows and space, 
   expect(apiFetch.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false)
 })
 
-it.each([390, 3840])('fits the three child rows of a desktop session on an install with a cluster at %i px, each saying where it runs', async width => {
+it.each(browserWidths([390, 3840]))('fits the three child rows of a desktop session on an install with a cluster at %i px, each saying where it runs', async width => {
   await page.viewport(width, 900)
   const three = { ...approval, runtimes: ['docker', 'daemon', 'cluster'].map(runtime => ({ runtime, enabled: false, partial: false, allowed_engines: ['claude', 'codex'], granted_engines: [], standing_rule_engines: [], effective_allowed_engines: [], can_enable: true, reason: '' })) }
   apiFetch.mockImplementation(async (url: string) => new Response(JSON.stringify(
@@ -173,11 +174,11 @@ it.each([390, 3840])('fits the three child rows of a desktop session on an insta
     expect(row.getBoundingClientRect().right).toBeLessThanOrEqual(right)
     expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth + 1)
   }
-  expect(within(cluster).getByRole('checkbox', { name: 'Start children on the cluster without asking' })).toBeVisible()
+  expect(within(cluster).getByRole('checkbox', { name: 'Start workers on the cluster without asking' })).toBeVisible()
   expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
 })
 
-it.each([390, 3840])('shows a started session its cap on the board row without overflowing at %i px', async width => {
+it.each(browserWidths([390, 3840]))('shows a started session its cap on the board row without overflowing at %i px', async width => {
   await page.viewport(width, 800)
   const child = { ...perms,
     boards: [{ board_id: 'b1', board_name: LONG, level: 'read', own_level: 'full', parent_level: 'read', grant_id: 'g9', created_via: 'parent', created_at: '2026-10-20T10:00:00Z', active: true }],

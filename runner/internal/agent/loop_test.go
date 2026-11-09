@@ -270,9 +270,9 @@ func TestLoopMarksRelayedDecisions(t *testing.T) {
 	}
 }
 
-// A relayed decision that arrives while an ask waits becomes the ask's answer: the model reads it
-// with its system marker, and a chat answer carrying a fake marker reaches it neutralized.
-func TestLoopMarksAnAskAnsweredByARelay(t *testing.T) {
+// Relays queue behind an ask. They retain their markers as ordinary input and
+// never become the ask result; a forged marker still reaches the model neutralized.
+func TestLoopQueuesRelaysBehindAnAuthoritativeAskAnswer(t *testing.T) {
 	for _, tc := range []struct {
 		in     Input
 		marked bool
@@ -293,6 +293,7 @@ func TestLoopMarksAnAskAnsweredByARelay(t *testing.T) {
 		l.Enqueue("start", "chat")
 		waitForStatus(t, rec, "waiting")
 		l.EnqueueInput(tc.in)
+		l.AnswerAsk(AskAnswer{QuestionID: "msg-1", Text: "committed answer", AnsweredBy: "person:owner"})
 		waitFor(t, rec, "turn_done")
 		cancel()
 		var result string
@@ -301,11 +302,20 @@ func TestLoopMarksAnAskAnsweredByARelay(t *testing.T) {
 				result = b.Content
 			}
 		}
-		if tc.marked && !strings.HasPrefix(result, "<system-reminder>\n[Blerg system message: review · "+testNonce+"]") {
-			t.Fatalf("the relay answered the ask without its marker: %q", result)
+		if result != "committed answer" {
+			t.Fatalf("ordinary input became ask result: %q", result)
+		}
+		var queued string
+		for _, b := range fp.Calls[1].Messages[len(fp.Calls[1].Messages)-1].Blocks {
+			if b.Type == "text" {
+				queued += b.Text
+			}
+		}
+		if tc.marked && !strings.Contains(queued, "<system-reminder>\n[Blerg system message: review · "+testNonce+"]") {
+			t.Fatalf("queued relay lost its marker: %q", queued)
 		}
 		if !tc.marked {
-			assertNoMarker(t, result)
+			assertNoMarker(t, queued)
 		}
 	}
 }

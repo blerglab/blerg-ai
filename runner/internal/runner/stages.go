@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blerglab/blerg-ai/runner/internal/clusterworkspace"
 	"github.com/blerglab/blerg-ai/runner/internal/daemon"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
@@ -191,6 +192,12 @@ func (e *cloneError) Error() string { return "clone: " + e.out }
 // caller-safe explanation. git's own text is never passed on: it can echo
 // the clone URL, and the URL carries the git token.
 func classifyWorkspaceError(err error) (detail, hint string) {
+	if errors.Is(err, clusterworkspace.ErrClone) {
+		return "Repository clone failed", "Check repository access and the cluster network, then resume the session."
+	}
+	if errors.Is(err, clusterworkspace.ErrRetainedStorage) {
+		return "Retained repository storage is missing; resume refused", "Ask an administrator to restore the retained workspace volume before resuming."
+	}
 	var ce *cloneError
 	if !errors.As(err, &ce) {
 		return "Preparing the workspace failed", "See the pod log (kubectl logs) for details, then start the session again."

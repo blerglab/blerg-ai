@@ -6,10 +6,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { create } from 'zustand'
 import { composeMessage, type MessageAttachment } from '../model/attachments'
 import type { SessionMeta, Transport } from '../transport/types'
-import type { AgentEvent, SessionStatus, UserMessagePayload } from '../types'
+import type { AgentEvent, ArtifactPayload, SessionStatus, UserMessagePayload } from '../types'
 import { useArtifacts, type Artifacts } from './useArtifacts'
 import { resumeSeq, useTranscriptStore } from './useTranscriptStore'
-import { dismissedAsk } from '../model/asks'
+import { dismissedAsk, WITHDRAWN_ASK } from '../model/asks'
 import { isRelayInputSource } from '../model/userMessages'
 
 /** The older part of a long transcript follows the newest page in pages of this many events. */
@@ -34,6 +34,9 @@ export interface PendingTurn {
   /** Server time (ms) of the send. */
   since: number
   afterSeq: number
+  /** The client id it was sent with, to tell the server's own receipt of it (input_accepted) from
+   *  the agent answering it. */
+  clientId: string
 }
 
 export interface UseSessionOptions {
@@ -113,6 +116,19 @@ export function echoedClientIds(events: AgentEvent[]): Set<string> {
   return ids
 }
 
+/** The client ids the server has acknowledged receiving (input_accepted): proof the message
+ *  reached the workspace, distinct from the agent having answered it. A long step after this
+ *  is a wait, not a loss. */
+export function deliveredClientIds(events: AgentEvent[]): Set<string> {
+  const ids = new Set<string>()
+  for (const ev of events) {
+    if (ev.kind !== 'input_accepted') continue
+    const id = (ev.payload as { client_id?: unknown } | null)?.client_id
+    if (typeof id === 'string' && id) ids.add(id)
+  }
+  return ids
+}
+
 // The queued messages whose real event has not arrived yet. A message is matched by its client id
 // first: the user_message that echoes it (whatever its text: a slash skill, an answer to an ask),
 // or the error of a session that dropped it (its queue was full). Events with no client id (a
@@ -143,6 +159,8 @@ export function unmatchedQueued(queued: QueuedMessage[], events: AgentEvent[]): 
 }
 
 const NO_EVENTS: AgentEvent[] = []
+const NO_LIVE_ARTIFACTS: Record<string, ArtifactPayload> = {}
+const NOOP = () => {}
 const NO_CLOSED: ReadonlyMap<string, string> = new Map()
 
 // A transport owns its pending messages for the life of the page. Keeping this outside the
@@ -164,6 +182,8 @@ export function useSession(transport: Transport, sessionId: string, opts: UseSes
   const ingestMany = useTranscriptStore(s => s.ingestMany)
   const resetEvents = useTranscriptStore(s => s.resetEvents)
   const appendStreaming = useTranscriptStore(s => s.appendStreaming)
+  const applyLiveArtifact = useTranscriptStore(s => s.applyLiveArtifact)
+  const pruneLiveArtifacts = useTranscriptStore(s => s.pruneLiveArtifacts)
   const ingestReplayDone = useTranscriptStore(s => s.ingestReplayDone)
   const ingestOlder = useTranscriptStore(s => s.ingestOlder)
 
@@ -171,6 +191,13 @@ export function useSession(transport: Transport, sessionId: string, opts: UseSes
   const [live, setLive] = useState<{ sessionId: string; status: SessionStatus } | null>(null)
   const [fetched, setFetched] = useState<{ sessionId: string; meta: SessionMeta } | null>(null)
   const [connected, setConnected] = useState(() => transport.connected())
+  // A stable place for the subscribe effect below to reach artifacts.refresh (declared after it,
+  // from useArtifacts further down) without reordering every hook here around it. Live files
+  // (BLG-470) are pushed outside the transcript and never replayed, so a reconnect or a gap-driven
+  // backfill — the only two events that mean "this browser missed something" — must refetch the
+  // file list explicitly, or a phone that slept shows a stale republish forever.
+  const artifactsRefreshRef = useRef<() => void>(NOOP)
+  const wasConnected = useRef(connected)
   const outbox = outboxFor(transport)
   const queued = outbox(s => s.sessions[sessionId] ?? EMPTY_QUEUE)
   const setQueued = useCallback((update: QueuedMessage[] | ((q: QueuedMessage[]) => QueuedMessage[])) => {
@@ -283,6 +310,7 @@ export function useSession(transport: Transport, sessionId: string, opts: UseSes
         resetEvents(sessionId)
       },
       onStreaming: delta => appendStreaming(sessionId, delta),
+      onArtifactUpdated: payload => applyLiveArtifact(sessionId, payload),
       onReplayDone: done => {
         ingestReplayDone(sessionId, done)
         // The newest page of a tail (older) or the last forward page ends the replay; a page with more behind it does not.
@@ -296,16 +324,24 @@ export function useSession(transport: Transport, sessionId: string, opts: UseSes
         held = null
         applyStatus(s)
       },
-      onAskClosed: (id, answer, dismissed, dismissedBy) => setClosed(cur => {
+      onAskClosed: (id, answer, dismissed, dismissedBy, withdrawn) => setClosed(cur => {
         const asks = new Map(cur?.sessionId === sessionId ? cur.asks : NO_CLOSED)
-        asks.set(id, dismissed ? dismissedAsk(dismissedBy) : answer)
+        asks.set(id, withdrawn ? WITHDRAWN_ASK : dismissed ? dismissedAsk(dismissedBy) : answer)
         return { sessionId, asks }
       }),
       onConnection: c => {
         setConnected(c)
         if (!c) release()
-        if (c) void pumpOlder()
+        if (c) {
+          void pumpOlder()
+          // A reconnect means this browser may have missed a live file's republish (never
+          // replayed): the first connect is covered by useArtifacts' own initial fetch, so this
+          // only matters — and only fires — from the second connection on.
+          if (!wasConnected.current) artifactsRefreshRef.current()
+        }
+        wasConnected.current = c
       },
+      onArtifactsStale: () => artifactsRefreshRef.current(),
     })
     // A visit after the first: one older page, as after the tail (the rest when the view asks).
     if (!firstVisit) void pumpOlder()
@@ -314,7 +350,7 @@ export function useSession(transport: Transport, sessionId: string, opts: UseSes
       release()
       unsubscribe()
     }
-  }, [transport, sessionId, ingest, ingestMany, resetEvents, appendStreaming, ingestReplayDone, pumpOlder])
+  }, [transport, sessionId, ingest, ingestMany, resetEvents, appendStreaming, applyLiveArtifact, ingestReplayDone, pumpOlder])
 
   // A working indicator belongs to the mounted session; messages stay in its outbox.
   const [queuedFor, setQueuedFor] = useState(sessionId)
@@ -338,7 +374,7 @@ export function useSession(transport: Transport, sessionId: string, opts: UseSes
       const t = useTranscriptStore.getState().sessions[sessionId]
       const afterSeq = t?.lastSeq ?? 0
       setQueued(q => [...q, { id, text, afterSeq }])
-      if (status !== 'running') setPending({ sessionId, turn: { since: Date.now() - clockOffset, afterSeq } })
+      if (status !== 'running') setPending({ sessionId, turn: { since: Date.now() - clockOffset, afterSeq, clientId: id } })
     }
     return r
   }, [transport, sessionId, noTurn, status, clockOffset, setQueued])
@@ -412,7 +448,9 @@ export function useSession(transport: Transport, sessionId: string, opts: UseSes
     const t = setTimeout(() => setQueued(q => q.filter(m => !ids.has(m.id))), QUEUED_LINGER_MS)
     return () => clearTimeout(t)
   }, [staleIds, setQueued])
-  const artifacts = useArtifacts(sessionId, transport.files ?? null, events)
+  const liveArtifacts = transcript?.liveArtifacts ?? NO_LIVE_ARTIFACTS
+  const artifacts = useArtifacts(sessionId, transport.files ?? null, events, liveArtifacts, pruneLiveArtifacts)
+  useEffect(() => { artifactsRefreshRef.current = artifacts.refresh }, [artifacts.refresh])
 
   return {
     sessionId,

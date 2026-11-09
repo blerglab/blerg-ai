@@ -285,3 +285,39 @@ commits.
   open, done, declined}`, and topics gain `counts.feedback`.
 - **F3, Files · Skills.** The panel's Files and Skills tabs (Live · History · Files · Skills), in
   place of the links in Session. No reply change: no jump route and no live fold (R6).
+
+### History pages for long-lived sessions
+
+The topics route reads at most 300 History candidate events plus one lookahead row,
+newest recording sequence first. A response's optional next_cursor carries the
+snapshot sequence and exclusive before-sequence. Passing it as cursor loads the
+next fixed-size page; newly recorded events do not shift older pages. The cursor
+also participates in the ETag. The snapshot freezes page membership; lifecycle
+states and topic summaries remain current, and the live event sequence also
+participates in the ETag so later decisions refresh older pages. The existing 100-row UI windows still bound mounted
+rows within each server page, with Show older history and Show newer history
+navigating server pages.
+
+The topic summaries and backdated-mark anchors still use the reel reads, which
+exclude mark events. Each page retains the reducer's effective-time ordering
+within that recording-sequence window. Latest lifecycle counterparts resolve
+requests whose decisions lie on another page. All currently pending attention
+remains visible as the established exception to the page bound; pending-state
+tables supply those keys. Context reads exclude marks, and a separate concurrent
+partial index keeps retained mark payloads out of lifecycle scans. Another
+concurrent partial index serves History candidates without scanning tool events.
+Neither index requires a numbered schema migration.
+
+Insights mark evidence retains its effective-time interval (inclusive start,
+exclusive end), independently of recording time. Card review aggregates remain
+owner- and card-scoped and read all accepted rounds so totals are complete.
+
+The timing pipeline is distinct from windowed mark evidence: its card-scoped
+initial-stage lookup intentionally sees earlier reviews, and cold timing-cache
+rebuilds stream the selected sessions' complete projected timing events. Those
+reads are not time-windowed mark lists and must not be truncated as History pages;
+the chart window is applied to the resulting timing buckets.
+
+Only the newest page uses the shared session-view cache. Older pages live in the
+active request/view, so visiting cursors across many snapshots does not accumulate
+globally cached History payloads.

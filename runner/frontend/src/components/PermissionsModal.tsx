@@ -1,3 +1,4 @@
+import { IconButton } from '@blerglab/chat'
 // PermissionsModal: everything a session may do without asking, in one dialog with a search. Child
 // sessions (per runtime, with their engines and every rule the server states), Boards (the person's
 // boards, each with an access level: propose, read, file without asking, or full), MCP write tools
@@ -275,7 +276,7 @@ export default function PermissionsModal(props: PermissionsModalProps) {
   ]
   const shownActive = active.filter(a => matchesQuery(query, a.label, a.detail))
   const shownAdditions = additions.filter(a => matchesQuery(query, a.label))
-  const pendingNote = mode === 'launch' ? 'Given as the session starts' : 'Applies on Save'
+  const pendingNote = mode === 'launch' ? 'Given as the workspace starts' : 'Applies on Save'
 
   const boardsWithAccess = boardList.filter(b => levelOf(draft, b.id) !== 'propose').length
   // An active board row says what Save does to it: revoked (back to propose) or its new level.
@@ -285,13 +286,14 @@ export default function PermissionsModal(props: PermissionsModalProps) {
   const nothing = (what: string) => <p className="pm-empty">{query ? `No ${what} match “${query.trim()}”.` : `No ${what}.`}</p>
 
   return createPortal(
+    // button-guard-ignore: useBackdropClose supplies pointer handlers only; this overlay is not a button
     <div className="pm-overlay" data-testid="permissions-overlay" {...backdrop}>
       <div ref={dialogRef} className={`pm-dialog${maximized ? ' pm-maximized' : ''}`} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
         data-testid="permissions-modal" onKeyDown={onKeyDown}>
         <header className="pm-head">
           <div className="pm-title">
             <h2 id={titleId}>Permissions</h2>
-            <p>{mode === 'launch' ? 'What the new session may do without asking you. Given as it starts.' : 'What this session may do without asking you. Each one still runs every check of your approval, as you.'}</p>
+            <p>{mode === 'launch' ? 'What the new workspace may do without asking you. Given as it starts.' : 'What this workspace may do without asking you. Each one still runs every check of your approval, as you.'}</p>
           </div>
           <button type="button" className="pm-close pm-maximize" aria-label={maximized ? 'Restore size' : 'Maximize'} aria-pressed={maximized}
             onClick={() => setMaximized(m => !m)}>{maximized ? '⤡' : '⤢'}</button>
@@ -304,12 +306,12 @@ export default function PermissionsModal(props: PermissionsModalProps) {
         <div className="pm-body">
           {/* ── Child sessions ── */}
           <section className="pm-section" data-section="children" aria-labelledby={`${titleId}-children`}>
-            <h3 id={`${titleId}-children`}><span className="pm-glyph" aria-hidden="true">{KIND_GLYPH.child}</span>Child sessions</h3>
+            <h3 id={`${titleId}-children`}><span className="pm-glyph" aria-hidden="true">{KIND_GLYPH.child}</span>Workers</h3>
             {children.state === 'loading' && <p className="pm-empty" role="status">Loading child approvals…</p>}
-            {children.state === 'none' && <p className="pm-empty">This session cannot start child sessions.</p>}
-            {children.state === 'failed' && <p className="pm-empty pm-error" role="alert">{children.message} {children.retry && <button type="button" className="perm-revoke" onClick={children.retry}>Retry</button>}</p>}
+            {children.state === 'none' && <p className="pm-empty">This workspace cannot start workers.</p>}
+            {children.state === 'failed' && <p className="pm-empty pm-error" role="alert">{children.message} {children.retry && <IconButton label="Retry" onClick={children.retry} />}</p>}
             {children.state === 'ready' && (shownChildren.length === 0 ? nothing('child options') : <>
-              <ul className="pm-list" data-roving onKeyDown={onListKey} aria-label="Child sessions">
+              <ul className="pm-list" data-roving onKeyDown={onListKey} aria-label="Workers">
                 {shownChildren.map(o => <ChildRow key={o.runtime} failed={failedKeys.includes(`c:${o.runtime}`)} option={o} state={draft.children[o.runtime] ?? 'off'} changed={o.runtime in edits.children} disabled={saving} onToggle={() => setChild(o)} />)}
               </ul>
               {children.value.note && <p className="pm-note">{children.value.note}</p>}
@@ -322,13 +324,13 @@ export default function PermissionsModal(props: PermissionsModalProps) {
               <h3 id={`${titleId}-boards`}><span className="pm-glyph" aria-hidden="true">{KIND_GLYPH.board}</span>Boards</h3>
               {canGrant && boards.state === 'ready' && boardList.length > 0 && <span className="pm-count" data-testid="pm-board-count">{boardsWithAccess} of {boardList.length} with access</span>}
             </div>
-            {!canGrant ? <p className="pm-empty" data-testid="pm-grant-reason">{grantReason || 'This session cannot be given these permissions.'}</p>
+            {!canGrant ? <p className="pm-empty" data-testid="pm-grant-reason">{grantReason || 'This workspace cannot be given these permissions.'}</p>
               : boards.state === 'loading' ? <p className="pm-empty" role="status">Checking your boards…</p>
-                : boards.state === 'failed' ? <p className="pm-empty pm-error" role="alert">{boards.message} {boards.retry && <button type="button" className="perm-revoke" onClick={boards.retry}>Retry</button>}</p>
+                : boards.state === 'failed' ? <p className="pm-empty pm-error" role="alert">{boards.message} {boards.retry && <IconButton label="Retry" onClick={boards.retry} />}</p>
                   : boards.state === 'none' || boardList.length === 0 ? <p className="pm-empty">No boards.</p>
                     : <>
                       <p className="pm-note pm-levels-note">{BOARD_LEVEL_NOTE}</p>
-                      {boardCap && <p className="pm-note pm-cap-note" data-testid="pm-board-cap-note">Started by {boardCap.by}: this session never has more access to a board than that session has now, and acts at the lower of the two.</p>}
+                      {boardCap && <p className="pm-note pm-cap-note" data-testid="pm-board-cap-note">Started by {boardCap.by}: this workspace never has more access to a board than that workspace has now, and acts at the lower of the two.</p>}
                       {shownBoards.length === 0 ? nothing('boards')
                         : <ul className="pm-list pm-scroll" aria-label="Board access">
                           {visibleBoards.map(b => {
@@ -366,8 +368,8 @@ export default function PermissionsModal(props: PermissionsModalProps) {
           {/* ── MCP write tools ── */}
           <section className="pm-section" data-section="tools" aria-labelledby={`${titleId}-tools`}>
             <h3 id={`${titleId}-tools`}><span className="pm-glyph" aria-hidden="true">{KIND_GLYPH.tool}</span>MCP write tools</h3>
-            {!canGrant ? <p className="pm-empty">{grantReason || 'This session cannot be given these permissions.'}</p>
-              : connections.length === 0 ? <p className="pm-empty">{mode === 'launch' ? 'Tools you set to "queued for your approval" can be allowed here.' : 'No tools of this session wait for your approval.'}</p>
+            {!canGrant ? <p className="pm-empty">{grantReason || 'This workspace cannot be given these permissions.'}</p>
+              : connections.length === 0 ? <p className="pm-empty">{mode === 'launch' ? 'Tools you set to "queued for your approval" can be allowed here.' : 'No tools of this workspace wait for your approval.'}</p>
                 : shownConnections.length === 0 ? nothing('tools')
                   : shownConnections.map(c => {
                     const open = !!query.trim() || !collapsed.includes(c.id)
@@ -396,7 +398,7 @@ export default function PermissionsModal(props: PermissionsModalProps) {
           {/* ── Active ── */}
           <section className="pm-section" data-section="active" aria-labelledby={`${titleId}-active`}>
             <h3 id={`${titleId}-active`}>{mode === 'launch' ? 'Selected' : 'Active'} <span className="pm-count">{active.length}</span></h3>
-            {shownActive.length + shownAdditions.length === 0 ? (query ? nothing('permissions') : <p className="pm-empty">{mode === 'launch' ? 'Nothing selected: the session will ask each time.' : 'Nothing yet: the session asks you each time.'}</p>)
+            {shownActive.length + shownAdditions.length === 0 ? (query ? nothing('permissions') : <p className="pm-empty">{mode === 'launch' ? 'Nothing selected: the workspace will ask each time.' : 'Nothing yet: the workspace asks you each time.'}</p>)
               : <ul className="pm-list pm-active">
                 {shownActive.map(a => {
                   const out = revoking(a)
@@ -445,7 +447,7 @@ function ChildRow({ option: o, state, changed, failed, disabled, onToggle }: { o
       {o.engines.length > 0 && <span className="pm-row-note">Engines: {engineNames(o.engines)}</span>}
       {state === 'partial' && <span className="pm-row-note">Allowed for {engineNames(o.grantedEngines)} only. {o.canEnable ? 'Tick to allow every engine.' : 'Untick to revoke.'}</span>}
       {o.reason && <span className="pm-row-note pm-reason">{o.reason}</span>}
-      {o.standingEngines.length > 0 && <span className="pm-row-note">{o.runtime === 'cluster' ? 'Cluster' : 'Desktop'} rules still allow {engineNames(o.standingEngines)} independently. Manage those in Settings → Sessions starting sessions.</span>}
+      {o.standingEngines.length > 0 && <span className="pm-row-note">{o.runtime === 'cluster' ? 'Cluster' : 'Desktop'} rules still allow {engineNames(o.standingEngines)} independently. Manage those in Settings → Starting workers.</span>}
     </div>
   </li>
 }

@@ -1,3 +1,4 @@
+import { IconButton } from '@blerglab/chat'
 import '../../../../packages/settings/settings.css'
 // McpPicker: choose which of the person's MCP connections a session may use, and for each
 // tool whether it is off, queued for approval, or allowed (spec 6.2, 6.3).
@@ -252,7 +253,7 @@ export default function McpPicker({ value, onChange, requireExplicit = false, co
             {on && st?.status === 'error' && (
               <div data-testid={`mcp-tools-error-${c.name}`} style={{ ...muted, color: 'var(--danger)' }}>
                 Could not load tools: {st.message}{' '}
-                <button className="settings-action" type="button" style={button} onClick={() => loadTools(c.id)}>Retry</button>
+                <IconButton label="Retry" onClick={() => loadTools(c.id)} />
               </div>
             )}
             {on && st?.status === 'ready' && (

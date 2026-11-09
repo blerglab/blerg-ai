@@ -16,7 +16,7 @@ func newLineDriver(t *testing.T) (*claudeCodeDriver, *collectEmitter, func(strin
 	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", em, nil)
 	d.now = func() time.Time { return time.Unix(1_800_000_000, 0) }
 	d.steer.legacy = false
-	p := &ccProc{}
+	p := claudeTestProc(t, d, &ccProc{})
 	d.steer.proc = p
 	return d, em, func(line string) { d.onLine(p, []byte(line)) }
 }

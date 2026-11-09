@@ -10,12 +10,17 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
+	"github.com/blerglab/blerg-ai/runner/internal/clusterworkspace"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
@@ -587,6 +592,430 @@ func TestCreateSessionJobPersonalGitHubToken(t *testing.T) {
 	}
 	if strings.Contains(body, "ghp_personal") {
 		t.Errorf("the git token must never appear as a literal value in the Job spec: %s", body)
+	}
+}
+
+// markClusterWorkerRow marks sessionID's own row as a BLG-460 cluster worker — a child of
+// some parent, running on the cluster runtime — the same durable facts CreateSessionJob
+// derives worker-ness from. A caller-set spec.ReadOnlyGitWorker is ignored entirely now; only
+// the row decides, so every test of this behavior must set up the row, not the field.
+func markClusterWorkerRow(t *testing.T, pool *pgxpool.Pool, sessionID string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := db.SetSessionPosture(ctx, pool, sessionID, "cluster", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetSessionStartedBy(ctx, pool, sessionID, "session", "fixture-parent"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCreateSessionJobReadOnlyGitWorkerSuppressesWriteCredential: a BLG-460 cluster worker
+// (its row marked as a cluster-runtime child — see markClusterWorkerRow) must never receive
+// a write-capable git token, from the launcher's own personal credential or the operator's
+// shared Secret, even when both are available and would ordinarily be used. The fake is
+// seeded with both so the test fails if either suppressed path is reinstated. Worker-ness
+// comes from the row alone: the spec here never sets ReadOnlyGitWorker.
+func TestCreateSessionJobReadOnlyGitWorkerSuppressesWriteCredential(t *testing.T) {
+	f := &fakeK8s{
+		credentialFetchResponses: map[string][]byte{
+			"acct-1:github": []byte("ghp_personal_write"),
+		},
+		secrets: map[string]map[string]string{
+			"blerg-runner-agent": {"BLERG_RUNNER_GIT_TOKEN": b64("ghp_operator_write")},
+		},
+	}
+	api, hub, pool := clusterRunnerAPI(t, f)
+	_ = api
+	ctx := context.Background()
+	sessionID := newUUID()
+	if err := db.UpsertDaemon(ctx, pool, clusterDaemonID, "cluster", "runner", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertSession(ctx, pool, sessionID, clusterDaemonID, "starting", "/workspace/org/r", "org/r", "T", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetSessionSpawningAccount(ctx, pool, sessionID, "acct-1"); err != nil {
+		t.Fatal(err)
+	}
+	markClusterWorkerRow(t, pool, sessionID)
+	jm := hub.JobManager()
+	if err := jm.CreateSessionJob(SessionJobSpec{
+		SessionID: sessionID, Repo: "org/r", Engine: "claude", SpawningAccountID: "acct-1", AuthSessionID: testSID,
+		ReadOnlyGitToken: "ghp_readonly_scoped",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.createdSecrets) != 1 {
+		t.Fatalf("expected 1 per-session secret, got %d", len(f.createdSecrets))
+	}
+	secretRaw, _ := json.Marshal(f.createdSecrets[0])
+	if !strings.Contains(string(secretRaw), `"BLERG_RUNNER_GIT_TOKEN":"ghp_readonly_scoped"`) {
+		t.Errorf("expected the read-only token in the per-session secret, got %s", secretRaw)
+	}
+	if strings.Contains(string(secretRaw), "ghp_personal_write") {
+		t.Fatalf("a read-only worker must never receive the launcher's write-capable personal git token: %s", secretRaw)
+	}
+	raw, _ := json.Marshal(f.created[0])
+	body := string(raw)
+	if strings.Contains(body, `"key":"BLERG_RUNNER_GIT_TOKEN","name":"blerg-runner-agent"`) {
+		t.Fatalf("a read-only worker must never source its git token from the operator secret: %s", body)
+	}
+	if strings.Contains(body, "ghp_personal_write") || strings.Contains(body, "ghp_operator_write") {
+		t.Fatalf("a write-capable token must never appear literally in the Job spec: %s", body)
+	}
+}
+
+// TestCreateSessionJobReadOnlyGitWorkerNoTokenNeeded: a public repository needs no credential
+// at all — ReadOnlyGitToken empty must not inject an empty secret entry, and must still
+// never fall back to the operator token.
+func TestCreateSessionJobReadOnlyGitWorkerNoTokenNeeded(t *testing.T) {
+	f := &fakeK8s{
+		secrets: map[string]map[string]string{
+			"blerg-runner-agent": {"BLERG_RUNNER_GIT_TOKEN": b64("ghp_operator_write")},
+		},
+	}
+	_, hub, pool := clusterRunnerAPI(t, f)
+	ctx := context.Background()
+	sessionID := newUUID()
+	if err := db.UpsertDaemon(ctx, pool, clusterDaemonID, "cluster", "runner", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertSession(ctx, pool, sessionID, clusterDaemonID, "starting", "/workspace/org/r", "org/r", "T", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetSessionSpawningAccount(ctx, pool, sessionID, "acct-1"); err != nil {
+		t.Fatal(err)
+	}
+	markClusterWorkerRow(t, pool, sessionID)
+	jm := hub.JobManager()
+	if err := jm.CreateSessionJob(SessionJobSpec{
+		SessionID: sessionID, Repo: "org/r", Engine: "claude", SpawningAccountID: "acct-1", AuthSessionID: testSID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(f.created[0])
+	body := string(raw)
+	if strings.Contains(body, "BLERG_RUNNER_GIT_TOKEN") {
+		t.Errorf("a public-repo read-only worker needs no git token env at all: %s", body)
+	}
+	if strings.Contains(body, "ghp_operator_write") {
+		t.Fatalf("a write-capable token must never appear literally in the Job spec: %s", body)
+	}
+}
+
+// TestCreateSessionJobOrdinarySessionIgnoresReadOnlyGitWorkerField: an ordinary (non-child)
+// session's row is not a worker, so CreateSessionJob must still source the operator's shared
+// git token normally — proving worker-ness is genuinely derived from the row, not merely
+// "whatever the caller happened to pass" in the other direction either.
+func TestCreateSessionJobOrdinarySessionIgnoresReadOnlyGitWorkerField(t *testing.T) {
+	f := &fakeK8s{
+		secrets: map[string]map[string]string{
+			"blerg-runner-agent": {"BLERG_RUNNER_GIT_TOKEN": b64("ghp_operator_write")},
+		},
+	}
+	_, hub, pool := clusterRunnerAPI(t, f)
+	ctx := context.Background()
+	sessionID := newUUID()
+	if err := db.UpsertDaemon(ctx, pool, clusterDaemonID, "cluster", "runner", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertSession(ctx, pool, sessionID, clusterDaemonID, "starting", "/workspace/org/r", "org/r", "T", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetSessionSpawningAccount(ctx, pool, sessionID, "acct-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetSessionPosture(ctx, pool, sessionID, "cluster", false); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately not markClusterWorkerRow: this is Main's own session, not a child.
+	jm := hub.JobManager()
+	if err := jm.CreateSessionJob(SessionJobSpec{
+		SessionID: sessionID, Repo: "org/r", Engine: "claude", SpawningAccountID: "acct-1", AuthSessionID: testSID,
+		// A caller setting this directly must not matter either way.
+		ReadOnlyGitWorker: true, ReadOnlyGitToken: "should-be-ignored",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(f.created[0])
+	body := string(raw)
+	if !strings.Contains(body, `"key":"BLERG_RUNNER_GIT_TOKEN","name":"blerg-runner-agent"`) {
+		t.Fatalf("Main's own session must still source the operator's shared git token normally: %s", body)
+	}
+	if strings.Contains(body, "should-be-ignored") {
+		t.Fatalf("a caller-set ReadOnlyGitWorker/Token must not affect a non-worker session: %s", body)
+	}
+}
+
+// TestCreateSessionJobResumedWorkerStaysReadOnly: BLG-460 H1 — a resumed worker's spec
+// (built fresh by resumeClusterSessionModeGuarded, which never sets ReadOnlyGitWorker)
+// must come back read-only exactly like its original start, because CreateSessionJob
+// re-derives worker-ness from the row every time it is called, not from anything the
+// first launch's spec carried. Simulates resume the way it actually happens: a second,
+// independent call to CreateSessionJob for the same, already-marked worker row.
+func TestCreateSessionJobResumedWorkerStaysReadOnly(t *testing.T) {
+	f := &fakeK8s{
+		credentialFetchResponses: map[string][]byte{
+			"acct-1:github": []byte("ghp_personal_write"),
+		},
+	}
+	api, hub, pool := clusterRunnerAPI(t, f)
+	_ = api
+	ctx := context.Background()
+	sessionID := newUUID()
+	if err := db.UpsertDaemon(ctx, pool, clusterDaemonID, "cluster", "runner", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertSession(ctx, pool, sessionID, clusterDaemonID, "starting", "/workspace/org/r", "org/r", "T", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetSessionSpawningAccount(ctx, pool, sessionID, "acct-1"); err != nil {
+		t.Fatal(err)
+	}
+	markClusterWorkerRow(t, pool, sessionID)
+	jm := hub.JobManager()
+	if err := jm.CreateSessionJob(SessionJobSpec{
+		SessionID: sessionID, Repo: "org/r", Engine: "claude", SpawningAccountID: "acct-1", AuthSessionID: testSID,
+		ReadOnlyGitToken: "ghp_readonly_scoped",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A resumed worker's row never changes (its parent/delegation markers are immutable),
+	// but its spec is rebuilt from scratch — ReadOnlyGitWorker left unset, exactly as
+	// resumeClusterSessionModeGuarded's own spec literal does. The previous pod has ended,
+	// as a real resume's target always has (parentResumeProblem requires "disconnected").
+	f.setJobMissing(jm.jobName(sessionID))
+	if err := jm.CreateSessionJob(SessionJobSpec{
+		SessionID: sessionID, Repo: "org/r", Engine: "claude", SpawningAccountID: "acct-1", AuthSessionID: testSID,
+		Resume: true, ReadOnlyGitToken: "ghp_readonly_scoped",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.createdSecrets) != 2 {
+		t.Fatalf("expected a secret from the start and from the resume, got %d", len(f.createdSecrets))
+	}
+	resumedSecret, _ := json.Marshal(f.createdSecrets[1])
+	if strings.Contains(string(resumedSecret), "ghp_personal_write") {
+		t.Fatalf("a resumed cluster worker must stay read-only, not regain the write-capable personal token: %s", resumedSecret)
+	}
+	if !strings.Contains(string(resumedSecret), `"BLERG_RUNNER_GIT_TOKEN":"ghp_readonly_scoped"`) {
+		t.Fatalf("a resumed cluster worker should still carry its read-only token: %s", resumedSecret)
+	}
+}
+
+// TestFilterGitTokensFromEnvBlob: the pure line-filtering logic L6 relies on.
+func TestFilterGitTokensFromEnvBlob(t *testing.T) {
+	in := "# a comment\n" +
+		"FOO=bar\n" +
+		"GIT_TOKEN=ghp_secret\n" +
+		"GITHUB_TOKEN=ghp_secret2\n" +
+		"GITLAB_TOKEN=glpat_secret\n" +
+		"GH_TOKEN=gho_secret\n" +
+		"GH_PAT=github_pat_secret\n" +
+		"GH_ENTERPRISE_TOKEN=ghe_secret\n" +
+		"GL_TOKEN=gl_secret\n" +
+		"GITLAB_ACCESS_TOKEN=glat_secret\n" +
+		"BITBUCKET_APP_PASSWORD=bb_secret\n" +
+		"BITBUCKET_TOKEN=bb_secret2\n" +
+		"SOME_GIT_TOKEN=ghp_secret3\n" +
+		// security review finding 3 (round 3's finding numbering; filter widening): a token
+		// under an unrelated key name, by value prefix alone.
+		"UNRELATED_KEY_NAME=ghp_value_only_secret\n" +
+		"ANOTHER_UNRELATED=github_pat_value_only_secret\n" +
+		"A_THIRD_UNRELATED=gho_value_only_secret\n" +
+		"A_FOURTH_UNRELATED=glpat-value_only_secret\n" +
+		// a credential embedded in a URL's userinfo, aimed at a git host, under a name that
+		// gives no hint at all.
+		"REMOTE_URL=https://x-access-token:ghp_embedded_secret@github.com/acme/widget.git\n" +
+		// security review round-4 finding 4: DIGITALOCEAN_TOKEN is not a git credential —
+		// "DIGITAL" merely contains the substring "GIT".
+		"DIGITALOCEAN_TOKEN=do_unrelated_value\n" +
+		// security review round-4 finding 2b: a harmless userinfo URL aimed at a NON-git
+		// host must survive — basic auth in a URL is not itself a git credential.
+		"DATABASE_URL=postgres://dbuser:dbpass@db.internal:5432/app\n" +
+		"HTTPS_PROXY=http://proxyuser:proxypass@proxy.internal:3128\n" +
+		"BAR=baz\n\nMALFORMED_NO_EQUALS\n"
+	got, dropped := filterGitTokensFromEnvBlob([]byte(in))
+	gotStr := string(got)
+	for _, want := range []string{
+		"# a comment", "FOO=bar", "BAR=baz",
+		"DIGITALOCEAN_TOKEN", "do_unrelated_value",
+		"DATABASE_URL", "dbuser", "dbpass",
+		"HTTPS_PROXY", "proxyuser", "proxypass",
+	} {
+		if !strings.Contains(gotStr, want) {
+			t.Errorf("expected %q to survive filtering, got %q", want, gotStr)
+		}
+	}
+	for _, drop := range []string{
+		"GIT_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN", "GH_TOKEN", "GH_PAT", "GH_ENTERPRISE_TOKEN", "GL_TOKEN",
+		"GITLAB_ACCESS_TOKEN", "BITBUCKET_APP_PASSWORD", "BITBUCKET_TOKEN", "SOME_GIT_TOKEN",
+		"ghp_secret", "glpat_secret", "gho_secret", "github_pat_secret", "ghe_secret", "gl_secret", "glat_secret", "bb_secret",
+		"ghp_value_only_secret", "github_pat_value_only_secret", "gho_value_only_secret", "glpat-value_only_secret",
+		"REMOTE_URL", "ghp_embedded_secret",
+		"MALFORMED_NO_EQUALS",
+	} {
+		if strings.Contains(gotStr, drop) {
+			t.Errorf("expected %q to be dropped, got %q", drop, gotStr)
+		}
+	}
+	for _, key := range []string{"GIT_TOKEN", "GITHUB_TOKEN", "REMOTE_URL"} {
+		if !slices.Contains(dropped, key) {
+			t.Errorf("expected %q to be reported as dropped, got %v", key, dropped)
+		}
+	}
+	for _, key := range []string{"DIGITALOCEAN_TOKEN", "DATABASE_URL", "HTTPS_PROXY"} {
+		if slices.Contains(dropped, key) {
+			t.Errorf("expected %q NOT to be reported as dropped, got %v", key, dropped)
+		}
+	}
+}
+
+// TestFilterGitTokensFromEnvBlobScopesEmbeddedURLToWorkspaceHost: an embedded-credential URL
+// aimed at a host that is neither a fixed git provider nor one of this launch's own
+// workspace/repo hosts must survive; the same URL aimed at a workspace host must be dropped.
+func TestFilterGitTokensFromEnvBlobScopesEmbeddedURLToWorkspaceHost(t *testing.T) {
+	in := "INTERNAL_GIT_URL=https://x-access-token:ghp_secret@git.acme-corp.internal/acme/widget.git\n"
+	gotNoHost, _ := filterGitTokensFromEnvBlob([]byte(in))
+	if !strings.Contains(string(gotNoHost), "ghp_secret") {
+		t.Errorf("expected the line to survive with no workspace host given, got %q", gotNoHost)
+	}
+	gotWithHost, dropped := filterGitTokensFromEnvBlob([]byte(in), "git.acme-corp.internal")
+	if strings.Contains(string(gotWithHost), "ghp_secret") {
+		t.Errorf("expected the line to be dropped once its host matches a workspace host, got %q", gotWithHost)
+	}
+	if !slices.Contains(dropped, "INTERNAL_GIT_URL") {
+		t.Errorf("expected INTERNAL_GIT_URL to be reported as dropped, got %v", dropped)
+	}
+}
+
+// TestResumeWorkspaceGitHostsFailsClosedOnLookupFailure: security review round-4 finding 3 —
+// a workspace resume whose own persisted host record can't be read (here: the
+// cluster_workspace_storage row for this launch generation was never written) must report
+// ok=false, not silently narrow to "no extra hosts". Also covers the ordinary-success and
+// single-repo cases so the happy paths are pinned down too.
+func TestResumeWorkspaceGitHostsFailsClosedOnLookupFailure(t *testing.T) {
+	_, _, pool := clusterRunnerAPI(t, &fakeK8s{})
+	ctx := context.Background()
+	sessionID := newUUID()
+	if err := db.UpsertDaemon(ctx, pool, clusterDaemonID, "cluster", "runner", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertSession(ctx, pool, sessionID, clusterDaemonID, "disconnected", "/workspace", "", "T", ""); err != nil {
+		t.Fatal(err)
+	}
+	workspace := &protocol.WorkspaceManifest{LaunchGeneration: newUUID(), OwnerID: "owner-1"}
+
+	// No cluster_workspace_storage row exists for this session/generation at all: the lookup
+	// itself fails, and must be reported as such, not as "zero hosts".
+	if hosts, ok := resumeWorkspaceGitHosts(ctx, pool, sessionID, workspace, ""); ok || hosts != nil {
+		t.Fatalf("expected ok=false and nil hosts on a missing storage row, got hosts=%v ok=%v", hosts, ok)
+	}
+
+	// A single-repo (no-workspace) resume with a real clone URL still succeeds ordinarily.
+	// hostOfGitURL reports a bare hostname (url.Hostname() already strips the port).
+	if hosts, ok := resumeWorkspaceGitHosts(ctx, pool, sessionID, nil, "https://git.corp:8443/acme/widget.git"); !ok || len(hosts) != 1 || hosts[0] != "git.corp" {
+		t.Fatalf("expected ok=true and one host for a single-repo resume, got hosts=%v ok=%v", hosts, ok)
+	}
+
+	// A single-repo resume with no GitURL at all (a NoRepo session) is a confident "no
+	// hosts", not a failure.
+	if hosts, ok := resumeWorkspaceGitHosts(ctx, pool, sessionID, nil, ""); !ok || hosts != nil {
+		t.Fatalf("expected ok=true and no hosts for a no-repo resume, got hosts=%v ok=%v", hosts, ok)
+	}
+
+	// With a genuine, well-formed storage row present, the lookup succeeds and returns the
+	// member hosts.
+	members := []clusterworkspace.Member{{ID: "one", CredentialHost: "git.acme-corp.internal"}}
+	raw, err := json.Marshal(members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO cluster_workspace_storage(session_id,launch_generation,claim_name,claim_uid,contexts,owner_id) VALUES($1,$2,'fixture-claim','fixture-uid',$3,$4)`,
+		sessionID, workspace.LaunchGeneration, raw, workspace.OwnerID); err != nil {
+		t.Fatal(err)
+	}
+	if hosts, ok := resumeWorkspaceGitHosts(ctx, pool, sessionID, workspace, ""); !ok || len(hosts) != 1 || hosts[0] != "git.acme-corp.internal" {
+		t.Fatalf("expected ok=true and the stored member host, got hosts=%v ok=%v", hosts, ok)
+	}
+}
+
+// TestCreateSessionJobReadOnlyWorkerFiltersHermesGitTokens: L6 — a cluster worker's
+// HERMES_ENV_CONTENTS (a whole .env blob that may itself carry a git/GitHub token) has
+// every such line stripped before it ever reaches the pod's Secret, even though the
+// fetched credential genuinely contains one and an ordinary (non-worker) session would
+// keep it as-is.
+func TestCreateSessionJobReadOnlyWorkerFiltersHermesGitTokens(t *testing.T) {
+	const hermesBlob = "OPENROUTER_API_KEY=sk-or-fixture\nGIT_TOKEN=ghp_leaked_in_hermes_env\n"
+	f := &fakeK8s{
+		credentialKinds:          []string{"hermes"},
+		credentialFetchResponses: map[string][]byte{"acct-1:hermes": []byte(hermesBlob)},
+	}
+	api, hub, pool := clusterRunnerAPI(t, f)
+	_ = api
+	ctx := context.Background()
+	sessionID := newUUID()
+	if err := db.UpsertDaemon(ctx, pool, clusterDaemonID, "cluster", "runner", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertSession(ctx, pool, sessionID, clusterDaemonID, "starting", "/workspace/org/r", "org/r", "T", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetSessionSpawningAccount(ctx, pool, sessionID, "acct-1"); err != nil {
+		t.Fatal(err)
+	}
+	markClusterWorkerRow(t, pool, sessionID)
+	jm := hub.JobManager()
+	if err := jm.CreateSessionJob(SessionJobSpec{
+		SessionID: sessionID, Repo: "org/r", Engine: "hermes", SpawningAccountID: "acct-1", AuthSessionID: testSID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	secretRaw, _ := json.Marshal(f.createdSecrets[0])
+	if strings.Contains(string(secretRaw), "ghp_leaked_in_hermes_env") || strings.Contains(string(secretRaw), "GIT_TOKEN") {
+		t.Fatalf("a cluster worker's HERMES_ENV_CONTENTS must have its git token line stripped: %s", secretRaw)
+	}
+	if !strings.Contains(string(secretRaw), "OPENROUTER_API_KEY") {
+		t.Fatalf("filtering must keep the rest of the blob intact: %s", secretRaw)
+	}
+}
+
+// TestCreateSessionJobReadOnlyWorkerNeverFallsBackToOperatorHermesBlob: security review
+// finding 2 — a worker with NO personal Hermes credential (so there is nothing for L6 to
+// filter) must not fall back to the operator's shared HERMES_ENV_CONTENTS unfiltered: core
+// never decrypts that Secret, so it cannot be filtered. Round 4's finding 2a hardens this
+// further: rather than silently starting with no HERMES_ENV_CONTENTS at all (indistinguishable
+// from a broken launch), the start itself is refused with a reason the person can act on.
+func TestCreateSessionJobReadOnlyWorkerNeverFallsBackToOperatorHermesBlob(t *testing.T) {
+	f := &fakeK8s{
+		secrets: map[string]map[string]string{
+			"blerg-runner-agent": {"HERMES_ENV_CONTENTS": b64("OPENROUTER_API_KEY=x\nGIT_TOKEN=ghp_leaked_from_operator\n")},
+		},
+	}
+	api, hub, pool := clusterRunnerAPI(t, f)
+	_ = api
+	ctx := context.Background()
+	sessionID := newUUID()
+	if err := db.UpsertDaemon(ctx, pool, clusterDaemonID, "cluster", "runner", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertSession(ctx, pool, sessionID, clusterDaemonID, "starting", "/workspace/org/r", "org/r", "T", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetSessionSpawningAccount(ctx, pool, sessionID, "acct-1"); err != nil {
+		t.Fatal(err)
+	}
+	markClusterWorkerRow(t, pool, sessionID)
+	jm := hub.JobManager()
+	err := jm.CreateSessionJob(SessionJobSpec{
+		SessionID: sessionID, Repo: "org/r", Engine: "hermes", SpawningAccountID: "acct-1", AuthSessionID: testSID,
+	})
+	if !errors.Is(err, errWorkerNoHermesCredential) {
+		t.Fatalf("expected errWorkerNoHermesCredential, got %v", err)
+	}
+	if len(f.created) != 0 || len(f.createdSecrets) != 0 {
+		t.Fatalf("a refused worker launch must create no Job and no Secret: jobs=%d secrets=%d", len(f.created), len(f.createdSecrets))
 	}
 }
 
@@ -1398,3 +1827,81 @@ func TestCreateSessionJobResumeCleanupErrorsHideK8sBody(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestCreateSessionJobBranchTemplateIntent(t *testing.T) {
+	for _, custom := range []bool{false, true} {
+		t.Run(strconv.FormatBool(custom), func(t *testing.T) {
+			f := &fakeK8s{}
+			jm := newTestJobManager(t, f)
+			if err := jm.CreateSessionJob(SessionJobSpec{SessionID: "abc-123", Repo: "proj", WorkBranch: "wip/ticket-data-7d67a123", WorkBranchCustom: custom}); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(f.created[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(raw), `"name":"BLERG_RUNNER_WORK_BRANCH_CUSTOM","value":"`+strconv.FormatBool(custom)+`"`) {
+				t.Fatal("job lost explicit branch template signal")
+			}
+		})
+	}
+}
+
+// TestReadOnlyGitCredentialKindLowercasesOwner: BLG-460 security re-review finding 3 — core
+// always stores a read-only token's owner lowercased, so the runner's lookup key must lowercase
+// it too (a clone URL's owner segment keeps whatever case the repository host used).
+func TestReadOnlyGitCredentialKindLowercasesOwner(t *testing.T) {
+	got := readOnlyGitCredentialKind("github", "Acme-Corp")
+	want := "git-readonly:github:acme-corp"
+	if got != want {
+		t.Fatalf("readOnlyGitCredentialKind(github, Acme-Corp) = %q, want %q", got, want)
+	}
+}
+
+// TestCreateSessionJobSetsResultBundleEnvOnlyForReadOnlyWorkers: BLG-479 §4's pod-side publish
+// hook (agentsession.go's turn_done) only bundles and publishes when
+// BLERG_WORKER_RESULT_BUNDLE is set — this must come from the same row-derived worker-ness as
+// the credential lockdown, never a flag a non-worker session could carry, and never absent for
+// an actual worker.
+func TestCreateSessionJobSetsResultBundleEnvOnlyForReadOnlyWorkers(t *testing.T) {
+	for _, worker := range []bool{true, false} {
+		t.Run(strconv.FormatBool(worker), func(t *testing.T) {
+			f := &fakeK8s{}
+			_, hub, pool := clusterRunnerAPI(t, f)
+			ctx := context.Background()
+			sessionID := newUUID()
+			if err := db.UpsertDaemon(ctx, pool, clusterDaemonID, "cluster", "runner", ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.InsertSession(ctx, pool, sessionID, clusterDaemonID, "starting", "/workspace/org/r", "org/r", "T", ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.SetSessionSpawningAccount(ctx, pool, sessionID, "acct-1"); err != nil {
+				t.Fatal(err)
+			}
+			if worker {
+				markClusterWorkerRow(t, pool, sessionID)
+			} else {
+				// A plain cluster Main (not a worker child): same runtime, no parent.
+				if err := db.SetSessionPosture(ctx, pool, sessionID, "cluster", false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			jm := hub.JobManager()
+			if err := jm.CreateSessionJob(SessionJobSpec{
+				SessionID: sessionID, Repo: "org/r", Engine: "claude", SpawningAccountID: "acct-1", AuthSessionID: testSID,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := json.Marshal(f.created[0])
+			body := string(raw)
+			has := strings.Contains(body, `"name":"BLERG_WORKER_RESULT_BUNDLE","value":"1"`)
+			if worker && !has {
+				t.Fatalf("expected BLERG_WORKER_RESULT_BUNDLE=1 for a read-only worker, got %s", body)
+			}
+			if !worker && has {
+				t.Fatalf("a non-worker session must never get BLERG_WORKER_RESULT_BUNDLE, got %s", body)
+			}
+		})
+	}
+}

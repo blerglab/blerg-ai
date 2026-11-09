@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -16,6 +17,48 @@ import (
 
 func childRoute(parent, child, suffix string) string {
 	return "/api/sessions/" + parent + "/children/" + child + suffix
+}
+
+func TestParentDownloadsChildPublishedScreenshot(t *testing.T) {
+	t.Setenv("BLERG_RUNNER_DATA_DIR", t.TempDir())
+	fx := newDelegFx(t)
+	fx.api.registerArtifactRoutes(fx.mux)
+	child, token := fx.session(sessOpts{owner: "owner-1", parent: fx.parent, private: true})
+	req := httptest.NewRequest("POST", "/api/sessions/"+child+"/artifacts", bytes.NewReader(tinyPNG))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Artifact-Name", "phone.png")
+	rec := httptest.NewRecorder()
+	fx.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("publish: %d %s", rec.Code, rec.Body.String())
+	}
+	var published artMeta
+	if err := json.Unmarshal(rec.Body.Bytes(), &published); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ := fx.do("GET", childRoute(fx.parent, child, "/artifacts"), fx.parentTok, nil, nil)
+	if code != http.StatusOK {
+		t.Fatalf("list: %d %v", code, out)
+	}
+	items := out["artifacts"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["id"] != published.ID {
+		t.Fatalf("published screenshot missing: %v", items)
+	}
+	path := childRoute(fx.parent, child, "/artifacts/"+published.ID+"/download")
+	req = httptest.NewRequest("GET", path, nil)
+	req.Header.Set("Authorization", "Bearer "+fx.parentTok)
+	rec = httptest.NewRecorder()
+	fx.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), tinyPNG) {
+		t.Fatalf("download: status=%d bytes=%d", rec.Code, rec.Body.Len())
+	}
+	foreign, foreignToken := fx.session(sessOpts{owner: "owner-1"})
+	for _, suffix := range []string{"/artifacts", "/artifacts/" + published.ID + "/download"} {
+		code, _, _ = fx.do("GET", childRoute(foreign, child, suffix), foreignToken, nil, nil)
+		if code != http.StatusNotFound {
+			t.Fatalf("unrelated same-owner session %s: %d", suffix, code)
+		}
+	}
 }
 
 func TestChildRoutesOwnChildrenOnly(t *testing.T) {
@@ -83,8 +126,19 @@ func TestChildStatusHasAuthoritativeOpenAsksAndListUsesLowercaseFields(t *testin
 		t.Fatalf("missing authoritative asks: %v", out)
 	}
 	ask := asks[0].(map[string]any)
-	if ask["message_id"] != mid || ask["body"] != "Which option?" {
+	if ask["message_id"] != mid || ask["body"] != "Which option?" || ask["escalated"] != false {
 		t.Fatalf("ask shape=%v", ask)
+	}
+	if err := fx.api.escalateChildQuestion(t.Context(), fx.row(child), fx.row(fx.parent), mid); err != nil {
+		t.Fatal(err)
+	}
+	code, escalated, _ := fx.do("GET", childRoute(fx.parent, child, ""), fx.parentTok, nil, nil)
+	if code != 200 {
+		t.Fatalf("escalated status: %d %v", code, escalated)
+	}
+	escalatedAsks := escalated["open_asks"].([]any)
+	if len(escalatedAsks) != 1 || escalatedAsks[0].(map[string]any)["escalated"] != true {
+		t.Fatalf("missing escalation flag: %v", escalated)
 	}
 	code, out, _ = fx.do("GET", "/api/sessions/"+fx.parent+"/children", fx.parentTok, nil, nil)
 	if code != 200 {
@@ -114,7 +168,7 @@ func TestChildStatusHasAuthoritativeOpenAsksAndListUsesLowercaseFields(t *testin
 	}
 }
 
-func TestChildMessageAnswersAskAndPreservesSessionSource(t *testing.T) {
+func TestChildExplicitAnswerAndMessagePreserveSessionSource(t *testing.T) {
 	fx := newDelegFx(t)
 	child, _ := fx.session(sessOpts{owner: "owner-1", parent: fx.parent})
 	fx.hub.SetSessionOwner(child, fx.dc.ID)
@@ -127,8 +181,8 @@ func TestChildMessageAnswersAskAndPreservesSessionSource(t *testing.T) {
 	}
 	woke := fx.api.waiters.channel(mid)
 	defer fx.api.waiters.drop(mid)
-	code, out, _ := fx.do("POST", childRoute(fx.parent, child, "/message"), fx.parentTok, map[string]any{"text": "yes"}, nil)
-	if code != 202 || out["answered_ask"] != true {
+	code, out, _ := fx.do("POST", childRoute(fx.parent, child, "/questions/"+mid+"/answer"), fx.parentTok, map[string]any{"answer": "yes"}, nil)
+	if code != 200 {
 		t.Fatalf("answer status=%d body=%v", code, out)
 	}
 	select {
@@ -396,4 +450,48 @@ func TestChildEventsCancellationAndPagination(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("cancelled poll leaked a waiter")
 	}
+}
+
+func TestChildIdleStatusAndResultAgree(t *testing.T) {
+	fx := newDelegFx(t)
+	child, _ := fx.session(sessOpts{owner: "owner-1", parent: fx.parent})
+	if _, err := fx.pool.Exec(t.Context(), `UPDATE sessions SET status='idle' WHERE id=$1`, child); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", "/result"} {
+		code, out, _ := fx.do("GET", childRoute(fx.parent, child, suffix), fx.parentTok, nil, nil)
+		if code != 200 || out["status"] != "idle" || out["lifecycle"] != "running" {
+			t.Fatalf("%s: %d %v", suffix, code, out)
+		}
+	}
+}
+
+func TestChildResultDistinguishesQueuedWorkFromACompletedIdleTurn(t *testing.T) {
+	fx := newDelegFx(t)
+	child, _ := fx.session(sessOpts{owner: "owner-1", parent: fx.parent, status: "idle"})
+	for _, step := range []struct {
+		kind     string
+		complete bool
+	}{
+		{"turn_done", true}, {"input_accepted", false}, {"user_message", false}, {"turn_done", true},
+	} {
+		if _, _, err := db.AppendAgentEvent(t.Context(), fx.pool, child, newUUID(), step.kind, `{}`); err != nil {
+			t.Fatal(err)
+		}
+		code, out, _ := fx.do("GET", childRoute(fx.parent, child, "/result"), fx.parentTok, nil, nil)
+		if code != 200 || out["turn_complete"] != step.complete {
+			t.Fatalf("after %s: %d %v", step.kind, code, out)
+		}
+	}
+	fx.hub.SetSessionOwner(child, fx.dc.ID)
+	fx.dc.SetInputReceipts(true)
+	code, sent, _ := fx.do("POST", childRoute(fx.parent, child, "/message"), fx.parentTok, map[string]any{"text": "Next task."}, nil)
+	if code != 202 || sent["client_id"] == nil || sent["client_id"] == "" {
+		t.Fatalf("child send receipt: %d %v", code, sent)
+	}
+	code, out, _ := fx.do("GET", childRoute(fx.parent, child, "/result"), fx.parentTok, nil, nil)
+	if code != 200 || out["turn_complete"] != false || out["status"] != "idle" {
+		t.Fatalf("queued child result: %d %v", code, out)
+	}
+
 }

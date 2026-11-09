@@ -16,12 +16,12 @@ describe('themeStyle', () => {
   })
   it('names every token of the contract', () => {
     expect(Object.values(TOKEN_NAMES).sort()).toEqual([
-      '--chat-accent', '--chat-accent-fg', '--chat-bg', '--chat-border',
-      '--chat-card-assistant-bg', '--chat-card-system-bg', '--chat-card-tool-bg', '--chat-card-user-bg',
+      '--chat-accent', '--chat-accent-fg', '--chat-backdrop', '--chat-document-bg', '--chat-media-bg', '--chat-shadow-overlay', '--chat-bg', '--chat-border', '--chat-button-bg',
+      '--chat-chart-sequential-low', '--chat-chart-sequential-high', '--chat-card-assistant-bg', '--chat-card-system-bg', '--chat-card-tool-bg', '--chat-card-user-bg',
       '--chat-danger', '--chat-density', '--chat-fg', '--chat-font', '--chat-font-display', '--chat-font-mono', '--chat-info',
       '--chat-muted', '--chat-muted-2', '--chat-radius', '--chat-selected-bg', '--chat-selected-border', '--chat-selected-text',
       '--chat-success', '--chat-surface', '--chat-surface-2',
       '--chat-text-sm', '--chat-text-xs', '--chat-warning',
-    ])
+    ].sort())
   })
 })

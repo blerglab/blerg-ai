@@ -43,6 +43,7 @@ beforeEach(() => {
   useSessionStore.setState({ daemons: [makeDaemon()], sessions: ['a', 'b'].map(x => makeSession({ id: `sess-${x}`, kind: 'agent', status: 'idle', title: `Session ${x.toUpperCase()}` })) })
   localStorage.setItem(RAIL_PREF_KEY, '1')
   localStorage.setItem(RAIL_TAB_KEY, 'files')
+  localStorage.setItem('blerg-runner.session-dock.windows', JSON.stringify({ active: 'files', panels: [], ratio: .5 }))
   localStorage.setItem(explorerPrefKey('person-a'), JSON.stringify({ open: true, width: 320 }))
   apiFetch.mockReset().mockImplementation(async (url: string) => {
     const id = /\/api\/sessions\/([^/]+)\//.exec(url)?.[1] ?? ''

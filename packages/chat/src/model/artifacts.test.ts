@@ -175,6 +175,19 @@ describe('versions', () => {
     ])
   })
 
+  it('groupArtifacts: the live row is latest even when an orphaned version outranks it (BLG-470 #5, a rolling update)', () => {
+    // An old server, unaware of `live`, let a plain publish add a numbered version over a live
+    // name; readers must not mistake that higher number for the current file.
+    const groups = groupArtifacts([
+      info('live1', 'chart.png', 2, { live: true, updated_at: '2026-11-04T00:00:00Z' }),
+      info('orphan', 'chart.png', 3),
+      info('old', 'chart.png', 1),
+    ])
+    expect(groups).toHaveLength(1)
+    expect(groups[0].latest.id).toBe('live1')
+    expect(groups[0].earlier.map(e => e.id)).toEqual(['orphan', 'old'])
+  })
+
   it('fileCount counts files, not versions', () => {
     expect(fileCount([info('a', 'r.md', 1), info('b', 'r.md', 2), info('c', 'n.md', 1)])).toBe(2)
     expect(fileCount([])).toBe(0)

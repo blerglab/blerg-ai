@@ -62,7 +62,11 @@ func assertUpdateRecovery(t *testing.T, engine string, rec AgentRecord, cause Re
 			logPath = os.Getenv("FAKE_CODEX_LOG")
 		}
 		input, err := os.ReadFile(logPath)
-		if err != nil || !strings.Contains(string(input), "update you started succeeded (now on 1234567890abcdef)") || strings.Contains(string(input), "Nothing you ran caused it") || strings.Count(string(input), "Tool calls cut off before they returned") != 1 {
+		wantCutOff := 0
+		if len(rec.OpenCalls) > 0 {
+			wantCutOff = 1
+		}
+		if err != nil || !strings.Contains(string(input), "update you started succeeded (now on 1234567890abcdef)") || strings.Contains(string(input), "Nothing you ran caused it") || strings.Count(string(input), "Tool calls cut off before they returned") != wantCutOff {
 			t.Fatalf("agent update instructions missing, repeated, or misattributed: %s (%v)", input, err)
 		}
 		if !strings.Contains(words, "↻ Updated to 1234567890ab · continued") || strings.Contains(words, "Nothing you ran caused it") || len(userTexts(sender)) != 1 {
@@ -77,7 +81,8 @@ func assertUpdateRecovery(t *testing.T, engine string, rec AgentRecord, cause Re
 func TestObservedUpdateRequesterContinues(t *testing.T) {
 	for _, engine := range []string{"claude", "codex"} {
 		for _, command := range []string{
-			"install/desktop/daemon/install.sh install", "make restart-daemon",
+			"install/desktop/daemon/install.sh install", "make install-daemon", "make restart-daemon",
+			"systemd-run --user --unit=planned-reinstall --on-active=5s install/desktop/daemon/install.sh install; while ! test -f /tmp/reinstall.done; do sleep 1; done; cat /tmp/reinstall.done",
 			"install/desktop/daemon/install.sh refresh-path", "./install/desktop/daemon/install.sh refresh-path --yes",
 			"(setsid nohup ./install/desktop/daemon/install.sh install --yes >update.log 2>&1 &)\nwhile ! test -f ready; do sleep 1; done",
 			"(setsid nohup ./install/desktop/daemon/install.sh install --yes >update.log 2>&1 &); while pgrep -f install.sh >/dev/null; do sleep 5; done",
@@ -90,6 +95,94 @@ func TestObservedUpdateRequesterContinues(t *testing.T) {
 				}
 				assertUpdateRecovery(t, engine, AgentRecord{SessionID: "s1", TurnActive: true, OpenCalls: []OpenCall{call}}, observedUpdateCause(t, call), true)
 			})
+		}
+	}
+}
+
+func TestDelayedReinstallIsBoundToItsUnit(t *testing.T) {
+	command := "systemd-run --user --unit=planned-reinstall --on-active=5s install/desktop/daemon/install.sh install; while ! test -f /tmp/reinstall.done; do sleep 1; done; cat /tmp/reinstall.done"
+	call := openCallOf("reinstall-1", "Bash", bashIn(command))
+	if !call.Destructive || !call.UpdateSafe || call.TimerUnit != "planned-reinstall.service" {
+		t.Fatalf("timer installer must require verified recovery: %+v", call)
+	}
+}
+
+func TestDelayedReinstallAfterArmingStepReturns(t *testing.T) {
+	for _, engine := range []string{"claude", "codex"} {
+		t.Run(engine, func(t *testing.T) {
+			call := openCallOf("timer-1", "Bash", bashIn("systemd-run --user --unit=reinstall --on-active=5s install/desktop/daemon/install.sh install"))
+			rec := AgentRecord{SessionID: "s1", PlannedUpdate: &call}
+			assertUpdateRecovery(t, engine, rec, observedUpdateCause(t, call), true)
+		})
+	}
+}
+
+func TestTimerObservationSurvivesOnlyItsOwnCompletedStep(t *testing.T) {
+	k := &recordKeeper{dir: t.TempDir(), rec: AgentRecord{SessionID: "s1", EnginePID: os.Getpid(), TurnActive: true}}
+	input := bashIn("systemd-run --user --unit=reinstall --on-active=5s install/desktop/daemon/install.sh install")
+	k.toolCall("timer-1", "Bash", input, "", true)
+	k.toolCall("timer-1", "Bash", input, "", false)
+	if got := k.updateCandidateLocked(); got.TimerUnit != "reinstall.service" || len(got.Call) == 0 {
+		t.Fatal("completed arming step lost attribution")
+	}
+	k.setTurnActive(false)
+	if len(k.updateCandidateLocked().Call) == 0 {
+		t.Fatal("ending turn lost pending timer")
+	}
+	k.setTurnActive(true)
+	if len(k.updateCandidateLocked().Call) != 0 || k.rec.PlannedUpdate != nil {
+		t.Fatal("new turn inherited timer")
+	}
+	k.toolCall("timer-2", "Bash", input, "", true)
+	k.toolCall("timer-2", "Bash", input, "", false)
+	k.toolCall("delete-1", "Bash", bashIn("rm -rf example"), "", true)
+	if k.rec.PlannedUpdate != nil || k.liveUpdate != nil {
+		t.Fatal("later tool inherited timer")
+	}
+}
+
+func TestTimerReinstallStillFailsClosed(t *testing.T) {
+	command := "systemd-run --user --unit=reinstall --on-active=5s install/desktop/daemon/install.sh install; while ! test -f /tmp/reinstall.done; do sleep 1; done; cat /tmp/reinstall.done"
+	call := openCallOf("timer-1", "Bash", bashIn(command))
+	// A completed wrapper output is session-writable, and therefore deliberately
+	// never consulted by recovery. A planned restart and connection aren't enough.
+	if err := os.WriteFile(t.TempDir()+"/reinstall.done", []byte("rc=0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", "; rm -rf example", "; ./install.sh uninstall", "; make deploy"} {
+		rec := AgentRecord{SessionID: "s1", TurnActive: true, OpenCalls: []OpenCall{openCallOf(call.CallID, call.Tool, bashIn(command+suffix))}}
+		cause := RestartCause{Planned: true, Reason: "reinstall"}
+		if suffix != "" {
+			cause = observedUpdateCause(t, rec.OpenCalls[0])
+		}
+		if cont, _ := adoptPlanAfter(rec, true, protocol.InteractionUnattended, cause); cont {
+			t.Fatalf("unproven or mixed timer continued: %q", suffix)
+		}
+	}
+	for _, change := range []string{"failed", "expired", "changed call", "stop", "background work", "unverified"} {
+		rec := AgentRecord{SessionID: "s1", PlannedUpdate: &call}
+		cause := observedUpdateCause(t, call)
+		switch change {
+		case "failed":
+			cause.update.Succeeded = false
+		case "expired":
+			cause.update.CreatedAt = time.Now().Add(-updatehandoff.MaxAge)
+		case "changed call":
+			changed := call
+			changed.CallID = "different"
+			rec.PlannedUpdate = &changed
+		case "stop":
+			rec.StopRequested = true
+		case "background work":
+			rec.OpenSubagents = []OpenSubagent{{ChildID: "child-1"}}
+		case "unverified":
+			cause = RestartCause{Planned: true, Reason: "reinstall"}
+		}
+		if change == "unverified" && (!cutOffWork(rec) || !destructiveCutOff(rec)) {
+			t.Fatal("unverified pending timer must pause even after the arming turn ended")
+		}
+		if cont, _ := adoptPlanAfter(rec, true, protocol.InteractionUnattended, cause); cont {
+			t.Fatalf("completed arming step continued after %s", change)
 		}
 	}
 }

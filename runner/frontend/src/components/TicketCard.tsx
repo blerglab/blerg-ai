@@ -71,7 +71,7 @@ export default function TicketCard({ ticket, columns, sessions = [] }: TicketCar
       {isSessionWaiting && (
         <span
           data-testid="session-indicator"
-          title="Session waiting"
+          title="Workspace waiting"
           style={{
             position: 'absolute',
             top: 8,
@@ -116,9 +116,7 @@ export default function TicketCard({ ticket, columns, sessions = [] }: TicketCar
             color: 'var(--chalk)',
             flex: 1,
             minWidth: 0,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
+            overflowWrap: 'anywhere',
           }}
         >
           {ticket.title}
@@ -244,7 +242,7 @@ export default function TicketCard({ ticket, columns, sessions = [] }: TicketCar
                 zIndex: 30,
                 minWidth: 150,
                 padding: 4,
-                boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
+                boxShadow: '0 4px 16px var(--shadow-5)',
               }}
             >
               {otherColumns.map((col) => (

@@ -140,33 +140,34 @@ func TestArtifactVersionsConcurrentPublishesGetDistinctNumbers(t *testing.T) {
 	}
 }
 
-func TestArtifactVersionCapRefusesTheTwentyFirst(t *testing.T) {
+func TestArtifactVersionCap(t *testing.T) {
 	pool, session := versionFixture(t)
 	ctx := context.Background()
-	for i := 1; i <= db.MaxArtifactVersions; i++ {
-		if _, err := db.InsertArtifact(ctx, pool, vrow(session, i, "big.txt", ""), 50); err != nil {
+	const versionCap = 3
+	for i := 1; i <= versionCap; i++ {
+		if _, err := db.InsertArtifactWithVersionLimit(ctx, pool, vrow(session, i, "big.txt", ""), versionCap); err != nil {
 			t.Fatalf("version %d: %v", i, err)
 		}
 	}
-	if _, err := db.InsertArtifact(ctx, pool, vrow(session, 100, "big.txt", ""), 50); !errors.Is(err, db.ErrArtifactVersionLimit) {
-		t.Fatalf("21st version: %v, want ErrArtifactVersionLimit", err)
+	if _, err := db.InsertArtifactWithVersionLimit(ctx, pool, vrow(session, 100, "big.txt", ""), versionCap); !errors.Is(err, db.ErrArtifactVersionLimit) {
+		t.Fatalf("over-limit version: %v, want ErrArtifactVersionLimit", err)
 	}
 	// Another name, and the same name from the other origin, are unaffected.
-	if _, err := db.InsertArtifact(ctx, pool, vrow(session, 101, "small.txt", ""), 50); err != nil {
+	if _, err := db.InsertArtifactWithVersionLimit(ctx, pool, vrow(session, 101, "small.txt", ""), versionCap); err != nil {
 		t.Errorf("another name: %v", err)
 	}
-	if _, err := db.InsertArtifact(ctx, pool, vrow(session, 102, "big.txt", db.OriginUser), 50); err != nil {
+	if _, err := db.InsertArtifactWithVersionLimit(ctx, pool, vrow(session, 102, "big.txt", db.OriginUser), versionCap); err != nil {
 		t.Errorf("same name, user origin: %v", err)
 	}
-	// Deleting one frees a place; the new one continues the sequence (v21).
+	// Deleting one frees a place; the new one continues the sequence (v4).
 	if _, err := db.DeleteArtifact(ctx, pool, session, fmt.Sprintf("%032x", 1)); err != nil {
 		t.Fatal(err)
 	}
-	r, err := db.InsertArtifact(ctx, pool, vrow(session, 103, "big.txt", ""), 50)
-	if err != nil || r.Version != 21 {
-		t.Fatalf("after a delete = %+v, %v; want v21", r, err)
+	r, err := db.InsertArtifactWithVersionLimit(ctx, pool, vrow(session, 103, "big.txt", ""), versionCap)
+	if err != nil || r.Version != versionCap+1 {
+		t.Fatalf("after a delete = %+v, %v; want v4", r, err)
 	}
-	if n, err := db.CountArtifactVersions(ctx, pool, session, db.OriginAgent, "big.txt"); err != nil || n != db.MaxArtifactVersions {
+	if n, err := db.CountArtifactVersions(ctx, pool, session, db.OriginAgent, "big.txt"); err != nil || n != versionCap {
 		t.Fatalf("CountArtifactVersions = %d, %v", n, err)
 	}
 }

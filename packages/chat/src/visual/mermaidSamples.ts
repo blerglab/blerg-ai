@@ -1,6 +1,9 @@
 // Diagrams shaped like the ones people really publish (board card #84): labels that contain
 // words like "image", color styling with classDef, class and style, and a service graph of about
 // forty nodes. Used by the policy tests here and the browser tests in the runner app.
+//
+// themecheck:allow-file BLG-473: the colors here are diagram sample source a real author would
+// paste in (Mermaid classDef/style syntax), not app UI colors — independent of any other card.
 
 export const IMAGE_WORD_LABEL = `flowchart LR
   ctl[vm-image-controller] --> reg[(image registry)]
@@ -70,9 +73,12 @@ export const BROKEN = `flowchart LR
   B --> --> C
   C --> D`
 
-/** Tall: sixty steps top to bottom. */
+/** Tall: sixty steps top to bottom. BLG-468: the last node's cylinder shape keeps this outside
+ *  Blerg's own declared flowchart subset (parse.ts) — MermaidReal.browser.test.tsx's own use of
+ *  this is specifically about Mermaid's scale-to-fit-the-viewer behavior, not our renderer's. */
 export function tallDiagram(): string {
   const lines = ['flowchart TD']
-  for (let i = 0; i < 60; i++) lines.push(`  s${i}[Step ${i}] --> s${i + 1}[Step ${i + 1}]`)
+  for (let i = 0; i < 59; i++) lines.push(`  s${i}[Step ${i}] --> s${i + 1}[Step ${i + 1}]`)
+  lines.push('  s59[Step 59] --> s60[(Step 60)]')
   return lines.join('\n')
 }

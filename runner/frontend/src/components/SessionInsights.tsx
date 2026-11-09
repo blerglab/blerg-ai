@@ -1,3 +1,4 @@
+import { IconButton } from '@blerglab/chat'
 import { modelDisplayName } from '@blerglab/chat'
 // SessionInsights: one session's figures (time, work, subagents, tokens and estimated cost) in a dialog
 // opened from the session header. Fetched on open, and every 30 s while the session is live. The dialog
@@ -110,6 +111,7 @@ export default function SessionInsights({ sessionId, title, live, background = f
   const name = title || data?.title || sessionId.slice(0, 8)
 
   return createPortal(
+    // button-guard-ignore: useBackdropClose supplies pointer handlers only; this overlay is not a button
     <div className="caps-overlay" data-testid="session-insights-overlay" {...backdrop}>
       <div
         ref={dialogRef}
@@ -134,9 +136,9 @@ export default function SessionInsights({ sessionId, title, live, background = f
               <div role="alert" className="si-card si-error">
                 <span className="si-error-msg">
                   <span aria-hidden="true">!</span>
-                  {data ? 'Could not refresh these figures.' : 'Could not load insights for this session.'}
+                  {data ? 'Could not refresh these figures.' : 'Could not load insights for this workspace.'}
                 </span>
-                <button type="button" className="si-btn" onClick={reload}>Retry</button>
+                <IconButton label="Retry" labeled={!data} busy={loading} onClick={reload} />
               </div>
             )}
             {loading && !data && <Skeleton />}
@@ -171,7 +173,7 @@ function MetaStrip({ d, ago, refreshing, background }: { d: SessionInsightsRespo
   const model = modelDisplayName(d.model)
   return (
     <div className="si-strip" data-testid="session-insights-meta">
-      <ul className="si-chips" aria-label="About this session">
+      <ul className="si-chips" aria-label="About this workspace">
         <li className={`si-chip si-state-${state.id}`} data-testid="si-state">
           <span aria-hidden="true">{state.icon}</span>{state.label}
         </li>
@@ -222,7 +224,7 @@ function Report({ d }: { d: SessionInsightsResponse }) {
       ) : (
         <>
           <p className="si-empty" data-testid="session-insights-terminal">
-            A terminal session runs the engine&rsquo;s own CLI, which does not report time, turns, tool calls,
+            A terminal workspace runs the engine&rsquo;s own CLI, which does not report time, turns, tool calls,
             subagents or tokens.
           </p>
           <WorkCard d={d} isAgent={false} />
@@ -232,7 +234,7 @@ function Report({ d }: { d: SessionInsightsResponse }) {
   )
 }
 
-function KpiTiles({ d, isAgent }: { d: SessionInsightsResponse; isAgent: boolean }) {
+export function KpiTiles({ d, isAgent }: { d: SessionInsightsResponse; isAgent: boolean }) {
   const lifeSub = d.ended_at ? shortWhen(d.ended_at, 'ended') : shortWhen(d.started_at, 'since')
   return (
     <div className="si-tiles" data-testid="si-kpis">
@@ -262,7 +264,7 @@ function TokensTile({ d }: { d: SessionInsightsResponse }) {
   const costText = cost === null ? 'unpriced' : `est. ${formatUSD(cost)}${t.unpriced_models.length > 0 ? ' + unpriced' : ''}`
   // two parts: on a narrow tile the cache figure drops to a second line (losing its separator on a
   // phone), and nothing is clipped
-  const sub = <><span>{costText}</span> <span><span className="si-sep">· </span>cache {formatTokens(t.totals.cache_read)}</span>{t.children_total && <span>incl. {d.started_sessions?.count ?? 0} started sessions: {formatTokens(t.totals.input + t.totals.output + t.children_total.input + t.children_total.output)}</span>}</>
+  const sub = <><span>{costText}</span> <span><span className="si-sep">· </span>cache {formatTokens(t.totals.cache_read)}</span>{t.children_total && <span>incl. {d.started_sessions?.count ?? 0} workers: {formatTokens(t.totals.input + t.totals.output + t.children_total.input + t.children_total.output)}</span>}</>
   return <Tile id="tokens" label="Tokens" value={formatTokens(t.totals.input + t.totals.output)} sub={sub} wrap />
 }
 
@@ -331,7 +333,7 @@ function StackedBar({ parts, testId, legendTestId }: { parts: Part[]; testId: st
   )
 }
 
-function TimeCard({ d }: { d: SessionInsightsResponse }) {
+export function TimeCard({ d }: { d: SessionInsightsResponse }) {
   const parts: Part[] = [
     { id: 'running', label: 'Working', value: d.running_seconds, text: formatDuration(d.running_seconds), series: 1 },
     { id: 'waiting', label: 'Waiting on you', value: d.waiting_seconds, text: formatDuration(d.waiting_seconds), series: 2 },
@@ -375,12 +377,12 @@ function BarList({ rows, testId, rowTestId, narrow, children }: {
 
 const costNote = 'Estimates from the per-model prices an administrator sets on the Insights page'
 
-function TokensCard({ d }: { d: SessionInsightsResponse }) {
+export function TokensCard({ d }: { d: SessionInsightsResponse }) {
   const t = d.tokens
   if (!t) {
     return (
       <Card testId="si-tokens" title="Tokens by model">
-        <p className="si-empty" data-testid="si-tokens-hidden">Token figures are visible to the session&rsquo;s owner and administrators.</p>
+        <p className="si-empty" data-testid="si-tokens-hidden">Token figures are visible to the workspace&rsquo;s owner and administrators.</p>
       </Card>
     )
   }
@@ -423,7 +425,7 @@ function TokensCard({ d }: { d: SessionInsightsResponse }) {
   )
 }
 
-function WorkCard({ d, isAgent }: { d: SessionInsightsResponse; isAgent: boolean }) {
+export function WorkCard({ d, isAgent }: { d: SessionInsightsResponse; isAgent: boolean }) {
   const line = [isAgent ? plural(d.messages_from_person, 'message from you', 'messages from you') : '', plural(d.artifacts, 'file published', 'files published')]
     .filter(Boolean).join(' · ')
   if (!isAgent) {
@@ -478,7 +480,7 @@ function StatGroup({ title, total, rows, testId }: { title: string; total: numbe
   )
 }
 
-function SubagentsCard({ d }: { d: SessionInsightsResponse }) {
+export function SubagentsCard({ d }: { d: SessionInsightsResponse }) {
   const s = d.subagents
   const t = d.tokens?.subagents
   const aside = s.count > 0
@@ -510,10 +512,10 @@ function CountTable({ head, rows, testId, mono }: { head: string; rows: CountRow
   )
 }
 
-function StartedSessionsCard({ d }: { d: SessionInsightsResponse }) {
+export function StartedSessionsCard({ d }: { d: SessionInsightsResponse }) {
   const started = d.started_sessions
   if (!started?.count) return null
-  return <Card testId="si-started-sessions" title="Started sessions" aside={String(started.count)}>
-    <ul>{started.sessions.map(s => <li key={s.id}><EngineBadge engine={s.engine} /> <Link to={`/sessions/${encodeURIComponent(s.id)}`}>{s.title || 'Untitled session'}</Link> · <span title={s.model}>{modelDisplayName(s.model)}</span>{s.tokens !== null ? ` · ${formatTokens(s.tokens)} tokens` : ''}{s.cost_usd !== undefined ? ` · ${formatUSD(s.cost_usd)}` : ''}</li>)}</ul>
+  return <Card testId="si-started-sessions" title="Workers" aside={String(started.count)}>
+    <ul>{started.sessions.map(s => <li key={s.id}><EngineBadge engine={s.engine} /> <Link to={`/sessions/${encodeURIComponent(s.id)}`}>{s.title || 'Untitled chat'}</Link> · <span title={s.model}>{modelDisplayName(s.model)}</span>{s.tokens !== null ? ` · ${formatTokens(s.tokens)} tokens` : ''}{s.cost_usd !== undefined ? ` · ${formatUSD(s.cost_usd)}` : ''}</li>)}</ul>
   </Card>
 }

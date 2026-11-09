@@ -45,6 +45,8 @@ func TestAgentSpawnNewRepoCreatesWorkspace(t *testing.T) {
 	// Command makes the spawn succeed end to end: a spawn that fails before its
 	// session starts now removes the folder it created (see failedspawn_test.go).
 	mgr := newManagerWithSender(sender, ManagerConfig{ReposRoot: root, Command: []string{"true"}})
+	mgr.agents = NewAgentHost(sender, AgentHostConfig{ReposRoot: root, APIKey: "fixture-key", Provider: &scriptedAgentProvider{}})
+	t.Cleanup(func() { mgr.agents.Kill("s-agent-new") })
 
 	raw, _ := json.Marshal(protocol.SpawnSession{
 		Type: "spawn_session", SessionID: "s-agent-new", Repo: "fresh", NewRepo: true,
@@ -410,6 +412,8 @@ func TestSpawnNoRepoCollisionReportsTheFolderItCreated(t *testing.T) {
 	}
 	sender := newRecordingSender(8)
 	mgr := newManagerWithSender(sender, ManagerConfig{ReposRoot: root, Command: []string{"true"}})
+	mgr.agents = NewAgentHost(sender, AgentHostConfig{ReposRoot: root, APIKey: "fixture-key", Provider: &scriptedAgentProvider{}})
+	t.Cleanup(func() { mgr.agents.Kill("s-collide") })
 	raw, _ := json.Marshal(protocol.SpawnSession{
 		Type: "spawn_session", SessionID: "s-collide", Repo: ".scratch-taken", NoRepo: true, NewRepo: true,
 	})
@@ -438,6 +442,8 @@ func TestAgentSpawnNoRepoCreatesScratchWorkspace(t *testing.T) {
 	root := t.TempDir()
 	sender := newRecordingSender(4)
 	mgr := newManagerWithSender(sender, ManagerConfig{ReposRoot: root, Command: []string{"true"}})
+	mgr.agents = NewAgentHost(sender, AgentHostConfig{ReposRoot: root, APIKey: "fixture-key", Provider: &scriptedAgentProvider{}})
+	t.Cleanup(func() { mgr.agents.Kill("s-norepo") })
 
 	raw, _ := json.Marshal(protocol.SpawnSession{
 		Type: "spawn_session", SessionID: "s-norepo", Repo: ".scratch-ember-01ab", NoRepo: true, NewRepo: true,

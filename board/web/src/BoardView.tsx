@@ -1,5 +1,10 @@
+import { useColumnFocus } from '../../../packages/board/columnFocus';
+import { BoardColumn, BoardCard, ageShort } from "../../../packages/board/BoardPresentation";
+import { HiddenColumnsNotice, useColumnVisibility } from "../../../packages/board/columnVisibility";
+import { useMe } from "./me";
+import { ReleasePlanning } from "./ReleasePlanning";
 import { RestrictedMarker } from "./CardOrigin";
-import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError, Board, Card, Column, boardSocket, pendingBlockers } from "./api";
 import { CardSheet } from "./CardSheet";
@@ -8,9 +13,10 @@ import { MetricsModal } from "./MetricsPage";
 import { BoardSettings } from "./BoardSettings";
 import { BoardFilterBar } from "./BoardFilterBar";
 import { BoardSearch } from "./BoardSearch";
+import { mark } from "./releasePerfMarks";
 import { ActiveFilters, FilterMenu } from "./FilterMenu";
 import {
-  BoardFilter, chipsFor, countLabel, forgetTab, isFiltering, loadFilter, loadTab, matchesFilter, pickColumn,
+  BoardFilter, Chip, chipsFor, countLabel, forgetTab, isFiltering, loadFilter, loadTab, matchesFilter, pickColumn,
   saveFilter, saveTab, swipeStep, words,
 } from "./boardFilter";
 
@@ -18,15 +24,8 @@ import {
 //   spinner  — a session is actively churning (starting/running)
 //   ?        — the session asked something and is waiting on you
 //   ✓        — the card is at the review gate: your accept/reject verdict
+interface CardViewPage { cards: Card[]; older: Record<string, number>; totals?: Record<string, number>; matched?: Record<string, number>; chips?: Chip[]; next?: Record<string, string>; loaded?: Record<string, number> }
 interface ActiveInfo { lifecycle: string; since: string }
-
-function ageShort(iso: string): string {
-  const secs = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
-  if (secs < 90) return `${Math.round(secs)}s`;
-  if (secs < 5400) return `${Math.round(secs / 60)}m`;
-  if (secs < 129600) return `${(secs / 3600).toFixed(1)}h`;
-  return `${Math.round(secs / 86400)}d`;
-}
 
 function indicatorFor(card: Card, active: Record<string, ActiveInfo>, reviewCols: Set<string>) {
   const info = active[card.id];
@@ -39,7 +38,7 @@ function indicatorFor(card: Card, active: Record<string, ActiveInfo>, reviewCols
         <span className="shield">🛡</span><span className="churn review" />
       </span>
     ) : (
-      <span className="ind-live" title={`session working · active ${age} ago`}>
+      <span className="ind-live" title={`workspace working · active ${age} ago`}>
         <span className="churn" />
       </span>
     );
@@ -55,7 +54,7 @@ function indicatorFor(card: Card, active: Record<string, ActiveInfo>, reviewCols
     // session attached but between turns — show a quiet pulse so "moving
     // along" is distinguishable from "abandoned"
     return (
-      <span className="ind-live" title={`session attached, between turns · last active ${age} ago`}>
+      <span className="ind-live" title={`workspace attached, between turns · last active ${age} ago`}>
         <span className="idle-dot" /><span className="ind-age idle">{age}</span>
       </span>
     );
@@ -109,7 +108,10 @@ function retryableLoadError(e: unknown): boolean {
 }
 
 export function BoardView({ boardId }: { boardId: string }) {
+  const [releaseFilter, setReleaseFilter] = useState("");
+  const [groupedReleases, setGroupedReleases] = useState(false);
   const [board, setBoard] = useState<Board | null>(null);
+  const me = useMe();
   const [deploys, setDeploys] = useState<Deployment[]>([]);
   const [chatOpen, setChatOpen] = useState(false);
   // "c" opens the board session and puts the cursor in its composer
@@ -147,9 +149,20 @@ export function BoardView({ boardId }: { boardId: string }) {
       .catch(() => {});
     return () => { stop = true; };
   }, [boardId]);
-  const [columns, setColumns] = useState<Column[]>([]);
-  const [cards, setCards] = useState<Card[]>([]);
   const [openCard, setOpenCard] = useState<Card | null>(null);
+  const [columns, setColumns] = useState<Column[]>([]);
+  const visibility = useColumnVisibility(me?.account_id ?? '', boardId, columns);
+  const focus = useColumnFocus(JSON.stringify([me?.account_id ?? '', boardId]), !openCard, columns.length ? columns.filter(c => !visibility.hidden.includes(c.id)).map(c => c.id) : undefined);
+  const visibleColumns = columns.filter(c => !visibility.hidden.includes(c.id) && (!focus.column || c.id === focus.column));
+  const [cards, setCards] = useState<Card[]>([]);
+  // BLG-453: a no-op everywhere except the release-perf harness.
+  useEffect(() => { if (cards.length) mark('board-rendered') }, [cards]);
+  const [older, setOlder] = useState<Record<string, number>>({});
+  const [expanded, setExpanded] = useState<string[]>([]);
+  const [remote, setRemote] = useState<CardViewPage | null>(null);
+  const [pageBusy, setPageBusy] = useState(false);
+  const pageLoading = useRef(false);
+  const reloadGeneration = useRef(0);
   const nav = useNavigate();
   const metricsOpen = useLocation().pathname.endsWith("/metrics");
   const { number: urlNumber } = useParams();
@@ -165,13 +178,31 @@ export function BoardView({ boardId }: { boardId: string }) {
   const [filter, setFilterState] = useState<BoardFilter>(() => loadFilter(boardId));
   const [tabPick, setTabPick] = useState<string | null>(() => loadTab(boardId));
   if (filterBoard !== boardId) {
+    setExpanded([]); setOlder({});
+    setReleaseFilter(""); setGroupedReleases(false);
     setFilterBoard(boardId); setFilterState(loadFilter(boardId)); setTabPick(loadTab(boardId));
   }
   const setFilter = (f: BoardFilter) => { setFilterState(f); saveFilter(boardId, f); };
   // The box shows every keystroke at once; the cards follow at a lower priority, so typing stays
   // smooth on a big board.
   const applied = useDeferredValue(filter);
-  const filtering = isFiltering(applied);
+  const filtering = isFiltering(applied) || releaseFilter !== "";
+  const expansionQuery = [...[...new Set([...expanded, ...(focus.column ? [focus.column] : [])])].map(id => `expand=${encodeURIComponent(id)}`), ...(filtering ? [`filter=${encodeURIComponent(JSON.stringify({ ...applied, release: releaseFilter }))}`] : [])].join("&");
+  const viewKey = `${boardId}?${expansionQuery}`;
+  const currentViewKey = useRef(viewKey);
+  useLayoutEffect(() => { currentViewKey.current = viewKey; }, [viewKey]);
+  async function loadOlder(col: string) {
+    const cursor = remote?.next?.[col]; if (!cursor || pageLoading.current) return;
+    const generation = reloadGeneration.current;
+    const key = viewKey; pageLoading.current = true; setPageBusy(true);
+    try {
+      const page = await api<CardViewPage>(`/api/boards/${boardId}/cards/view?${expansionQuery}&older_column=${encodeURIComponent(col)}&cursor=${encodeURIComponent(cursor)}`);
+      if (currentViewKey.current !== key || reloadGeneration.current !== generation) return;
+      setCards(old => [...old, ...page.cards.filter(c => !old.some(existing => existing.id === c.id))].sort(byRank));
+      setRemote(old => old ? { ...page, loaded: { ...old.loaded, [col]: (old.loaded?.[col] ?? 0) + (page.loaded?.[col] ?? 0) }, next: { ...old.next, [col]: page.next?.[col] ?? "" } } : page);
+    } catch { /* The current page remains available for retry. */ }
+    finally { pageLoading.current = false; setPageBusy(false); }
+  }
   // Each column's shown cards (stale-first, narrowed by the filter) and size, and the chips:
   // worked out once per board change or filter change, not once per render.
   const view = useMemo(() => {
@@ -180,14 +211,14 @@ export function BoardView({ boardId }: { boardId: string }) {
     const byColumn = new Map<string, { shown: Card[]; total: number }>();
     for (const col of columns) {
       const all = columnCards(cards, col.id);
-      byColumn.set(col.id, { shown: on ? all.filter((c) => matchesFilter(c, applied, q)) : all, total: all.length });
+      byColumn.set(col.id, { shown: on ? all.filter((c) => matchesFilter(c, applied, q)) : all, total: remote?.totals?.[col.id] ?? (all.length + (expanded.includes(col.id) ? 0 : (older[col.id] ?? 0))) });
     }
-    return { byColumn, chips: chipsFor(cards, applied) };
-  }, [cards, columns, applied]);
+    return { byColumn, chips: remote?.chips ?? chipsFor(cards, applied) };
+  }, [cards, columns, applied, older, expanded, remote]);
   // shownCards: a column's cards as the board shows them. Render and commitDrop both use it, so a
   // drop's index means the same card on screen and here.
-  const shownCards = (colId: string) => view.byColumn.get(colId)?.shown ?? [];
-  const activeColumn = pickColumn(columns, tabPick);
+  const shownCards = (colId: string) => (view.byColumn.get(colId)?.shown ?? []).filter(c => !releaseFilter || (c.release_id ?? "none") === releaseFilter);
+  const activeColumn = pickColumn(visibleColumns, tabPick);
   // a remembered column that was deleted is forgotten, not kept forever
   // (pickColumn already shows the first column in its place)
   useEffect(() => {
@@ -222,8 +253,8 @@ export function BoardView({ boardId }: { boardId: string }) {
     // pinch-zoomed in, a sideways drag pans the zoomed page: it is not a swipe
     if ((window.visualViewport?.scale ?? 1) > 1.01) return;
     const step = swipeStep(x - start.x, y - start.y);
-    const i = columns.findIndex((c) => c.id === activeColumn);
-    const next = columns[i + step];
+    const i = visibleColumns.findIndex((c) => c.id === activeColumn);
+    const next = visibleColumns[i + step];
     if (step !== 0 && next) pickColumnTab(next.id);
   };
 
@@ -319,6 +350,7 @@ export function BoardView({ boardId }: { boardId: string }) {
     };
   });
   const load = useCallback(async () => {
+    reloadGeneration.current++;
     reloadRetry.clear();
     reloadRetry.reset();
     const isLatest = loadTicket();
@@ -327,20 +359,21 @@ export function BoardView({ boardId }: { boardId: string }) {
         const [b, cols, cs, act, deps] = await Promise.all([
           api<Board>(`/api/boards/${boardId}`),
           api<Column[]>(`/api/boards/${boardId}/columns`),
-          api<Card[]>(`/api/boards/${boardId}/cards`),
+          api<CardViewPage>(`/api/boards/${boardId}/cards/view${expansionQuery ? `?${expansionQuery}` : ""}`),
           api<Record<string, ActiveInfo>>(`/api/boards/${boardId}/active-sessions`).catch(() => ({})),
           api<Deployment[]>(`/api/boards/${boardId}/deployments`).catch(() => []),
         ]);
         if (!isLatest()) return;
+        reloadGeneration.current++;
         setBoard(b); setColumns(cols ?? []);
-        setCards((cs ?? []).slice().sort(byRank));
+        setCards((cs.cards ?? []).slice().sort(byRank)); setOlder(cs.older ?? {}); setRemote(cs);
         setActive(act ?? {}); setDeploys(deps ?? []);
       } catch (e) {
         if (isLatest() && retryableLoadError(e)) reloadRetry.schedule(() => { void attempt(); });
       }
     };
     await attempt();
-  }, [boardId, loadTicket, reloadRetry]);
+  }, [boardId, loadTicket, reloadRetry, expansionQuery]);
 
   // A board_changed ping refreshes the run status too, not just the cards:
   // concurrency is a board setting the chip renders, so without this a PATCH
@@ -362,6 +395,15 @@ export function BoardView({ boardId }: { boardId: string }) {
     const target = cards.find((c) => c.number === Number(urlNumber));
     if (target) setOpenCard(target);
   }
+
+  useEffect(() => {
+    if (!urlNumber || cards.some(card => card.number === Number(urlNumber))) return;
+    let cancelled = false;
+    api<Card>(`/api/boards/${boardId}/cards/by-number/${encodeURIComponent(urlNumber)}`)
+      .then(card => { if (!cancelled && card.number === Number(urlNumber)) setOpenCard(card); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [boardId, urlNumber, cards]);
 
   const openSheet = (card: Card) => {
     setOpenCard(card);
@@ -396,6 +438,11 @@ export function BoardView({ boardId }: { boardId: string }) {
       setStartError(e instanceof ApiError ? e.message : "stop failed");
     }
     loadRun();
+  };
+
+  const handleRunChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (event.target.checked) void startRun();
+    else void stopRun();
   };
 
   if (!board) return null;
@@ -453,17 +500,17 @@ export function BoardView({ boardId }: { boardId: string }) {
             <label className={`run-toggle${stateClass}`}
               title={running
                 ? parked
-                  ? `auto-advance is on but this board is PARKED: its concurrency is 0, so nothing new is dispatched.${inFlight > 0 ? ` ${inFlight} card(s) already in flight finish normally and still auto-merge.` : ""} The run stays active and keeps its counters. Set the board's concurrency above 0 (PATCH /api/boards/{id}, or ask a board session) to resume.`
+                  ? `auto-advance is on but this board is PARKED: its concurrency is 0, so nothing new is dispatched.${inFlight > 0 ? ` ${inFlight} card(s) already in flight finish normally and still auto-merge.` : ""} The run stays active and keeps its counters. Set the board's concurrency above 0 (PATCH /api/boards/{id}, or ask a board channel) to resume.`
                   : idle
                   ? "auto-advance is on, idle — nothing in ready right now; a card dropped into ready is picked up automatically. Uncheck to stop."
                   : gridlocked
                   ? "auto-advance is on but every ready card is waiting on a hard dependency that has not reached a done column yet. Nothing is wrong — open a card to see which blocker it is waiting on. The board starts moving the moment a blocker lands."
                   : waiting
-                  ? `auto-advance is on (up to ${limit} card(s) at a time), but the runner has no free session slots — ready cards are left where they are and the first tick after a slot frees picks one up.`
-                  : `auto-advance is on — draining ready top-down, up to ${limit} card(s) at a time, through adversarial review and (if auto-merge is on) merge. Uncheck to stop feeding new cards; in-flight sessions finish and still auto-merge.`
+                  ? `auto-advance is on (up to ${limit} card(s) at a time), but the runner has no free workspace slots — ready cards are left where they are and the first tick after a slot frees picks one up.`
+                  : `auto-advance is on — draining ready top-down, up to ${limit} card(s) at a time, through adversarial review and (if auto-merge is on) merge. Uncheck to stop feeding new cards; in-flight workspaces finish and still auto-merge.`
                 : "check to auto-advance the ready column — cards move to in progress as they become claimable, with no manual click per card"}>
               <input type="checkbox" checked={running}
-                onChange={(e) => (e.target.checked ? startRun() : stopRun())} />
+                onChange={handleRunChange} />
               {running ? (
                 <span className="run-chip">
                   {parked ? (
@@ -484,8 +531,8 @@ export function BoardView({ boardId }: { boardId: string }) {
             </label>
           );
         })()}
-        <button className="btn ghost small" onClick={() => { setChatOpen(true); setTimeout(() => window.dispatchEvent(new Event("blerg-board:chat-focus")), 60); }} title="board session (c)">
-          💬 Board session
+        <button className="btn ghost small" onClick={() => { setChatOpen(true); setTimeout(() => window.dispatchEvent(new Event("blerg-board:chat-focus")), 60); }} title="board channel (c)">
+          💬 Board channel
         </button>
         <button className="btn ghost small" onClick={() => nav(`/boards/${boardId}/metrics`)}>📊 Metrics</button>
         {/* search, Filter and the active filters stay together: they never split across rows */}
@@ -498,7 +545,7 @@ export function BoardView({ boardId }: { boardId: string }) {
           <BoardSearch boardId={boardId} value={filter.q} onChange={(q) => setFilter({ ...filter, q })}
             cards={cards} onOpenCard={openSheet} collapsible focusSignal={searchSignal} />
         )}
-        <FilterMenu chips={view.chips} filter={filter} onFilter={setFilter} sheet={isPhone} />
+        <FilterMenu chips={view.chips} filter={filter} onFilter={setFilter} sheet={isPhone} visibility={visibility} />
         {!isPhone && <ActiveFilters filter={filter} onFilter={setFilter} />}
         </div>
         {board.deploy_url && (
@@ -518,18 +565,20 @@ export function BoardView({ boardId }: { boardId: string }) {
         <div className="bootstrap-hint">
           <p className="sign">New project?</p>
           <p>
-            Open <b>💬 Board session</b> — the agent interviews you, creates the
+            Open <b>💬 Board channel</b> — the agent interviews you, creates the
             GitHub repo, scaffolds it, wires this board (repos, git base, model),
             and files your first cards. Then drag them to ready and press
             ▶ Run board.
           </p>
         </div>
       )}
+
       <div ref={sentinelRef} aria-hidden="true" />
       <BoardFilterBar
-        counts={columns.map((column) => ({
-          column, shown: shownCards(column.id).length, total: view.byColumn.get(column.id)?.total ?? 0,
+        counts={visibleColumns.map((column) => ({
+          column, shown: filtering ? (remote?.matched?.[column.id] ?? shownCards(column.id).length) : shownCards(column.id).length, total: view.byColumn.get(column.id)?.total ?? 0,
         }))}
+        focused={!!focus.column} onFocusColumn={isPhone ? () => { if (activeColumn) focus.toggle(activeColumn) } : undefined}
         activeColumn={activeColumn} onPickColumn={pickColumnTab} applied={applied}
       >
         {isPhone && (phoneSearch || filter.q !== "") && (
@@ -541,12 +590,14 @@ export function BoardView({ boardId }: { boardId: string }) {
         )}
         {isPhone && <ActiveFilters filter={filter} onFilter={setFilter} />}
       </BoardFilterBar>
-      <div className={`board${dragging ? " drag-active" : ""}`}
+      <HiddenColumnsNotice boardId={boardId} visibility={visibility} cards={cards} counts={Object.fromEntries(columns.map(c => [c.id, view.byColumn.get(c.id)?.total ?? 0]))} />
+      <ReleasePlanning key={boardId} boardId={boardId} revision={cards} filter={applied} columns={columns} readOnly={isMirroredBoard || !(me?.is_admin || me?.capabilities?.includes("card.write"))} selected={releaseFilter} onFilter={setReleaseFilter} grouped={groupedReleases} onGroup={setGroupedReleases} onOpenCard={openSheet} />
+      <div hidden={groupedReleases} style={groupedReleases ? { display: "none" } : undefined} className={`board${focus.column ? " shared-board-focused" : ""}${dragging ? " drag-active" : ""}`}
         onTouchStart={(e) => { const t = e.touches[0]; swipeRef.current = e.touches.length === 1 && t ? { x: t.clientX, y: t.clientY } : null; }}
         onTouchEnd={(e) => { const t = e.changedTouches[0]; if (t) onSwipeEnd(t.clientX, t.clientY); }}
         onTouchCancel={() => { swipeRef.current = null; }}
       >
-        {columns.map((col) => {
+        {visibleColumns.map((col) => {
           const colCards = shownCards(col.id);
           const total = view.byColumn.get(col.id)?.total ?? 0;
           const visible = colCards.filter((c) => c.id !== dragging?.id);
@@ -557,8 +608,11 @@ export function BoardView({ boardId }: { boardId: string }) {
           const srcHome = dragging != null && dragSrc?.colId === col.id &&
             indicatorIdx === dragSrc.index;
           return (
-            <section
-              className={`column${col.is_terminal ? " terminal" : ""}${col.id === activeColumn ? " picked" : ""}`}
+            <BoardColumn
+              focused={focus.column === col.id} onFocusColumn={() => focus.toggle(col.id)}
+              name={col.name} terminal={col.is_terminal} headingId={`colname-${col.id}`}
+              count={countLabel(filtering ? (remote?.matched?.[col.id] ?? visible.length) : visible.length, total, filtering)}
+              className={col.id === activeColumn ? "picked" : ""}
               key={col.id} id={`column-${col.id}`}
               // on a phone the picked column is the tab panel its tab names; on a desktop each
               // column is a region named by its heading
@@ -589,11 +643,13 @@ export function BoardView({ boardId }: { boardId: string }) {
               }}
               onDrop={(e) => { e.preventDefault(); commitDrop(); }}
             >
-              <header>
-                <span className="blaze" />
-                <h3 id={`colname-${col.id}`}>{col.name}</h3>
-                <span className="count">{countLabel(visible.length, total, filtering)}</span>
-              </header>
+              {!filtering && (older[col.id] ?? 0) > 0 && <button className="btn ghost small" type="button"
+                aria-expanded={expanded.includes(col.id)}
+                title="Cards that entered done more than 14 days ago"
+                onClick={() => setExpanded(ids => ids.includes(col.id) ? ids.filter(id => id !== col.id) : [...ids, col.id])}>
+                {expanded.includes(col.id) ? "Show recent" : `${Math.max(0, older[col.id] - (remote?.loaded?.[col.id] ?? 0))} older`}
+              </button>}
+              {remote?.next?.[col.id] && <button type="button" className="btn ghost small" disabled={pageBusy} onClick={() => void loadOlder(col.id)}>Load more older cards ({Math.max(0, (older[col.id] ?? 0) - (remote.loaded?.[col.id] ?? 0))})</button>}
               <div className="cards">
                 {(() => { let vi = 0; return colCards.flatMap((card) => {
                   const isSrc = card.id === dragging?.id;
@@ -603,8 +659,8 @@ export function BoardView({ boardId }: { boardId: string }) {
                     <div className="card ghost-slot" key="ghost" style={{ height: dragHeight }} />
                   ) : null;
                   return [slot, (
-                  <button
-                    className={`card${isSrc ? (srcHome ? " ghost-inplace" : " drag-src") : ""}`} key={card.id} draggable
+                  <BoardCard card={card} head={<><RestrictedMarker sensitive={card.sensitive} />{indicatorFor(card, active, reviewCols)}</>}
+                    className={`${isSrc ? (srcHome ? " ghost-inplace" : " drag-src") : ""}`} key={card.id} draggable
                     {...(isSrc ? {} : { "data-card-id": card.id })}
                     onDragStart={(e) => {
                       e.dataTransfer.effectAllowed = "move";
@@ -626,18 +682,6 @@ export function BoardView({ boardId }: { boardId: string }) {
                     onDragEnd={endDrag}
                     onClick={() => openSheet(card)}
                   >
-                    <div className="head">
-                      <span className="num">{card.reference || `#${card.number}`}</span>
-                      <span className="title">{card.title}</span>
-                      <RestrictedMarker sensitive={card.sensitive} />
-                      {indicatorFor(card, active, reviewCols)}
-                    </div>
-                    <div className="meta">
-                      <span className="chip type">{card.type}</span>
-                      {(card.priority === "high" || card.priority === "urgent") && (
-                        <span className={`chip priority-${card.priority}`}>{card.priority}</span>
-                      )}
-                      {card.size && <span className="chip">{card.size}</span>}
                       {card.gate_flag && <span className={`dot ${card.gate_flag}`} title={`gate: ${card.gate_flag}`} />}
                       {card.merged_sha && (
                         <span className={`chip merged${(() => {
@@ -666,14 +710,10 @@ export function BoardView({ boardId }: { boardId: string }) {
                           </span>
                         );
                       })()}
-                      {card.stuck_at && <span className="chip stuck" title="blerg-board stopped working this card and wants a human — open it, the newest comment says why and what to do; Run clears the flag and retries">⏸ stuck {ageShort(card.stuck_at)}</span>}
-                      {card.stale_at && <span className="chip stale" title="claimed but idle — no active session and no card activity for a while; update it or release it back to ready">💤 stale {ageShort(card.stale_at)}</span>}
                       {card.auto_merge && reviewCols.has(card.column_id ?? "") && (
                         <span className="chip automerge" title="auto-merges when the adversarial review approves">⚡ auto</span>
                       )}
-                      {(card.tags ?? []).slice(0, 3).map((t) => <span className="chip" key={t}>{t}</span>)}
-                    </div>
-                  </button>
+                  </BoardCard>
                   )];
                 }); })()}
                 {indicatorIdx != null && !srcHome && indicatorIdx >= visible.length && (
@@ -685,7 +725,7 @@ export function BoardView({ boardId }: { boardId: string }) {
                   </div>
                 )}
               </div>
-            </section>
+            </BoardColumn>
           );
         })}
       </div>

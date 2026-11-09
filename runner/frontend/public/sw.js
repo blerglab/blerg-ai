@@ -26,3 +26,11 @@ self.addEventListener('notificationclick', function(event) {
     clients.openWindow(event.notification.data.url || '/')
   )
 })
+
+self.addEventListener('pushsubscriptionchange', function(event) {
+  // Authentication belongs to the page. Never persist a bearer token in a
+  // service worker or re-subscribe a browser that may have turned push off.
+  event.waitUntil(clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(wins) {
+    wins.forEach(function(win) { win.postMessage({ type: 'push_subscription_changed' }) })
+  }))
+})

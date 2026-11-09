@@ -5,6 +5,8 @@ package db
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -45,6 +47,24 @@ func MaxAgentEventSeq(ctx context.Context, pool *pgxpool.Pool, sessionID string)
 	return n, err
 }
 
+// LiveCounts combines three reads GET /live needs before it can even answer a 304 - the newest
+// seq (MaxAgentEventSeq), the viewer's pending tool changes and pending proposals on sessionID -
+// into one round trip instead of three. BLG-431: running these three as independent goroutines
+// measured *worse* under a connection-pool-constrained install (including the MaxConns=1
+// installs runtime_fence.go supports, where concurrency cannot help at all since there is only
+// one connection to contend over); this helps regardless of pool size, because it is fewer round
+// trips, not more concurrency. The caller must have already confirmed sessionID is a valid UUID
+// (CountPendingToolChangesForSession/CountPendingProposalsForSession's own proposalUUID guard,
+// replicated here by the ::uuid casts erroring instead of silently reading zero).
+func LiveCounts(ctx context.Context, pool *pgxpool.Pool, accountID, sessionID string) (through int64, toolChanges, proposals int, err error) {
+	err = pool.QueryRow(ctx, `SELECT
+		(SELECT coalesce(max(seq), 0) FROM agent_events WHERE session_id = $1),
+		(SELECT count(*) FROM mcp_tool_changes WHERE account_id = $2 AND session_id = $1::uuid AND state = 'pending' AND NOT muted AND kind <> 'removed'),
+		(SELECT count(*) FROM mcp_proposals WHERE account_id = $2 AND session_id = $1::uuid AND state = 'pending' AND `+proposalDeadline+` > now())`,
+		sessionID, accountID).Scan(&through, &toolChanges, &proposals)
+	return
+}
+
 // ArtifactStamp is how many files a session holds (every origin) and the newest one's created_at (the
 // epoch when there is none), read from session_artifacts_session_created_idx: an addition or a
 // deletion changes it.
@@ -66,16 +86,16 @@ func LockTopics(ctx context.Context, tx pgx.Tx, sessionID string) error {
 // TopicState is the session's newest topic event (nil when there is none) and how many it holds.
 func TopicState(ctx context.Context, tx pgx.Tx, sessionID string) (*AgentEventRow, int, error) {
 	var n int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM agent_events WHERE session_id = $1 AND kind = 'topic'`, sessionID).Scan(&n); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM agent_events WHERE session_id = $1 AND kind = 'topic' AND ts > now()-interval '1 minute'`, sessionID).Scan(&n); err != nil {
 		return nil, 0, err
-	}
-	if n == 0 {
-		return nil, 0, nil
 	}
 	var r AgentEventRow
 	err := tx.QueryRow(ctx, `SELECT session_id, seq, client_event_id, kind, payload::text, ts FROM agent_events
 		WHERE session_id = $1 AND kind = 'topic' ORDER BY seq DESC LIMIT 1`, sessionID).
 		Scan(&r.SessionID, &r.Seq, &r.ClientEventID, &r.Kind, &r.Payload, &r.Ts)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, n, nil
+	}
 	if err != nil {
 		return nil, 0, err
 	}
@@ -85,7 +105,7 @@ func TopicState(ctx context.Context, tx pgx.Tx, sessionID string) (*AgentEventRo
 // AppendAgentEventTx is AppendAgentEventAt inside the caller's transaction: the same insert, duplicate
 // lookup and retry (appendAgentEvent), each attempt under a savepoint so a failed one does not abort tx.
 func AppendAgentEventTx(ctx context.Context, tx pgx.Tx, sessionID, clientEventID, kind, payload string, ts time.Time) (int64, bool, error) {
-	return appendAgentEvent(ctx, tx, sessionID, clientEventID, kind, payload, ts)
+	return appendWorkState(ctx, tx, sessionID, clientEventID, kind, payload, ts)
 }
 
 // ListProposalDecidedEvents returns a session's proposal_decided events with seq <= throughSeq, in
@@ -102,8 +122,9 @@ func ListSessionRenamedEvents(ctx context.Context, pool *pgxpool.Pool, sessionID
 		WHERE session_id = $1 AND seq <= $2 AND kind = 'session_renamed' ORDER BY seq`, sessionID, throughSeq)
 }
 
-func listKindEvents(ctx context.Context, pool *pgxpool.Pool, query, sessionID string, throughSeq int64) ([]AgentEventRow, error) {
-	rows, err := pool.Query(ctx, query, sessionID, throughSeq)
+func listKindEvents(ctx context.Context, pool *pgxpool.Pool, query, sessionID string, throughSeq int64, extra ...any) ([]AgentEventRow, error) {
+	args := append([]any{sessionID, throughSeq}, extra...)
+	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -122,13 +143,93 @@ func listKindEvents(ctx context.Context, pool *pgxpool.Pool, query, sessionID st
 // StrokeKindsSQL is the kind list of agent_events_strokes_idx (EnsureConcurrentIndexes), written out
 // in the query so the planner can prove the query's predicate implies the index's. topics.StrokeKinds
 // is the same list.
-const StrokeKindsSQL = `('mark', 'ask', 'proposal_request', 'review_requested', 'review_decided', 'delegation_request', 'delegation_decided')`
+const StrokeKindsSQL = `('mark', 'ask', 'proposal_request', 'review_requested', 'review_decided', 'delegation_request', 'delegation_decided', 'background_task_done')`
 
-// ListStrokeEvents returns a session's events of the stroke kinds with seq <= throughSeq, in seq
-// order: the History feed's marks, asks, approvals, proposals and reviews.
-func ListStrokeEvents(ctx context.Context, pool *pgxpool.Pool, sessionID string, throughSeq int64) ([]AgentEventRow, error) {
+// StrokePageSize bounds each History page before payloads leave Postgres.
+const StrokePageSize = 300
+
+// HistoryKindsSQL includes the reel events that can generate strokes as well as
+// lifecycle events. The session/seq index supports backwards keyset scans.
+const HistoryKindsSQL = "('mark', 'ask', 'proposal_request', 'review_requested', 'review_decided', 'delegation_request', 'delegation_decided', 'background_task_done', 'user_message', 'topic', 'proposal_decided')"
+
+// ListStrokeEvents reads newest first, with one lookahead row. before is exclusive;
+// omitting it starts at the snapshot's newest event. Never use OFFSET or grow LIMIT.
+func ListStrokeEvents(ctx context.Context, pool *pgxpool.Pool, sessionID string, throughSeq int64, before ...int64) ([]AgentEventRow, error) {
+	boundary := throughSeq
+	if len(before) > 0 {
+		boundary = before[0] - 1
+	}
 	return listKindEvents(ctx, pool, `SELECT session_id, seq, client_event_id, kind, payload::text, ts FROM agent_events
-		WHERE session_id = $1 AND seq <= $2 AND kind IN `+StrokeKindsSQL+` ORDER BY seq`, sessionID, throughSeq)
+ WHERE session_id=$1 AND seq<=$2 AND seq<=$3 AND kind IN `+HistoryKindsSQL+`
+ ORDER BY seq DESC LIMIT 301`, sessionID, throughSeq, boundary)
+}
+
+// StrokeContextKindsSQL excludes marks so lifecycle lookups do not scan mark payloads.
+const StrokeContextKindsSQL = "('ask', 'proposal_request', 'proposal_decided', 'review_requested', 'review_decided', 'delegation_request', 'delegation_decided')"
+
+// StrokeContext reads the latest request/decision per lifecycle key for this page,
+// plus currently pending requests (the existing always-visible exception). Marks
+// are never context.
+// Keeping both sides avoids treating an old resolved request as waiting when its
+// decision lies on another page. Results are bounded by two kinds per key.
+func StrokeContext(ctx context.Context, pool *pgxpool.Pool, sessionID string, through int64, page []AgentEventRow) ([]AgentEventRow, error) {
+	keys := map[string][]string{"ask": {}, "review": {}, "delegation": {}, "proposal": {}}
+	for _, row := range page {
+		var p map[string]json.RawMessage
+		if row.Kind == "mark" || json.Unmarshal([]byte(row.Payload), &p) != nil {
+			continue
+		}
+		group, field := "", ""
+		switch row.Kind {
+		case "ask":
+			group, field = "ask", "message_id"
+		case "review_requested", "review_decided":
+			group, field = "review", "request_id"
+		case "delegation_request", "delegation_decided":
+			group, field = "delegation", "request_id"
+		case "proposal_request", "proposal_decided":
+			group, field = "proposal", "proposal_id"
+		}
+		var id string
+		if group != "" && json.Unmarshal(p[field], &id) == nil && id != "" {
+			keys[group] = append(keys[group], id)
+		}
+	}
+	// Pending rows come from their indexed state tables, never a scan of mark payloads.
+	pending, err := pool.Query(ctx, `SELECT kind,id FROM (
+ SELECT 'ask' AS kind,id::text,created_at FROM messages WHERE session_id=$1 AND kind='ask' AND status='open'
+ UNION ALL SELECT 'review',id::text,created_at FROM review_requests WHERE session_id=$1 AND state='pending'
+ UNION ALL SELECT 'delegation',id::text,created_at FROM delegation_requests WHERE parent_session_id=$1 AND status='pending'
+ UNION ALL SELECT 'proposal',id::text,created_at FROM mcp_proposals WHERE session_id=$1 AND state='pending'
+ ) p ORDER BY created_at DESC,id`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	for pending.Next() {
+		var kind, id string
+		if err := pending.Scan(&kind, &id); err != nil {
+			pending.Close()
+			return nil, err
+		}
+		keys[kind] = append(keys[kind], id)
+	}
+	err = pending.Err()
+	pending.Close()
+	if err != nil {
+		return nil, err
+	}
+	if len(keys["ask"])+len(keys["review"])+len(keys["delegation"])+len(keys["proposal"]) == 0 {
+		return nil, nil
+	}
+	return listKindEvents(ctx, pool, `SELECT DISTINCT ON(kind, coalesce(payload->>'request_id',payload->>'proposal_id',payload->>'message_id'))
+ session_id,seq,client_event_id,kind,payload::text,ts FROM agent_events
+ WHERE session_id=$1 AND seq<=$2 AND kind IN `+StrokeContextKindsSQL+` AND (
+ (kind='ask' AND payload->>'message_id'=ANY($3::text[])) OR
+ (kind IN ('review_requested','review_decided') AND payload->>'request_id'=ANY($4::text[])) OR
+ (kind IN ('delegation_request','delegation_decided') AND payload->>'request_id'=ANY($5::text[])) OR
+ (kind IN ('proposal_request','proposal_decided') AND payload->>'proposal_id'=ANY($6::text[])))
+ ORDER BY kind,coalesce(payload->>'request_id',payload->>'proposal_id',payload->>'message_id'),seq DESC`,
+		sessionID, through, keys["ask"], keys["review"], keys["delegation"], keys["proposal"])
 }
 
 // AskStates reads a session's asks (the messages rows): the ids of those closed without an answer

@@ -18,6 +18,8 @@ import (
 )
 
 type shellWaiter struct {
+	version int
+	op      string
 	dc      *DaemonConn
 	session string
 	reply   chan shellruntime.RPC
@@ -118,9 +120,10 @@ func pumpShellOutput(pipe *ownershell.OutputPipe, out chan<- []byte) {
 }
 
 type shellRPCState struct {
-	mu      sync.Mutex
-	pending map[string]shellWaiter
-	outputs map[string]shellOutput
+	mu       sync.Mutex
+	pending  map[string]shellWaiter
+	outputs  map[string]shellOutput
+	retained map[string]*retainedRemoteOutput
 }
 
 func shellRandom() string {
@@ -141,7 +144,12 @@ func (h *Hub) shellCall(ctx context.Context, dc *DaemonConn, r shellruntime.RPC)
 	if r.Op == "attach_workspace" {
 		r.Type = "attach_session_workspace"
 	}
-	r.Version = 1
+	if r.Version == 0 {
+		r.Version = 1
+	}
+	if r.Version != 1 && r.Version != 2 {
+		return shellruntime.RPC{}, ownershell.ErrDenied
+	}
 	r.RequestID = shellRandom()
 	if r.RequestID == "" {
 		return shellruntime.RPC{}, ownershell.ErrDenied
@@ -156,7 +164,7 @@ func (h *Hub) shellCall(ctx context.Context, dc *DaemonConn, r shellruntime.RPC)
 		return shellruntime.RPC{}, ownershell.ErrLimit
 	}
 	wait := make(chan shellruntime.RPC, 1)
-	state.pending[r.RequestID] = shellWaiter{dc, r.SessionID, wait}
+	state.pending[r.RequestID] = shellWaiter{dc: dc, session: r.SessionID, reply: wait, version: r.Version, op: r.Op}
 	state.mu.Unlock()
 	defer func() { state.mu.Lock(); delete(state.pending, r.RequestID); state.mu.Unlock() }()
 	raw, err := json.Marshal(r)
@@ -183,7 +191,11 @@ func (h *Hub) shellCall(ctx context.Context, dc *DaemonConn, r shellruntime.RPC)
 	}
 }
 func (h *Hub) deliverShell(dc *DaemonConn, r shellruntime.RPC) {
-	if r.Version != 1 || h.GetDaemon(dc.ID) != dc || h.FindDaemonForSession(r.SessionID) != dc || (dc.BoundSessionID != "" && dc.BoundSessionID != r.SessionID) {
+	if (r.Version != 1 && r.Version != 2) || h.GetDaemon(dc.ID) != dc || h.FindDaemonForSession(r.SessionID) != dc || (dc.BoundSessionID != "" && dc.BoundSessionID != r.SessionID) {
+		return
+	}
+	if r.Version == 2 && r.Type == "owner_shell_output" {
+		h.deliverRetainedOutput(dc, r)
 		return
 	}
 	if r.Type == "owner_shell_phase" {
@@ -217,28 +229,37 @@ func (h *Hub) deliverShell(dc *DaemonConn, r shellruntime.RPC) {
 		}
 		return
 	}
-	if wait, ok := state.pending[r.RequestID]; ok && wait.dc == dc && wait.session == r.SessionID {
+	if wait, ok := state.pending[r.RequestID]; ok && wait.dc == dc && wait.session == r.SessionID && (wait.version == 0 && r.Version == 1 || wait.version == r.Version) && (wait.op == "" || wait.op == r.Op) {
 		delete(state.pending, r.RequestID)
 		wait.reply <- r
 	}
 }
 
 type remoteShell struct {
-	api   *API
-	mu    sync.Mutex
-	live  map[string]ownershell.Binding
-	peers map[string]*DaemonConn
+	challengeRates map[string]consentChallengeRate
+	consents       map[string]*brokerRetainedConsent
+	api            *API
+	mu             sync.Mutex
+	live           map[string]ownershell.Binding
+	peers          map[string]*DaemonConn
 }
 
 func newRemoteShell(a *API) *remoteShell {
-	return &remoteShell{api: a, live: map[string]ownershell.Binding{}, peers: map[string]*DaemonConn{}}
+	return &remoteShell{challengeRates: map[string]consentChallengeRate{}, consents: map[string]*brokerRetainedConsent{}, api: a, live: map[string]ownershell.Binding{}, peers: map[string]*DaemonConn{}}
 }
 func (r *remoteShell) describe(ctx context.Context, id string) (shellruntime.RPC, error) {
 	dc := r.api.hub.FindDaemonForSession(id)
-	if dc == nil || dc.WorkspaceCapabilities.ManifestVersion != protocol.WorkspaceVersion || dc.WorkspaceCapabilities.ShellVersion != 1 {
+	if dc == nil {
+		return shellruntime.RPC{}, ownershell.ErrUnknown
+	}
+	if dc.WorkspaceCapabilities.ManifestVersion != protocol.WorkspaceVersion || dc.WorkspaceCapabilities.ShellVersion != 1 {
 		return shellruntime.RPC{}, ownershell.ErrDenied
 	}
-	return r.api.hub.shellCall(ctx, dc, shellruntime.RPC{SessionID: id, Op: "describe"})
+	reply, err := r.api.hub.shellCall(ctx, dc, shellruntime.RPC{SessionID: id, Op: "describe"})
+	if err != nil && (reply.Type != "owner_shell_result" || reply.ErrorCode == "" || ownershell.RuntimeReason(reply.ErrorCode) == ownershell.ReasonUnavailable) {
+		return reply, ownershell.ErrUnknown
+	}
+	return reply, err
 }
 func consentBinding(b ownershell.Binding, login string, i shellruntime.Identity) db.ShellConsentBinding {
 	// HOME is never browser consent authority; it is independently resolved locally.
@@ -255,10 +276,20 @@ func (r *remoteShell) Resolve(ctx context.Context, id string) (ownershell.Bindin
 		return ownershell.Binding{}, err
 	}
 	b := reply.Binding
+	if b.ShellLink.Version == 2 {
+		dc := r.api.hub.FindDaemonForSession(id)
+		var link *protocol.ShellLinkWelcome
+		if dc != nil {
+			link = dc.shellLink()
+		}
+		if dc == nil || link == nil || dc.DesktopBinding == nil || (!b.ShellLink.SameCustodian(*link) || b.ShellLink.Challenge != link.Challenge || !b.ShellLink.Desktop.ExpiresAt.Equal(link.Desktop.ExpiresAt)) || b.Owner != dc.DesktopBinding.OwnerID {
+			return ownershell.Binding{}, ownershell.ErrDenied
+		}
+	}
 	if !r.api.hub.workspaceCapabilities().Supports(b.Runtime, true) || !dcSupportsShell(r.api.hub.FindDaemonForSession(id), b.Runtime) {
 		return ownershell.Binding{}, ownershell.ErrDenied
 	}
-	if b.Runtime == "host" {
+	if b.Runtime == "host" && b.ShellLink.Version != 2 {
 		b.HostConsentValid = false
 		b.Consent = ""
 		consent, err := db.GetShellConsent(ctx, r.api.dbPool, consentBinding(b, "", reply.Identity))
@@ -330,7 +361,12 @@ func (r *remoteShell) call(ctx context.Context, g ownershell.SignedGrant, frame 
 	}
 	frame.SessionID = b.Session
 	frame.Grant = g
-	return r.api.hub.shellCall(ctx, dc, frame)
+	frame.Version = g.Grant.Version
+	reply, err := r.api.hub.shellCall(ctx, dc, frame)
+	if g.Grant.Version == 2 && err != nil && (reply.Type != "owner_shell_result" || reply.ErrorCode == "" || ownershell.RuntimeReason(reply.ErrorCode) == ownershell.ReasonUnavailable) {
+		return reply, ownershell.ErrUnknown
+	}
+	return reply, err
 }
 func (r *remoteShell) Renew(ctx context.Context, g ownershell.SignedGrant) error {
 	_, e := r.call(ctx, g, shellruntime.RPC{Op: "renew"})
@@ -437,6 +473,12 @@ func (h *Hub) abandonShellRequests(dc *DaemonConn) {
 		if wait.dc == dc {
 			delete(state.pending, id)
 			wait.reply <- shellruntime.RPC{SessionID: wait.session, RequestID: id}
+		}
+	}
+	for _, entry := range state.retained {
+		if entry.dc == dc && !entry.closed {
+			close(entry.output)
+			entry.closed = true
 		}
 	}
 	for id, entry := range state.outputs {

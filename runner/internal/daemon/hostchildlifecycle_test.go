@@ -19,24 +19,6 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/workspaceselection"
 )
 
-func hostChildAllocationFixture(t *testing.T, parent workspacePrivateManifest) *LocalWorkspace {
-	t.Helper()
-	record, _ := workspaceRecord("child")
-	w := &LocalWorkspace{record: record, state: workspacePrivateManifest{Host: true, Session: "child", Launch: parent.Launch}}
-	pins, err := w.allocateHostChild(t.Context(), parent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pins.Close()
-	for i, a := range w.state.HostChildren {
-		w.state.Members = append(w.state.Members, workspacePrivateMember{Member: w.state.Launch.Members[i], Clone: a.Path, CloneIdentity: a.Root, Result: protocol.WorkspaceMemberResult{WorkspaceMemberRef: protocol.WorkspaceMemberRef{LaunchGeneration: w.state.Launch.LaunchGeneration, MemberID: a.MemberID}, Pending: true}})
-	}
-	if err := w.save(); err != nil {
-		t.Fatal(err)
-	}
-	return w
-}
-
 func TestHostChildWorktreeLifecycle(t *testing.T) {
 	for _, scenario := range []string{"clean", "untracked", "staged", "tracked", "ignored", "ignored-and-untracked", "detached", "switched", "unproven", "replaced"} {
 		t.Run(scenario, func(t *testing.T) {
@@ -93,6 +75,9 @@ func TestHostChildWorktreeLifecycle(t *testing.T) {
 			}
 			r := recovered.state.Members[0].Result
 			if scenario == "clean" || scenario == "ignored" {
+				if r.Summary == nil || len(r.Summary.Commits) == 0 || r.Summary.Commits[0].SHA != commit {
+					t.Fatalf("metadata lost after worktree release: %+v", r.Summary)
+				}
 				if _, err := os.Stat(a.Path); !os.IsNotExist(err) {
 					t.Fatal("clean worktree retained", err)
 				}
@@ -290,8 +275,13 @@ func hostChildrenConcurrentCommits(t *testing.T, stress func(*testing.T, *LocalW
 		if got := childRepoGit(t, repo, "show", "wip/"+c.spawn.SessionID+":child.txt"); got != c.spawn.SessionID {
 			t.Fatal("wrong child commit", got)
 		}
-		if _, err := c.work.Stop(t.Context()); err != nil {
+		c.work.state.Members[0].Result.SyncNote = "previous privileged copy"
+		results, err := c.work.Stop(t.Context())
+		if err != nil {
 			t.Fatal(err)
+		}
+		if results[0].SyncNote != "" {
+			t.Fatal("final result retained a stale privileged copy note")
 		}
 	}
 	if got := childRepoGit(t, repo, "rev-parse", "HEAD"); got != head {
@@ -654,5 +644,39 @@ func TestResumedHostParentCanBindChildrenAfterRestart(t *testing.T) {
 	}
 	if r := after.discovery.Handle(t.Context(), bindChild); r.OK {
 		t.Fatal("a closed parent still binds children")
+	}
+}
+
+func TestHostChildReadableBranchRecoveryAndCleanup(t *testing.T) {
+	_, parent, repo := hostChildSelectionFixture(t)
+	const branch = "wip/ticket-data-7d67a123"
+	w := hostChildAllocationFixture(t, parent, branch)
+	a := w.state.HostChildren[0]
+	if got := childRepoGit(t, a.Path, "branch", "--show-current"); got != branch {
+		t.Fatal(got)
+	}
+	childCommit(t, a.Path, "child.txt")
+	head := childRepoGit(t, a.Path, "rev-parse", "HEAD")
+	if err := w.save(); err != nil {
+		t.Fatal(err)
+	}
+	state, err := readPrivateWorkspace(w.record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered := &LocalWorkspace{record: w.record, state: state}
+	recovered.collectHostChildren(t.Context())
+	if err := recovered.releaseHostChildren(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := childRepoGit(t, repo, "rev-parse", branch); got != head {
+		t.Fatal("lost child commit")
+	}
+	if _, err := os.Stat(a.Path); !os.IsNotExist(err) {
+		t.Fatal("clean worktree retained", err)
+	}
+	result := recovered.state.Members[0].Result
+	if result.Branch != branch || result.Head != head || result.Pending || result.RecoveryLocation != "" {
+		t.Fatalf("result: %+v", result)
 	}
 }

@@ -417,3 +417,61 @@ func TestBoardMintOffSwitchPreservesRevoke(t *testing.T) {
 		t.Fatalf("disabled revoke=%d", code)
 	}
 }
+
+func TestBoardAutomationIdentityRequiresProofAndReturnsOnlyName(t *testing.T) {
+	e := newBoardMintEnv(t, 100)
+	path := boardMintPath + "/identity"
+	if _, err := e.pool.Exec(context.Background(), `UPDATE accounts SET email='private@example.com' WHERE id=$1`, e.acctA); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"", testInternalKey} {
+		code, _, _ := e.internal(t, path, key, map[string]string{"access_token": e.boardHuman(t, e.acctA, e.sidA)})
+		if code != http.StatusUnauthorized {
+			t.Fatalf("wrong key: %d", code)
+		}
+	}
+	for _, proof := range []string{"", "invalid"} {
+		code, _, _ := e.internal(t, path, testBoardMintKey, map[string]string{"access_token": proof})
+		if code != http.StatusNotFound {
+			t.Fatalf("invalid proof: %d", code)
+		}
+	}
+	proof := e.boardHuman(t, e.acctA, e.sidA)
+	code, body, hdr := e.internal(t, path, testBoardMintKey, map[string]string{"access_token": proof, "account_id": e.acctB})
+	var got map[string]string
+	if err := json.Unmarshal([]byte(body), &got); err != nil || code != 200 || len(got) != 1 || got["username"] != "mint-a" {
+		t.Fatalf("identity = %d %s", code, body)
+	}
+	for _, fixture := range []struct{ stored, want string }{{"example-user", "example-user"}, {"private@example.com", ""}} {
+		if _, err := e.pool.Exec(context.Background(), `UPDATE accounts SET provider='github', email=$2 WHERE id=$1`, e.acctA, fixture.stored); err != nil {
+			t.Fatal(err)
+		}
+		code, body, _ := e.internal(t, path, testBoardMintKey, map[string]string{"access_token": proof})
+		if err := json.Unmarshal([]byte(body), &got); err != nil || code != 200 || got["username"] != fixture.want {
+			t.Fatalf("GitHub name = %d %s", code, body)
+		}
+	}
+	if _, err := e.pool.Exec(context.Background(), `UPDATE accounts SET provider='local' WHERE id=$1`, e.acctA); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(body, proof) || hdr.Get("Cache-Control") != "no-store" {
+		t.Fatal("identity leaked proof or is cacheable")
+	}
+	code, mintedBody, _ := e.internal(t, boardMintPath, testBoardMintKey, e.mintBody(e.acctA, proof))
+	if code != 200 {
+		t.Fatalf("mint: %d", code)
+	}
+	var minted boardMintResp
+	_ = json.Unmarshal([]byte(mintedBody), &minted)
+	code, body, _ = e.internal(t, path, testBoardMintKey, map[string]string{"access_token": minted.Token})
+	if code != 200 || !strings.Contains(body, `"username":"mint-a"`) {
+		t.Fatalf("automation identity: %d %s", code, body)
+	}
+	if _, err := e.pool.Exec(context.Background(), `UPDATE human_sessions SET revoked_at=now() WHERE chain_id=$1`, e.sidA); err != nil {
+		t.Fatal(err)
+	}
+	code, _, _ = e.internal(t, path, testBoardMintKey, map[string]string{"access_token": proof})
+	if code != http.StatusNotFound {
+		t.Fatalf("dead session: %d", code)
+	}
+}

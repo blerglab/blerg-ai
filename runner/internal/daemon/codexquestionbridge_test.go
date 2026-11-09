@@ -3,9 +3,11 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -111,9 +113,10 @@ func TestOwnerOnlyApprovalFailureSaysWhy(t *testing.T) {
 		t.Cleanup(srv.Close)
 		return srv.URL
 	}
-	closed := httptest.NewServer(http.NotFoundHandler())
-	closedURL := closed.URL
-	closed.Close()
+	// Port zero cannot have a listener: binding it allocates a nonzero port.
+	// Closing an httptest server here released its port for the refusal servers
+	// below, so "unreachable" could actually receive their 409 response.
+	closedURL := "http://127.0.0.1:0"
 	for name, tc := range map[string]struct {
 		base      string
 		runnerKey bool
@@ -169,5 +172,76 @@ func TestDesktopQuestionsUseRotatingSessionCredential(t *testing.T) {
 	answer, err := h.questionAsker("session", &collectEmitter{}, "", nil, "session-initial")(t.Context(), "Choose")
 	if err != nil || answer != "choice" {
 		t.Fatal("session-scoped question failed", err)
+	}
+}
+
+// The turn was interrupted after the answer committed. The handler cannot return it, so the close
+// asks the server to carry it to the session; it must not fetch it for a channel nobody reads.
+func TestInterruptedQuestionLeavesItsAnswerToTheServer(t *testing.T) {
+	closed := make(chan string, 1)
+	var fetches atomic.Int32
+	asked := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/expire"):
+			raw, _ := io.ReadAll(r.Body)
+			closed <- string(raw)
+			_, _ = w.Write([]byte(`{}`))
+		case r.Method == "POST":
+			_, _ = w.Write([]byte(`{"id":"late-question"}`))
+		default:
+			if fetches.Add(1) == 1 {
+				asked <- struct{}{}
+			}
+			_, _ = w.Write([]byte(`{"answered":false}`))
+			time.Sleep(10 * time.Millisecond)
+		}
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	failed := make(chan error, 1)
+	go func() {
+		_, err := codexQuestionHandler(server.URL, "fixture-token", nil, "session", &collectEmitter{})(ctx, "Question")
+		failed <- err
+	}()
+	<-asked
+	cancel()
+	if err := <-failed; err == nil {
+		t.Fatal("an interrupted question returned an answer")
+	}
+	select {
+	case body := <-closed:
+		if !strings.Contains(body, `"waiter_ended":true`) {
+			t.Fatalf("close body = %s", body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the question was never closed")
+	}
+	time.Sleep(50 * time.Millisecond)
+	after := fetches.Load()
+	time.Sleep(100 * time.Millisecond)
+	if fetches.Load() != after {
+		t.Fatal("still polling after the close")
+	}
+}
+
+// The native loop has its own late-answer path, so its close must not ask for a relay too.
+func TestNativeLoopCloseDoesNotAskForARelay(t *testing.T) {
+	closed := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			raw, _ := io.ReadAll(r.Body)
+			closed <- string(raw)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"answered":false}`))
+	}))
+	defer server.Close()
+	m := NewLoopMessenger(LoopMessengerConfig{Context: t.Context(), BaseURL: server.URL, SessionID: "session", TokenSource: func() string { return "fixture-token" }})
+	m.(agent.AskCloser).CloseAsk("question", "")
+	if body := <-closed; strings.Contains(body, `"waiter_ended":true`) {
+		t.Fatalf("close body = %s", body)
 	}
 }

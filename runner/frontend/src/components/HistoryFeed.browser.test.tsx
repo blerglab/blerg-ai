@@ -99,7 +99,7 @@ describe('History feed on a phone (390 px)', () => {
   it('fits every stroke and the filters in the drawer, one line each', async () => {
     renderPage()
     await userEvent.click(screen.getByTestId('rail-toggle'))
-    const drawer = await screen.findByRole('dialog', { name: 'Session panel' })
+    const drawer = await screen.findByRole('dialog', { name: 'Workspace panel' })
     await waitFor(() => expect(drawer.getBoundingClientRect().right).toBe(390))
     await within(drawer).findAllByTestId('stroke')
     oneLineEach(drawer)
@@ -129,7 +129,7 @@ describe('History feed squeezed on a phone (390 px)', () => {
     apiFetch.mockImplementation((url: string) => json(url.endsWith('/topics') ? r : url.endsWith('/live') ? seedRichRail().live : {}))
     renderPage()
     await userEvent.click(screen.getByTestId('rail-toggle'))
-    const drawer = await screen.findByRole('dialog', { name: 'Session panel' })
+    const drawer = await screen.findByRole('dialog', { name: 'Workspace panel' })
     await waitFor(() => expect(drawer.getBoundingClientRect().right).toBe(390))
     await within(drawer).findAllByTestId('stroke')
     const d = drawer.getBoundingClientRect()

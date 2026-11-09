@@ -67,7 +67,7 @@ export default function ReviewRequestBar({ artifact, hideAsk = false }: { artifa
           </div>
         </form>
       )}
-      {pending && !decide && <span className="review-request-bar-wait">Waiting for the session owner's decision.</span>}
+      {pending && !decide && <span className="review-request-bar-wait">Waiting for the workspace owner's decision.</span>}
       {error && <div className="delegation-error" role="alert" data-testid="review-request-bar-error">{error}</div>}
     </section>
   )

@@ -33,6 +33,16 @@ func testDesktopPersonalAttachFailure(t *testing.T, failure string) {
 	for _, state := range []string{"existing", "fresh", "pending"} {
 		t.Run(state, func(t *testing.T) {
 			fx := newPrivFixture(t)
+			var expire func()
+			if failure == "timeout" {
+				// The fence deadline policy is tested under virtual time in db.
+				// Every enrollment state still expires after its real SQL bind.
+				fx.hub.desktopAttachContext = func(parent context.Context) context.Context {
+					ctx := &attachDeadlineContext{Context: parent, done: make(chan struct{})}
+					expire = func() { close(ctx.done) }
+					return ctx
+				}
+			}
 			fx.hub.UnregisterIfCurrent(fx.dc)
 			binding := *fx.dc.DesktopBinding
 			switch state {
@@ -50,6 +60,12 @@ func testDesktopPersonalAttachFailure(t *testing.T, failure string) {
 			if !failWelcome {
 				fx.hub.SetDelegationHelloHook(func(ctx context.Context, _ string) error {
 					if failure == "timeout" {
+						if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > 5*time.Second {
+							t.Error("attach callback did not receive the bounded fence context")
+						}
+						if expire != nil {
+							expire()
+						}
 						<-ctx.Done()
 						return ctx.Err()
 					}
@@ -99,6 +115,23 @@ func testDesktopPersonalAttachFailure(t *testing.T, failure string) {
 				t.Fatalf("failed personal attach left status=%q reason=%q", d.Status, d.StatusReason)
 			}
 		})
+	}
+}
+
+// An explicitly advanced deadline, scoped to one attach. Parent values survive
+// so the real fence and SQL authority paths run unchanged.
+type attachDeadlineContext struct {
+	context.Context
+	done chan struct{}
+}
+
+func (c *attachDeadlineContext) Done() <-chan struct{} { return c.done }
+func (c *attachDeadlineContext) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
 	}
 }
 

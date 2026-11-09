@@ -4,7 +4,7 @@
 // it, then as a link in the same place: a hovercard on hover, a click opening the ticket or the
 // commit viewer. Model: model/refs.ts.
 import './markdown.css'
-import { createContext, useContext, useEffect, useMemo, useSyncExternalStore, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useSyncExternalStore, type ReactNode } from 'react'
 import { Hover } from './Hovercard'
 import { useCommitOpener } from './CommitViewer'
 import { isHash, splitRefs, refStoreFor, type ChatRefs, type RefKey, type RefStore } from '../model/refs'
@@ -20,6 +20,34 @@ export const RefContext = createContext<RefContextValue | null>(null)
 
 export function useRefContext(): RefContextValue | null {
   return useContext(RefContext)
+}
+
+/** The same resolve-then-open behavior `RefSpan` uses, for a non-text surface that draws its own
+ *  DOM imperatively (BLG-468's diagram chips) rather than rendering `<RefSpan>` directly: `want`s
+ *  the key, opens it once the store confirms it's a card, and does nothing (no chip, no error) if
+ *  it resolves to 'none' or the host lends no `openCard`. `undefined` when there's no RefContext
+ *  at all — the caller's own "lending contract absent → no-op" shape (refs.ts's own one). */
+export function useChipOpener(): ((key: string) => void) | undefined {
+  const ctx = useRefContext()
+  const store = ctx?.store
+  const open = ctx?.refs?.openCard
+  // Stable across renders (useCallback, not a plain closure) so a consumer can put this in an
+  // effect's own dependency array without that effect re-running — and so redrawing — on every
+  // unrelated re-render of whatever provides RefContext.
+  const opener = useCallback((key: string) => {
+    if (!store || !open) return
+    const refKey = key as RefKey
+    const existing = store.get(refKey)
+    if (existing.state === 'card') { open(existing.target); return }
+    store.want(refKey)
+    const unsubscribe = store.subscribe(() => {
+      const next = store.get(refKey)
+      if (next.state === 'pending') return
+      unsubscribe()
+      if (next.state === 'card') open(next.target)
+    })
+  }, [store, open])
+  return ctx ? opener : undefined
 }
 
 // ── The rehype step ─────────────────────────────────────────────────────────────────────────────
@@ -57,8 +85,10 @@ function walk(node: HNode) {
     }
     if (c.type === 'text' && c.value) {
       const pieces = splitRefs(c.value)
-      if (pieces.length === 1 && !('key' in pieces[0]) && !('cards' in pieces[0])) { out.push(c); continue }
-      for (const p of pieces) out.push('cards' in p
+      if (pieces.length === 1 && !('key' in pieces[0]) && !('cards' in pieces[0]) && !('href' in pieces[0])) { out.push(c); continue }
+      for (const p of pieces) out.push('href' in p
+        ? { type: 'element', tagName: 'a', properties: { href: p.href, target: '_blank', rel: 'noopener noreferrer' }, children: [{ type: 'text', value: p.text }] }
+        : 'cards' in p
         ? { type: 'element', tagName: 'span', properties: { [RANGE]: p.cards.join(',') }, children: [{ type: 'text', value: p.text }] }
         : 'key' in p ? mark(p.key, [{ type: 'text', value: p.text }]) : { type: 'text', value: p.text })
       continue
@@ -85,6 +115,7 @@ export function RefSpanFor(props: { enabled: boolean } & Record<string, unknown>
   const key = rest['data-blerg-ref']
   if (enabled && typeof key === 'string' && (key.startsWith('card:') || key.startsWith('commit:'))) return <RefSpan refKey={key as RefKey}>{children as ReactNode}</RefSpan>
   delete rest['data-blerg-ref']
+  // button-guard-ignore: Markdown span attributes are forwarded as content, not an interactive button
   return <span {...rest}>{children as ReactNode}</span>
 }
 
@@ -136,7 +167,9 @@ function RefSpan({ refKey, children }: { refKey: RefKey; children?: ReactNode })
 
 /** The same confirmed card references in host surfaces such as History and plans. */
 export function ReferenceText({ text }: { text: string }) {
-  return <>{splitRefs(text).map((p, i) => 'key' in p
+  return <>{splitRefs(text).map((p, i) => 'href' in p
+    ? <a key={i} href={p.href} target="_blank" rel="noopener noreferrer">{p.text}</a>
+    : 'key' in p
     ? <RefSpan key={i} refKey={p.key}>{p.text}</RefSpan>
     : 'cards' in p ? <RangeSpan key={i} numbers={p.cards}>{p.text}</RangeSpan> : p.text)}</>
 }

@@ -14,6 +14,18 @@
     { "name": "sessions", "description": "The session contract: start, drive, follow, collect." },
     { "name": "files", "description": "A session's files: what the agent published and what a person attached." }
   ],
+  "x-session-gate-reports": {
+    "path": "POST /api/sessions/{id}/gate-reports",
+    "authentication": "Running session's own messaging credential or existing daemon authority; browser and other-session tokens refused.",
+    "description": "Ingest a sanitized pre_merge report envelope: run_id UUID, positive revision, commit SHA, started_at/finished_at UTC timestamps and report with seconds, complete and suites (suite, seconds, outcome). At most 128 KiB and 128 unique identifier-only suite labels. Only those typed fields persist; all log, host, path and diagnostic metadata is discarded. Reports are reported by the agent, not verified. Limits: 30 requests/minute, 256 stored runs/session, 30-day retention. Finish times more than five seconds in the future and run seconds inconsistent with the interval by more than one second are refused. Producer: blerg-runner gate report FILE; pre_merge.py invokes it inside sessions.",
+    "success": "201 for a new run or higher correction revision; 200 for an identical sanitized retry; 409 for stale/conflicting revisions; 400 for malformed fields; 429 for per-session rate/count limits. Feeds blerg.gates.durations and blerg.gates.bins under viewer authority. See docs/design/charts-datasets.md for the row contract."
+  },
+  "x-session-task-clear": {
+    "path": "POST /api/sessions/{id}/tasks/{task}/clear",
+    "authentication": "The session’s own session token only.",
+    "description": "Acknowledge a finished background task. The result remains recorded; Running now hides it.",
+    "success": "200 with task_id; 404 when no finished task exists in this session."
+  },
   "x-session-discard": {
     "path": "POST /api/sessions/{id}/discard",
     "authority": "Signed-in human owner with a browser session only; agent, session, daemon and other accounts have no authority.",
@@ -95,7 +107,51 @@
       "description": "Recorded display IDs scoped to this session and direct same-account children, current work first. Native tool control IDs may differ."
     }
   },
+  "x-review-marks": {
+    "path": "POST /api/sessions/{id}/marks",
+    "authority": "Session credential bound to this session (including workers), daemon credential, or signed-in owner.",
+    "description": "kind review records structured review data as a durable mark event in History. Imports use {marks:[...]} with at on each mark; repeated historical imports deduplicate. Requires a linked card or effective board access. by names the reviewing engine and is a claim, not verified provenance. Session-token person attribution is stored as claimed_by with by and posted_by agent. Findings contain one severity per finding, including repeated severities.",
+    "fields": {"kind":"review","text":"summary","card":368,"board_id":"board-id","verdict":"approved|changes|rejected","findings":["high","medium","low"],"by":"engine","target":"7 to 40 hex commit sha","round":1,"at":"optional RFC3339 timestamp"}
+  },
+  "x-failure-marks": {
+    "path": "POST /api/sessions/{id}/marks",
+    "description": "Structured failure records and rerun outcomes, including worker sessions. Requires a linked card or effective board access; session-token person attribution is stored as a claim with posted_by agent. Findings remain exclusive to reviews. Server failure alerts are linked automatically through card session attribution.",
+    "fields": {"kind":"failure","text":"summary","card":368,"board_id":"board-id","type":"test|gate|flake|review|session|engine|deploy|merge","severity":"high|medium|low","suite":"suite name","rerun_passed":false,"at":"optional RFC3339 timestamp"}
+  },
+  "x-card-data": {
+    "path": "GET /api/board-cards/{board}/{number}/data",
+    "authority": "Signed-in human owner; live board read permission is checked. Agent/session credentials are refused.",
+    "description": "Returns {card,activity}. card includes estimates, first-set times (null when historically unknown), flow entry snapshots. activity includes owner-scoped linked sessions and their same-owner workers, engine/model, structured reviews and explicit blocking-ask intervals with overlapping time counted once. No engine idle time is counted as waiting. Multiple cards or worker asks a parent can answer make waiting attribution ambiguous: aggregate seconds are null and raw intervals remain available. Failures include explicit marks and linked server failure alerts; reruns list successful rerun marks without removing failures. Each session includes a disjoint interval-union timing split for tests, build_lint, git, read, edit, other, model, idle, waiting_on_person and unknown, plus building/reviewing/fixing/waiting_on_person/gates phases. Commit tool intervals count as gates because they include commit hooks, except --no-verify/-n. Child review marks bound a reviewing phase from launch through verdict. The split covers the complete linked session, not an invented per-card allocation. card_links and shared_with_other_cards identify shared attribution. Detail is capped at 100 model events and 100 worker events. Private timing batches are capped at 2000 events; longer histories use an ordered row stream for complete totals. timing_events_truncated identifies the batch limit and timing_event_count retains the full count. model_events_truncated and workers_truncated identify truncated detail. Missing attribution remains unknown. Links survive unpin and title edits; bare #N titles require a launch-board context."
+  },
   "paths": {
+    "/api/inbox/{item}": {
+      "delete": {
+        "summary": "Delete an inbox item",
+        "security": [{"humanSession": []}],
+        "description": "Human recipient only, including in shared workspaces; no admin override. Broadcasts a content-free inbox_changed invalidation to the recipient. The UI delays this request five seconds to offer Undo.",
+        "parameters": [
+          {
+            "name": "item",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted"
+          },
+          "401": {
+            "description": "Human sign-in required"
+          },
+          "404": {
+            "description": "Missing or foreign item"
+          }
+        }
+      }
+    },
     "/api/session-boards": {
       "get": {
         "tags": [
@@ -455,7 +511,7 @@
                   "text": { "type": "string", "description": "The turn to deliver. Required and non-empty." },
                   "source": {
                     "type": "string",
-                    "description": "Who is speaking, for the transcript. Defaults to `runner`. The sources Blerg writes itself (`proposal`, `review`, `system`, `ask_answer`, `note_reply`, `limit_resume`, `child_turn`, `question_answer`, `plan_drift`, `usage_limit`) are refused with 422, and so is `session`, which the runner sets itself for a parent session's messages to its child.",
+                    "description": "Who is speaking, for the transcript. Defaults to `runner`. The sources Blerg writes itself (`page_result`, `proposal`, `review`, `system`, `ask_answer`, `note_reply`, `limit_resume`, `child_turn`, `question_answer`, `plan_drift`, `usage_limit`) are refused with 422, and so is `session`, which the runner sets itself for a parent session's messages to its child.",
                     "default": "runner"
                   },
                   "client_id": {
@@ -715,7 +771,7 @@
         "operationId": "upload",
         "tags": ["files"],
         "summary": "Attach a person's file to the session (raw body, X-Artifact-Name header), for the agent to fetch.",
-        "description": "The body is the file; the name comes from `X-Artifact-Name` (percent-encoded) or `?name=`, sanitized to a base name. The content type is classified by the server from the name and bytes — the request's `Content-Type` is never used. Stored with `origin: user`, attributed to the account the credential acts for, or to the person a broker credential names in `X-Blerg-Acting-Account`. Caps, as on the browser route: 100 MiB per file and 500 MiB of attachments per session unless an administrator raised this session's total (no lifetime file-count cap), 20 versions per name (the defaults; an operator changes the sizes with `BLERG_RUNNER_MAX_FILE_MB` and `BLERG_RUNNER_MAX_SESSION_UPLOADS_MB`, and `GET /api/runner/sessions/{id}` reports the ones in force as `limits`); an ended session takes no more. Send `Content-Length`: a declared size over the limit is refused before the body is read, while an undeclared one is read up to the limit first.",
+        "description": "The body is the file; the name comes from `X-Artifact-Name` (percent-encoded) or `?name=`, sanitized to a base name. The content type is classified by the server from the name and bytes — the request's `Content-Type` is never used. Stored with `origin: user`, attributed to the account the credential acts for, or to the person a broker credential names in `X-Blerg-Acting-Account`. Caps, as on the browser route: 100 MiB per file and 500 MiB of attachments per session unless an administrator raised this session's total (no lifetime file-count cap), 500 versions per name (the defaults; an operator changes the sizes with `BLERG_RUNNER_MAX_FILE_MB` and `BLERG_RUNNER_MAX_SESSION_UPLOADS_MB`, and `GET /api/runner/sessions/{id}` reports the ones in force as `limits`); an ended session takes no more. Send `Content-Length`: a declared size over the limit is refused before the body is read, while an undeclared one is read up to the limit first.",
         "security": [{ "agentToken": ["session.start"] }, { "runnerKey": [] }],
         "parameters": [
           { "$ref": "#/components/parameters/SessionId" },
@@ -901,6 +957,7 @@
           }
         ],
         "parameters": [
+          { "name": "runtime_target_id", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Named cluster target from targets. Omitted means the default; unknown IDs refuse with 422." },
           {
             "name": "runtime",
             "in": "query",
@@ -1295,15 +1352,17 @@
       },
       "StartRequest": {
         "type": "object",
-        "description": "`repo` is required unless `no_repo` is true, in which case `repo`, `git_url` and `provider` must be absent (422 otherwise). A blank `repo` without `no_repo` is refused with 422 `repo is required`, as it always was.",
+        "description": "`repositories` selects 2 to 20 targets for one workspace (desktop discovery or cluster workspace support required); each member is resolved and authorized before dispatch. Legacy scalar fields, when supplied, must agree with its first member. Otherwise `repo` is required unless `no_repo` is true, in which case `repo`, `git_url` and `provider` must be absent (422 otherwise). A blank `repo` without `no_repo` is refused with 422 `repo is required`, as it always was.",
         "anyOf": [
           { "required": ["repo"] },
+          { "required": ["repositories"] },
           { "required": ["no_repo"], "properties": { "no_repo": { "const": true } } }
         ],
         "properties": {
+          "repositories": { "type": "array", "minItems": 2, "maxItems": 20, "description": "All repository targets for one workspace. Missing or ambiguous members refuse the entire start. Cluster targets must be in the caller's authorized hosted inventory. Child and cron starts cannot use this field.", "items": { "type": "object", "required": ["repo"], "properties": { "repo": { "type": "string" }, "provider": { "type": "string" }, "git_url": { "type": "string" } } } },
           "repo": {
             "type": "string",
-            "description": "A folder name or `org/name` (one slash at most, no `..`, no leading dot). On a daemon runtime it must exist under the daemon's repos root. Cluster starts resolve bare folder names from unambiguous reported desktop remotes, preserving their provider; otherwise they need a configured organization/base or owner/name. Repository read access is checked before Job creation. Required unless `no_repo` is true."
+            "description": "A folder name or `org/name` (one slash at most, no `..`, no leading dot). On a daemon runtime it must exist under the daemon's repos root. Cluster starts resolve bare folder names from unambiguous reported desktop remotes, preserving their provider; otherwise they need a configured organization/base or owner/name. Repository read access is checked before Job creation. Required unless `no_repo` is true or `repositories` is supplied."
           },
           "no_repo": {
             "type": "boolean",
@@ -1312,6 +1371,7 @@
           "git_url": { "type": "string", "description": "Clone URL override for cross-org repositories or another git provider, e.g. `https://gitlab.com/group/project.git` (cluster runtime only). A git token is only ever sent to the host it belongs to: the launcher's personal token for a registered provider's host (GitHub: github.com, GitLab: gitlab.com), or the install's shared token for its own configured git base. A URL on any other host is cloned with no token at all, so only a public repository clones there." },
           "provider": { "type": "string", "enum": ["github", "gitlab"], "description": "The git provider `repo` lives on. Honored on every runtime: a cluster clone comes from that provider's host with the caller's token for it, and a daemon never resolves the repo on another provider. Absent means GitHub, as before this field existed — pass it for any repository not on GitHub, or an `owner/name` is cloned from github.com. With `git_url`, the URL must be on this provider's host (422 otherwise)." },
           "title": { "type": "string", "description": "A human-readable label for the session." },
+          "kind": { "type": "string", "enum": ["card", "role", "review", "research"], "description": "Worker purpose; omission infers card only from a ticket key in the creation title." },
           "prompt": { "type": "string", "description": "The session's first turn." },
           "model": { "type": "string", "description": "Engine-specific model name; the install's default when empty. An `id` from GET /api/models/{engine}; for Claude also a Claude Code alias such as `sonnet` or `sonnet[1m]` (lowercase letters, digits, `.`, `-`, `[`, `]`, at most 64 characters). Other engines: letters, digits and `. _ : / @ - [ ]`, not starting with `-`, at most 128 characters." },
           "effort": { "type": "string", "description": "Reasoning effort (see the model's `efforts` in GET /api/models/{engine}); the model's own default when empty. Must be in the engine's allowlist — Claude: `low`, `medium`, `high`, `xhigh`, `max`; Codex: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; Hermes: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; an engine with no effort levels (today: OpenClaw) refuses any non-empty value with 422 — and, for a model the engine's list knows, in that model's own `efforts`. A daemon-reported list (Codex, Hermes) is per workstation and this call does not name one, so for those engines only the allowlist is checked here." },
@@ -1329,6 +1389,7 @@
             "description": "HMAC-SHA256 key for the webhook's X-Blerg-Signature header. Never returned by any endpoint."
           },
           "engine": { "type": "string", "description": "Coding engine to run. Defaults to `claude`." },
+          "runtime_target_id": { "type": "string", "description": "Named cluster target ID. Omitted on a cluster request selects the default; unknown IDs refuse with 422. This release offers cluster only. Desktop runtimes keep daemon_id." },
           "runtime": {
             "type": "string",
             "enum": ["cluster", "docker", "daemon"],
@@ -1338,6 +1399,7 @@
             "type": "boolean",
             "description": "One-shot: the runner stops the session itself once the first turn after the prompt is done — same effect as POST /stop, so `result.terminal` becomes true and the completion webhook fires without the caller stopping anything. Defaults to false: the session stays up waiting for more messages."
           },
+          "verbosity": {"type":"string", "enum":["narrated","standard","terse"], "description":"Reply style, independent of interaction mode. New sessions use the account default or Standard; children default to Terse. The person can change it for subsequent turns."},
           "interaction": {
             "type": "string",
             "enum": ["interactive", "unattended"],
@@ -1355,6 +1417,7 @@
         "required": ["lifecycle", "runtime", "resumable", "auto_stop", "interaction", "error_reason", "end_reason", "ended_by"],
         "properties": {
           "lifecycle": { "$ref": "#/components/schemas/Lifecycle" },
+          "runtime_target_id": { "type": "string", "description": "Named cluster target ID. Omitted on a cluster request selects the default; unknown IDs refuse with 422. This release offers cluster only. Desktop runtimes keep daemon_id." },
           "runtime": {
             "type": "string",
             "enum": ["none", "docker", "daemon", "cluster", "job_finished"],
@@ -1362,6 +1425,7 @@
           },
           "resumable": { "type": "boolean", "description": "Whether the next message can revive a dead session." },
           "auto_stop": { "type": "boolean", "description": "Whether this session was started one-shot: the runner ends it when its first turn is done." },
+          "verbosity": {"type":"string", "enum":["narrated","standard","terse"], "description":"Reply style, independent of interaction mode. New sessions use the account default or Standard; children default to Terse. The person can change it for subsequent turns."},
           "interaction": { "type": "string", "enum": ["interactive", "unattended"], "description": "The session's interaction mode, as decided at start: `interactive` (a person is reading its chat as it works, and the agent was told so) or `unattended` (nobody is). Never empty: a session started before the mode was recorded reads `interactive` when a person started it in the app and `unattended` when a tool, a cron or the runner key did." },
           "error_reason": { "type": "string", "description": "Why it failed; empty unless the lifecycle is `error`." },
           "end_reason": { "$ref": "#/components/schemas/EndReason" },
@@ -1488,13 +1552,21 @@
           "session_id": { "type": "string", "format": "uuid" },
           "lifecycle": { "$ref": "#/components/schemas/Lifecycle" },
           "terminal": { "type": "boolean", "description": "True for `ended` and `error`: the work is over." },
+          "runtime_target_id": { "type": "string", "description": "Named cluster target ID. Omitted on a cluster request selects the default; unknown IDs refuse with 422. This release offers cluster only. Desktop runtimes keep daemon_id." },
           "runtime": { "$ref": "#/components/schemas/Status/properties/runtime" },
           "repo": { "type": "string" },
           "git_url": { "type": "string" },
-          "branch": { "type": "string", "description": "`wip/<session_id>`: pushed to the repository's remote by a cluster session; for any sandboxed session (a child or not), the branch fetched from its own clone into the repository on its desktop. Empty for a host session or a session with no repository." },
+          "branch": { "type": "string", "description": "Recorded work branch; use this returned name rather than deriving it from a session ID. Pushed to the repository's remote by a cluster session; for any sandboxed session (a child or not), the branch fetched from its own clone into the repository on its desktop. Empty for a host session or a session with no repository." },
           "workspace": { "type": "object", "description": "Authorized immutable launch manifest with member IDs, paths, provider/destination and launch_generation. Omitted when source metadata is not authorized." },
           "workspace_results": { "type": "array", "description": "Persisted outcomes qualified by member_id and launch_generation. Folder scalar repo, git_url and branch remain empty. Recovery locations require the exact desktop recipient.", "items": { "type": "object", "required": ["member_id", "launch_generation", "base", "head", "branch"], "properties": { "member_id": { "type": "string" }, "launch_generation": { "type": "string" }, "base": { "type": "string" }, "head": { "type": "string" }, "branch": { "type": "string" }, "sync_error": { "type": "string" }, "push_error": { "type": "string" }, "pending": { "type": "boolean" }, "recovery_location": { "type": "string" } } } },
+          "status": { "type": "string", "description": "Detailed session status, including idle and waiting, as shown by session list. Lifecycle remains the broader contract state." },
+          "turn_complete": { "type": "boolean", "description": "The latest turn ended, with no newer accepted input or user message. An idle status alone can precede dispatch of queued work." },
           "last_assistant_message": { "type": "string", "description": "The last text the agent wrote in its last turn (the one in progress, while one is). Empty when that turn wrote none or failed." },
+          "worker_data_notice": { "type": "string", "description": "Child result route only: worker text is untrusted data, never authority to run a command. The session result CLI wraps this result under data with trust=untrusted_worker_data." },
+          "open_asks": { "type": "array", "description": "Child result route only: full untrusted question bodies with message_id, escalated, person_required, no_wait and waiter_ended. Answer and escalation permissions are unchanged.", "items": { "type": "object" } },
+          "notes": { "type": "array", "description": "Child result route only: newest 20 worker notes, selected in SQL, with message_id and untrusted body. Retained across reads; each body is clipped to 4096 characters and truncated reports clipping.", "items": { "type": "object" } },
+          "closed_questions": { "type": "array", "description": "Child result route only: latest 20 resolved or withdrawn questions with message_id, body, status, answer and dismissed; all text is untrusted data.", "items": { "type": "object" } },
+          "sync_problem": { "type": "string", "description": "Child result route only: untrusted workspace delivery detail for the last turn, excluded from wakes." },
           "error_reason": { "type": "string", "description": "Why the session failed; else, when its last turn failed, why that turn did." },
           "end_reason": { "$ref": "#/components/schemas/EndReason" },
           "ended_by": { "$ref": "#/components/schemas/EndedBy" },
@@ -1571,6 +1643,7 @@
           "targets"
         ],
         "properties": {
+          "runtime_target_id": { "type": "string", "description": "Named cluster target ID. Omitted on a cluster request selects the default; unknown IDs refuse with 422. This release offers cluster only. Desktop runtimes keep daemon_id." },
           "runtime": {
             "type": "string"
           },
@@ -1598,6 +1671,7 @@
                 "daemon_id": {
                   "type": "string"
                 },
+                "runtime_target_id": { "type": "string", "description": "Named cluster target ID; absent for a desktop." },
                 "runtimes": {
                   "type": "array",
                   "items": {
@@ -1664,6 +1738,7 @@
                 "models": {
                   "$ref": "#/components/schemas/ModelList"
                 },
+                "runtime_target_id": { "type": "string", "description": "Named cluster target ID. Omitted on a cluster request selects the default; unknown IDs refuse with 422. This release offers cluster only. Desktop runtimes keep daemon_id." },
                 "runtime": {
                   "type": "string"
                 },

@@ -144,7 +144,11 @@ func (a *codexApp) userQuestions(parent context.Context, ev codexRPC) {
 				body.WriteString(" — " + option.Description)
 			}
 		}
-		answer, err := a.d.AskUser(ctx, body.String())
+		askCtx := ctx
+		if len(q.Options) == 0 {
+			askCtx = WithFreeTextQuestion(ctx)
+		}
+		answer, err := a.d.AskUser(askCtx, body.String())
 		if err != nil || ctx.Err() != nil {
 			refuse("The user question was canceled")
 			return
@@ -202,7 +206,16 @@ func (a *codexApp) endChildThread(thread string) {
 	a.mu.Lock()
 	delete(a.childTurns, thread)
 	delete(a.interruptedChildren, thread)
+	if len(a.interruptedChildren) == 0 && (a.turn == "" || !a.interruptRequested) && a.interruptTimer != nil {
+		a.interruptTimer.Stop()
+		a.interruptTimer = nil
+		a.interruptEpoch++
+	}
 	a.mu.Unlock()
+	select {
+	case a.interruptWake <- struct{}{}:
+	default:
+	}
 	a.cancelDynamic(thread, "")
 }
 

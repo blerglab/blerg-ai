@@ -168,6 +168,12 @@ docker push "${REGISTRY}/blerg-runner:${TAG}"
 echo "==> Ensuring namespace/blerg exists"
 kubectl get namespace blerg >/dev/null 2>&1 || kubectl create namespace blerg
 
+live_data_ready=true
+if ! "$script_dir/provision_live_data.sh" "${REGISTRY}/blerg-core:${TAG}" "$work_dir"; then
+  live_data_ready=false
+  echo "WARNING: Live-data TLS provisioning failed; live-data stays off and application deployment continues. Check Docker bind-mount ownership/user namespaces and SELinux :Z support; rerun provision_live_data.sh after fixing access." >&2
+fi
+
 echo "==> Generating blerg-secrets (existing values are pinned via SECRET_* env vars, otherwise reused from the live Secret, otherwise randomized)"
 # Re-running this script (e.g. to roll out a new TAG) must NEVER rotate a
 # value Postgres or a component already has on disk out from under it — a
@@ -363,6 +369,8 @@ else
   kubectl apply -f "$script_dir/cluster-runtime.yaml"
 fi
 
+# Certificate renewal must also restart same-tag deployments.
+python3 "$script_dir/render_live_data.py" "$render_dir" "$work_dir" "$live_data_ready"
 kubectl apply -k "$render_dir"
 # env-from-ConfigMap values are read once, at process start. A re-run with an
 # unchanged TAG leaves the Deployment's pod spec byte-identical, so `apply -k`

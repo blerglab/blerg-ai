@@ -1,3 +1,4 @@
+import {liveFileSupport} from '../visual/liveFile'
 // ArtifactViewer: shows a published file inside the app. The bytes come through the transport's
 // authenticated `raw` read, and what is done with them depends on the file's `view`
 // (model/artifactViews.ts):
@@ -16,10 +17,11 @@
 //                                  popups or top navigation) and a CSP meta ahead of the page cuts
 //                                  its network entirely.
 //   anything else                  no preview: name, size, type and the Download button.
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { HostedViewerRequest, useViewerHost } from './ViewerHost'
 import { formatSize, parseCsv, prettyJson, withCsp } from '../model/artifacts'
+import { TimeLabel } from './TimeLabel'
 import { langFromName } from '../model/codeLang'
 import {
   ARTIFACT_VIEWS,
@@ -29,6 +31,7 @@ import {
   TEXT_VIEW_MAX,
   blobTypeFor,
   keptMediaUrl,
+  isSvgImage,
   mediaUrl,
   releaseMediaUrl,
   isViewable,
@@ -38,25 +41,32 @@ import { useBackdropClose } from '../hooks/useBackdropClose'
 import { useSelectAllIn } from '../hooks/useSelectAllIn'
 import { composeMarkupMessage } from '../model/feedback'
 import { MAXIMIZED_KEY, isMaximizeShortcut, localStorageChatStorage, type ViewerLayoutKind as LayoutKind } from '../model/storage'
-import { FILE_GONE_MESSAGE, FileRequestError, fileErrorText, isArtifactGone } from '../transport/files'
+import { FILE_GONE_MESSAGE, FileRequestError, fileErrorText, isArtifactGone, saveBlob } from '../transport/files'
 import type { ArtifactInfo, TransportFiles } from '../transport/types'
 import { useChat } from './context'
-import { contentKeeper, peekContent } from '../model/viewCache'
+import { artifactContentIdentity as artifactIdentity, contentKeeper, peekContent } from '../model/viewCache'
 import CodeLines from './CodeLines'
 import DataTable from './DataTable'
 import ErrorId from './ErrorId'
 import SourceCode from './SourceCode'
-import ViewerToolbar, { ViewerAction, WrapToggle } from './ViewerToolbar'
+import ViewerToolbar, { ViewerActionsContext, ViewerAction, WrapToggle } from './ViewerToolbar'
 import { WrapHostContext, WrapScopeContext, isWrapShortcut, toggleWrapIn, wrapKind, type WrapTarget } from '../model/lineWrap'
 import { hasRenderedText } from '../model/rawView'
 import DiffView from './DiffView'
 import Markdown, { type MarkdownDocument } from './Markdown'
 import VisualBlock from './VisualBlock'
-import { visualFile } from '../model/visualKind'
+import { parseVegaLite } from '../visual/policy'
+import { parseDashboard } from '../visual/dashboard'
+import { renderVisual, type RenderedVisual } from '../visual/render'
+import { DASHBOARD_EXPORT_BLOCKED, payloadExportAllowed, exportPng, exportSvg, exportedAtLowerResolution } from '../visual/visualExport'
+import { readVisualTheme } from '../visual/theme'
+import { visualFile, type VisualKind } from '../model/visualKind'
 import MarkupMode from './markup/MarkupMode'
 import ImageView from './ImageView'
 import ReviewMode from './review/ReviewMode'
 import ReviewRequestBar from './ReviewRequestBar'
+import AnswerPage from './AnswerPage'
+import VersionComparison from './VersionComparison'
 
 type Loaded =
   | { kind: 'text'; text: string }
@@ -68,7 +78,9 @@ type Loaded =
 /** What an artifact view keeps (model/viewCache): a version's bytes never change, so a kept one is
  *  shown and not read again. An SVG keeps the data: URL it drew from. */
 type KeptArtifact = { kind: 'text'; text: string } | { kind: 'blob'; blob: Blob; dataUrl?: string }
-const artifactIdentity = (a: ArtifactInfo) => `artifact:${a.id}:${a.version ?? ''}:${a.view}:${a.size}`
+// A live file's version never moves, so its own updated_at (BLG-470) has to be part of what
+// counts as "changed content" here too — otherwise an in-place republish that happens to keep the
+// same byte size would not force the remount that picks up its freshly fetched bytes.
 
 /** What the dialog's body shows: the file, its review (markdown, pdf) or a draw-over (image). */
 type Mode = 'view' | 'review' | 'markup'
@@ -98,10 +110,123 @@ interface Props {
 export default function ArtifactViewer(props: Props) {
   const host = useViewerHost()
   if (host && !props.embedded) return <HostedViewerRequest view={{ kind: 'artifact', artifact: props.artifact, commit: props.commit, review: props.review, autoplay: props.autoplay }} consumed={props.onClose} />
+  if (props.embedded && !props.review) return <FollowingArtifact key={`${props.sessionId}:${/\.(?:vl|vega-lite|dash)\.json$/i.test(props.artifact.name) ? props.artifact.id : artifactIdentity(props.artifact)}`} {...props} />
   return <ArtifactViewerSession key={`${props.sessionId}:${props.artifact.id}:${props.artifact.view}:${props.artifact.version ?? ''}:${props.review ? 'review' : 'view'}`} {...props}/>
 }
 
-function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, onOpen, autoplay = false, commit = null, review = false, embedded = false, headerActions }: Props) {
+function FollowingArtifact(props: Props) {
+  const isLive = props.artifact.live === true
+  const followKey = `blerg.viewer.follow.${props.sessionId}.${props.artifact.origin === 'user' ? 'user' : 'agent'}.${props.artifact.name}`
+  const [following, setFollowing] = useState(() => isLive || localStorageChatStorage.get(followKey) !== '0')
+  const [shown, setShown] = useState<{ artifact: ArtifactInfo; text?: string }>({ artifact: props.artifact })
+  const [failed, setFailed] = useState(false)
+  const [snapshotting, setSnapshotting] = useState(false)
+  const [snapshotMsg, setSnapshotMsg] = useState<string | null>(null)
+  const candidate = props.latest ?? (isLive ? props.artifact : undefined)
+  const latest = candidate?.name === props.artifact.name && (candidate.origin === 'user') === (props.artifact.origin === 'user') ? candidate : undefined
+  const [versions, setVersions] = useState<ArtifactInfo[]>([])
+  useEffect(() => {
+    if (typeof props.files.list !== 'function') return
+    let live = true
+    void props.files.list(props.sessionId).then(items => {
+      if (live) setVersions(items.filter(a => a.name === props.artifact.name && (a.origin === 'user') === (props.artifact.origin === 'user') && typeof a.version === 'number'))
+    }, () => { /* Without the list, the toolbar still names the shown version when it can. */ })
+    return () => { live = false }
+  }, [props.files, props.sessionId, props.artifact.name, props.artifact.origin, latest?.id, shown.artifact.id])
+  // A live file (BLG-470) keeps one id: its own republish is not a newer version, it is the same
+  // artifact with a later updated_at, so the ordinary version check (which requires the id to
+  // differ, or the version to have moved on) never fires for it. live.id === shown.id with a
+  // moved updated_at is treated the same way a newer version would be.
+  const liveUpdate = isLive && latest && latest.id === shown.artifact.id &&
+    latest.updated_at !== undefined && latest.updated_at !== shown.artifact.updated_at
+  useEffect(() => {
+    if (!following || !latest ||
+      (!liveUpdate && (latest.id === shown.artifact.id || (latest.version ?? 0) <= (shown.artifact.version ?? 0))) ||
+      latest.name !== props.artifact.name ||
+      (latest.origin === 'user') !== (props.artifact.origin === 'user') ||
+      latest.view !== props.artifact.view) return
+    let cancelled = false
+    const controller = new AbortController()
+    // Coalesce publication bursts; cleanup fences both reads and text conversion.
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          if (latest.missing || tooBigToPreview(latest.view, latest.size)) throw new Error()
+          if (!isViewable(latest.view)) { setShown({ artifact: latest }); setFailed(false); return }
+          const blob = await props.files.raw(props.sessionId, latest.id)
+          const textual = isViewable(latest.view) && ARTIFACT_VIEWS[latest.view].textual
+          if (textual && blob.size > TEXT_VIEW_MAX) throw new Error()
+          const text = textual ? await blob.text() : undefined
+          if (cancelled) return
+          const kind = text === undefined ? null : visualFile(latest.name, latest.view, text)
+          if (kind === 'vega-lite') parseVegaLite(text!)
+          else if (kind === 'dashboard') parseDashboard(text!)
+          else if (kind) {
+            // Validate and draw charts away from the visible preview before replacing it.
+            const target = document.createElement('div')
+            target.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;width:800px'
+            document.body.append(target)
+            try {
+              const visual = await renderVisual(kind, text!, target, undefined, controller.signal)
+              visual.dispose()
+            } finally { target.remove() }
+          }
+          const dataUrl = isSvgImage(latest.view, latest.content_type) ? await mediaUrl(blob, latest.view, latest.content_type) : undefined
+          if (cancelled) return
+          if (text !== undefined) contentKeeper<KeptArtifact>(props.files, props.sessionId, artifactIdentity(latest))({ kind: 'text', text }, text.length * 2)
+          else contentKeeper<KeptArtifact>(props.files, props.sessionId, artifactIdentity(latest))({ kind: 'blob', blob, dataUrl }, blob.size + (dataUrl?.length ?? 0) * 2)
+          setShown({ artifact: latest, text })
+          setFailed(false)
+        } catch (error) {
+          if (!cancelled) {
+            console.warn('Artifact replacement failed', {cause: error instanceof Error ? error.name : 'UnknownError'})
+            setFailed(true)
+          }
+        }
+      })()
+    }, 250)
+    return () => { cancelled = true; controller.abort(); clearTimeout(timer) }
+  }, [following, latest, liveUpdate, props.artifact.name, props.artifact.origin, props.artifact.view, props.files, props.sessionId, shown.artifact])
+  const options = [...versions.filter(v => v.id !== shown.artifact.id), shown.artifact].sort((a, b) => (a.version ?? 1) - (b.version ?? 1))
+  const newest = Math.max(...options.map(v => v.version ?? 1), shown.artifact.latest_version ?? 0, latest?.version ?? 0)
+  function pick(id: string) {
+    const version = options.find(v => v.id === id)
+    if (!version) return
+    if ((version.version ?? 1) < newest) { localStorageChatStorage.set(followKey, '0'); setFollowing(false) }
+    setFailed(false)
+    setShown({ artifact: version })
+  }
+  async function snapshot() {
+    if (!props.files.snapshot || snapshotting) return
+    setSnapshotting(true)
+    setSnapshotMsg(null)
+    try {
+      const saved = await props.files.snapshot(props.sessionId, shown.artifact.id)
+      setSnapshotMsg(`Saved as ${saved.name}.`)
+    } catch (e) {
+      setSnapshotMsg(fileErrorText(e, 'Could not take a snapshot.').message)
+    } finally {
+      setSnapshotting(false)
+    }
+  }
+  // A live file has no versions to pick or pin: it always follows its own content, and its
+  // header offers Snapshot (a normal versioned copy of what it holds right now) instead.
+  const actions = <>
+    {!isLive && newest > 1 && <select className="viewer-version-select" aria-label="Version" title="Version" value={shown.artifact.id} onChange={e => pick(e.target.value)}>
+      {options.map(v => <option key={v.id} value={v.id}>v{v.version ?? 1}{(v.version ?? 1) === newest ? ' (latest)' : ''}</option>)}
+    </select>}
+    {!isLive && <ViewerAction icon="follow" label={following ? 'Pin version' : 'Follow latest'} title={following ? 'Following latest · click to pin this version' : 'Follow latest'} pressed={following} onClick={() => { localStorageChatStorage.set(followKey, following ? '0' : '1'); setFollowing(!following); setFailed(false) }} />}
+    {isLive && props.files.snapshot && <ViewerAction icon="save" label={snapshotting ? 'Saving…' : 'Snapshot'} title="Save this file's current content as a normal versioned file, named with the time" disabled={snapshotting} onClick={() => void snapshot()} />}
+    {props.headerActions}
+  </>
+  return <>
+    {failed && <div className="artifact-status" role="status">Could not update preview. The previous version is still shown.</div>}
+    {snapshotMsg && <div className="artifact-status" role="status">{snapshotMsg}</div>}
+    <ArtifactViewerSession key={/\.(?:vl|vega-lite|dash)\.json$/i.test(shown.artifact.name) ? shown.artifact.id : artifactIdentity(shown.artifact)} {...props} artifact={shown.artifact} initialText={shown.text} onFeedback={() => setFollowing(false)} headerActions={actions} versionUpdate={!isLive && !following && latest && (latest.version ?? 0) > (shown.artifact.version ?? 0) ? latest : undefined} onVersionUpdate={() => { if (latest) setShown({ artifact: latest }) }} />
+  </>
+}
+
+function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, onOpen, autoplay = false, commit = null, review = false, embedded = false, headerActions, initialText, versionUpdate, onVersionUpdate, onFeedback }: Props & { initialText?: string; versionUpdate?: ArtifactInfo; onVersionUpdate?: () => void; onFeedback?: () => void }) {
   const viewerHost = useViewerHost()
   const titleId = useId()
   const dialogRef = useRef<HTMLDivElement | null>(null)
@@ -115,12 +240,16 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
     const url = keptMediaUrl(kept.blob, artifact.view, artifact.content_type, kept.dataUrl)
     return url ? { identity: artifactIdentity(artifact), loaded: { kind: 'blob', blob: kept.blob, url } as Loaded } : null
   })
-  const [loaded, setLoaded] = useState<Loaded | null>(() => restored?.loaded ?? null)
+  const [fetched, setLoaded] = useState<Loaded | null>(() => initialText !== undefined ? { kind: 'text', text: initialText } : restored?.loaded ?? null)
+  const loaded: Loaded | null = initialText !== undefined ? {kind: 'text', text: initialText} : fetched
   // An object URL made for a kept file, freed when the view goes.
   useEffect(() => () => { if (restored?.loaded.kind === 'blob') releaseMediaUrl(restored.loaded.url) }, [restored])
   const [raw, setRaw] = useState(false)
+  const [comparing, setComparing] = useState(false)
+  const [comparisonHost, setComparisonHost] = useState<HTMLSpanElement | null>(null)
   // The kind of code on show, for the wrap toggle; null while the file is rendered, not code.
   const [codeWrap, setCodeWrap] = useState<WrapTarget | null>(null)
+  const support = artifact.live && loaded?.kind === 'text' ? liveFileSupport(visualFile(artifact.name, artifact.view, loaded.text), loaded.text) : undefined
   const [showAll, setShowAll] = useState(false)
   const [downloadError, setDownloadError] = useState<{ message: string; errorId?: string } | null>(null)
   const [mode, setMode] = useState<Mode>(review && (artifact.view === 'markdown' || artifact.view === 'pdf' || artifact.view === 'diff') ? 'review' : 'view')
@@ -143,7 +272,7 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
   useEffect(() => { if (!embedded || viewerHost?.autoFocus !== false) dialogRef.current?.focus() }, [embedded, viewerHost?.autoFocus])
 
   useEffect(() => {
-    if (artifact.missing || !previewable || !spec) return // a file listed as missing is not fetched
+    if (initialText !== undefined || artifact.missing || !previewable || !spec) return // a file listed as missing is not fetched
     // A version's bytes never change: kept ones are not read again.
     if (restored?.identity === artifactIdentity(artifact)) return
     let cancelled = false
@@ -184,11 +313,72 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
   async function download() {
     setDownloadError(null)
     try {
+      if (loaded?.kind === 'blob') {
+        saveBlob(loaded.blob, artifact.name)
+        return
+      }
+      if (loaded?.kind === 'text') {
+        saveBlob(new Blob([loaded.text], {type: artifact.content_type || 'text/plain'}), artifact.name)
+        return
+      }
       await files.download(sessionId, artifact.id)
     } catch (e) {
+      console.warn('content_download_failed', { cause: e instanceof FileRequestError ? 'file_request_rejected' : 'browser_export_rejected' })
       if (isArtifactGone(e)) setLoaded({ kind: 'gone' })
       else setDownloadError(fileErrorText(e, 'Download failed.'))
     }
+  }
+
+  // A chart or diagram's current drawing, fed by TextView/VisualBlock's onRendered — null while
+  // drawing, on a theme-triggered redraw, or after a failure, so export never uses a stale one.
+  const visualKind: VisualKind | null = loaded?.kind === 'text' ? visualFile(artifact.name, view, loaded.text) : null
+  const [rendered, setRendered] = useState<RenderedVisual | null>(null)
+  const revisionSource=loaded?.kind==='text'?loaded.text:undefined
+  const revision = useRef({at:artifact.updated_at,source:revisionSource})
+  useLayoutEffect(() => { revision.current = {at:artifact.updated_at,source:revisionSource} }, [artifact.updated_at,revisionSource])
+  const [drawnAt,setDrawnAt] = useState(artifact.updated_at)
+  const committedRevisionSource = useRef<string | undefined>(undefined)
+  useLayoutEffect(() => {
+    if (revisionSource !== undefined && revisionSource === committedRevisionSource.current) setDrawnAt(artifact.updated_at)
+  }, [artifact.updated_at, revisionSource])
+  const [runtimeUnsupported,setRuntimeUnsupported] = useState(false)
+  useLayoutEffect(() => {
+    const node=dialogRef.current
+    const support=()=>{
+      if(artifact.live){const unsupported=[...node!.querySelectorAll<HTMLElement>('.visual-surface')].some(surface=>surface.dataset.liveSupport!=='true');setRuntimeUnsupported(unsupported)}
+    }
+    const committed=(event:Event)=>{const source=(event as CustomEvent<{source:string}>).detail.source;queueMicrotask(()=>{if(source===revision.current.source){committedRevisionSource.current=source;setDrawnAt(revision.current.at)}})}
+    node?.addEventListener('blerg-dashboard-committed',committed)
+    node?.addEventListener('blerg-chart-live-support',support)
+    return ()=>{node?.removeEventListener('blerg-chart-live-support',support);node?.removeEventListener('blerg-dashboard-committed',committed)}
+  },[artifact.live])
+  const onVisualRendered = useCallback((visual: RenderedVisual | null, committedSource?: string) => {
+    setRendered(visual)
+    if(visual){
+      // Child layout commits can precede this viewer's revision layout effect.
+      queueMicrotask(() => {if(committedSource===undefined || committedSource===revision.current.source){committedRevisionSource.current=revision.current.source;setDrawnAt(revision.current.at)}})
+    }
+  }, [setRendered, setDrawnAt])
+  const [exportError, setExportError] = useState<string | null>(null)
+  const [exportNotice, setExportNotice] = useState<string | null>(null)
+  const exportName = artifact.name.replace(/\.[^./]+$/, '')
+
+  function downloadSvg() {
+    if (!rendered || !payloadExportAllowed(visualKind)) return
+    setExportError(null)
+    try { saveBlob(exportSvg(rendered), `${exportName}.svg`) }
+    catch { console.warn('visual_export_failed', { cause: 'svg_export_rejected' }); setExportError('Could not export the SVG.') }
+  }
+  async function downloadPng() {
+    if (!rendered || !payloadExportAllowed(visualKind)) return
+    setExportError(null)
+    setExportNotice(null)
+    try {
+      const theme = readVisualTheme(dialogRef.current ?? document.body)
+      const blob = await exportPng(rendered, theme)
+      saveBlob(blob, `${exportName}.png`)
+      if (exportedAtLowerResolution(rendered)) setExportNotice('Exported at a lower resolution to stay within size limits.')
+    } catch { console.warn('visual_export_failed', { cause: 'png_export_rejected' }); setExportError('Could not export the PNG.') }
   }
 
   // Which feedback mode this file takes, once its bytes are here.
@@ -198,7 +388,7 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
   const inlineReview = view === 'diff' && !!chat && ready && (!embedded || mode === 'review')
 
   // Maximize: edge to edge, remembered per kind of layout (a review, a diff, a draw-over, a file).
-  const layoutKind: LayoutKind = view === 'diff' ? 'diff' : mode === 'review' ? 'review' : mode === 'markup' ? 'markup' : 'file'
+  const layoutKind: LayoutKind = view === 'diff' || comparing ? 'diff' : mode === 'review' ? 'review' : mode === 'markup' ? 'markup' : 'file'
   const [maximizedByKind, setMaximizedByKind] = useState<Partial<Record<LayoutKind, boolean>>>({})
   const maximized = maximizedByKind[layoutKind] ?? localStorageChatStorage.get(MAXIMIZED_KEY(layoutKind)) === '1'
   function toggleMaximized() {
@@ -224,50 +414,36 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
     !chat || !ready ? null : view === 'markdown' || view === 'pdf' || view === 'diff' ? 'review' : view === 'image' ? 'markup' : null
 
   const body = (
+    // button-guard-ignore: useBackdropClose supplies pointer handlers only; this overlay is not a button
     <div className={embedded ? "embedded-viewer" : `artifact-overlay artifact-overlay-viewer${maximized ? ' is-maximized' : ''}`} data-testid="artifact-viewer-overlay" {...(embedded ? {} : backdrop)}>
       <div
         ref={dialogRef}
-        className={`artifact-dialog artifact-viewer${mode !== 'view' || inlineReview ? ' is-review' : ''}${view === 'diff' ? ' is-diff' : ''}${maximized ? ' is-maximized' : ''}`}
+        className={`artifact-dialog artifact-viewer${mode !== 'view' || inlineReview ? ' is-review' : ''}${view === 'diff' || comparing ? ' is-diff' : ''}${maximized ? ' is-maximized' : ''}`}
         role={embedded ? "region" : "dialog"}
         aria-modal={embedded ? undefined : true}
         aria-labelledby={titleId}
         tabIndex={-1}
         onKeyDown={onKeyDown}
       >
-        {embedded ? <ViewerToolbar titleId={titleId} title={title} copyValue={artifact.name} meta={['From Files', spec?.label, formatSize(artifact.size)].filter(Boolean).join(' · ')} toggle={loaded?.kind === 'text' && hasRenderedText(artifact.name, artifact.view, loaded.text) && <button type="button" className="artifact-btn" onClick={() => setRaw(!raw)}>{raw ? 'Rendered' : 'Raw'}</button>}>
-          {inlineReview && !embedded ? null : mode !== 'view' ? <ViewerAction icon="back" label="Back" onClick={() => setMode('view')} />
-            : feedback && <ViewerAction icon={feedback === 'review' ? 'review' : 'markup'} label={feedback === 'review' ? 'Review' : 'Mark up'} onClick={() => setMode(feedback)} />}
-          {codeWrap && <WrapToggle kind={codeWrap.kind} available={codeWrap.available} />}
-          {!gone && <ViewerAction icon="download" label="Download" onClick={() => void download()} />}
-        </ViewerToolbar> : <header className="artifact-header">
-          <div className="artifact-header-text">
-            <h2 id={titleId}>{title}</h2>
-            <p className="artifact-meta">{[spec?.label, formatSize(artifact.size)].filter(Boolean).join(' · ')}</p>
-          </div>
-          {inlineReview ? null : mode !== 'view' ? (
-            <button type="button" className="artifact-btn" onClick={() => setMode('view')}>Back</button>
-          ) : feedback === 'review' ? (
-            <button type="button" className="artifact-btn" onClick={() => setMode('review')}>Review</button>
-          ) : feedback === 'markup' ? (
-            <button type="button" className="artifact-btn" onClick={() => setMode('markup')}>Mark up</button>
-          ) : null}
-          {!gone && <button type="button" className="artifact-btn" onClick={() => void download()}>Download</button>}
-          <button
-            type="button"
-            className="artifact-close artifact-maximize"
-            aria-label={maximized ? 'Restore size' : 'Maximize'}
-            aria-pressed={maximized}
-            title={`${maximized ? 'Restore size' : 'Maximize'} (Ctrl+Alt+F)`}
-            onClick={toggleMaximized}
-          >
-            <span aria-hidden="true">{maximized ? '⤡' : '⤢'}</span>
-          </button>
-          {loaded?.kind === 'text' && hasRenderedText(artifact.name, artifact.view, loaded.text) && <button type="button" className="artifact-btn" onClick={() => setRaw(!raw)}>{raw ? 'Rendered' : 'Raw'}</button>}
-          {codeWrap && <WrapToggle kind={codeWrap.kind} available={codeWrap.available} text />}
+        <ViewerToolbar exports={<>
+          {visualKind && visualKind !== 'dashboard' && <>
+            <ViewerAction icon="downloadSvg" label="Download SVG" disabled={!rendered || !payloadExportAllowed(visualKind)} onClick={downloadSvg} />
+            <ViewerAction icon="downloadPng" label="Download PNG" disabled={!rendered || !payloadExportAllowed(visualKind)} onClick={() => void downloadPng()} />
+          </>}
+          {!gone && <ViewerAction icon="download" label={visualKind ? 'Download source' : 'Download'} onClick={() => void download()} />}
+        </>} primary={comparing || inlineReview && !embedded ? null : mode !== 'view' ? <ViewerAction icon="back" label="Back" onClick={() => setMode('view')} />
+            : feedback && <ViewerAction icon={feedback === 'review' ? 'review' : 'markup'} label={feedback === 'review' ? 'Review' : 'Mark up'} onClick={() => { onFeedback?.(); setMode(feedback) }} />} printDisabled={gone || !loaded || visualKind === 'dashboard' || !!visualKind && !rendered} titleId={titleId} title={versionUpdate || embedded && artifact.name.includes('/') ? artifact.name : title} showPath={!embedded || artifact.name.includes("/")} copyValue={artifact.name} meta={['From Files', spec?.label, formatSize(artifact.size)].filter(Boolean).join(' · ')} toggle={!comparing && loaded?.kind === 'text' && hasRenderedText(artifact.name, artifact.view, loaded.text) && <ViewerAction icon="raw" label={raw ? 'Rendered' : 'Raw'} title={raw ? 'Show rendered file' : 'Show raw source'} pressed={raw} onClick={() => setRaw(!raw)} />}>
+          {versionUpdate && <button type="button" className="viewer-version" title={`v${versionUpdate.version} is available`} aria-label={`v${versionUpdate.version} is available`} onClick={onVersionUpdate}><span className="viewer-version-dot" aria-hidden="true" /></button>}
+          <span className="viewer-control-slot" ref={setComparisonHost} />
+          {!comparing && codeWrap && <WrapToggle kind={codeWrap.kind} available={codeWrap.available} />}
           {headerActions}
-          <button type="button" className="artifact-close" aria-label="Close" onClick={onClose}>✕</button>
-        </header>}
-        {isOlder && (
+          {!embedded && <>
+            <ViewerAction icon={maximized ? 'restore' : 'maximize'} label={maximized ? 'Restore size' : 'Maximize'} title={`${maximized ? 'Restore size' : 'Maximize'} (Ctrl+Alt+F)`} pressed={maximized} onClick={toggleMaximized} />
+            <ViewerAction icon="close" label="Close" onClick={onClose} />
+          </>}
+          {artifact.live && <span className="viewer-live-updated" data-testid="viewer-live-updated"><span title={support === 'unsupported-live' || runtimeUnsupported ? 'unsupported-live: native data updates unavailable; redraws each file revision' : undefined}>Live · updated </span><TimeLabel ts={visualKind === 'vega-lite' || visualKind === 'dashboard' ? drawnAt : artifact.updated_at} /></span>}
+        </ViewerToolbar>
+        {isOlder && !versionUpdate && !embedded && (
           <p className="artifact-older" data-testid="artifact-older">
             This is an older version.
             {latest && onOpen && <> <button type="button" className="artifact-link" onClick={() => onOpen(latest)}>View latest</button></>}
@@ -275,7 +451,11 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
         )}
         <ReviewRequestBar artifact={artifact} hideAsk={inlineReview && reviewTab === 'conversation'} />
         {downloadError && <div className="artifact-error" role="alert">{downloadError.message}<ErrorId id={downloadError.errorId} /></div>}
-        <div className="artifact-body">
+        {exportError && <div className="artifact-error" role="alert">{exportError}</div>}
+        {visualKind === 'dashboard' && <p className="artifact-status" role="status">{DASHBOARD_EXPORT_BLOCKED}</p>}
+        {exportNotice && <p className="artifact-status" role="status">{exportNotice}</p>}
+        <VersionComparison artifact={artifact} files={files} sessionId={sessionId} currentText={loaded?.kind === 'text' ? loaded.text : undefined} active={comparing} onActive={setComparing} controlsHost={comparisonHost} />
+        <ViewerActionsContext.Provider value={comparing ? null : comparisonHost}><div className="artifact-body" hidden={comparing}>
           {gone ? (
             <p className="artifact-status" role="status" data-testid="artifact-gone">
               {FILE_GONE_MESSAGE} Its bytes were not kept on the server, so it can’t be viewed or downloaded.
@@ -313,13 +493,13 @@ function ArtifactViewerSession({ sessionId, files, artifact, onClose, latest, on
           ) : loaded.kind === 'blob' ? (
             <BlobView artifact={artifact} url={loaded.url} autoplay={autoplay} />
           ) : (
-            <TextView artifact={artifact} text={loaded.text} showAll={showAll} onShowAll={() => setShowAll(true)} commit={commit} />
+            artifact.view === 'html' && artifact.origin !== 'user' ? <AnswerPage key={artifact.id} sessionId={sessionId} artifactId={artifact.id} name={artifact.name} text={loaded.text} files={files} /> : <TextView artifact={artifact} text={loaded.text} showAll={showAll} onShowAll={() => setShowAll(true)} commit={commit} fileContext={{ sessionId, files }} onRendered={onVisualRendered} />
           )}
-        </div>
+        </div></ViewerActionsContext.Provider>
       </div>
     </div>
   )
-  const scoped = <WrapScopeContext.Provider value={files.queueScope?.() ?? ''}><WrapHostContext.Provider value={setCodeWrap}>{body}</WrapHostContext.Provider></WrapScopeContext.Provider>
+  const scoped = <WrapScopeContext.Provider value={files.queueScope?.() ?? ''}><WrapHostContext.Provider value={setCodeWrap}><ViewerActionsContext.Provider value={comparisonHost}>{body}</ViewerActionsContext.Provider></WrapHostContext.Provider></WrapScopeContext.Provider>
   return embedded ? scoped : createPortal(scoped, document.body)
 }
 
@@ -364,7 +544,7 @@ export function BlobView({ artifact, url, autoplay }: { artifact: ArtifactInfo; 
 // A published file has no folder: its relative images stay placeholders (MarkdownDocument).
 const PUBLISHED_DOCUMENT: MarkdownDocument = {}
 
-export function TextView({ artifact, text, showAll, onShowAll, commit, document: doc = PUBLISHED_DOCUMENT }: { artifact: ArtifactInfo; text: string; showAll: boolean; onShowAll: () => void; commit?: string | null; document?: MarkdownDocument }) {
+export function TextView({ artifact, text, showAll, onShowAll, commit, fileContext, document: doc = PUBLISHED_DOCUMENT, onRendered }: { fileContext?: { sessionId: string; files: TransportFiles }; artifact: ArtifactInfo; text: string; showAll: boolean; onShowAll: () => void; commit?: string | null; document?: MarkdownDocument; onRendered?: (visual: RenderedVisual | null, committedSource?:string) => void }) {
   if (artifact.view === 'html') {
     return (
       <iframe
@@ -377,10 +557,10 @@ export function TextView({ artifact, text, showAll, onShowAll, commit, document:
     )
   }
   if (artifact.view === 'csv') return <CsvView artifact={artifact} text={text} />
-  if (artifact.view === 'diff') return <DiffView text={text} commit={commit} />
+  if (artifact.view === 'diff') return <DiffView text={text} commit={commit} fileContext={fileContext} />
 
   const visual = visualFile(artifact.name, artifact.view, text)
-  if (visual) return <VisualBlock kind={visual} source={text} />
+  if (visual) return <VisualBlock kind={visual} source={text} fileContext={fileContext} onRendered={onRendered} hostedTab />
 
   const body = artifact.view === 'json' ? prettyJson(text) : text
   // Code is coloured by its extension, json as json; no known language stays plain.

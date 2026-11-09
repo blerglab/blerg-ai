@@ -13,9 +13,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -23,12 +26,14 @@ import (
 	"github.com/blerglab/blerg-ai/contracts/engines"
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
 	"github.com/blerglab/blerg-ai/runner/internal/clusterworkspace"
+	"github.com/blerglab/blerg-ai/runner/internal/commandsteps"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/gitprovider"
 	"github.com/blerglab/blerg-ai/runner/internal/mcpgw"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/blerglab/blerg-ai/runner/internal/scratch"
+	"github.com/blerglab/blerg-ai/runner/skills"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -36,6 +41,10 @@ import (
 // using the in-cluster service account. It deliberately speaks plain HTTP to
 // the API server (no client-go dependency) — the two calls we need are tiny.
 type JobManager struct {
+	// Tests advance the create deadline after the real POST has committed.
+	launchCreateContext func(context.Context) (context.Context, context.CancelFunc)
+
+	resolveWorkBranch func(context.Context, string) (string, error)
 	// Trusted operator scheduling policy, never supplied by a session request.
 	ExcludedNodes []string
 
@@ -44,6 +53,9 @@ type JobManager struct {
 	WorkspaceDefaultClass string
 	// Tests replace the network read; nil uses the guarded Git HTTP precheck.
 	repositoryRead func(context.Context, string, string) error
+	// Tests replace the base-branch provider check (BLG-501); nil uses the guarded Git
+	// HTTP advertisement read (checkBaseBranchRemote).
+	baseBranchRemote func(ctx context.Context, cloneURL, branch, token string) (remoteSHA string, cred credentialRefusal, err error)
 	// Optional owner for start watchers; nil retains process-lifetime defaults.
 	startWatches  *clusterWatchLifetime
 	codexCatalog  clusterCodexCatalogCache
@@ -528,6 +540,10 @@ func (j *JobManager) Status() protocol.ClusterStatus {
 
 // SessionJobSpec is what the spawn/resume paths need to start a pod.
 type SessionJobSpec struct {
+	SkillPolicy           *skills.Policy
+	CommandSteps          *commandsteps.Definition
+	WorkBranch            string
+	WorkBranchCustom      bool
 	Workspace             *protocol.WorkspaceManifest
 	WorkspaceMembers      []clusterworkspace.Member `json:"-"` // authorized private contexts from selection service
 	workspacePlan         *clusterworkspace.Plan
@@ -543,7 +559,9 @@ type SessionJobSpec struct {
 	InitialPromptSource   string
 	InitialPromptClientID string
 	Resume                bool
-	RequireRecoveryReady  bool // internal child lineage, never caller env
+	// HostGenerationFloor is the session's highest hosting so far, for a resumed pod's fresh home.
+	HostGenerationFloor  int64
+	RequireRecoveryReady bool // internal child lineage, never caller env
 	// ExtraEnv is caller-supplied env for runner-brokered sessions (e.g.
 	// blerg-board's BLERG_BOARD_URL/BLERG_BOARD_TOKEN). BLERG_RUNNER_*/ANTHROPIC_API_KEY are
 	// rejected upstream so callers cannot shadow blerg-owned variables.
@@ -566,6 +584,19 @@ type SessionJobSpec struct {
 	// theirs. Unlike NoOperatorFallback it says nothing about engine
 	// credentials.
 	NoOperatorGitToken bool
+	// ReadOnlyGitWorker marks a cluster worker under BLG-460's option B: the pod must never
+	// receive a write-capable git credential, from the launcher's own personal token (the
+	// fetchPersonalCredential path below) or the operator's shared Secret (gitOperatorOK's
+	// fallback). Deliberately independent of NoOperatorFallback, which also forces a personal
+	// engine credential — a read-only worker still uses the owner's/operator's normal engine
+	// credentials, only its git credential is restricted. Set only by a cluster-child launch
+	// path (startClusterChild, and selectHostClusterChild once it exists); never decoded from a
+	// request body.
+	ReadOnlyGitWorker bool
+	// ReadOnlyGitToken is the read-only, repo-scoped token already resolved for this worker's
+	// single-repo clone (empty for a public repository, which needs none). Ignored unless
+	// ReadOnlyGitWorker is set. Never a write-capable credential.
+	ReadOnlyGitToken string
 	// SpawningAccountID is the verified account id (identity.Principal.Sub)
 	// of the human who requested this session, used to look up a personal
 	// credential for spec.Engine via fetchPersonalCredential before falling
@@ -606,6 +637,7 @@ type SessionJobSpec struct {
 	// secret); the pod reads and unsets it at once, and states it in the engine's system prompt.
 	// Empty sets nothing, which the pod reads as interactive.
 	Interaction string
+	Verbosity   string
 	// NoOperatorFallback is set for a cron's session (spec 7.4): the shared operator Secret must
 	// never supply this session's credentials. CreateSessionJob then fails with
 	// ErrNoPersonalCredential, creating no Secret and no Job, whenever the owner's personal
@@ -619,6 +651,13 @@ type SessionJobSpec struct {
 // personal credential could not be fetched. It is a credential problem, not a capacity one: the
 // cron scheduler fails the run (cron.ErrCredential) instead of holding it.
 var ErrNoPersonalCredential = errors.New("the owner's personal credential is unavailable: a cron never runs on the shared operator credential")
+
+// errWorkerNoHermesCredential is BLG-460 security review finding 2a: a cluster worker has no
+// personal Hermes credential to filter, and must never silently fall back to the operator's
+// shared one unfiltered (core cannot decrypt that Secret to check it) — the start is refused
+// with a reason the person can act on, instead of a pod that mysteriously has no Hermes
+// provider credentials at all.
+var errWorkerNoHermesCredential = errors.New("this cluster worker has no personal Hermes credential to use read-only; add one in Settings before starting Hermes cluster workers")
 
 // errClusterCap is the cluster's concurrent session cap, reported by CreateSessionJob (its text
 // is "cluster session cap reached (N)"). The cron start path treats it as capacity.
@@ -733,6 +772,92 @@ func singleEngineCredentialKey(engine string) (string, bool) {
 		return "", false
 	}
 	return descriptor.CredentialEnvKeys[0], true
+}
+
+// filterGitTokensFromEnvBlob drops every "KEY=VALUE" line from a multi-line .env-style
+// credential blob (HERMES_ENV_CONTENTS) whose key names a git or GitHub/GitLab token, for a
+// BLG-460 read-only cluster worker (L6). A line that doesn't parse as KEY=VALUE is dropped
+// too — if it can't be identified as safe, it is not kept. Comments and blank lines pass
+// through unchanged. workspaceHosts (this launch's own resolved repository hosts) scopes the
+// embedded-URL-credential check (security review finding 2b): a DATABASE_URL or HTTPS_PROXY
+// value can carry basic-auth userinfo too, and must survive unless its host is actually a git
+// provider or this launch's own repository host. The second return value names every dropped
+// key, for the caller to log (never the values).
+func filterGitTokensFromEnvBlob(blob []byte, workspaceHosts ...string) ([]byte, []string) {
+	lines := strings.Split(string(blob), "\n")
+	kept := make([]string, 0, len(lines))
+	var dropped []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			kept = append(kept, line)
+			continue
+		}
+		key, value, ok := strings.Cut(trimmed, "=")
+		if !ok {
+			continue
+		}
+		keyTrimmed := strings.TrimSpace(key)
+		if isGitTokenEnvKey(keyTrimmed) || looksLikeGitTokenValue(value, workspaceHosts...) {
+			dropped = append(dropped, keyTrimmed)
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return []byte(strings.Join(kept, "\n")), dropped
+}
+
+// isGitTokenEnvKey reports whether an env var name, as a whole, is shaped like a git provider
+// credential. Security review finding 4: the previous "contains GIT and contains TOKEN"
+// substring test matched DIGITALOCEAN_TOKEN (DIGITAL contains "git" as a substring) — a false
+// positive with nothing to do with git. Matching whole name segments instead (GIT_TOKEN,
+// *_GIT_TOKEN, GITHUB_*, GITLAB_*, GH_*, GL_TOKEN, BITBUCKET_*) both fixes that and still
+// covers every name this filter is meant to catch: GH_PAT/GH_ENTERPRISE_TOKEN match GH_*,
+// GITHUB_PAT matches GITHUB_*, GITLAB_PAT/GITLAB_ACCESS_TOKEN match GITLAB_*. GL_TOKEN is
+// matched exactly, not as a GL_* prefix — "GL" alone is too ambiguous to treat as git-related
+// on its own (unlike GH, which has no other common meaning in this context).
+func isGitTokenEnvKey(key string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(key))
+	switch {
+	case upper == "GIT_TOKEN", upper == "GL_TOKEN":
+		return true
+	case strings.HasSuffix(upper, "_GIT_TOKEN"):
+		return true
+	case strings.HasPrefix(upper, "GITHUB_"), strings.HasPrefix(upper, "GITLAB_"),
+		strings.HasPrefix(upper, "GH_"), strings.HasPrefix(upper, "BITBUCKET_"):
+		return true
+	}
+	return false
+}
+
+// gitTokenValuePrefixes are the provider-stamped prefixes of a bare git token value — present
+// regardless of what env var name carries it, which is exactly the case isGitTokenEnvKey
+// cannot cover: an unrelated-looking key whose value is still a live credential.
+var gitTokenValuePrefixes = []string{"ghp_", "github_pat_", "gho_", "glpat-"}
+
+// embeddedURLCredential matches a credential embedded in a URL's userinfo
+// (scheme://user:token@host/...) — a second way a git token travels under a key name that
+// gives no hint at all, e.g. a REMOTE_URL or clone-URL style variable. Matching this alone is
+// not sufficient to drop a line (see looksLikeGitTokenValue): plenty of harmless values share
+// this exact shape.
+var embeddedURLCredential = regexp.MustCompile(`://[^/\s:@]+:[^/\s@]+@`)
+
+// looksLikeGitTokenValue reports whether an env var's VALUE, regardless of its key name, looks
+// like it holds a git credential: a known provider token prefix, or a URL with credentials
+// embedded in its userinfo AND aimed at a git provider or one of workspaceHosts. Security
+// review finding 2b: the second check used to fire on ANY userinfo URL, which drops a
+// perfectly ordinary DATABASE_URL=postgres://user:pass@db or
+// HTTPS_PROXY=http://user:pass@proxy line too — basic auth in a URL is common and not itself a
+// git credential. Scoping it to an actual git host (fixed list or this launch's own resolved
+// repository hosts) keeps the check aimed at what it's for.
+func looksLikeGitTokenValue(value string, workspaceHosts ...string) bool {
+	trimmed := strings.TrimSpace(value)
+	for _, prefix := range gitTokenValuePrefixes {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return embeddedURLCredential.MatchString(trimmed) && isGitProviderURL(trimmed, workspaceHosts...)
 }
 
 // claudeOAuthPrefix marks a Claude subscription OAuth token. Anything else is
@@ -957,6 +1082,158 @@ type internalCredentialFetchResponse struct {
 	PlaintextBase64 string `json:"plaintext_base64"`
 }
 
+// fetchReadOnlyGitToken reads the account's read-only, per-provider-owner token for a
+// BLG-460 cluster worker (option B) — never the account's write-capable personal git
+// credential (fetchPersonalCredential) and never the shared operator Secret. It reuses
+// fetchCoreCredential's existing accountID+key boundary with a key scheme
+// ("git-readonly:<provider>:<owner>") distinct from an engine name, so storing one
+// requires no change to that boundary. core does not yet have a "Read-only tokens for
+// workers" Settings section to populate this kind (BLG-460 open question/L6): until it
+// does, every call here fails closed with found=false, which is the correct behavior
+// for a private repository (refused downstream) and a no-op for a public one (needs
+// none).
+func (j *JobManager) fetchReadOnlyGitToken(ctx context.Context, accountID, provider, owner string, proof coreProof) (string, bool, error) {
+	if owner == "" {
+		return "", false, nil
+	}
+	plaintext, found, err := fetchCoreCredential(ctx, j.CredentialClient, j.CoreURL, j.CoreInternalKey, accountID, readOnlyGitCredentialKind(provider, owner), proof)
+	if !found {
+		return "", false, err
+	}
+	return string(plaintext), true, err
+}
+
+// readOnlyGitCredentialKind is the credential-kind key a read-only per-owner token is
+// stored and fetched under — distinct from any engine name or the write-capable git
+// kind (gitCredentialFor), so the two can never collide in the same account's vault.
+// Lowercases owner: core always stores these lowercased (BLG-460 security re-review
+// finding 3), but a clone URL's owner segment keeps whatever case the repository host used.
+func readOnlyGitCredentialKind(provider, owner string) string {
+	return "git-readonly:" + provider + ":" + strings.ToLower(owner)
+}
+
+// gitOwnerFromCloneURL is the first path segment of a clone URL (its GitHub/GitLab
+// owner — a user or an organization): https://github.com/acme/widget.git -> "acme".
+// Empty for a clone URL with no owner segment.
+func gitOwnerFromCloneURL(cloneURL string) string {
+	u, err := url.Parse(cloneURL)
+	if err != nil {
+		return ""
+	}
+	trimmed := strings.TrimPrefix(u.Path, "/")
+	owner, _, _ := strings.Cut(trimmed, "/")
+	return owner
+}
+
+// fixedGitProviderHosts are the git-hosting providers refused regardless of what any
+// particular workspace points at: the two public SaaS hosts, and the official GitHub MCP
+// server (api.githubcopilot.com), which is not a repository host at all but still reaches
+// GitHub with whatever scope its own connection was granted.
+var fixedGitProviderHosts = []string{"github.com", "gitlab.com", "api.githubcopilot.com"}
+
+// isGitProviderURL reports whether raw's host is a known git-hosting provider, or one of
+// workspaceHosts (L5): a write-capable MCP connection to one of these must never attach to a
+// cluster worker under option B. workspaceHosts covers what the fixed list cannot — GitHub
+// Enterprise and self-hosted GitLab, whose hostnames are specific to the install and only
+// knowable from the session's own resolved repository hosts, never from a static list.
+func isGitProviderURL(raw string, workspaceHosts ...string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return false
+	}
+	for _, provider := range fixedGitProviderHosts {
+		if host == provider || strings.HasSuffix(host, "."+provider) {
+			return true
+		}
+	}
+	for _, wh := range workspaceHosts {
+		if wh != "" && host == strings.ToLower(hostnameOnly(wh)) {
+			return true
+		}
+	}
+	return false
+}
+
+// hostnameOnly strips a ":port" suffix from a host[:port] string (clusterworkspace.Member's
+// CredentialHost is u.Host, which keeps the port when the clone URL has one, e.g.
+// "git.corp:8443") — security review finding 1: without this, a workspace host compared with
+// a connection URL's port-free Hostname() would never match, so a GitHub Enterprise or
+// self-hosted GitLab instance on a non-default port would never be recognized as a git
+// provider host at all. Returns the input unchanged if it has no port (or isn't a valid
+// host:port, e.g. already bare).
+func hostnameOnly(hostport string) string {
+	h, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return hostport
+	}
+	return h
+}
+
+// workspaceMemberHosts is the lower-cased, deduplicated set of hosts a cluster workspace's own
+// members actually clone from — resolved per member at launch (CredentialHost), so it covers a
+// GitHub Enterprise or self-hosted GitLab host without needing to know about either kind in
+// advance.
+func workspaceMemberHosts(members []clusterworkspace.Member) []string {
+	seen := map[string]bool{}
+	var hosts []string
+	for _, m := range members {
+		host := strings.ToLower(strings.TrimSpace(m.CredentialHost))
+		if host == "" || seen[host] {
+			continue
+		}
+		seen[host] = true
+		hosts = append(hosts, host)
+	}
+	return hosts
+}
+
+// hostOfGitURL is the lower-cased hostname of a clone URL, or "" if it doesn't parse — for a
+// single-repo (non-workspace) launch's one repository host.
+func hostOfGitURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
+}
+
+// resumeWorkspaceGitHosts is workspaceMemberHosts/hostOfGitURL for a resuming session: a
+// workspace resume re-reads its own persisted per-member contexts (the same durable record
+// clusterChildWorkspace already reads for a fresh child); a single-repo resume uses its own
+// recorded clone URL. ok is false only when a workspace resume's host lookup itself failed or
+// came back malformed (a query error, or contexts that don't unmarshal) — security review
+// finding 3: silently treating that as "no extra hosts" would have narrowed what L5 refuses
+// without anyone knowing why. The caller must refuse the resume's MCP grants outright on
+// ok==false, not quietly fall back to the fixed provider list. A single-repo resume with no
+// GitURL (a NoRepo session) is a confident, ordinary "no hosts", not a failure: ok is true.
+func resumeWorkspaceGitHosts(ctx context.Context, pool *pgxpool.Pool, sessionID string, workspace *protocol.WorkspaceManifest, gitURL string) (hosts []string, ok bool) {
+	if workspace == nil {
+		if h := hostOfGitURL(gitURL); h != "" {
+			return []string{h}, true
+		}
+		return nil, true
+	}
+	var raw []byte
+	if err := pool.QueryRow(ctx, `SELECT contexts FROM cluster_workspace_storage WHERE session_id=$1 AND launch_generation=$2 AND owner_id=$3`,
+		sessionID, workspace.LaunchGeneration, workspace.OwnerID).Scan(&raw); err != nil {
+		log.Printf("resume %s: could not read workspace repository hosts for the git-provider MCP check: %v", sessionID, err)
+		return nil, false
+	}
+	var contexts []clusterworkspace.Member
+	if json.Unmarshal(raw, &contexts) != nil {
+		log.Printf("resume %s: workspace repository host record did not parse for the git-provider MCP check", sessionID)
+		return nil, false
+	}
+	return workspaceMemberHosts(contexts), true
+}
+
 // fetchPersonalCredential reads the owner's credential. Only an absent credential
 // with a currently verified principal permits an operator fallback; failures do
 // not change whose account will run the session.
@@ -1016,13 +1293,15 @@ func fetchCoreCredential(parent context.Context, client *http.Client, coreURL, i
 			return nil, false, errPersonalCredentialUnavailable
 		}
 		return plaintext, true, nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return nil, false, errors.Join(errPersonalCredentialUnavailable, errCorePrincipalRefused)
 	case http.StatusConflict:
 		return nil, false, errCoreManagedCredential
 	case http.StatusNotFound:
 		// Core intentionally uses the same 404 for an absent credential and a
 		// revoked principal. Resolve that ambiguity before allowing fallback.
-		if verifyCorePrincipal(ctx, client, coreURL, internalKey, accountID, proof) != nil {
-			return nil, false, errPersonalCredentialUnavailable
+		if err := verifyCorePrincipal(ctx, client, coreURL, internalKey, accountID, proof); err != nil {
+			return nil, false, errors.Join(errPersonalCredentialUnavailable, err)
 		}
 		return nil, false, nil
 	default:
@@ -1030,12 +1309,80 @@ func fetchCoreCredential(parent context.Context, client *http.Client, coreURL, i
 	}
 }
 
+func (j *JobManager) assignWorkBranch(ctx context.Context, spec *SessionJobSpec) error {
+	branchAPI := &API{coreURL: j.CoreURL, coreInternalKey: j.CoreInternalKey}
+	resolve := j.resolveWorkBranch
+	if resolve == nil {
+		resolve = func(ctx context.Context, id string) (string, error) {
+			return ensureWorkBranch(ctx, j.historyPool, id, branchAPI.branchUsername)
+		}
+	}
+	branchContext, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	branch, err := resolve(branchContext, spec.SessionID)
+	if err != nil {
+		return err
+	}
+	spec.WorkBranch = branch
+	if j.historyPool != nil {
+		row, err := db.GetSession(branchContext, j.historyPool, spec.SessionID)
+		if err != nil {
+			return err
+		}
+		if row == nil {
+			return errors.New("session branch intent could not be read")
+		}
+		spec.WorkBranchCustom = row.WorkBranchCustom
+	}
+	return nil
+}
+
 // CreateSessionJob creates the runner Job. Enforces the concurrency cap.
-func (j *JobManager) CreateSessionJob(spec SessionJobSpec) error {
+//
+// BLG-460: "cluster worker" (read-only git, option B) is decided exactly once, here, from
+// the session's own persisted record — never from a caller-supplied flag. Every path that
+// creates or resumes a pod funnels through this one function, so there is nowhere left for
+// a call site to forget it: a fresh worker start and a resumed one both re-derive the same
+// answer from the same row, every time. A caller-set spec.ReadOnlyGitWorker is ignored; only
+// the row decides.
+func (j *JobManager) CreateSessionJob(spec SessionJobSpec) (launchErr error) {
+	defer func() {
+		if refusal := clusterRefusal(launchErr); refusal != nil {
+			logClusterRefusal(refusal)
+			launchErr = refusal
+		}
+	}()
+	worker, err := j.isClusterWorkerSession(context.Background(), spec.SessionID)
+	if err != nil {
+		return err
+	}
+	spec.ReadOnlyGitWorker = worker
 	if spec.Workspace != nil {
+		if err := j.assignWorkBranch(context.Background(), &spec); err != nil {
+			return err
+		}
 		return j.withClusterWorkspace(spec)
 	}
 	return j.withNativeHistory(spec)
+}
+
+// isClusterWorkerSession reports whether sessionID's own row already marks it as a child of
+// another session (isChildSession) running on the cluster runtime (onClusterParent) — a
+// BLG-460 cluster worker under option B. The row is the single source of truth: a fresh
+// worker's row is inserted (with its parent/delegation markers already set) before
+// CreateSessionJob is ever called for it, and a resumed worker's row still carries the same
+// markers it was created with. Without a wired history pool (standalone/test fixtures that
+// never persist a session at all) there is nothing to prove worker-ness from, so this reports
+// false rather than failing every ordinary launch closed.
+func (j *JobManager) isClusterWorkerSession(ctx context.Context, sessionID string) (bool, error) {
+	if j.historyPool == nil || sessionID == "" {
+		return false, nil
+	}
+	row, err := db.GetSession(ctx, j.historyPool, sessionID)
+	if err != nil {
+		return false, err
+	}
+	return isClusterPodWorker(row) && onClusterParent(row), nil
 }
 
 func (j *JobManager) createSessionJob(spec SessionJobSpec) error {
@@ -1045,6 +1392,13 @@ func (j *JobManager) createSessionJob(spec SessionJobSpec) error {
 func (j *JobManager) createSessionJobContext(parent context.Context, spec SessionJobSpec) (launchErr error) {
 	ctx, cancel := context.WithTimeout(parent, 5*time.Minute)
 	defer cancel()
+	if spec.SkillPolicy == nil {
+		var skillErr error
+		spec.SkillPolicy, skillErr = sessionSkills(ctx, j.historyPool, spec.SessionID)
+		if skillErr != nil {
+			return fmt.Errorf("resolve session skills: %w", skillErr)
+		}
+	}
 	progress := &clusterLaunchProgress{j: j, session: spec.SessionID}
 	if spec.workspacePlan != nil {
 		progress.next(ctx, "launch_admission", "Checking cluster capacity and launch configuration")
@@ -1071,10 +1425,24 @@ func (j *JobManager) createSessionJobContext(parent context.Context, spec Sessio
 	if !spec.NoRepo && spec.workspacePlan == nil {
 		cloneURL = j.CloneURL(spec.Repo, spec.GitURL)
 	}
+	// Preserve capacity refusal before reading or reserving a branch. Workspace
+	// plans already resolved theirs before their private launch record was made.
+	if spec.WorkBranch == "" {
+		if err := j.assignWorkBranch(ctx, &spec); err != nil {
+			return err
+		}
+	}
+
 	env := []map[string]any{
+		{"name": "GIT_AUTHOR_NAME", "value": "Blerg Agent"},
+		{"name": "GIT_AUTHOR_EMAIL", "value": "agent@blerg.invalid"},
+		{"name": "GIT_COMMITTER_NAME", "value": "Blerg Agent"},
+		{"name": "GIT_COMMITTER_EMAIL", "value": "agent@blerg.invalid"},
 		{"name": "BLERG_RUNNER_SERVER_WS", "value": j.ServerWSURL},
 		{"name": "BLERG_RUNNER_SERVER_HTTP", "value": j.ServerHTTPURL},
 		{"name": "BLERG_RUNNER_SESSION_ID", "value": spec.SessionID},
+		{"name": "BLERG_RUNNER_WORK_BRANCH", "value": spec.WorkBranch},
+		{"name": "BLERG_RUNNER_WORK_BRANCH_CUSTOM", "value": strconv.FormatBool(spec.WorkBranchCustom)},
 		{"name": "BLERG_RUNNER_ATTACHMENTS_DIR", "value": "/home/agent/.blerg-runner-daemon/sessions/" + spec.SessionID + "/attachments"},
 		{"name": "BLERG_RUNNER_REPO", "value": spec.Repo},
 		{"name": "BLERG_RUNNER_TITLE", "value": spec.Title},
@@ -1082,6 +1450,13 @@ func (j *JobManager) createSessionJobContext(parent context.Context, spec Sessio
 		{"name": "BLERG_RUNNER_EFFORT", "value": spec.Effort},
 		{"name": "BLERG_RUNNER_ENGINE", "value": spec.Engine},
 		{"name": "BLERG_RUNNER_GIT_URL", "value": cloneURL},
+	}
+	// BLG-479: a worker's turn_done bundles and publishes its own commits (design §4) only when
+	// this is set — from the same ReadOnlyGitWorker derivation as the credential lockdown above
+	// (isClusterPodWorker(row) && onClusterParent(row)), never a signal the pod could set for
+	// itself. A desktop/non-worker session never gets this var at all.
+	if spec.ReadOnlyGitWorker {
+		env = append(env, map[string]any{"name": "BLERG_WORKER_RESULT_BUNDLE", "value": "1"})
 	}
 	// Read the actual runner container limits, never node capacity or a caller's
 	// ExtraEnv. Divisors make the entry point independent of quantity spelling.
@@ -1103,6 +1478,9 @@ func (j *JobManager) createSessionJobContext(parent context.Context, spec Sessio
 	}
 	if spec.Resume {
 		env = append(env, map[string]any{"name": "BLERG_RUNNER_RESUME", "value": "1"})
+		if spec.HostGenerationFloor > 0 {
+			env = append(env, map[string]any{"name": "BLERG_RUNNER_HOST_GENERATION_FLOOR", "value": strconv.FormatInt(spec.HostGenerationFloor, 10)})
+		}
 	}
 	if spec.nativeHistory != nil {
 		env = append(env,
@@ -1130,6 +1508,20 @@ func (j *JobManager) createSessionJobContext(parent context.Context, spec Sessio
 			return fmt.Errorf("env key %s is reserved", restrictToolsEnvVar)
 		}
 		env = append(env, map[string]any{"name": restrictToolsEnvVar, "value": "1"})
+	}
+	if _, dup := spec.ExtraEnv[skillPolicyEnv]; dup {
+		return fmt.Errorf("env key %s is reserved", skillPolicyEnv)
+	}
+	skillRaw, skillErr := json.Marshal(spec.SkillPolicy)
+	if skillErr != nil {
+		return skillErr
+	}
+	env = append(env, map[string]any{"name": skillPolicyEnv, "value": string(skillRaw)})
+	if spec.Verbosity != "" {
+		if _, dup := spec.ExtraEnv[verbosityEnvVar]; dup {
+			return fmt.Errorf("env key %s is reserved", verbosityEnvVar)
+		}
+		env = append(env, map[string]any{"name": verbosityEnvVar, "value": spec.Verbosity})
 	}
 	if spec.Interaction != "" {
 		if _, dup := spec.ExtraEnv[interactionEnvVar]; dup {
@@ -1191,6 +1583,21 @@ func (j *JobManager) createSessionJobContext(parent context.Context, spec Sessio
 	if spec.workspacePlan != nil {
 		progress.next(ctx, "launch_credentials", "Resolving personal engine credentials")
 	}
+	if _, exists := spec.ExtraEnv["BLERG_RUNNER_FIXED_COMMAND_STEPS"]; exists {
+		return fmt.Errorf("env key BLERG_RUNNER_FIXED_COMMAND_STEPS is reserved")
+	}
+	if spec.CommandSteps != nil {
+		if err := spec.CommandSteps.Validate(); err != nil {
+			return err
+		}
+		copied := make(map[string]string, len(spec.ExtraEnv)+1)
+		for key, value := range spec.ExtraEnv {
+			copied[key] = value
+		}
+		raw, _ := json.Marshal(spec.CommandSteps)
+		copied["BLERG_RUNNER_FIXED_COMMAND_STEPS"] = string(raw)
+		spec.ExtraEnv = copied
+	}
 	sessionData := make(map[string][]byte, len(spec.ExtraEnv)+2)
 	if spec.InitialPromptSource != "" || spec.InitialPromptClientID != "" {
 		copied := make(map[string]string, len(spec.ExtraEnv)+1)
@@ -1242,6 +1649,25 @@ func (j *JobManager) createSessionJobContext(parent context.Context, spec Sessio
 	personalKeys := map[string]bool{}
 	managedCredential := false
 	gitKind, gitOperatorOK := j.gitCredentialFor(cloneURL)
+	// BLG-460: a read-only cluster worker's git credential is decided once, unconditionally,
+	// before anything below gets a chance to run — never the launcher's personal credential,
+	// never the operator's shared Secret. ReadOnlyGitWorker itself is set only by
+	// CreateSessionJob, derived from the session's own row, never by a caller. Nothing past
+	// this point may override sessionData[gitTokenKey] for a worker: the fetch below is
+	// explicitly gated on this same flag (not the reverse), so removing that gate is its own,
+	// independently observable regression — it is not masked by a later step undoing it.
+	if spec.ReadOnlyGitWorker {
+		personalKeys[gitTokenKey] = true
+		if spec.ReadOnlyGitToken != "" {
+			sessionData[gitTokenKey] = []byte(spec.ReadOnlyGitToken)
+		}
+		// L6, fail-closed: a worker's Hermes env blob can itself carry a git token, and core
+		// never decrypts the operator's shared Secret to filter it — there is no plaintext
+		// here to check. Claim the key unconditionally so the operator-fallback loop below
+		// never sources it; if no personal (filtered) credential is found later, the pod
+		// simply has no HERMES_ENV_CONTENTS at all rather than an unfiltered operator blob.
+		personalKeys["HERMES_ENV_CONTENTS"] = true
+	}
 	if spec.SpawningAccountID != "" {
 		if effectiveEngine == "claude" {
 			plaintext, found, err := j.fetchPersonalCredential(ctx, spec.SpawningAccountID, "claude", spec.proof())
@@ -1264,7 +1690,8 @@ func (j *JobManager) createSessionJobContext(parent context.Context, spec Sessio
 			}
 		} else if credKey, ok := singleEngineCredentialKey(effectiveEngine); ok {
 			plaintext, found, err := j.fetchPersonalCredential(ctx, spec.SpawningAccountID, effectiveEngine, spec.proof())
-			if errors.Is(err, errCoreManagedCredential) {
+			switch {
+			case errors.Is(err, errCoreManagedCredential):
 				for _, key := range []string{"CODEX_AUTH_JSON", "OPENAI_API_KEY", "CODEX_API_KEY"} {
 					if _, exists := spec.ExtraEnv[key]; exists {
 						return errManagedCredential
@@ -1277,9 +1704,32 @@ func (j *JobManager) createSessionJobContext(parent context.Context, spec Sessio
 				personalKeys[credKey] = true
 				env = append(env, map[string]any{"name": managedCredentialEnv, "value": "1"})
 				found = true
-			} else if err == nil && found {
+			case err == nil && found:
+				// L6: a Hermes credential is a whole .env blob that may itself carry a git
+				// or GitHub token (k8sjobs.go's own sessionCredentialEnvKeys comment: "the
+				// git token, when present there"). A cluster worker never gets one, from
+				// any source — strip any such line before it ever reaches sessionData.
+				if spec.ReadOnlyGitWorker {
+					hosts := workspaceMemberHosts(spec.WorkspaceMembers)
+					if h := hostOfGitURL(cloneURL); h != "" {
+						hosts = append(hosts, h)
+					}
+					var dropped []string
+					plaintext, dropped = filterGitTokensFromEnvBlob(plaintext, hosts...)
+					if len(dropped) > 0 {
+						log.Printf("cluster worker %s: dropped %d git-token-looking key(s) from HERMES_ENV_CONTENTS: %v", spec.SessionID, len(dropped), dropped)
+					}
+				}
 				sessionData[credKey] = plaintext
 				personalKeys[credKey] = true
+			//nolint:gosec // credKey is an env var NAME ("HERMES_ENV_CONTENTS"), never a credential value
+			case spec.ReadOnlyGitWorker && credKey == "HERMES_ENV_CONTENTS" && err == nil && !found:
+				// Security review finding 2a: silently handing the pod no HERMES_ENV_CONTENTS
+				// at all is indistinguishable, from the person's side, from a broken launch.
+				// Refuse with a reason they can act on, rather than leave them guessing why
+				// Hermes has no provider credentials.
+				logLaunchFailure("launch_credentials", &jobSubmissionError{reason: "NotFound"})
+				return errWorkerNoHermesCredential
 			}
 			if spec.NoOperatorFallback && (err != nil || !found) {
 				return ErrNoPersonalCredential
@@ -1291,7 +1741,10 @@ func (j *JobManager) createSessionJobContext(parent context.Context, spec Sessio
 		// The git credential is independent of the engine: whoever launched
 		// the session clones as themselves when they've connected a token
 		// for the clone URL's provider, whatever agent they're running.
-		if gitKind != "" {
+		// A read-only cluster worker (BLG-460) never reaches fetchPersonalCredential for
+		// git at all: its token, if any, was already resolved once at launch
+		// (ReadOnlyGitToken), never the launcher's own write-capable credential.
+		if gitKind != "" && !spec.ReadOnlyGitWorker {
 			plaintext, found, err := j.fetchPersonalCredential(ctx, spec.SpawningAccountID, gitKind, spec.proof())
 			if spec.NoOperatorFallback && (err != nil || !found) {
 				return ErrNoPersonalCredential
@@ -1331,6 +1784,17 @@ func (j *JobManager) createSessionJobContext(parent context.Context, spec Sessio
 	if spec.workspacePlan == nil {
 		if err := j.precheckRepositoryContext(ctx, spec, cloneURL, sessionData, personalKeys, gitOperatorOK); err != nil {
 			return err
+		}
+	}
+
+	// BLG-460 fail-closed backstop: a worker's git credential, if any, is its one read-only
+	// token and nothing else — checked once, right before anything gets persisted, against
+	// whatever sessionData actually ended up holding, not against the control flow that put
+	// it there. This refuses a worker spec regardless of how a write-capable value got into
+	// sessionData[gitTokenKey] (a bug here, a future code path, an ExtraEnv collision).
+	if spec.ReadOnlyGitWorker {
+		if got, ok := sessionData[gitTokenKey]; ok && string(got) != spec.ReadOnlyGitToken {
+			return errWorkerWriteCredential
 		}
 	}
 
@@ -1868,6 +2332,10 @@ func resumeClusterSessionModeGuarded(ctx context.Context, h *Hub, pool *pgxpool.
 		logLaunchFailure("authorization", &jobSubmissionError{reason: "Forbidden"})
 		return errors.New("cluster resume was not accepted")
 	}
+	if clusterPodInterrupted(row) {
+		text = "Your last turn was interrupted by pod termination. " + derefOrEmpty(row.ErrorReason) +
+			"\nInspect restored files and the recorded session branch before continuing; the interrupted turn may contain uncommitted work.\n\n" + text
+	}
 	// The session stays "disconnected" until the new pod connects, so restart
 	// its status clock now: the reconciler measures both the 24 h resume
 	// expiry and the missing-Job grace from that stamp, and neither must fire
@@ -1885,11 +2353,12 @@ func resumeClusterSessionModeGuarded(ctx context.Context, h *Hub, pool *pgxpool.
 		recordLaunchAuthSession(ctx, pool, sessionID, authSessionID)
 	}
 	newRepo := db.GetSessionNewRepo(ctx, pool, sessionID)
+	floor, _ := db.HighestHostGeneration(ctx, pool, sessionID) // without it the pod starts from the clock
 	// A resume is a start too: the browser shows its progress the same way.
 	spec := SessionJobSpec{
 		SessionID: sessionID, Repo: row.Repo, Title: title, Model: model, Effort: effort, Engine: engine,
-		RequireRecoveryReady: isChildSession(row),
-		InitialPrompt:        text, Resume: true,
+		RequireRecoveryReady: isChildSession(row) || row.DelegationVia == "person",
+		InitialPrompt:        text, Resume: true, HostGenerationFloor: floor,
 		InitialPromptClientID: func() string {
 			if len(inputs) > 0 {
 				return inputs[0].ClientID
@@ -1934,6 +2403,7 @@ func resumeClusterSessionModeGuarded(ctx context.Context, h *Hub, pool *pgxpool.
 		// The mode the session was started in (migration 038); a row from before it is read
 		// by who started it (effectiveInteraction).
 		Interaction: effectiveInteraction(row),
+		Verbosity:   effectiveVerbosity(row),
 	}
 	w, workspaceErr := db.GetSessionWorkspace(ctx, pool, sessionID)
 	if w != nil && w.Manifest != nil && !protocol.WorkspaceRuntimeEnabled("cluster", "linux") {
@@ -1957,6 +2427,31 @@ func resumeClusterSessionModeGuarded(ctx context.Context, h *Hub, pool *pgxpool.
 		return errClusterWorkspace
 	}
 	if len(grants) > 0 {
+		// L5: a resumed cluster worker is refused a git-provider MCP connection by default,
+		// exactly as a fresh one is (startClusterChild) — never attached, never recorded as
+		// an exception. isClusterPodWorker(row) && onClusterParent(row) is the same worker
+		// definition CreateSessionJob derives credentials from (a person channel included).
+		if isClusterPodWorker(row) && onClusterParent(row) {
+			resumeGitHosts, hostsOK := resumeWorkspaceGitHosts(ctx, pool, sessionID, spec.Workspace, derefOrEmpty(row.GitURL))
+			// Security review finding 3: a host lookup that itself failed must fail the
+			// check closed — refuse every grant — rather than silently fall back to
+			// checking against only the fixed provider list, which would narrow what L5
+			// refuses without anyone being told why.
+			if !hostsOK {
+				logLaunchFailure("authorization", &jobSubmissionError{reason: "InternalError"})
+				announceClusterStart(ctx, h, pool, sessionID, row.Repo, true, nil)
+				clusterJobCreateFailed(ctx, h, pool, sessionID, "could not verify this worker's repository hosts; refusing its MCP connections")
+				return errors.New("cluster resume was not accepted")
+			}
+			for _, grant := range grants {
+				if isGitProviderURL(grant.URLSnapshot, resumeGitHosts...) {
+					logLaunchFailure("authorization", &jobSubmissionError{reason: "Forbidden"})
+					announceClusterStart(ctx, h, pool, sessionID, row.Repo, true, nil)
+					clusterJobCreateFailed(ctx, h, pool, sessionID, "a cluster worker cannot be granted an MCP connection to a git provider")
+					return errors.New("cluster resume was not accepted")
+				}
+			}
+		}
 		// New tokens for the new pod, replacing the old ones in one transaction: the old
 		// tokens died with the old pod.
 		gateway, err := reissueGrants(ctx, h, pool, sessionID, launcher, requesterSessionID, grants)

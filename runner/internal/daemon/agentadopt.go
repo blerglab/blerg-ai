@@ -108,11 +108,13 @@ func (h *AgentHost) keepRecord(msg protocol.SpawnSession, workDir, model string,
 	rec := AgentRecord{
 		SessionID: msg.SessionID, Repo: msg.Repo, WorkDir: workDir, Engine: msg.Engine,
 		RequireRecoveryReady: msg.RequireRecoveryReady,
-		Interaction:          msg.Interaction, Assist: msg.Assist, BoardID: msg.BoardID, TicketID: msg.TicketID,
+		Interaction:          msg.Interaction,
+		SkillPolicy:          msg.SkillPolicy, Verbosity: msg.Verbosity, Assist: msg.Assist, BoardID: msg.BoardID, TicketID: msg.TicketID,
 		SessionToken: msg.SessionToken, BoardToken: msg.BoardToken, ExtraEnv: msg.ExtraEnv,
 		Plugins: msg.Plugins, Model: model, Effort: msg.Effort,
 	}
 	if ad != nil {
+		rec.PersonTime = ad.rec.PersonTime
 		rec.CodexThreadID = ad.rec.CodexThreadID
 		rec.EngineSession = ad.rec.EngineSession
 		rec.KnownSubagents = ad.rec.KnownSubagents
@@ -121,6 +123,7 @@ func (h *AgentHost) keepRecord(msg protocol.SpawnSession, workDir, model string,
 		rec.ClaudeSessionID = ad.rec.ClaudeSessionID
 		rec.CurrentTurnID = ad.rec.CurrentTurnID
 		rec.TurnActive = ad.rec.TurnActive
+		rec.StopRequested = ad.rec.StopRequested
 		rec.ToolRunning, rec.OpenCalls, rec.Waiting = ad.rec.ToolRunning, ad.rec.OpenCalls, ad.rec.Waiting
 		rec.AutoContinues = ad.rec.AutoContinues
 	}
@@ -135,8 +138,13 @@ func (h *AgentHost) Freeze() { h.explorer.Close(); h.frozen.Store(true) }
 // DropRecord forgets a session this daemon is not hosting: a stop that arrived for a session
 // that was never adopted, or before it could be (it is then not brought back at all).
 func (h *AgentHost) DropRecord(sessionID string) {
+	var scratchRecord *AgentRecord
+	paused := false
 	h.mu.Lock()
 	if a := h.adopting[sessionID]; a != nil {
+		rec := a.rec
+		scratchRecord = &rec
+		paused = a.failed != ""
 		a.dropped = true
 		a.held = nil
 		if a.failed != "" {
@@ -145,6 +153,20 @@ func (h *AgentHost) DropRecord(sessionID string) {
 	}
 	h.mu.Unlock()
 	deleteAgentRecord(h.cfg.RecordsDir, sessionID)
+	if scratchRecord != nil {
+		if folder := bindScratchFolder(h.cfg.reposRoot(), scratchRecord.WorkDir, scratchRecord.Repo); folder != nil {
+			report := fmt.Sprintf("Scratch folder kept at %s: recovery cleanup is unresolved", folder.path)
+			if paused && !h.scratchInUse(folder) && scratchNoOpenFiles(folder.path) == nil {
+				report = folder.remove()
+			}
+			if report != "" {
+				logRetainedAdoptionScratch()
+			}
+			if paused {
+				_ = h.sender.Send(protocol.SessionEnded{Type: "session_ended", SessionID: sessionID, Message: report})
+			}
+		}
+	}
 }
 
 // BeginAdoption claims every recorded session and returns how many there are. From here on they
@@ -211,7 +233,7 @@ func (h *AgentHost) RunAdoption() int {
 		case dropped:
 			h.Kill(id)
 		case reason != "":
-			log.Printf("agent session %s: not recovered after the restart: %s", id, reason)
+			logAdoptionRefusal(id, reason)
 		default:
 			adopted++
 			for _, m := range held {
@@ -263,17 +285,26 @@ func (h *AgentHost) holdForAdoption(sessionID string, in agent.Input) bool {
 }
 
 // adoptOne hosts one recorded session; "" means it is hosted.
-func (h *AgentHost) adoptOne(rec AgentRecord) string {
+func (h *AgentHost) adoptOne(rec AgentRecord) (reason string) {
+	stage := "record workspace"
+	defer func() {
+		if reason != "" {
+			logDaemonFailure("adoption: "+stage, nil)
+		}
+	}()
 	if !filepath.IsAbs(rec.WorkDir) {
 		return "its record names no workspace"
 	}
 	if info, err := os.Stat(rec.WorkDir); err != nil || !info.IsDir() {
+		logDaemonFailure("adoption workspace stat", err)
 		return fmt.Sprintf("its workspace %s is gone", rec.WorkDir)
 	}
+	stage = "workspace recovery"
 	msg := protocol.SpawnSession{
 		Type: "spawn_session", SessionID: rec.SessionID, Kind: "agent", Engine: rec.Engine,
 		ProjectPath: rec.WorkDir, Repo: rec.Repo,
-		Interaction: rec.Interaction, Assist: rec.Assist, BoardID: rec.BoardID, TicketID: rec.TicketID,
+		Interaction: rec.Interaction,
+		SkillPolicy: rec.SkillPolicy, Verbosity: rec.Verbosity, Assist: rec.Assist, BoardID: rec.BoardID, TicketID: rec.TicketID,
 		SessionToken: rec.SessionToken, BoardToken: rec.BoardToken, ExtraEnv: rec.ExtraEnv,
 		Plugins: rec.Plugins, Model: rec.Model, Effort: rec.Effort,
 		RequireRecoveryReady: rec.RequireRecoveryReady,
@@ -281,10 +312,14 @@ func (h *AgentHost) adoptOne(rec AgentRecord) string {
 	if h.cfg.Workspaces != nil {
 		path, err := workspaceRecord(rec.SessionID)
 		if err != nil {
+			logDaemonFailure("adoption workspace record", err)
 			return "Workspace recovery is unavailable; retry after restarting the daemon."
 		}
 		if _, err = os.Lstat(path); err == nil {
 			state, readErr := readPrivateWorkspace(path)
+			if readErr != nil {
+				logDaemonFailure("adoption read private workspace", readErr)
+			}
 			if reason := workspaceResumeRefusal(state, readErr, rec.SessionID); reason != "" {
 				return reason
 			}
@@ -293,12 +328,14 @@ func (h *AgentHost) adoptOne(rec AgentRecord) string {
 				err = authority.client.WaitWorkspaceRuntime(ctx, "host")
 				cancel()
 				if err != nil {
+					logDaemonFailure("adoption wait for runtime", err)
 					return adoptAwaitsServer
 				}
 			}
 			msg.Workspace = &state.Launch
 			msg.WorkspaceCapabilities = protocol.WorkspaceCapabilitiesFor("host", "linux")
 		} else if !os.IsNotExist(err) {
+			logDaemonFailure("adoption workspace journal stat", err)
 			return "Workspace recovery is unavailable; retry after restarting the daemon."
 		}
 	}
@@ -312,6 +349,7 @@ func (h *AgentHost) adoptOne(rec AgentRecord) string {
 	}
 	// The session ran on Claude Code. If this daemon would now pick another driver (the CLI was
 	// removed), the conversation cannot be continued by it.
+	stage = "engine driver"
 	if kind, refusal := h.driverFor(msg); kind == driverNone {
 		return refusal
 	} else if kind != driverClaudeCode && rec.Engine != "codex" && engineRegistry[rec.Engine].NativeSessionVersion == 0 {
@@ -324,6 +362,7 @@ func (h *AgentHost) adoptOne(rec AgentRecord) string {
 	}
 	stopLeftoverEngine(rec)
 
+	stage = "native conversation identity"
 	ad := &adoptRequest{rec: rec}
 	switch {
 	case rec.Engine == "codex":
@@ -340,6 +379,7 @@ func (h *AgentHost) adoptOne(rec AgentRecord) string {
 	case rec.ClaudeSessionID != "" && claudeTranscriptExists(rec.ClaudeSessionID):
 		ad.resumeID = rec.ClaudeSessionID
 	}
+	stage = "spawn recovered engine"
 	h.spawn(msg, nil, "", ad)
 	if ad.failed != "" {
 		return ad.failed
@@ -367,7 +407,8 @@ func adoptPlan(rec AgentRecord, resumed bool, interaction string) (cont, gaveUp 
 	return adoptPlanAfter(rec, resumed, interaction, RestartCause{})
 }
 func adoptPlanAfter(rec AgentRecord, resumed bool, interaction string, cause RestartCause) (cont, gaveUp bool) {
-	eligible := cutOffWork(rec) && resumed && (!destructiveCutOff(rec) || cause.updateSucceeded(rec))
+	verifiedUpdate := cause.updateSucceeded(rec)
+	eligible := !rec.StopRequested && (cutOffWork(rec) || verifiedUpdate) && resumed && (!destructiveCutOff(rec) || verifiedUpdate)
 	if interaction != protocol.InteractionUnattended {
 		eligible = eligible && !waitsOnPerson(rec)
 	}
@@ -377,7 +418,7 @@ func adoptPlanAfter(rec AgentRecord, resumed bool, interaction string, cause Res
 
 // cutOffWork reports whether a restart cut anything off: a turn, background tasks or subagents.
 func cutOffWork(rec AgentRecord) bool {
-	return rec.TurnActive || len(rec.OpenTasks)+len(rec.OpenSubagents) > 0
+	return rec.TurnActive || rec.PlannedUpdate != nil || len(rec.OpenTasks)+len(rec.OpenSubagents) > 0
 }
 
 // NoteOpenAsks records which sessions the server says have an open `blerg-runner ask` (the
@@ -448,6 +489,8 @@ func (h *AgentHost) finishAdoptionConfirmed(ad *adoptRequest, sess *agentSession
 		parts = append(parts, n+" stopped.")
 	}
 	switch {
+	case ad.rec.StopRequested:
+		parts = append(parts, "Stop was requested before the restart, so the worker waits for your next message.")
 	case cont:
 		parts = append(parts, "The agent is being asked to continue.")
 	case gaveUp:
@@ -486,7 +529,7 @@ func (h *AgentHost) finishAdoptionConfirmed(ad *adoptRequest, sess *agentSession
 	log.Printf("agent session %s: recovered after a daemon restart (conversation resumed=%v, turn cut off=%v, tool calls cut off=%d, background tasks cut off=%d, subagents cut off=%d, continuing=%v)",
 		msg.SessionID, resumed, cutOff, len(ad.rec.OpenCalls), len(tasks), len(subs), cont)
 
-	if !cutOffWork(ad.rec) {
+	if !cutOffWork(ad.rec) && !h.cfg.RestartCause.updateSucceeded(ad.rec) {
 		// Nothing was cut off: nothing to continue or report paused.
 		showNotice()
 		return
@@ -557,10 +600,10 @@ func (h *AgentHost) finishAdoptionConfirmed(ad *adoptRequest, sess *agentSession
 			report := func() {
 				showNotice()
 				if err := h.sender.Send(protocol.SessionStateChanged{Type: "session_state_changed", SessionID: msg.SessionID, Status: "idle"}); err != nil {
-					log.Printf("agent session %s: reporting it idle after the restart: %v", msg.SessionID, err)
+					logDaemonFailure("adoption report idle", err)
 				}
 				if err := h.sender.Send(protocol.SessionPaused{Type: "session_paused", SessionID: msg.SessionID, Reason: protocol.PausedByRestart, Detail: h.recoveryPauseReason(ad.rec, resumed, gaveUp)}); err != nil {
-					log.Printf("agent session %s: reporting it paused by the restart: %v", msg.SessionID, err)
+					logDaemonFailure("adoption report paused", err)
 				}
 			}
 			if isCC {
@@ -680,6 +723,19 @@ func (h *AgentHost) restartCauseWords(rec AgentRecord) string {
 	return restartCauseWords(h.cfg.RestartCause, rec.OpenCalls)
 }
 
+func (h *AgentHost) adoptionWork(rec AgentRecord) string {
+	if work := cutOffNotice(rec.OpenCalls, rec.OpenTasks, rec.OpenSubagents); work != "" {
+		return work
+	}
+	if h.cfg.RestartCause.updateSucceeded(rec) {
+		return "[system] Your delayed daemon reinstall restarted this host after the arming step returned."
+	}
+	if rec.PlannedUpdate != nil {
+		return "[system] A delayed daemon reinstall was armed before the restart, but its result could not be verified. Check the installer state; do not repeat it without the person's instruction."
+	}
+	return ""
+}
+
 // recoveryRow is the person's summary; the driver's adoption note carries the
 // full instructions once, with the next input to the agent.
 func (h *AgentHost) recoveryRow(rec AgentRecord, resumed, continuing, gaveUp bool) string {
@@ -691,7 +747,7 @@ func (h *AgentHost) recoveryRow(rec AgentRecord, resumed, continuing, gaveUp boo
 		}
 		prefix = "Updated to " + commit
 	}
-	if !cutOffWork(rec) {
+	if !cutOffWork(rec) && !h.cfg.RestartCause.updateSucceeded(rec) {
 		return ""
 	}
 	row := "[system] ↻ " + prefix + " · "
@@ -710,6 +766,8 @@ func (h *AgentHost) recoveryRow(rec AgentRecord, resumed, continuing, gaveUp boo
 
 func (h *AgentHost) recoveryPauseReason(rec AgentRecord, resumed, gaveUp bool) string {
 	switch {
+	case rec.StopRequested:
+		return "Stop was requested; waiting for your next message"
 	case !resumed:
 		return "send the task again"
 	case gaveUp:
@@ -816,6 +874,7 @@ func (h *AgentHost) NoteConnected() {
 	if retry {
 		go h.RunAdoption()
 	}
+	go h.retryQuestionRecovery()
 	h.ReportAdoptionFailures()
 }
 
@@ -845,6 +904,7 @@ func (h *AgentHost) ReportAdoptionFailures() {
 		}
 		detail = "Recovery paused: " + strings.TrimSuffix(detail, ".") + ". Send a message to retry."
 		if err := h.sender.Send(protocol.SessionPaused{Type: "session_paused", SessionID: id, Reason: protocol.PausedByRestart, Detail: detail}); err != nil {
+			logDaemonFailure("adoption pause report", err)
 			// The connection went away again: keep it for the next one.
 			h.mu.Lock()
 			h.adoptFailed = append(h.adoptFailed, id)

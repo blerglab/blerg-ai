@@ -33,6 +33,15 @@ func textResult(text string) json.RawMessage {
 // short placeholder, structuredContent and _meta are dropped, and the total text is capped
 // at maxBytes. Upstream output is untrusted content; nothing else reaches the session.
 func sanitizeResult(raw json.RawMessage, maxBytes int) json.RawMessage {
+	return sanitize(raw, maxBytes, false)
+}
+
+// Board text blocks contain machine-readable JSON. Never return a clipped success.
+func sanitizeBoardResult(raw json.RawMessage, maxBytes int) json.RawMessage {
+	return sanitize(raw, maxBytes, true)
+}
+
+func sanitize(raw json.RawMessage, maxBytes int, atomic bool) json.RawMessage {
 	var in struct {
 		Content []json.RawMessage `json:"content"`
 		IsError bool              `json:"isError"`
@@ -66,6 +75,9 @@ func sanitizeResult(raw json.RawMessage, maxBytes int) json.RawMessage {
 			text = "[unsupported content omitted]"
 		}
 		if len(text) > remaining {
+			if atomic {
+				return errorResult(fmt.Sprintf("board result exceeded %d bytes; request a smaller page or narrower filters", maxBytes))
+			}
 			text = cutUTF8(text, remaining)
 			truncated = true
 		}

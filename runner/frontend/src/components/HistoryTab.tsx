@@ -1,3 +1,6 @@
+import { useSessionStore } from '../hooks/useSessionStore'
+import { sessionRole } from '../lib/sessionRole'
+import { jumpToElement } from '@blerglab/chat'
 import InitialLoader from './InitialLoader'
 import { FileIcon } from '@blerglab/chat'
 import { modelDisplayName } from '@blerglab/chat'
@@ -28,7 +31,7 @@ import { useLiveBoardCard } from '../lib/liveBoardCard'
 import { apiFetch } from '../apiFetch'
 import { useTopics, type TopicsView } from '../hooks/useTopics'
 import {
-  KIND_GLYPH, KIND_WORDS, MARK_COMMAND, STROKE_KINDS, TOPIC_COMMAND, countGlyphs, feedEntries, heldFrom, renamedBy, shownVersion, spanLabel,
+  EMPTY_HISTORY, KIND_GLYPH, KIND_WORDS, STROKE_KINDS, countGlyphs, feedEntries, heldFrom, renamedBy, shownVersion, spanLabel,
   messageLabel, strokeCounts, strokeGlyph, strokeSpan, strokeTime, strokeWords, unmarkedLabel, usageTotal, waitingItems, wallClockMs,
   type AgentItem, type AgentStatus, type CardItem, type DocItem, type DoneItem, type RenameItem, type Stroke, type StrokeCard, type StrokeKind,
   type Topic, type TopicCard, type TopicCommit, type TopicRename, type Unmarked,
@@ -58,9 +61,28 @@ export interface HistoryTabProps {
 }
 
 export default function HistoryTab({ active, filesKey, ...rest }: HistoryTabProps) {
-  const view = useTopics(rest.sessionId, active, filesKey)
+  const [paging, setPaging] = useState<{ sessionId: string; cursors: string[] }>({ sessionId: rest.sessionId, cursors: [] })
+  const cursors = paging.sessionId === rest.sessionId ? paging.cursors : []
+  const cursor = cursors.at(-1) ?? ''
+  const view = useTopics(rest.sessionId, active, filesKey, cursor)
+  const next = view.status === 'ready' ? view.reply.next_cursor : undefined
+  const olderButton = useRef<HTMLButtonElement>(null)
+  const newerButton = useRef<HTMLButtonElement>(null)
+  const focusPage = useRef(false)
+  useLayoutEffect(() => {
+    if (view.status === 'loading' || !focusPage.current) return
+    focusPage.current = false
+    ;(olderButton.current ?? newerButton.current)?.focus()
+  }, [view.status, cursor, next])
+  const older = (event: MouseEvent<HTMLButtonElement>) => { focusPage.current = event.currentTarget === document.activeElement; if (next) setPaging({ sessionId: rest.sessionId, cursors: [...cursors, next] }) }
+  const newer = (event: MouseEvent<HTMLButtonElement>) => { focusPage.current = event.currentTarget === document.activeElement; setPaging({ sessionId: rest.sessionId, cursors: cursors.slice(0, -1) }) }
   const now = useNow(active)
-  return <InitialLoader loading={view.status === 'loading'} active={active} loadKey={rest.sessionId} label="history"><TopicList key={rest.sessionId} {...rest} view={view} now={now} /></InitialLoader>
+  return <><InitialLoader loading={view.status === 'loading'} active={active} loadKey={rest.sessionId} label="history"><TopicList key={rest.sessionId} {...rest} view={view} pageKey={cursor} now={now} /></InitialLoader>
+    {(cursors.length > 0 || next) && <nav className="history-window history-pages" aria-label="History pages">
+      {cursors.length > 0 && <button type="button" className="rail-link" ref={newerButton} onClick={newer}>Show newer history</button>}
+      {next && <button type="button" className="rail-link" ref={olderButton} onClick={older}>Show older history</button>}
+    </nav>}
+  </>
 }
 
 const NO_STROKES: Stroke[] = []
@@ -117,9 +139,9 @@ function useNow(active: boolean): Date {
   return now
 }
 
-type ListProps = Omit<HistoryTabProps, 'active' | 'filesKey'> & { view: TopicsView; now: Date }
+type ListProps = Omit<HistoryTabProps, 'active' | 'filesKey'> & { view: TopicsView; now: Date; pageKey?: string }
 
-export function TopicList({ sessionId, view, now, missing, onJump, onOpenArtifact, progress = null }: ListProps) {
+export function TopicList({ sessionId, view, now, missing, onJump, onOpenArtifact, progress = null, pageKey = '' }: ListProps) {
   // Only where the held part of the conversation begins: a number, so streaming (every new event
   // changes the transcript) does not draw the list again.
   const held = useTranscriptStore(s => heldFrom(s.sessions[sessionId]))
@@ -181,15 +203,14 @@ export function TopicList({ sessionId, view, now, missing, onJump, onOpenArtifac
       {topics.length === 0 && strokes.length === 0
         ? (
           <p className="rail-empty reel-note" data-testid="reel-empty">
-            No topics yet. The agent marks a topic when it starts a piece of work: <code>{TOPIC_COMMAND}</code>, and a decision,
-            milestone or finding with <code>{MARK_COMMAND}</code>.
+            {EMPTY_HISTORY}
           </p>
         )
         : entries.length === 0
         ? <p className="rail-empty reel-note" data-testid="stroke-none">Nothing of these kinds yet.</p>
         : (
           <ul className="rail-list reel-list" data-testid="reel-list">
-            <HistoryWindow key={[...shown].sort().join(',')} items={entries} label="entries">{e => (e.type === 'topic'
+            <HistoryWindow key={pageKey + ':' + [...shown].sort().join(',')} items={entries} label="entries">{e => (e.type === 'topic'
               ? (
                 <TopicCard key={e.topic.id} topic={e.topic} strokes={e.strokes} pinned={pinnedIds} now={now} open={open.get(e.topic.id) ?? e.topic.status === 'open'} onToggle={toggle}
                   heldFrom={held} missing={missing} onJump={jump} onOpenArtifact={openFile} progress={e.topic.status === 'open' ? progress : null} />
@@ -219,6 +240,7 @@ function StrokeFilters({ counts, shown, onToggle }: { counts: Record<StrokeKind,
   return (
     <div className="stroke-filters" role="group" aria-label="Show only" data-testid="stroke-filters">
       {STROKE_KINDS.map(k => (
+        // button-guard-ignore: stroke kinds are a fixed enum; stroke-filter supplies the button surface
         <button key={k} type="button" className={`stroke-filter stroke-${k}`} aria-pressed={shown.has(k)} title={KIND_WORDS[k]}
           aria-label={`${KIND_WORDS[k]}, ${counts[k]}`} data-testid={`stroke-filter-${k}`} onClick={() => onToggle(k)}>
           <span className="stroke-filter-glyph" aria-hidden="true">{KIND_GLYPH[k]}</span>
@@ -280,13 +302,15 @@ function StrokeRow({ stroke, now, heldFrom, missing, onJump, testId, pinned, key
   setOpen: (f: (o: boolean) => boolean) => void
   group?: 'waiting' | 'rest'
 }) {
-  const words = strokeWords(stroke)
+  const actor = useHistoryCoordinator()
+  const words = strokeWords(stroke, actor)
   const rowKey = `${keyPrefix}${testId}:${stroke.id}`
   const folded = (stroke.items?.length ?? 0) > 1
   const when = folded && stroke.first_at ? strokeSpan(stroke.first_at, stroke.at, now) : strokeTime(stroke.at, now)
   const jump = stroke.jump
   const reachable = jump && jump.seq >= heldFrom
-  const full = stroke.outcome ? `${stroke.text} → ${stroke.outcome}` : stroke.text
+  const reviewPrefix = stroke.kind === 'review' ? `${stroke.by} · ${stroke.verdict} · round ${stroke.round}: ` : ''
+  const full = reviewPrefix + (stroke.outcome ? `${stroke.text} → ${stroke.outcome}` : stroke.text)
   const cls = [
     'stroke', `stroke-${stroke.kind}`,
     stroke.kind === 'decision' && stroke.by !== 'person' ? 'by-agent' : '',
@@ -297,7 +321,7 @@ function StrokeRow({ stroke, now, heldFrom, missing, onJump, testId, pinned, key
   const listId = `fold-${(keyPrefix + testId).replace(/[^\w-]/g, '-')}-${stroke.id}`
   const text = (
     <>
-      {folded ? stroke.text : <ReferenceText text={stroke.text} />}
+      {reviewPrefix}{folded ? stroke.text : <ReferenceText text={stroke.text} />}
       {stroke.outcome && <span className="stroke-outcome"> → {folded ? stroke.outcome : <ReferenceText text={stroke.outcome} />}</span>}
     </>
   )
@@ -359,6 +383,15 @@ function waitingFirst(items: readonly Stroke[]): [Stroke, 'waiting' | 'rest'][] 
 
 /** The session History shows: its chips' hovercards read from it. */
 const HistorySession = createContext('')
+
+function useHistoryCoordinator(): string {
+  const id = useContext(HistorySession)
+  return useSessionStore(state => {
+    const session = state.sessions.find(s => s.id === id)
+    const coordinator = state.sessions.find(s => s.id === session?.parent_session_id)
+    return coordinator && sessionRole(coordinator) !== 'workspace' ? coordinator.title || 'Untitled chat' : 'Main'
+  })
+}
 const HistoryCardOpen = createContext<(ticket: Ticket) => void>(() => {})
 
 /** A board card's hovercard target from History's copy of it. */
@@ -631,11 +664,12 @@ function JumpChip({ rowKey, seq, label, title, name, testId, go, heldFrom, missi
   )
 }
 
-/** "Renamed by the parent: Worker → Fix the login flow". */
+/** "Renamed by Main: Worker → Fix the login flow". */
 function RenameLine({ rename }: { rename: TopicRename }) {
+  const actor = useHistoryCoordinator()
   return (
     <div className="reel-rename-text" title={`${rename.from || 'Untitled'} → ${rename.to}`}>
-      <span className="reel-who">{renamedBy(rename.by)}</span> {rename.from || 'Untitled'} → {rename.to}
+      <span className="reel-who">{renamedBy(rename.by, actor)}</span> {rename.from || 'Untitled'} → {rename.to}
     </div>
   )
 }
@@ -644,7 +678,7 @@ function RenameLine({ rename }: { rename: TopicRename }) {
 function scrollToProposal(id: string): boolean {
   const el = id ? document.querySelector<HTMLElement>(`[data-proposal-id="${CSS.escape(id)}"]`) : null
   if (!el) return false
-  el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  jumpToElement(el)
   return true
 }
 
@@ -657,7 +691,7 @@ function CardChip({ card }: { card: TopicCard }) {
   return (
     <Hover target={{ ...boardTarget(card), key: reference }}>
       <button type="button" className="reel-chip reel-card-chip" aria-label={`Open card ${label}`} onClick={() => openCard({ source: 'blerg-board', key: reference, board_id: card.board_id, title: card.title ?? '', status: card.column })}
-        title={`${label}${card.column ? ` · ${card.column}` : ''}${card.auto ? ' · approved by a session permission' : ''}`} data-testid="reel-card-chip">
+        title={`${label}${card.column ? ` · ${card.column}` : ''}${card.auto ? ' · approved by a workspace permission' : ''}`} data-testid="reel-card-chip">
         <span className="reel-card-board">{card.board_name || 'Board'}</span> <span className="reel-card-number">{reference}</span>
         {card.title && <> <span className="reel-card-title">{card.title}</span></>}
       </button>

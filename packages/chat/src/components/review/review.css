@@ -372,6 +372,10 @@
   .review-inline-mode .review-diff-hint, .review-inline-mode .diff-selection-help { display: none; }
   .review-inline-mode .review-bar, .review-inline-mode .diff-toolbar { flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; padding-top: 0; }
   .review-inline-mode .review-bar > *, .review-inline-mode .diff-toolbar > :not(.diff-file-picker) { flex-shrink: 0; }
+}
+/* Only the smallest groups need to scroll their bars away. Larger bodies let the patch
+   shrink to the available space so its scroller remains the sole owner of content overflow. */
+@container (max-height: 160px) {
   /* The floor is handed up the chain: the bars and the patch's floor give the review its minimum
      height, so below it the body (the size container, overflow:auto) scrolls rather than an
      inner box clipping the patch. The layout is size-contained so its rows do not count. */

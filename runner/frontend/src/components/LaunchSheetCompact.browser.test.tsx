@@ -23,7 +23,7 @@ async function open(runtime: 'daemon' | 'cluster', width = 1440, height = 900, t
     if (url === '/api/sessions' && init?.method === 'POST') { launchBodies.push(JSON.parse(String(init.body))); return json({ session_id: 'launched' }) }
     if (url === '/api/repos') return json({ repos: repositories.map(name => ({ name, full_name: `example-org/${name}`, provider: 'github', checked_out: ['Desktop'] })) })
     if (url === '/api/daemons') return json([{ id: 'desktop', name: 'Desktop', mode: 'local', repos_root: '/repos', status: 'connected', sandbox_available: true, available_engines: ['claude', 'codex'], discovery_version: 1, ownership_revision: 1, connection_generation: 'current', workspace_capabilities: { manifest_version: 2, linux_host: true, sandbox: true } }])
-    if (url === '/api/cluster/status') return json({ configured: true, available_engines: ['claude', 'codex'], git_configured: true, workspace_capabilities: { manifest_version: 2, cluster: true } })
+    if (url === '/api/cluster/status') return json({ runtime_target_id: 'cluster', runtime_target_name: 'Primary cluster', configured: true, available_engines: ['claude', 'codex'], git_configured: true, workspace_capabilities: { manifest_version: 2, cluster: true } })
     if (url === '/api/me/credentials') return json({ engines: ['claude', 'codex'], git: true })
     if (url.startsWith('/api/runner/launch-options?')) return json({ state: 'known', engines: [{ id: 'claude', name: 'Claude', restricted: true }, { id: 'codex', name: 'Codex', restricted: true }] })
     if (url.startsWith('/api/models/claude')) return json({ models: BUILTIN_MODELS.claude })
@@ -40,6 +40,7 @@ async function open(runtime: 'daemon' | 'cluster', width = 1440, height = 900, t
   await page.viewport(width, height)
   render(<MemoryRouter><LaunchSheet open onClose={() => {}} /></MemoryRouter>)
   fireEvent.click(await screen.findByTestId(`runtime-${runtime}`))
+  expect(screen.getByTestId('runtime-cluster').textContent).toContain('Primary cluster')
   await screen.findByRole('region', { name: 'Workspace repositories' })
   await screen.findByRole('checkbox', { name: /harbor/ })
 }
@@ -69,7 +70,7 @@ it.each(['daemon', 'cluster'] as const)('puts search, actions, selection and com
   expect(within(tree).queryByText('Git')).toBeNull()
   fireEvent.click(within(tree).getByRole('checkbox', { name: /harbor/ }))
   await screen.findByRole('button', { name: runtime === 'daemon' ? 'Remove harbor' : 'Remove example-org/harbor' })
-  expect((screen.getByRole('textbox', { name: 'Session name' }) as HTMLInputElement).value).toBe('harbor')
+  expect((screen.getByRole('textbox', { name: 'Workspace name' }) as HTMLInputElement).value).toBe('harbor')
   fireEvent.click(empty)
   await waitFor(() => expect(screen.queryByRole('button', { name: /Remove / })).toBeNull())
   expect(screen.getByText('0 / 20')).toBeTruthy()
@@ -170,7 +171,7 @@ it('exposes a checked tree with levels, nested groups and one keyboard tab stop'
   fireEvent.keyDown(apps, { key: 'Home' })
   expect(root).toHaveFocus()
   await userEvent.keyboard('{Tab}')
-  expect(screen.getByRole('textbox', { name: 'Session name' })).toHaveFocus()
+  expect(screen.getByRole('textbox', { name: 'Workspace name' })).toHaveFocus()
   await userEvent.keyboard('{Shift>}{Tab}{/Shift}')
   expect(root).toHaveFocus()
 })
@@ -190,7 +191,7 @@ it.each(['daemon', 'cluster'] as const)('keeps %s layout within the viewport wit
     const dir = import.meta.env.VITE_LAUNCH_SHOTS_DIR
     if (dir) await capture(`${dir}/${runtime}-${width}x${height}.png`, width, height)
     if (width === 390) {
-      screen.getByRole('textbox', { name: 'Session name' }).scrollIntoView({ block: 'center' })
+      screen.getByRole('textbox', { name: 'Workspace name' }).scrollIntoView({ block: 'center' })
       if (dir) await capture(`${dir}/${runtime}-${width}x${height}-options.png`, width, height)
     }
     cleanup(); clearLaunchCache()
@@ -206,8 +207,8 @@ it('keeps explanations short with details available and the empty-folder note be
   expect(details.open).toBe(false)
   fireEvent.click(screen.getByText('Sandbox details'))
   expect(details.open).toBe(true)
-  expect(details.textContent).toContain('wip/<session-id>')
-  expect(screen.getByText('About unattended sessions').closest('details')!.open).toBe(false)
+  expect(details.textContent).toContain('branch returned by blerg-runner session result <id>')
+  expect(screen.getByText('About unattended workspaces').closest('details')!.open).toBe(false)
   fireEvent.click(screen.getByRole('button', { name: 'Empty workspace' }))
   const plan = screen.getByTestId('no-repo-plan')
   expect(screen.getByTestId('launch-col-repo').contains(plan)).toBe(true)
@@ -227,7 +228,7 @@ it.each(['daemon', 'cluster'] as const)('launches the explicit %s multi-selectio
   await screen.findByText('1 / 20')
   fireEvent.click(within(picker).getByRole('checkbox', { name: /beacon/ }))
   await screen.findByText('2 / 20')
-  const launch = screen.getByRole('button', { name: 'Launch Session' })
+  const launch = screen.getByRole('button', { name: 'Launch Workspace' })
   if (runtime === 'daemon') {
     expect(launch).toBeDisabled()
     fireEvent.click(screen.getByTestId('agent-ack'))
@@ -239,10 +240,22 @@ it.each(['daemon', 'cluster'] as const)('launches the explicit %s multi-selectio
   expect(body.title).toBe('harbor')
   expect(body.kind).toBe('agent')
   expect(body.runtime).toBe(runtime)
+  expect(body.runtime_target_id).toBeUndefined()
   expect(body.no_repo).toBeUndefined()
   expect(body.selection).toEqual(runtime === 'cluster' ? { members: [], hosted: [
     { provider: 'github', full_name: 'example-org/harbor' }, { provider: 'github', full_name: 'example-org/beacon' },
   ] } : { daemon_id: 'desktop', ownership_revision: 1, connection_generation: 'current', root_identity: 'root', layout: 'names', members: [
     { path: 'harbor', source_identity: 'source:harbor' }, { path: 'beacon', source_identity: 'source:beacon' },
   ] })
+})
+
+for (const width of [390,3840]) it(`offers independent verbosity at ${width}px`, async () => {
+ await open('daemon', width, 844)
+ const field=screen.getByLabelText('Verbosity')
+ expect(field).toHaveValue('')
+ await userEvent.selectOptions(field, 'terse')
+ expect(field).toHaveValue('terse')
+ expect(screen.getByTestId('unattended-toggle')).not.toBeChecked()
+ expect(field.getBoundingClientRect().right).toBeLessThanOrEqual(width)
+ expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
 })

@@ -16,7 +16,7 @@ func kindWant(kind string) string {
 	if kind == "" {
 		return `kind \"agent\" is required`
 	}
-	return "Terminal sessions were removed in 0.5.0: start an agent session"
+	return "Terminal sessions have been removed. Start an agent session."
 }
 
 func TestNewTerminalSessionsAreDeprecated(t *testing.T) {
@@ -39,20 +39,7 @@ func TestNewTerminalSessionsAreDeprecated(t *testing.T) {
 	}
 }
 
-func TestBrowserTerminalLaunchIsDeprecated(t *testing.T) {
-	api, dc := runtimeTestAPI(t)
-	for _, kind := range []string{"", "tmux"} {
-		_, err := api.hub.forwardBrowserSpawn(&BrowserConn{ID: "fixture-browser"}, protocol.BrowserSpawnSession{DaemonID: dc.ID, Repo: "my-app", Kind: kind}, nil)
-		if err == nil || err.Error() != strings.ReplaceAll(kindWant(kind), `\"`, `"`) {
-			t.Fatalf("error=%v", err)
-		}
-		if len(dc.send) != 0 {
-			t.Fatal("deprecated launch reached daemon")
-		}
-	}
-}
-
-func TestExistingTerminalStillAcceptsInput(t *testing.T) {
+func TestExistingTerminalHistoryRefusesInput(t *testing.T) {
 	fx := newDelegFx(t)
 	id, _ := fx.session(sessOpts{owner: "owner-1", status: "running"})
 	if err := db.SetSessionKind(t.Context(), fx.pool, id, "tmux"); err != nil {
@@ -60,20 +47,12 @@ func TestExistingTerminalStillAcceptsInput(t *testing.T) {
 	}
 	fx.hub.SetSessionOwner(id, fx.dc.ID)
 	browser := &BrowserConn{ID: "fixture-browser", AccountID: "owner-1"}
-	if err := handleBrowserTerminalInput(t.Context(), fx.hub, browser, fx.pool, protocol.SendInput{SessionID: id, Data: "echo fixture\n"}); err != nil {
-		t.Fatal(err)
+	err := handleBrowserTerminalInput(t.Context(), fx.hub, browser, fx.pool, protocol.SendInput{SessionID: id, Data: "echo fixture\n"})
+	if err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("legacy input was not refused: %v", err)
 	}
-	var input protocol.SendInput
-	select {
-	case raw := <-fx.dc.send:
-		if err := json.Unmarshal(raw, &input); err != nil {
-			t.Fatal(err)
-		}
-	default:
-		t.Fatal("existing Terminal input was not forwarded")
-	}
-	if input.Type != "send_input" || input.SessionID != id || input.Data != "echo fixture\n" {
-		t.Fatalf("input=%+v", input)
+	if len(fx.dc.send) != 0 {
+		t.Fatal("Terminal input reached the daemon")
 	}
 }
 
@@ -82,9 +61,6 @@ func TestUnknownSessionKindCannotFallBackToTerminal(t *testing.T) {
 	rec := postSpawn(t, api, map[string]any{"daemon_id": dc.ID, "repo": "my-app", "runtime": "docker", "kind": "unknown"})
 	if rec.Code != 422 || len(dc.send) != 0 {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	if _, err := api.hub.forwardBrowserSpawn(&BrowserConn{}, protocol.BrowserSpawnSession{DaemonID: dc.ID, Repo: "my-app", Kind: "unknown"}, nil); err == nil || len(dc.send) != 0 {
-		t.Fatal("unknown websocket kind reached the daemon")
 	}
 }
 
@@ -96,5 +72,24 @@ func TestOpenAPIDoesNotAdvertiseTerminalSessions(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(string(runnerOpenAPIDoc)), "tmux") {
 		t.Fatal("openapi.json still mentions tmux sessions")
+	}
+}
+
+func TestRejectedTerminalInputPreservesAgentContinuation(t *testing.T) {
+	fx := newDelegFx(t)
+	id, _ := fx.session(sessOpts{owner: "owner-1", status: "idle"})
+	if err := db.SetSessionKind(t.Context(), fx.pool, id, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetLimitResume(t.Context(), fx.pool, id, true, newUUID()); err != nil {
+		t.Fatal(err)
+	}
+	browser := &BrowserConn{ID: "fixture-browser", AccountID: "owner-1"}
+	if err := handleBrowserTerminalInput(t.Context(), fx.hub, browser, fx.pool, protocol.SendInput{SessionID: id}); err == nil {
+		t.Fatal("legacy input accepted")
+	}
+	state, err := db.GetLimitResume(t.Context(), fx.pool, id)
+	if err != nil || !state.Enabled {
+		t.Fatalf("rejected legacy input cancelled agent continuation: %+v %v", state, err)
 	}
 }

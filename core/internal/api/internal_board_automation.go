@@ -19,7 +19,7 @@ import (
 //
 // Trust model, in short (the full threat model is in board/docs/CONFIG.md):
 //
-//   - Caller: the board, proved by BLERG_CORE_BOARD_MINT_KEY. That key opens these two routes and
+//   - Caller: the board, proved by BLERG_CORE_BOARD_MINT_KEY. That key opens the mint, revoke, and credential-bound identity routes and
 //     nothing else; the internal key (credential fetches) does not open them and they do not
 //     accept it, so the board never holds a key that reads engine credentials.
 //   - Person: proved by the board-audience access token their browser sent the board on this
@@ -68,7 +68,7 @@ type boardAutomationRevokeRequest struct {
 	BoardID   string `json:"board_id"`
 }
 
-// boardMintGate is the shared front of both routes: the routes exist only with a configured
+// boardMintGate is the shared front of these routes: the routes exist only with a configured
 // key, the caller must present it (and not through a proxy), and the body is capped and decoded.
 func (d Deps) boardMintGate(w http.ResponseWriter, r *http.Request, body any) (*identity.Service, bool) {
 	if d.BoardMintKey == "" {
@@ -245,4 +245,58 @@ func (d Deps) handleBoardAutomationRevoke(w http.ResponseWriter, r *http.Request
 	}
 	log.Printf("internal tokens: revoked board automation token %s of account %s (board %s)", body.TokenID, body.AccountID, body.BoardID)
 	w.WriteHeader(http.StatusOK)
+}
+
+// handleBoardAutomationIdentity returns only the name belonging to a proved credential.
+// There is no account-id lookup: the board key alone cannot enumerate accounts.
+func (d Deps) handleBoardAutomationIdentity(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		AccessToken string `json:"access_token"`
+	}
+	svc, ok := d.boardMintGate(w, r, &body)
+	if !ok {
+		return
+	}
+	deny := func() { http.Error(w, "not found", http.StatusNotFound) }
+	keys, err := d.Identity.JWKS(r.Context())
+	if err != nil {
+		http.Error(w, "identity unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	checker, err := d.revChecker(r.Context())
+	if err != nil {
+		http.Error(w, "identity unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	p, err := cid.Verify(body.AccessToken, "blerg-board", keys, checker, sensitiveCaps)
+	account := ""
+	if err == nil && p.Kind == string(cid.Human) && p.Has("card.read") && p.Sid != "" {
+		_, live, liveErr := svc.HumanSessionLive(r.Context(), p.Sub, p.Sid)
+		if liveErr == nil && live {
+			account = p.Sub
+		}
+	} else {
+		p, err = cid.Verify(body.AccessToken, "blerg-runner", keys, checker, sensitiveCaps)
+		if err == nil && p.Kind == string(cid.Agent) && p.Has("session.start") {
+			account = p.OnBehalfOf
+		}
+	}
+	if account == "" {
+		deny()
+		return
+	}
+	state, err := svc.AccountState(r.Context(), account)
+	if err != nil || state.Disabled || state.MustChangePassword {
+		deny()
+		return
+	}
+	// GitHub stores its login in the legacy email column; never expose an email or numeric subject as a name.
+	var username string
+	err = d.Store.Pool().QueryRow(r.Context(), `SELECT CASE WHEN provider='github' THEN CASE WHEN email ~ '^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}$' THEN email ELSE '' END ELSE provider_subject END FROM accounts WHERE id::text=$1`, account).Scan(&username)
+	if err != nil {
+		deny()
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, map[string]string{"username": username})
 }

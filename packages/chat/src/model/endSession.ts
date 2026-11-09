@@ -6,13 +6,13 @@ export function endSessionText(runtime?: string | null, terminal = false): strin
   if (terminal) {
     switch (runtime) {
       case 'daemon':
-        return 'The terminal session stops. Files are kept.'
+        return 'The terminal workspace stops. Files are kept.'
       case 'docker':
-        return 'The terminal session stops and its sandbox container is removed. Files and commits are kept.'
+        return 'The terminal workspace stops and its sandbox container is removed. Files and commits are kept.'
       case 'cluster':
-        return 'The terminal session stops and its pod is removed. Work in the pod that was not pushed is lost.'
+        return 'The terminal workspace stops and its pod is removed. Work in the pod that was not pushed is lost.'
       default:
-        return 'The terminal session stops. Work not yet saved may be lost.'
+        return 'The terminal workspace stops. Work not yet saved may be lost.'
     }
   }
   switch (runtime) {

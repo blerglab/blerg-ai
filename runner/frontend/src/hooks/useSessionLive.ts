@@ -5,8 +5,10 @@
 // down). Nothing is listed while the first read is on its way: a list that fills in at once beats one
 // that churns.
 import { useMemo } from 'react'
+import { apiFetch } from '../apiFetch'
+import { useMessageStore } from './useMessageStore'
 import { useChatReportStore, useLiveState, type BackgroundTask, type ChatReport } from '@blerglab/chat'
-import type { SessionPanelLiveState, LiveChildSession, LiveDelegationGrant, LiveDelegationRequest, LiveReviewRequest } from '../lib/liveState'
+import type { SessionPanelLiveState, LiveChildSession, LiveDelegationGrant, LiveDelegationRequest, LiveReviewRequest, LiveAnswerRequest } from '../lib/liveState'
 import { useLiveStateServer } from './useLiveStateServer'
 
 export interface SessionLive {
@@ -15,6 +17,8 @@ export interface SessionLive {
   delegationGrants?: LiveDelegationGrant[]
   /** Pending review requests (Needs you). */
   reviewRequests?: LiveReviewRequest[]
+  /** Pending published-page answers (Needs you). */
+  answerRequests?: LiveAnswerRequest[]
   /** The panel's lists, in the chat's LiveState shape (answer, openFiles, filesKey and files are the chat's). */
   live: SessionPanelLiveState
   /** The background tasks still running, by the server; null when the chat's list is used. */
@@ -31,12 +35,13 @@ const NO_REPORT: Partial<ChatReport> = {}
 const NO_CLOSED: ReadonlyMap<string, string> = new Map()
 
 export function useSessionLive(sessionId: string, enabled: boolean, refresh: unknown): SessionLive {
+  const messages = useMessageStore(s => s.messages)
   const report = useChatReportStore(s => s.reports[sessionId]) ?? NO_REPORT
   // An ask the server closed without a transcript event (it expired, or was answered on the Messages
   // page) reaches the chat as message_answered: it leaves the lists at once, and the server is asked
   // again.
   const closed = report.closedAsks ?? NO_CLOSED
-  const server = useLiveStateServer(sessionId, enabled, `${String(refresh)}|${closed.size}`)
+  const server = useLiveStateServer(sessionId, enabled, `${String(refresh)}|${closed.size}|${messages.filter(m => m.kind === 'ask').map(m => `${m.id}:${m.status}:${m.answerable}`).join(',')}`)
   const served = server.status === 'ready' || server.status === 'error' ? server.view : null
   const view = useMemo(() => (served && closed.size > 0 && served.asks.some(a => a.messageId && closed.has(a.messageId))
     ? { ...served, asks: served.asks.filter(a => !(a.messageId && closed.has(a.messageId))) }
@@ -47,13 +52,29 @@ export function useSessionLive(sessionId: string, enabled: boolean, refresh: unk
   const client = useLiveState(fallback ? sessionId : '')
   const clockOffset = server.status === 'ready' || server.status === 'error' ? server.clockOffset : 0
   const generatedAt = reply ? Date.parse(reply.generated_at) : NaN
+  const parentAnswer = report.answer
   const fromServer = useMemo<SessionPanelLiveState | null>(() => (view
     ? {
         settled: true,
         subagents: view.subagents,
-        openAsks: view.asks,
+        openAsks: view.asks.filter(a => !messages.some(m => m.id === a.messageId && m.status !== 'open')),
         backgroundRunning: view.tasks.length,
-        answer: report.answer,
+        answer: parentAnswer || view.asks.some(a => a.childSessionId) ? async (text, messageId) => {
+          const child = view.asks.find(a => a.messageId === messageId && a.childSessionId)
+          if (!child) return await parentAnswer?.(text, messageId) ?? false
+          try {
+            const response = await apiFetch(`/api/messages/${encodeURIComponent(child.messageId)}/reply`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answer: text }),
+            })
+            if (!response.ok) return false
+            const answered = { id: child.messageId, session_id: child.childSessionId!, kind: 'ask' as const,
+              body: child.question, status: 'answered' as const, answer: text,
+              created_at: new Date(child.askedAt ?? Date.now()).toISOString(), answered_at: new Date().toISOString() }
+            useMessageStore.setState(s => ({ messages: s.messages.some(m => m.id === answered.id)
+              ? s.messages.map(m => m.id === answered.id ? answered : m) : [...s.messages, answered] }))
+            return true
+          } catch { return false }
+        } : undefined,
         openFiles: report.openFiles,
         filesKey: report.filesKey ?? '',
         files: report.files,
@@ -71,8 +92,8 @@ export function useSessionLive(sessionId: string, enabled: boolean, refresh: unk
         reasoningTokens: view.reasoningTokens,
         usage: view.usage,
       }
-    : null), [view, report.answer, report.openFiles, report.filesKey, report.files, clockOffset, generatedAt])
-  if (fromServer && view) return { live: fromServer, tasks: view.tasks, toolChanges: view.toolChanges, children: view.children, delegationRequests: view.delegationRequests, delegationGrants: view.delegationGrants, reviewRequests: view.reviewRequests, source: 'server' }
+    : null), [view, messages, parentAnswer, report.openFiles, report.filesKey, report.files, clockOffset, generatedAt])
+  if (fromServer && view) return { live: fromServer, tasks: view.tasks, toolChanges: view.toolChanges, children: view.children, delegationRequests: view.delegationRequests, delegationGrants: view.delegationGrants, reviewRequests: view.reviewRequests, answerRequests: view.answerRequests, source: 'server' }
   if (fallback) return { live: client, tasks: null, toolChanges: null, source: 'client' }
   // Loading: the chat's reading of no session, which lists nothing.
   return { live: client, tasks: [], toolChanges: null, source: 'loading' }

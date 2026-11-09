@@ -18,3 +18,5 @@
 !runner/sandbox/engines/package.json
 !runner/sandbox/engines/package-lock.json
 !runner/sandbox/install-hermes.sh
+!runner/skills/
+!runner/skills/**

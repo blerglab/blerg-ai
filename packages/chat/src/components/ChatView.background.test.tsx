@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import ChatView from './ChatView'
 import { StatusGlyph, elapsedOf } from './BackgroundParts'
 import { scrollToCall } from './scrollToCall'
+import { useChatReportStore } from '../hooks/useLiveState'
 import { useBackgroundTasks } from '../hooks/useBackgroundTasks'
 import { createFakeTransport, type FakeTransport } from '../test/fakeTransport'
 import { COMPACT, SESSION, ev as mk, meta, resetChatState, seed } from '../test/chat'
@@ -64,6 +65,13 @@ describe('background tasks in the chat', () => {
     vi.useRealTimers()
     delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
     localStorage.removeItem(COMPACT)
+  })
+
+  it('suppresses stale working activity during a host recovery pause', () => {
+    seed(userMsg(NOW - S), ev('status_changed', {status: 'running'}, NOW - S))
+    const t = createFakeTransport()
+    render(<ChatView session={SESSION} transport={t.transport} meta={meta({status: 'running'})} recoveryPaused />)
+    expect(screen.queryByTestId('working')).toBeNull()
   })
 
   it('draws no strip or list of its own; the working line names what runs', () => {
@@ -239,6 +247,25 @@ describe('working line while background tasks run', () => {
     expect(screen.getByLabelText('Background task details').textContent).toBe(command)
   })
 
+  it('says Stop ended the wait while preserving the running task, including after replay', () => {
+    seed(userMsg(NOW - 70 * S), started('b1', 'c1', NOW - 65 * S, 'Run focused tests'), ev('turn_done', { stop_reason: 'interrupted', model: 'm', usage: {} }, NOW - 60 * S))
+    const { t } = mount('idle')
+    expect(screen.getByTestId('working-words').textContent).toBe('Stopped; background work may still be running')
+    arrive(t, done('b1', 'c1', NOW))
+    expect(screen.queryByTestId('working')).toBeNull()
+  })
+
+  it('ends the idle background wait when Stop is acknowledged without inventing a turn', () => {
+    seed(...twoRunning())
+    const { t } = mount('idle')
+    expect(useChatReportStore.getState().reports[SESSION]?.busy).toBe(true)
+    arrive(t, ev('background_wait_stopped', {}, NOW - S))
+    expect(useChatReportStore.getState().reports[SESSION]?.busy).toBe(false)
+    expect(screen.getByTestId('working-words').textContent).toBe('Stopped; background work may still be running')
+    arrive(t, userMsg(NOW), ev('status_changed', { status: 'running', reason: 'turn' }, NOW))
+    expect(screen.getByTestId('working-words').textContent).not.toContain('Stopped')
+  })
+
   it('goes when the last task finishes', () => {
     seed(userMsg(NOW - 70 * S), bashCall('c1', NOW - 66 * S), result('c1', NOW - 65 * S), started('b1', 'c1', NOW - 65 * S, 'Wait for the deploy'), turnDone(NOW - 60 * S))
     const { t } = mount('idle')
@@ -246,3 +273,9 @@ describe('working line while background tasks run', () => {
     expect(screen.queryByTestId('working')).toBeNull()
   })
 })
+
+ it('shows every Stop result as a visible notice',()=>{
+ resetChatState();const {t}=mount('running')
+ arrive(t,ev('stop_result',{state:'stopping',message:'Stopping the current work.'},NOW))
+ expect(screen.getByTestId('stop-result')).toHaveTextContent('Stopping the current work.')
+ })

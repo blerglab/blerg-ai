@@ -7,7 +7,7 @@
 // Tracker data is untrusted, and any session token can claim any source: every field is text; the
 // description and the comments go through Markdown WITHOUT the app's cards (a ```card fence stays
 // a code block) and, as everywhere, without raw HTML or images.
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { useLayoutEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useBackdropClose } from '../hooks/useBackdropClose'
 import { useSelectAllIn } from '../hooks/useSelectAllIn'
@@ -32,9 +32,9 @@ export function SourceBadge({ source }: { source: string }) {
 /** The key, as a link to the tracker when the address is http(s). */
 export function TicketKey({ ticket }: { ticket: Pick<Ticket, 'key' | 'url'> }) {
   const href = ticketHref(ticket.url)
-  if (!href) return <span className="ticket-key">{ticket.key}</span>
+  if (!href) return <span className="ticket-key" title={ticket.key}>{ticket.key}</span>
   return (
-    <a className="ticket-key" href={href} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}>
+    <a className="ticket-key" title={ticket.key} href={href} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}>
       {ticket.key}
     </a>
   )
@@ -203,7 +203,10 @@ const FOCUSABLE = 'a[href], button:not([disabled]), input, select, textarea, sum
 
 /** TicketModal: a ticket over the page, as an issue view. Esc, the backdrop and × close it; Tab
  *  stays inside it; the focus goes back where it was. */
-export function TicketModal({ ticket, onClose, onShow, body, actions }: {
+export function TicketModal({ ticket, onClose, onShow, body, actions, askedBy, plainTitle, wideQuestion }: {
+  askedBy?: string
+  plainTitle?: boolean
+  wideQuestion?: boolean
   ticket: Ticket
   onClose: () => void
   /** "Show in conversation", when the host can find its card. */
@@ -213,26 +216,28 @@ export function TicketModal({ ticket, onClose, onShow, body, actions }: {
   /** More of the host's actions in the header, before the tracker link. */
   actions?: ReactNode
 }) {
+  const question = ticket.source === 'question'
   const titleId = useId()
   const ref = useRef<HTMLDivElement | null>(null)
   useSelectAllIn(ref)
   const backdrop = useBackdropClose(onClose)
   // Maximize: edge to edge, remembered like the file viewer's (its own 'ticket' kind).
-  const [maximized, setMaximized] = useState(() => localStorageChatStorage.get(MAXIMIZED_KEY('ticket')) === '1')
+  const [maximized, setMaximized] = useState(() => !question && localStorageChatStorage.get(MAXIMIZED_KEY('ticket')) === '1')
   const toggleMaximized = () => {
     const next = !maximized
     setMaximized(next)
-    localStorageChatStorage.set(MAXIMIZED_KEY('ticket'), next ? '1' : null)
+    if (!question) localStorageChatStorage.set(MAXIMIZED_KEY('ticket'), next ? '1' : null)
   }
-  useEffect(() => {
+  useLayoutEffect(() => {
     const before = document.activeElement as HTMLElement | null
-    ref.current?.focus()
+    const answer = question ? ref.current?.querySelector<HTMLElement>('.ask-reply textarea, .ask-reply-decisions .primary') : null
+    ;(answer ?? ref.current)?.focus()
     return () => { if (before && before.isConnected) before.focus() }
-  }, [])
+  }, [question])
   const href = ticketHref(ticket.url)
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (e.key === 'Escape') { e.stopPropagation(); onClose(); return }
-    if (e.altKey && (e.ctrlKey || e.metaKey) && !e.shiftKey && (e.code === 'KeyF' || e.key.toLowerCase() === 'f')) {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onClose(); return }
+    if (!question && e.altKey && (e.ctrlKey || e.metaKey) && !e.shiftKey && (e.code === 'KeyF' || e.key.toLowerCase() === 'f')) {
       e.preventDefault()
       toggleMaximized()
       return
@@ -246,10 +251,11 @@ export function TicketModal({ ticket, onClose, onShow, body, actions }: {
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
   }
   return createPortal(
-    <div className={`artifact-overlay${maximized ? ' is-maximized' : ''}`} data-testid="ticket-modal-overlay" {...backdrop}>
+    // button-guard-ignore: useBackdropClose supplies pointer handlers only; this overlay is not a button
+    <div className={`artifact-overlay${question ? ' question-overlay' : ''}${maximized ? ' is-maximized' : ''}`} data-testid="ticket-modal-overlay" {...backdrop}>
       <div
         ref={ref}
-        className={`artifact-dialog ticket-modal${maximized ? ' is-maximized' : ''}`}
+        className={`artifact-dialog ticket-modal${question ? ' question-modal' : ''}${question && wideQuestion ? ' question-expanded' : ''}${maximized ? ' is-maximized' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -259,21 +265,24 @@ export function TicketModal({ ticket, onClose, onShow, body, actions }: {
       >
         <header className="artifact-header ticket-modal-header">
           <div className="artifact-header-text">
-            <div className="ticket-line">
+            {!question && askedBy && <div className="question-card-asker">Asked by {askedBy}</div>}
+            {!question && <div className="ticket-line">
               <SourceBadge source={ticket.source} />
               <TicketKey ticket={ticket} />
               <StatusChip status={ticket.status} />
-            </div>
-            <h2 className={titleClass(ticket, 'ticket-modal-title')} id={titleId}>{ticket.title}</h2>
+            </div>}
+            {question && !plainTitle
+              ? <div className={titleClass(ticket, 'ticket-modal-title')} role="heading" aria-level={2} id={titleId} title={ticket.title}><Markdown text={ticket.title} inline references={false} /></div>
+              : <h2 className={titleClass(ticket, 'ticket-modal-title')} id={titleId} title={question ? ticket.title : undefined}>{ticket.title}</h2>}
           </div>
           <div className="ticket-modal-actions">
             {actions}
             {href && (
-              <a className="ticket-open-link" href={href} target="_blank" rel="noopener noreferrer">
+              <a className="ticket-open-link" title={`Open in ${sourceLabel(ticket.source) || 'tracker'}`} aria-label={`Open in ${sourceLabel(ticket.source) || 'tracker'}`} href={href} target="_blank" rel="noopener noreferrer">
                 Open in {sourceLabel(ticket.source) || 'tracker'} <span aria-hidden="true">↗</span>
               </a>
             )}
-            <button
+            {!question && <button
               type="button"
               className="artifact-close artifact-maximize"
               aria-label={maximized ? 'Restore size' : 'Maximize'}
@@ -282,8 +291,8 @@ export function TicketModal({ ticket, onClose, onShow, body, actions }: {
               onClick={toggleMaximized}
             >
               <span aria-hidden="true">{maximized ? '⤡' : '⤢'}</span>
-            </button>
-            <button type="button" className="artifact-close" aria-label="Close" onClick={onClose}>✕</button>
+            </button>}
+            <button type="button" className="artifact-close" aria-label="Close" title="Close" onClick={onClose}>✕</button>
           </div>
         </header>
         <div className="artifact-body ticket-modal-body">

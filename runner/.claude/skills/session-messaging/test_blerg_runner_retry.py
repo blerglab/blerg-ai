@@ -48,6 +48,19 @@ class TestDeployRetry(unittest.TestCase):
     def error(self, code):
         return urllib.error.HTTPError('https://runner.example.com/api', code, 'gateway', {}, io.BytesIO(b'busy'))
 
+    def test_typed_launch_refusal_is_never_retried(self):
+        page = urllib.error.HTTPError('https://runner.example.com/api', 503, 'refused',
+                                      {'X-Blerg-Launch-Refusal': 'owner_token_rejected'},
+                                      io.BytesIO(b'{"error":"Update your token in Settings"}'))
+        self.opener.open.side_effect = [page, Reply()]
+        req = urllib.request.Request('https://runner.example.com/api', method='POST',
+                                     headers={'Idempotency-Key': 'same-launch'})
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.open(req, 30)
+        self.assertEqual(caught.exception.code, 503)
+        self.assertEqual(self.opener.open.call_count, 1)
+        self.assertEqual(self.sleeps, [])
+
     def test_gateway_errors_retry_then_recover(self):
         errors = [self.error(code) for code in (502, 503, 504)]
         self.opener.open.side_effect = errors + [Reply()]

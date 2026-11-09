@@ -1,83 +1,28 @@
 ---
 name: managing-cards
-description: Use when filing, updating, or triaging cards on a blerg-board board — covers search-before-file, dedup keys, the board field schema, and how to respond to admission-gate verdicts (deny/revise/held).
+description: File, estimate, start and review Blerg Board cards using MCP, REST or the session CLI.
 ---
 
-# Managing cards on blerg-board
+# Manage tickets consistently
 
-blerg-board is a card board where **agents write the cards and humans curate**. An
-LLM admission gate reviews agent writes on gated boards: it can deny a
-duplicate or send a vague card back for revision. The gate's feedback is
-in-band — read the error body and act on it.
+These rules apply to every workspace, channel, engine and worker.
 
-## Surfaces
+Workers reach Main with `blerg-runner ask` for decisions and `blerg-runner note` for information. Plain chat replies mid-turn do not notify Main. Main reads notes with `blerg-runner session result <child>`; use `publish` for long content.
 
-Prefer the **MCP tools** (`blerg_*`) when configured — card `fields` are
-structured objects and MCP passes them natively. Fallback: the `blerg-board` CLI
-(`ls`, `get`, `search`, `new`, `move`) with `BLERG_BOARD_URL`, `BLERG_BOARD_TOKEN`, `BLERG_BOARD_BOARD`
-env vars, or the REST API with `Authorization: Bearer $BLERG_BOARD_TOKEN`.
+1. Read the board and search before filing. Prefer board MCP tools when connected; inside a session use `blerg-runner ticket get/list/create/update/move`. Check `blerg-runner board access` after a refusal: permissions can change while you work.
+2. Before filing or starting, estimate: size S/M/L/XL, risk low/medium/high, and complexity low/medium/high. Use `ticket create/update --size M --risk medium --complexity low`, or the same top-level MCP fields. Do this before moving into progress or starting a worker. Read existing estimates; explain revisions. Fill missing estimates before starting. The service records first-set times; never backdate them.
+3. One idea per card, with a specific title, intent, acceptance criteria and workspace repos. Search first, use a stable intent-based dedup key when available, and update an existing match. A dedup refresh preserves estimates and placement: use update to change them.
+4. Custom fields are separate: read the board schema before writing `fields`. Size, risk and complexity need no schema or board setup. Pass the version you read as `if_match` on a read-modify-write.
+5. Record dependencies instead of relying on card order. Pin the card you work on and name its #N in worker titles using the correct board context. Move completed work to a terminal column. Do not archive, split, or remove another person's work without authorization.
+6. Record every completed review, including from a worker: `blerg-runner mark review "<summary>" --card N --verdict approved|changes|rejected --by <engine> --target <sha> --round N`. Add `--findings high,medium,low` with one entry per finding, preserving repeated severities; omit it for no findings. Use the actual reviewed commit and engine, and increment the round for another review of that work. Set the board context; card numbers alone are ambiguous across boards. Record the review even if it approves with no findings. Historical reviews may be imported with `mark --import` and their actual `at` time.
+7. Record a failure when a test, gate, flaky rerun, review, session, engine, deploy or merge fails: `blerg-runner mark failure "<summary>" --card N --type test|gate|flake|review|session|engine|deploy|merge --severity high|medium|low --suite "<name>"`. Record the failed attempt immediately; after a successful rerun record another failure mark for the same suite with `--rerun-passed`. Do not erase the failed attempt or call a failure a flake without rerun evidence. Review finding severities stay on review records. Server-recorded session failure alerts link automatically through pins and #N titles; do not duplicate those alerts. Use real times for historical imports.
+8. Reconcile the board after every merge and deploy, not from memory: list open cards (in progress, ready) and check each against first-parent merges on main and the deployed SHA. Move merged work to done, add `to-test` once deployed, and return stalled in-progress cards with no worker to ready. Workers send questions, decisions and work for review to Main with `blerg-runner ask`, never `--person`, `review request` or `--request-review`. Main reviews and asks the person only for their decisions, in plain words. Merge a card's branch with `git merge --no-ff` and a subject that starts `Merge BLG-N:`, so the board follows the merge by itself; a fast-forward leaves the card where it was. After a successful deploy, mark `blerg-runner mark milestone "Deployed: <environment>" --commit <full deployed SHA>` with exactly one commit; that prefix is the deploy evidence that adds `to-test`.
+9. Respond to admission feedback: search and update the match on duplicate denial; revise vague submissions; track held proposals. Do not rephrase and resubmit a denied duplicate. Keep progress comments short and factual.
 
-## No board for your project? Create it.
+## Admission and mirrored cards
 
-Board setup is agent work. If `blerg_board_list` has no board for the project
-at hand, create one (`blerg_board_create`: name, `repos` wired, `gate_enabled`
-true, optional `field_schema`) and then manage it — file the backlog, triage
-columns, keep bodies current, archive what's done. Only ask the human when
-your token lacks `board.admin`, and ask for the capability, not the board.
-
-## Filing a card — the discipline
-
-1. **Search first.** `blerg_card_search` with a few words from your finding
-   (no MCP: `blerg-board search <words>`). The gate denies semantic duplicates;
-   searching first saves the round trip. If a match exists, update that card
-   instead of filing a new one.
-2. **Choose a stable `dedup_key`.** A hash of *intent*, not wording:
-   `missing-tests:internal/daemon/screenstate.go`, `flaky:TestFoo`,
-   `sweep:security:pkg/auth`. Re-filing with the same key **refreshes** the
-   existing card (title/body/fields/tags only — it never moves a card the
-   human has placed). This is what makes re-running a sweep idempotent.
-3. **Read the schema before writing `fields`.** `blerg_board_schema` returns
-   the board's declared custom fields. Unknown keys and wrong types are
-   rejected with a 422 naming the key. Enum values are exact — `sev1`, not
-   `SEV1`.
-4. **Write titles that say the thing.** "classifyScreen misreads narrow
-   waiting prompts as idle" beats "fix session state bug". The curator sends
-   vague titles back.
-5. **Repos**: most boards require ≥1 repo per card; the first repo is the
-   primary working directory for whoever picks the card up.
-
-## Responding to gate verdicts
-
-- **409 deny, `duplicate_of: #N`** — fetch card #N. If your finding adds
-  something, update #N (append to body, adjust fields). Do not rephrase and
-  resubmit: identical payloads are auto-rejected for an hour, and the gate
-  remembers.
-- **422 revise** — the `suggestion` field says what to fix (usually: split an
-  ambiguous card, or add missing specifics). Revise and resubmit.
-- **Disagree with a denial?** You get **one** dispute per review: resubmit
-  with `dispute_of: <review_id>` and a `rebuttal` explaining why the denial is
-  wrong. Depending on board policy this is adjudicated by a stronger model,
-  held for the human, or accepted with a flag. A second dispute of the same
-  review is rejected outright — don't argue with the gate.
-- **202 held** — the submission is queued for the human. Note the `review_id`,
-  move on, and check later with `blerg_review_get`.
-
-## Comment like an engineer
-
-While working a card, post progress comments (`blerg_card_comment`): what
-you're investigating, findings with links, decisions and why. The human reads
-the card's trail live — short and frequent beats one long final edit.
-
-## Concurrency
-
-Every mutation bumps the card's `version`. Pass `if_match` with the version
-you read to get a 409 instead of silently overwriting a concurrent change —
-use it whenever you read-modify-write.
-
-## Don'ts
-
-- Don't file cards for work you're about to do in the same session — file
-  outcomes, findings, and follow-ups worth tracking.
-- Don't batch unrelated findings into one card; the gate sends those back.
-- Don't move incident cards (type `incident` / `INC-…` external ids) — blerg-ops
-  owns their lifecycle; they are read-only mirrors in blerg-board.
+- A 409 duplicate denial names `duplicate_of: #N`: fetch it and update the match if you have new evidence. A 422 revise response names the missing specifics. A 202 held response has a `review_id`; check it later instead of assuming the write succeeded.
+- A disputed denial may be resubmitted once with `dispute_of` and a factual `rebuttal`; never dispute the same review twice or rephrase the same denied filing.
+- Custom field keys and enum values must match the board schema exactly. Unknown keys and wrong types are rejected.
+- Incident cards (`type: incident` or `INC-…` external IDs) may be read-only mirrors owned by another service. Do not move those cards.
+- Do not delete a nonempty column; move its work deliberately or rename it. Keep a version guard on read-modify-write updates so another worker's change is not lost.

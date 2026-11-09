@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import Login from "./Login";
 import Settings from "./Settings";
 import ChangePassword from "./ChangePassword";
+import Invite from "./Invite";
 import Setup from "./Setup";
 import Shell, { useSite, type Site } from "./Shell";
 import { getAccessToken, redirectToRefresh } from "./authClient";
@@ -32,7 +33,7 @@ function tilesFor(site: Site | null): Tile[] {
     },
     {
       name: "Runner",
-      description: "Launches and watches coding-agent sessions end to end.",
+      description: "Launches and watches coding-agent workspaces end to end.",
       url: site?.runner_url || `${origin}:8083`,
     },
   ];
@@ -220,7 +221,7 @@ function HomeScreen() {
           <li>
             <a className="action" href="/settings">
               <span className="action-name">Settings</span>
-              <span className="action-desc">Engine and git credentials for cluster-runtime sessions.</span>
+              <span className="action-desc">Engine and git credentials for cluster-runtime workspaces.</span>
             </a>
           </li>
           <li>
@@ -232,7 +233,7 @@ function HomeScreen() {
           <li>
             <button type="button" className="action" onClick={logoutAll} disabled={loggingOut}>
               <span className="action-name">{loggingOut ? "Logging out…" : "Log out everywhere"}</span>
-              <span className="action-desc">Ends every session for this account, on every device.</span>
+              <span className="action-desc">Signs this account out on every device.</span>
             </button>
           </li>
         </ul>
@@ -249,6 +250,7 @@ export default function App() {
         <Route path="/settings" element={<Settings />} />
         <Route path="/change-password" element={<ChangePassword />} />
         <Route path="/login" element={<Login />} />
+        <Route path="/invite" element={<Invite />} />
         <Route path="/setup" element={<Setup />} />
         <Route path="*" element={<Navigate to="/app" replace />} />
       </Routes>

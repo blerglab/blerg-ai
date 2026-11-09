@@ -117,7 +117,7 @@ export function withSessionOutcome(session: StartSession, attempt: StartAttempt 
     stages[i] = {
       ...stages[i],
       state: 'failed',
-      detail: session.error_reason || session.message || (session.status === 'stopped' ? 'The session was stopped before it was ready' : 'The session failed to start'),
+      detail: session.error_reason || session.message || (session.status === 'stopped' ? 'The workspace was stopped before it was ready' : 'The workspace failed to start'),
     }
   }
   return { ...attempt, stages, failed: true }

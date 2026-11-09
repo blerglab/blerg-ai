@@ -13,12 +13,12 @@ beforeEach(() => {
 describe("native session model controls", () => {
   it("uses only its native engine models and clears effort on model change", async () => {
     render(<SessionModelControls session={session} />);
-    const model = await screen.findByRole("combobox", { name: "Session model" });
+    const model = await screen.findByRole("combobox", { name: "Workspace model" });
     expect(screen.queryByRole("option", { name: "claude-fixture" })).toBeNull();
     expect(screen.queryByRole("combobox", { name: "Engine" })).toBeNull();
     fireEvent.change(model, { target: { value: "gpt-next" } });
-    expect(screen.getByRole("combobox", { name: "Session effort" })).toHaveValue("");
-    fireEvent.change(screen.getByRole("combobox", { name: "Session effort" }), { target: { value: "high" } });
+    expect(screen.getByRole("combobox", { name: "Workspace effort" })).toHaveValue("");
+    fireEvent.change(screen.getByRole("combobox", { name: "Workspace effort" }), { target: { value: "high" } });
     fireEvent.click(screen.getByRole("button", { name: "Apply settings" }));
     await waitFor(() => expect(api).toHaveBeenCalledWith("/api/runner-sessions/fixture-session/model", { json: { model: "gpt-next", effort: "high" } }));
     expect(await screen.findByRole("status")).toHaveTextContent("requested for the next turn");
@@ -29,13 +29,13 @@ describe("native session model controls", () => {
     render(<SessionModelControls session={{ ...session, engine: "hermes" }} />);
     const option = await screen.findByRole("option", { name: "Nemotron Super VL" });
     expect(option).toHaveAttribute("title", id);
-    fireEvent.change(screen.getByRole("combobox", { name: "Session model" }), { target: { value: id } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Workspace model" }), { target: { value: id } });
     fireEvent.click(screen.getByRole("button", { name: "Apply settings" }));
     await waitFor(() => expect(api).toHaveBeenCalledWith("/api/runner-sessions/fixture-session/model", { json: { model: id, effort: "" } }));
   });
   it("reports rejected controls instead of claiming success", async () => {
     render(<SessionModelControls session={session} />);
-    await screen.findByRole("combobox", { name: "Session model" });
+    await screen.findByRole("combobox", { name: "Workspace model" });
     vi.mocked(api).mockRejectedValue(new Error("Session host unavailable"));
     fireEvent.click(screen.getByRole("button", { name: "Apply settings" }));
     expect(await screen.findByRole("status")).toHaveTextContent("Session host unavailable");

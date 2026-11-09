@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -160,5 +161,174 @@ func TestCardSearchPagingKeepsLegacyArrayAndScope(t *testing.T) {
 	args, _ = json.Marshal(map[string]any{"board_id": w.ids["B"]["board_id"], "page": true})
 	if _, err = w.srv.dispatch(t.Context(), w.scoped, "blerg_card_search", args); err == nil {
 		t.Fatal("paged search bypassed scope")
+	}
+}
+
+func TestCardGetNumericTitleFallback(t *testing.T) {
+	w := newDiffWorld(t)
+	board := w.ids["A"]["board_id"]
+	key := "BLG"
+	if _, err := db.UpdateBoard(t.Context(), w.pool, board, db.BoardParams{Key: &key}); err != nil {
+		t.Fatal(err)
+	}
+	create := func(title string) db.Card {
+		t.Helper()
+		res, err := db.CreateCard(t.Context(), w.pool, board, db.CardParams{Title: &title}, db.EventMeta{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		card, err := db.GetCard(t.Context(), w.pool, res.Card.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return card
+	}
+	numeric := create("2024")
+	get := func(number int) (string, error) {
+		args, _ := json.Marshal(map[string]any{"board_id": board, "number": number, "title_fallback": true})
+		res, err := w.srv.dispatch(t.Context(), w.scoped, "blerg_card_get", args)
+		if err != nil {
+			return "", err
+		}
+		var card db.Card
+		if err := json.Unmarshal([]byte(contentText(res)), &card); err != nil {
+			t.Fatal(err)
+		}
+		return card.ID, nil
+	}
+	if id, err := get(2024); err != nil || id != numeric.ID {
+		t.Fatalf("numeric title = %s, %v", id, err)
+	}
+	// A matching key wins regardless of which card was created first.
+	for _, key := range []int{1, numeric.Number} {
+		create(strconv.Itoa(key))
+		expected, err := db.GetCardByNumber(t.Context(), w.pool, board, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id, err := get(key); err != nil || id != expected.ID {
+			t.Fatalf("key %d = %s, %v", key, id, err)
+		}
+	}
+	// Here the numeric title exists before the card with that number.
+	early := create("6")
+	late := create("Later card")
+	if late.Number != 6 {
+		t.Fatalf("fixture number = %d", late.Number)
+	}
+	if id, err := get(6); err != nil || id != late.ID || id == early.ID {
+		t.Fatalf("later key = %s, %v", id, err)
+	}
+	if _, err := get(9999); err == nil {
+		t.Fatal("missing number and title resolved")
+	}
+	duplicate := create("2024")
+	if _, err := get(2024); err == nil || !strings.Contains(err.Error(), numeric.Reference) || !strings.Contains(err.Error(), duplicate.Reference) {
+		t.Fatalf("ambiguous numeric title = %v", err)
+	}
+	args, _ := json.Marshal(map[string]any{"board_id": board, "number": 2024})
+	if _, err := w.srv.dispatch(t.Context(), w.scoped, "blerg_card_get", args); err == nil {
+		t.Fatal("explicit number unexpectedly fell back to title")
+	}
+	foreign, _ := json.Marshal(map[string]any{"board_id": w.ids["B"]["board_id"], "number": 2024, "title_fallback": true})
+	if _, err := w.srv.dispatch(t.Context(), w.scoped, "blerg_card_get", foreign); err == nil || strings.Contains(err.Error(), "2024") {
+		t.Fatalf("foreign board fallback = %v", err)
+	}
+}
+
+func TestCardWithTrailToTestAddedAtSurvivesBoundedTrail(t *testing.T) {
+	w := newDiffWorld(t)
+	ctx := t.Context()
+	id := w.ids["A"]["card_id"]
+	tags := []string{"to-test"}
+	if _, err := db.UpdateCard(ctx, w.pool, id, db.CardParams{Tags: &tags}, db.EventMeta{Actor: "human"}); err != nil {
+		t.Fatal(err)
+	}
+	for range 31 {
+		if err := db.AppendComment(ctx, w.pool, id, "Additional evidence", db.EventMeta{Actor: "human"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := w.srv.dispatch(ctx, w.scoped, "blerg_card_get", json.RawMessage(`{"card_id":`+jstr(id)+`,"with_trail":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Added string `json:"to_test_added_at"`
+	}
+	if err := json.Unmarshal([]byte(contentText(res)), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Added == "" {
+		t.Fatal("missing tag-addition evidence beyond bounded trail")
+	}
+	tags = nil
+	if _, err := db.UpdateCard(ctx, w.pool, id, db.CardParams{Tags: &tags}, db.EventMeta{Actor: "human"}); err != nil {
+		t.Fatal(err)
+	}
+	res, err = w.srv.dispatch(ctx, w.scoped, "blerg_card_get", json.RawMessage(`{"card_id":`+jstr(id)+`,"with_trail":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got.Added = ""
+	if err := json.Unmarshal([]byte(contentText(res)), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Added != "" {
+		t.Fatal("removed tag still has active addition evidence")
+	}
+}
+
+func TestCardSearchSummaryReconciliationEvidence(t *testing.T) {
+	w := newDiffWorld(t)
+	ctx := t.Context()
+	id := w.ids["A"]["card_id"]
+	tags := []string{"to-test"}
+	if _, err := db.UpdateCard(ctx, w.pool, id, db.CardParams{Tags: &tags}, db.EventMeta{Actor: "human"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AppendComment(ctx, w.pool, id, "Done reason: Configuration decision", db.EventMeta{Actor: "human"}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := w.srv.dispatch(ctx, w.scoped, "blerg_card_search", json.RawMessage(`{"board_id":`+jstr(w.ids["A"]["board_id"])+`,"page":true,"summary":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Cards []struct {
+			ID     string  `json:"id"`
+			Added  *string `json:"to_test_added_at"`
+			Reason *bool   `json:"has_human_done_reason"`
+		}
+	}
+	if err := json.Unmarshal([]byte(contentText(res)), &got); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range got.Cards {
+		if c.ID == id {
+			found = true
+			if c.Added == nil || c.Reason == nil || !*c.Reason {
+				t.Fatalf("missing summary evidence: %+v", c)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("card missing")
+	}
+	if _, err := w.pool.Exec(ctx, `UPDATE card_events SET actor='agent' WHERE card_id=$1 AND type='comment'`, id); err != nil {
+		t.Fatal(err)
+	}
+	res, err = w.srv.dispatch(ctx, w.scoped, "blerg_card_search", json.RawMessage(`{"board_id":`+jstr(w.ids["A"]["board_id"])+`,"page":true,"summary":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(contentText(res)), &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range got.Cards {
+		if c.ID == id && (c.Reason == nil || *c.Reason) {
+			t.Fatal("worker reason accepted by summary projection")
+		}
 	}
 }

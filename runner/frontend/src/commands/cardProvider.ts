@@ -23,12 +23,12 @@ export function cardProvider(open: (ticket: Ticket) => void): PaletteProvider {
         // Access may have changed since discovery; never reuse a previous result.
         if (response.status === 403 || response.status === 404) return { items: [], note: '' }
         if (!response.ok) return { items: [], note: 'Some boards could not be searched. Try again.' }
-        const reply = await response.json() as { cards: { number: number; title: string; column_name?: string }[]; truncated?: boolean }
+        const reply = await response.json() as { cards: { number: number; reference?: string; title: string; column_name?: string }[]; truncated?: boolean }
         const items = reply.cards.map(card => ({
-          id: `card:${board.id}:${card.number}`, group: 'cards' as const, title: `#${card.number} ${card.title}`,
+          id: `card:${board.id}:${card.number}`, group: 'cards' as const, title: `${card.reference || `#${card.number}`} ${card.title}`,
           detail: [board.name, card.column_name].filter(Boolean).join(' · '), searchMatched: true,
           run: () => {
-            if (signedInAccount() === account) open({ source: 'blerg-board', board_id: board.id, key: `#${card.number}`, title: card.title, status: card.column_name })
+            if (signedInAccount() === account) open({ source: 'blerg-board', board_id: board.id, key: card.reference || `#${card.number}`, title: card.title, status: card.column_name })
           },
         } satisfies PaletteItem))
         return { items, note: reply.truncated ? 'Partial card results: narrow your search to see more.' : '' }

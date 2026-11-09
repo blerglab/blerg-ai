@@ -170,3 +170,25 @@ func TestSupportedVersion(t *testing.T) {
 		t.Errorf("empty version, got %q %v", v, ok)
 	}
 }
+
+func TestSanitizeBoardResultBoundary(t *testing.T) {
+	for _, size := range []int{0, 99, 100, 101} {
+		raw, _ := json.Marshal(outResult{Content: []outBlock{{Type: "text", Text: strings.Repeat("x", size)}}})
+		var got outResult
+		if err := json.Unmarshal(sanitizeBoardResult(raw, 100), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.IsError != (size > 100) {
+			t.Fatalf("size %d: %+v", size, got)
+		}
+		if size <= 100 && got.Content[0].Text != strings.Repeat("x", size) {
+			t.Fatalf("size %d changed", size)
+		}
+	}
+	raw, _ := json.Marshal(outResult{Content: []outBlock{{Type: "text", Text: strings.Repeat("x", 60)}, {Type: "text", Text: strings.Repeat("y", 60)}}})
+	var got outResult
+	_ = json.Unmarshal(sanitizeBoardResult(raw, 100), &got)
+	if !got.IsError || len(got.Content) != 1 || strings.Contains(got.Content[0].Text, "xxxx") {
+		t.Fatalf("partial blocks leaked: %+v", got)
+	}
+}

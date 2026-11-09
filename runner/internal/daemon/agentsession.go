@@ -8,32 +8,53 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/blerglab/blerg-ai/runner/internal/persontime"
+
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"github.com/blerglab/blerg-ai/contracts/pluginspec"
+	"github.com/blerglab/blerg-ai/runner/internal/activity"
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 	"github.com/blerglab/blerg-ai/runner/internal/agent/anthropic"
 	"github.com/blerglab/blerg-ai/runner/internal/agent/skills"
 	"github.com/blerglab/blerg-ai/runner/internal/agent/tools"
+	"github.com/blerglab/blerg-ai/runner/internal/commandsteps"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
 	"github.com/blerglab/blerg-ai/runner/internal/pluginsinstall"
+	"github.com/blerglab/blerg-ai/runner/internal/processtelemetry"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
 // AgentHostConfig configures agent-kind session hosting inside the daemon.
 type AgentHostConfig struct {
+	// ResultBundleRoot is the prepared cluster workspace projects directory.
+	ResultBundleRoot       string
+	WorkerPriority         *WorkerPriority
+	FixedCommandStepsInPod bool // set only by the trusted pod entrypoint
+	// GenerationDir keeps the last host generation beside it across restarts (askrecovery.go). Empty: kept
+	// in memory only, and a pod's server supplies SpawnSession.HostGenerationFloor.
+	GenerationDir string
+	// DaemonTokenSource reads the daemon's current credential when enrollment can replace
+	// DaemonToken while it runs. Nil: DaemonToken is current.
+	DaemonTokenSource func() string
 	// AttachmentsStateDir is the pod's private home state, outside /workspace.
 	// Empty uses the host daemon state directory.
 	AttachmentsStateDir string
+	// SkillReadGroup exposes only generated skills to the trusted pod agent group.
+	// Credentials and daemon state keep their private permissions.
+	SkillReadGroup bool
 	// BeforeDriverStop obtains the pod containment receipt before a CLI driver
 	// can kill its transport/helper process.
 	BeforeDriverStop func(sessionID string) error
@@ -111,11 +132,12 @@ func (c AgentHostConfig) reposRoot() string {
 // session, events shipped to the server over the existing WS with
 // client-event-ID idempotency and resend-on-reconnect.
 type AgentHost struct {
-	explorer WorkspaceExplorerRouter
+	skillStateDir string // captured per host; another daemon's state is never swept
+	explorer      WorkspaceExplorerRouter
 	// sandboxWatches tracks watcher teardown independently of driver teardown.
 	sandboxWatches sync.WaitGroup
 	initialPlanMu  sync.Mutex
-	initialPlans   map[string]chan string
+	initialPlans   map[string]chan protocol.PlanInputResult
 	sender         Sender
 	cfg            AgentHostConfig
 
@@ -136,14 +158,39 @@ type AgentHost struct {
 	// adopted interactive session among them waits for the person.
 	openAsks map[string]bool
 	// connected is closed the first time the daemon has a connection to its server.
-	connected       chan struct{}
-	connectedOnce   sync.Once
-	recoveryMu      sync.Mutex
-	recovery        RecoveryState
-	recoveryChanged chan struct{}
+	connected     chan struct{}
+	connectedOnce sync.Once
+	// questionRecovery holds restarted sessions whose dead question waiters the
+	// server has not withdrawn yet (askrecovery.go), guarded by mu.
+	questionRecovery    map[string]protocol.SpawnSession
+	waiterNoticeWorkers map[string]bool
+	// hostGeneration is the last generation minted (nextHostGeneration).
+	hostGeneration atomic.Int64
+	// hostGenerationMu serializes minting and its file; Loaded: the file has been read.
+	hostGenerationMu     sync.Mutex
+	hostGenerationLoaded bool
+	hostGenerationClock  func() time.Time // test override
+	// Test overrides of the recovery timeout and the pause between attempts.
+	questionRecoveryWait, questionRecoveryPause time.Duration
+	recoveryMu                                  sync.Mutex
+	recovery                                    RecoveryState
+	recoveryChanged                             chan struct{}
 }
 
 type agentSession struct {
+	inputClock agent.PersonClock
+	// stepMu keeps external input and Stop behind initial prompt delivery.
+	stepMu               sync.Mutex
+	stepsPending         bool
+	stepInputs           []agent.Input
+	processMonitor       *toolProcessMonitor
+	verbosityUpdated     atomic.Bool
+	verbosity            atomic.Value
+	stopInProgress       bool
+	stopBackground       map[string]bool
+	stopCompleted        time.Time
+	stopMu               sync.Mutex
+	scratch              *scratchFolder
 	workspaceV2          bool // immutable launch version; never inferred from request generations
 	localWorkspace       *LocalWorkspace
 	requireRecoveryReady bool
@@ -163,7 +210,7 @@ type agentSession struct {
 	status  atomic.Value // last status string for heartbeats
 	skills  []skills.Skill
 	// sandboxed marks a session whose engine runs inside a container, so Kill
-	// tears the container down the way killTmuxSession does for a terminal one.
+	// tears down the session container.
 	sandboxed bool
 	// sandboxCheck asks the watch of a sandboxed session's container (watchSandbox) to look now: an
 	// engine failure may be the container's. nil when the session has no sandbox.
@@ -182,9 +229,11 @@ type agentSession struct {
 	// in-session model/effort change is checked against (changeModel).
 	engine string
 	// record is the session's recovery record (nil: not recoverable, see recordable).
-	record     *recordKeeper
-	inputs     *inputJournal
-	inputFault atomic.Bool
+	record *recordKeeper
+	inputs *inputJournal
+	// processLimit is the process limit's line, until an input carries it to the agent.
+	processLimit atomic.Pointer[string]
+	inputFault   atomic.Bool
 	// stopReason is the non-retryable error the engine reported since its last turn started:
 	// what the session is said to have ended with when its runtime stops (trackStopReason).
 	stopReason atomic.Pointer[string]
@@ -289,12 +338,22 @@ func sandboxClaudeCredentialReport() *bool {
 
 // NewAgentHost builds an AgentHost. Sender is the WS client (or a test fake).
 func NewAgentHost(sender Sender, cfg AgentHostConfig) *AgentHost {
+	if cfg.PreferClaudeCLI && cfg.WorkerPriority == nil {
+		cfg.WorkerPriority = NewWorkerPriority("")
+	}
+	skillStateDir := DaemonStateDir()
+	if cfg.HomeDir != "" {
+		skillStateDir = filepath.Join(cfg.HomeDir, ".blerg-runner-daemon")
+	}
 	if cfg.HomeDir == "" {
 		if h, err := os.UserHomeDir(); err == nil {
 			cfg.HomeDir = h
 		}
 	}
-	host := &AgentHost{sender: sender, cfg: cfg, sessions: make(map[string]*agentSession),
+	if cfg.SkillReadGroup {
+		skillStateDir = PodSkillStateDir(cfg.HomeDir)
+	}
+	host := &AgentHost{sender: sender, cfg: cfg, skillStateDir: skillStateDir, sessions: make(map[string]*agentSession),
 		adopting: make(map[string]*adoptingSession), connected: make(chan struct{}), recoveryChanged: make(chan struct{})}
 	if client, ok := sender.(interface{ SetRecoveryStateHandler(func(RecoveryState)) }); ok {
 		client.SetRecoveryStateHandler(host.NoteRecoveryState)
@@ -315,6 +374,7 @@ const pendingCap = 10_000
 type pendingEvent struct {
 	clientEventID string
 	raw           []byte
+	stopNoticeKey string
 }
 
 // wsEmitter implements agent.Emitter: marshals events onto the WS and keeps
@@ -341,7 +401,8 @@ type wsEmitter struct {
 	// markerNonce is the session's marker code: emit replaces it in every payload, so a tool
 	// result (a `ps` listing, the agent reading its own transcript), the model's text or an echo
 	// never carries it to the server or a viewer.
-	markerNonce string
+	markerNonce   string
+	skillObserver *skillObserver
 }
 
 func newWSEmitter(sender Sender, sessionID string, onEvent func(agent.Event)) *wsEmitter {
@@ -356,6 +417,14 @@ func (e *wsEmitter) Emit(ev agent.Event) { e.emit(ev, true) }
 func (e *wsEmitter) Replay(ev agent.Event) { e.emit(ev, false) }
 
 func (e *wsEmitter) emit(ev agent.Event, observe bool) {
+	if observe && e.skillObserver != nil {
+		e.skillObserver.delivered(ev, e)
+	}
+	if observe && e.skillObserver != nil && (ev.Kind == "tool_call" || ev.Kind == "tool_result") {
+		for _, load := range e.skillObserver.observe(ev) {
+			e.emit(load, false)
+		}
+	}
 	if observe && e.onEvent != nil {
 		e.onEvent(ev)
 	}
@@ -385,56 +454,94 @@ func (e *wsEmitter) emit(ev agent.Event, observe bool) {
 		_ = e.sender.Send(msg) // best-effort, never buffered or ordered
 		return
 	}
-	e.mu.Lock()
-	duplicate := false
-	if !observe {
-		for _, pending := range e.pending {
-			if pending.clientEventID == ev.ClientEventID {
-				duplicate = true
-				break
+	// Stop outcomes need bounded reserved space: ordinary output can be blocked
+	// while cancellation is the only way to release the turn producing it.
+	key := ""
+	switch ev.Kind {
+	case "stop_result":
+		if p, ok := ev.Payload.(map[string]string); ok {
+			switch p["state"] {
+			case "stopping", "stopped", "idle":
+				key = "stop:" + p["state"]
 			}
 		}
+	case "background_wait_stopped":
+		key = "background_wait_stopped"
+	case "error":
+		if p, ok := ev.Payload.(agent.ErrorPayload); ok && p.Code == agent.ErrorCodeStopFailed {
+			key = "stop_failed"
+		}
 	}
-	for len(e.pending) >= pendingCap && !e.closed && !duplicate {
-		e.notFull.Wait() // spec: loop blocks at the bound (buffering)
-	}
-	if e.closed {
+	for {
+		e.mu.Lock()
+		buffered := func() bool {
+			if !observe {
+				for _, pending := range e.pending {
+					if pending.clientEventID == ev.ClientEventID {
+						return true
+					}
+				}
+			}
+			return false
+		}
+		for len(e.pending) >= pendingCap && key == "" && !e.closed && !buffered() {
+			e.notFull.Wait()
+		}
+		if e.closed {
+			e.mu.Unlock()
+			return
+		}
 		e.mu.Unlock()
-		return // killed session: drop instead of wedging the loop goroutine
-	}
-	e.mu.Unlock()
-
-	e.sendMu.Lock()
-	defer e.sendMu.Unlock()
-	e.mu.Lock()
-	if e.closed {
+		e.sendMu.Lock()
+		e.mu.Lock()
+		if e.closed {
+			e.mu.Unlock()
+			e.sendMu.Unlock()
+			return
+		}
+		if len(e.pending) >= pendingCap && key == "" && !buffered() {
+			e.mu.Unlock()
+			e.sendMu.Unlock()
+			continue
+		}
+		// At capacity, replay an outstanding outcome of the same kind instead of
+		// growing the reserve on repeated Stop presses. Its persistence ID stays stable.
+		if len(e.pending) >= pendingCap && key != "" {
+			for _, pending := range e.pending {
+				if pending.stopNoticeKey == key {
+					_ = json.Unmarshal(pending.raw, &msg)
+					e.mu.Unlock()
+					_ = e.sender.Send(msg)
+					e.sendMu.Unlock()
+					return
+				}
+			}
+		}
+		if !buffered() {
+			e.pending = append(e.pending, pendingEvent{clientEventID: ev.ClientEventID, raw: raw, stopNoticeKey: key})
+		}
 		e.mu.Unlock()
+		_ = e.sender.Send(msg) // send failure is fine: resend covers it
+		e.sendMu.Unlock()
 		return
 	}
-	buffered := false
-	if !observe {
-		for _, pending := range e.pending {
-			if pending.clientEventID == ev.ClientEventID {
-				buffered = true
-				break
-			}
-		}
-	}
-	if !buffered {
-		e.pending = append(e.pending, pendingEvent{ev.ClientEventID, raw})
-	}
-	e.mu.Unlock()
-	_ = e.sender.Send(msg) // send failure is fine: resend covers it
 }
 
 // ack removes a persisted event from the pending buffer.
 func (e *wsEmitter) ack(clientEventID string) {
+	if e.skillObserver != nil {
+		e.skillObserver.ackInitial(clientEventID)
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for i, p := range e.pending {
 		if p.clientEventID == clientEventID {
-			e.pending = append(e.pending[:i], e.pending[i+1:]...)
-			e.notFull.Signal()
+			copy(e.pending[i:], e.pending[i+1:])
+			// The backing array survives the shortened slice. Release the removed
+			// payload reference as well as its logical slot (BLG-431).
+			e.pending[len(e.pending)-1] = pendingEvent{}
+			e.pending = e.pending[:len(e.pending)-1]
+			e.notFull.Broadcast()
 			return
 		}
 	}
@@ -478,16 +585,21 @@ func (e *wsEmitter) pendingCount() int {
 // — the same endpoints the blerg-runner CLI uses, so the Chat tab, push
 // notifications, and answer routing work unchanged.
 type httpMessenger struct {
-	base        string
-	token       string
-	tokenSource func() string
-	sessionID   string
-	turnID      string // optional native-question turn, recorded atomically with its server ask
-	client      *http.Client
-	ctx         context.Context     // session lifetime; bounds answer polling
-	onAnswer    func(answer string) // called from the answer-poll goroutine
-	onPollEnd   func()              // optional: lets native requests stop waiting when the ask expires
-	ownerOnly   bool                // asks are answerable only by the session's signed-in owner (approvals)
+	hostGeneration int64
+	base           string
+	token          string
+	tokenSource    func() string
+	sessionID      string
+	turnID         string // optional native-question turn, recorded atomically with its server ask
+	client         *http.Client
+	waitNotice     func(context.Context, time.Duration) bool
+	ctx            context.Context       // session lifetime; bounds answer polling
+	onAnswerFrame  func(agent.AskAnswer) // called from the answer-poll goroutine
+	onPollEnd      func()                // optional: lets native requests stop waiting when the ask expires
+	// lateAnswerRelay: nothing here can take an answer once the waiter left, so CloseAsk leaves an
+	// answer committed first to the server, which sends it to the session as a message.
+	lateAnswerRelay bool
+	ownerOnly       bool // asks are answerable only by the session's signed-in owner (approvals)
 	// markerNonce is the session's marker code, taken out of every body posted (the model's
 	// update, note or question).
 	markerNonce string
@@ -544,6 +656,9 @@ func (m *httpMessenger) post(kind, body string) (string, error) {
 	}
 	if m.ownerOnly && kind == "ask" {
 		fields["owner_only"] = true
+	}
+	if m.hostGeneration > 0 && kind == "ask" {
+		fields["host_generation"] = m.hostGeneration
 	}
 	payload, _ := json.Marshal(fields)
 	ctx := m.ctx
@@ -608,20 +723,35 @@ func (m *httpMessenger) SendAsk(body string) (string, error) {
 	return id, nil
 }
 
-// CloseAsk implements agent.AskCloser: the ask was answered in the chat, so its poll stops (it
-// must not deliver the answer a second time) and its message is marked answered (its card stops
-// asking). Best effort: the loop already has its answer.
-func (m *httpMessenger) CloseAsk(id, answer string) {
+// CloseAsk implements agent.AskCloser for an interrupted waiter. It stops the
+// poll and closes the question without recording the supplied text as approval.
+func (m *httpMessenger) CloseAsk(id, _ string) {
+	path := ""
+	if m.lateAnswerRelay {
+		var err error
+		path, err = m.saveWaiterNotice(id)
+		if err != nil {
+			log.Printf("agent session %s: saving waiter notice: %v", m.sessionID, err)
+		}
+	}
 	m.pollMu.Lock()
 	if cancel := m.polls[id]; cancel != nil {
 		cancel()
 		delete(m.polls, id)
 	}
 	m.pollMu.Unlock()
+	if m.lateAnswerRelay {
+		go m.retryWaiterNotice(id, path)
+		return
+	}
 	go func() {
-		payload, _ := json.Marshal(map[string]string{"answer": answer})
+		fields := map[string]bool{}
+		if m.lateAnswerRelay {
+			fields["waiter_ended"] = true
+		}
+		payload, _ := json.Marshal(fields)
 		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
-			m.base+"/api/messages/"+url.PathEscape(id)+"/reply", bytes.NewReader(payload))
+			m.base+"/api/messages/"+url.PathEscape(id)+"/expire", bytes.NewReader(payload))
 		if err != nil {
 			return
 		}
@@ -632,14 +762,22 @@ func (m *httpMessenger) CloseAsk(id, answer string) {
 			log.Printf("agent session %s: closing ask %s: %v", m.sessionID, id, err)
 			return
 		}
-		// A refused close leaves the card open (it would take the next chat
-		// message as its answer), so it must not pass silently. 409 is a card
-		// that is already closed.
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusConflict {
+		// A refused interruption close leaves a dead question open, so it must
+		// not pass silently. 409 is a question that is already closed; 403 one
+		// the server kept for the person.
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusConflict && resp.StatusCode != http.StatusForbidden {
 			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 			log.Printf("agent session %s: closing ask %s: server answered %d: %s", m.sessionID, id, resp.StatusCode, strings.TrimSpace(string(raw)))
 		}
 		_ = resp.Body.Close()
+		// An answer the server committed before this close would otherwise be lost.
+		if m.onAnswerFrame != nil && !m.lateAnswerRelay {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if answer, ok, _ := m.fetchAnswer(ctx, id, "?wait=1"); ok && answer.Outcome == "answered" {
+				m.onAnswerFrame(answer)
+			}
+		}
 	}()
 }
 
@@ -647,70 +785,94 @@ func (m *httpMessenger) CloseAsk(id, answer string) {
 // `blerg-runner ask`'s exit 4).
 const askDismissedAnswer = "[the person dismissed this question without answering it; they may have answered in the chat instead. Ask again if you still need an answer]"
 
+// fetchAnswer reads one answer poll: the question's result when it has one, and
+// the HTTP status (0 when the request or its response failed).
+func (m *httpMessenger) fetchAnswer(ctx context.Context, id, query string) (agent.AskAnswer, bool, int) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.base+"/api/messages/"+id+"/answer"+query, nil)
+	if err != nil {
+		return agent.AskAnswer{}, false, 0
+	}
+	req.Header.Set("Authorization", "Bearer "+m.authToken())
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return agent.AskAnswer{}, false, 0
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return agent.AskAnswer{}, false, resp.StatusCode
+	}
+	// Server shape: {"answered": bool, "answer": string|null} (long-poll
+	// holds the request ≤25s while open).
+	var out struct {
+		QuestionID   string  `json:"question_id"`
+		AnsweredBy   string  `json:"answered_by"`
+		Outcome      string  `json:"outcome"`
+		Withdrawn    bool    `json:"withdrawn"`
+		AnswerPrefix string  `json:"answer_prefix"`
+		Answered     bool    `json:"answered"`
+		Answer       *string `json:"answer"`
+		Dismissed    bool    `json:"dismissed"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&out) != nil {
+		return agent.AskAnswer{}, false, 0
+	}
+	if (!out.Answered && !out.Withdrawn) || (out.QuestionID != "" && out.QuestionID != id) {
+		return agent.AskAnswer{}, false, resp.StatusCode
+	}
+	answer := ""
+	if out.Answer != nil {
+		answer = *out.Answer
+	}
+	switch {
+	case out.Withdrawn:
+		answer = "[question withdrawn without an answer]"
+	case out.Dismissed:
+		// The person dismissed it from Needs you (card #155): the CLI's words, not a bare close.
+		answer = askDismissedAnswer
+	case answer == "":
+		answer = "[ask closed without an answer]"
+	}
+	if out.Outcome == "" {
+		switch {
+		case out.Withdrawn:
+			out.Outcome = "withdrawn"
+		case out.Dismissed:
+			out.Outcome = "dismissed"
+		case out.Answer == nil || *out.Answer == "":
+			out.Outcome = "closed"
+		default:
+			out.Outcome = "answered"
+		}
+	}
+	return agent.AskAnswer{QuestionID: id, Text: answer, Label: out.AnswerPrefix, AnsweredBy: out.AnsweredBy, Outcome: out.Outcome}, true, resp.StatusCode
+}
+
 // pollAnswer long-polls the answer endpoint (the CLI's protocol) and delivers
 // the reply into the loop. Terminates on session shutdown (ctx), on a
 // non-retryable HTTP status (message expired/deleted), or on the answer.
 func (m *httpMessenger) pollAnswer(ctx context.Context, id string) {
 	for ctx.Err() == nil {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.base+"/api/messages/"+id+"/answer", nil)
-		if err != nil {
-			return
-		}
-		req.Header.Set("Authorization", "Bearer "+m.authToken())
-		resp, err := m.client.Do(req)
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(2 * time.Second):
-			}
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
-				return // message expired/deleted — terminal
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(2 * time.Second):
-			}
-			continue
-		}
-		// Server shape: {"answered": bool, "answer": string|null} (long-poll
-		// holds the request ≤25s while open).
-		var out struct {
-			Answered  bool    `json:"answered"`
-			Answer    *string `json:"answer"`
-			Dismissed bool    `json:"dismissed"`
-		}
-		decodeErr := json.NewDecoder(resp.Body).Decode(&out)
-		_ = resp.Body.Close()
-		if decodeErr != nil {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(2 * time.Second):
-			}
-			continue
-		}
-		if out.Answered {
-			answer := ""
-			if out.Answer != nil {
-				answer = *out.Answer
-			}
-			switch {
-			case out.Dismissed:
-				// The person dismissed it from Needs you (card #155): the CLI's words, not a bare close.
-				answer = askDismissedAnswer
-			case answer == "":
-				answer = "[ask closed without an answer]"
-			}
-			if m.onAnswer != nil {
-				m.onAnswer(answer)
+		answer, done, status := m.fetchAnswer(ctx, id, "")
+		if done {
+			if m.onAnswerFrame != nil {
+				m.onAnswerFrame(answer)
 			}
 			return
+		}
+		if status == http.StatusNotFound || status == http.StatusGone {
+			// The message is gone. Chat cannot resolve a blocked native ask, so
+			// release it here; a native request hears through onPollEnd.
+			if m.onAnswerFrame != nil && m.onPollEnd == nil {
+				m.onAnswerFrame(agent.AskAnswer{QuestionID: id, Text: "[question no longer available]", Outcome: "withdrawn"})
+			}
+			return
+		}
+		if status != http.StatusOK {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
 		}
 		// still open — the long-poll already waited server-side; loop again.
 	}
@@ -744,6 +906,10 @@ func (h *AgentHost) SpawnResumed(msg protocol.SpawnSession, events []agent.Resto
 	default:
 		note = "[system] Session resumed after a restart. The workspace is a fresh clone: committed work on the wip branch survived, but any uncommitted changes from before the restart are gone. Re-verify workspace state before continuing."
 	}
+	// A non-nil restore distinguishes a restart even when no event was acknowledged.
+	if events == nil {
+		events = []agent.RestoredEvent{}
+	}
 	h.spawn(msg, events, note, nil)
 }
 
@@ -753,6 +919,7 @@ func (h *AgentHost) SpawnResumed(msg protocol.SpawnSession, events []agent.Resto
 // initial prompt, no state change — and a refusal is returned in ad instead of being sent as the
 // session's error.
 func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEvent, note string, ad *adoptRequest) {
+	msg.HostGeneration = h.nextHostGeneration(msg.HostGenerationFloor)
 	// A clone made for this spawn is removed if the spawn fails before the session exists.
 	clonePath := ""
 	defer func() {
@@ -766,6 +933,19 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			return
 		}
 		h.sendError(msg.SessionID, reason)
+	}
+	if !filepath.IsAbs(h.skillStateDir) {
+		failurelog.Default.Event("session_skill_pack", slog.LevelError, "cause", "state_unavailable")
+		fail("Session skills require private daemon state")
+		return
+	}
+	if msg.CommandSteps != nil && ad == nil && !msg.RecoverQuestions && runtime.GOOS != "linux" {
+		fail("fixed command steps are supported only on Linux")
+		return
+	}
+	if err := recordWorkBranch(msg); err != nil {
+		fail(err.Error())
+		return
 	}
 	var local *LocalWorkspace
 	if msg.Sandbox && msg.Workspace != nil {
@@ -827,6 +1007,9 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			return
 		}
 		workDir = wd
+	}
+	if msg.ProjectPath == "" {
+		msg.ProjectPath = workDir
 	}
 	// Backstop: Manager.prepareWorkspace already creates/clones the workspace
 	// before every spawn_session reaches here, so this only fires for callers
@@ -939,7 +1122,8 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		fail("the session's message receipt journal could not be opened")
 		return
 	}
-	sess := &agentSession{workspaceV2: msg.Workspace != nil, localWorkspace: local, skills: skillList, engine: msg.Engine, inputs: inputs, workspace: workDir, workspaceInfo: workspaceInfo, requireRecoveryReady: msg.RequireRecoveryReady}
+	sess := &agentSession{stepsPending: msg.CommandSteps != nil && ad == nil && !msg.RecoverQuestions, scratch: bindScratchFolder(h.cfg.reposRoot(), msg.ProjectPath, msg.Repo), workspaceV2: msg.Workspace != nil, localWorkspace: local, skills: skillList, engine: msg.Engine, inputs: inputs, workspace: workDir, workspaceInfo: workspaceInfo, requireRecoveryReady: msg.RequireRecoveryReady}
+	sess.verbosity.Store(msg.Verbosity)
 	// A new session is idle until its first turn starts (the driver says
 	// "running" then). Reporting "running" here made a session with no
 	// initial prompt look busy — spinner, working indicator — while it was
@@ -949,6 +1133,9 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	// and the emitter takes it out of every event before the event leaves the daemon.
 	markerNonce := sessionMarkerNonce(h.markerKeyDirFor(), msg.SessionID)
 	emitter := newWSEmitter(h.sender, msg.SessionID, func(ev agent.Event) {
+		if sess.processMonitor != nil {
+			sess.processMonitor.observe(ev)
+		}
 		if native != nil && native.observe(ev) != nil {
 			if sess.inputFault.CompareAndSwap(false, true) {
 				if sess.cancel != nil {
@@ -973,10 +1160,33 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 				}()
 			}
 		}
+		switch p := ev.Payload.(type) {
+		case agent.BackgroundTaskStartedPayload:
+			if ev.Kind == "background_task_started" {
+				sess.stopMu.Lock()
+				if sess.stopBackground == nil {
+					sess.stopBackground = map[string]bool{}
+				}
+				sess.stopBackground[p.TaskID] = true
+				sess.stopMu.Unlock()
+			}
+		case agent.BackgroundTaskDonePayload:
+			if ev.Kind == "background_task_done" {
+				sess.stopMu.Lock()
+				delete(sess.stopBackground, p.TaskID)
+				sess.stopMu.Unlock()
+			}
+		}
 		// An engine failure in a sandbox may be its container's: the watch looks at once rather than
 		// at its next tick, so the session hears the real reason before an engine retries.
 		switch p := ev.Payload.(type) {
 		case agent.ErrorPayload:
+			if p.Code == agent.ErrorCodeStopFailed {
+				sess.stopMu.Lock()
+				sess.stopInProgress = false
+				sess.stopCompleted = time.Time{}
+				sess.stopMu.Unlock()
+			}
 			if ev.Kind == "error" && p.SandboxExit == nil {
 				askSandboxCheck(sess.sandboxCheck)
 			}
@@ -988,19 +1198,42 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		if ev.Kind == "status_changed" {
 			if p, ok := ev.Payload.(agent.StatusPayload); ok {
 				sess.trackStopReason(ev, "")
+				sess.stopMu.Lock()
+
 				sess.status.Store(p.Status)
+				sess.stopMu.Unlock()
 				sess.record.setStatus(p.Status)
 			}
 		}
 		if ev.Kind == "turn_done" && (local != nil || isSandboxClone(workDir, msg.SessionID)) {
+			workStart := time.Now()
+			workCtx, work := activity.NewWork(context.Background())
 			// The session's commits reach the repository before its turn's end does, so a person
 			// (or a parent) told the turn ended finds them on wip/<id>.
 			var err error
 			if local != nil {
-				_, err = local.Sync(context.Background())
-				err = errors.Join(err, h.cfg.Workspaces.Report(context.Background(), local))
+				syncCtx, cancelSync := context.WithTimeout(context.WithValue(workCtx, workspaceSyncKey{}, true), time.Duration(protocol.DefaultWorkspaceBudget().SyncSeconds)*time.Second)
+				_, err = local.Sync(syncCtx)
+				cancelSync()
+				// Reporting acknowledges results with the server; it does not deliver Git commits.
+				// Keep its deadline/refusal separate from the already completed sync.
+				reportStart := time.Now()
+				if reportErr := h.cfg.Workspaces.Report(context.Background(), local); reportErr != nil {
+					message := "The workspace result report failed: " + reportErr.Error()
+					if err == nil {
+						message = "Workspace sync completed; workspace result report failed: " + reportErr.Error()
+					}
+					log.Printf("agent session %s: workspace result report after %s: %v", msg.SessionID, time.Since(reportStart), reportErr)
+					if sess.emitter != nil {
+						sess.emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "error", Payload: agent.ErrorPayload{Message: message, Retryable: true}})
+					}
+				}
 			} else {
-				err = syncSandboxAtTurnEnd(workDir, msg.SessionID)
+				err = syncSandboxAtTurnEndContext(workCtx, workDir, msg.SessionID)
+			}
+			workEnd := time.Now()
+			if sess.emitter != nil {
+				sess.emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: workEnd, Kind: "turn_work", Payload: map[string]any{"started_at": workStart, "ended_at": workEnd, "seconds": work.Seconds(workEnd.Sub(workStart)), "machine": activity.SampleMachine(msg.SessionID, workDir)}})
 			}
 			var checkedOut *sandboxCheckedOutError
 			if errors.As(err, &checkedOut) {
@@ -1021,6 +1254,18 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 				}
 			}
 		}
+		if ev.Kind == "turn_done" && local == nil && !isSandboxClone(workDir, msg.SessionID) && sess.emitter != nil {
+			sess.emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "turn_work", Payload: map[string]any{"basis": "unknown", "machine": activity.SampleMachine(msg.SessionID, workDir)}})
+		}
+		if ev.Kind == "turn_done" {
+			bundleRoot := workDir
+			if h.cfg.ResultBundleRoot != "" {
+				bundleRoot = h.cfg.ResultBundleRoot
+			}
+			if err := publishWorkspaceResultBundles(context.Background(), bundleRoot, msg.SessionID, msg.Workspace); err != nil {
+				log.Printf("agent session %s: result bundle: %v", msg.SessionID, err)
+			}
+		}
 		if ev.Kind == "turn_done" && h.cfg.OnTurnDone != nil {
 			h.cfg.OnTurnDone(msg.SessionID)
 		}
@@ -1032,10 +1277,36 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 				h.cfg.UsageLimits.ClaudeTurnEnded()
 			}
 		}
+		terminalStop := false
+		if ev.Kind == "stop_result" {
+			if p, ok := ev.Payload.(map[string]string); ok {
+				terminalStop = p["state"] != "stopping" && p["notice_only"] != "true"
+			}
+		}
+		if ev.Kind == "turn_done" || ev.Kind == "background_wait_stopped" || terminalStop || (ev.Kind == "subagent_done" && sess.status.Load() == "idle") {
+			sess.stopMu.Lock()
+			stopping := sess.stopInProgress
+			sess.stopInProgress = false
+			if stopping {
+				sess.stopCompleted = time.Now()
+			}
+			sess.stopMu.Unlock()
+			if terminalStop || ev.Kind == "background_wait_stopped" {
+				sess.record.turnEnded("interrupted")
+			}
+			if stopping && !terminalStop {
+				if p, ok := ev.Payload.(agent.TurnDonePayload); ok && p.StopReason != "interrupted" {
+					sess.emitStopResult("idle", "The current work ended before Stop took effect.")
+				} else {
+					sess.emitStopResult("stopped", "Stopped the current work; background work may still be running.")
+				}
+			}
+		}
+
 		// What the recovery record keeps up with (a nil record ignores it all).
 		switch p := ev.Payload.(type) {
 		case agent.UserMessagePayload:
-			if ev.Kind == "user_message" {
+			if ev.Kind == "user_message" && p.Source != "system" && !p.StoppedTurn {
 				sess.record.setCurrentTurnID(p.TurnID)
 			}
 		case agent.TurnDonePayload:
@@ -1076,6 +1347,15 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	})
 	emitter.markerNonce = markerNonce
 	sess.emitter = emitter
+	var processSource func([]processtelemetry.SampleRoot) processtelemetry.Batch
+	if local != nil && local.host != nil {
+		if source, ok := local.host.writers.(interface {
+			ProcessActivityForRoots([]processtelemetry.SampleRoot) processtelemetry.Batch
+		}); ok {
+			processSource = source.ProcessActivityForRoots
+		}
+	}
+	sess.processMonitor = newToolProcessMonitor(processSource, emitter.Emit)
 
 	model := msg.Model
 	// claude-sonnet-5 is only a sensible default for the native loop and the
@@ -1111,10 +1391,10 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		Extra:               msg.ExtraEnv,
 	})
 	env = append(env, selectedBoardCLIEnv(msg.BoardID, msg.MCPGateway)...)
+	env = hostedSessionEnv(env, msg.HostGeneration)
 
-	// A sandboxed agent-kind session gets the same hardened container a
-	// terminal sandbox gets (sandbox.go) — no tmux inside it, just a place for
-	// the engine subprocess to run: every turn below is wrapped in `docker
+	// A sandboxed agent session gets a hardened container for its engine.
+	// Every turn below is wrapped in `docker
 	// exec` by this prefix, so the engine sees only /workspace and the
 	// credential mounts, never the rest of the host.
 	// Always-on plugins (pluginworkshop.go), installed before the container
@@ -1226,10 +1506,35 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	startCommand := h.cfg.StartCommand
 	if local != nil && local.host != nil {
 		startCommand = local.host.writers.Start
+		local.host.writers.OnLimit(func(message string) { h.TaskLimit(msg.SessionID, message) })
+	}
+	yieldToPerson := h.cfg.WorkerPriority.Enabled()
+	baseStart := startCommand
+	startCommand = func(cmd *exec.Cmd) error {
+		if yieldToPerson {
+			if msg.Sandbox {
+				wrapSandboxWorkerCommand(cmd)
+			} else {
+				wrapWorkerCommand(cmd, h.cfg.WorkerPriority.prefix)
+			}
+		}
+		start := baseStart
+		if start == nil {
+			start = func(c *exec.Cmd) error { return c.Start() }
+		}
+		if err := start(cmd); err != nil {
+			if yieldToPerson {
+				logDaemonFailure("worker priority launch", err)
+			}
+			return err
+		}
+		sess.processMonitor.started(cmd)
+		return nil
 	}
 	var prefix sandboxExec
 	if msg.Sandbox {
 		sbOpts := h.cfg.Sandbox
+		sbOpts.YieldToPerson = yieldToPerson
 		sbOpts.Workspace = local
 		if runtimeHome != "" {
 			sbOpts.CodexHome = runtimeHome
@@ -1296,6 +1601,68 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		})
 	}
 
+	if msg.CommandSteps != nil && ad == nil && !msg.RecoverQuestions {
+		if !msg.RestrictTools || (!msg.Sandbox && !h.cfg.FixedCommandStepsInPod) || msg.CommandSteps.Validate() != nil {
+			cancel()
+			releasePlugins()
+			if msg.Sandbox {
+				removeSandboxContainer(msg.SessionID)
+			}
+			fail("fixed command steps require an approved definition and an isolated unattended runtime")
+			return
+		}
+	}
+
+	// Install trusted bodies outside the repository and shared home. Restricted
+	// sessions retain the compact rules because their file tools cannot read here.
+	var pack *skillPack
+	if !msg.RestrictTools && msg.Engine != "openclaw" {
+		pack, err = prepareSkillPackWithAccess(prefix, effectiveSkillPolicy(msg.SkillPolicy), sessionSkillDir(h.skillStateDir, msg.SessionID), h.cfg.SkillReadGroup)
+		if err != nil {
+			// A stopped runtime is owned by the driver's existing terminal path. Do
+			// not replace its Docker exit evidence with a generic preparation error.
+			dead := false
+			if prefix.enabled() {
+				_, dead = sandboxContainerExit(prefix.container())
+			}
+			if !prefix.enabled() || !dead {
+				cancel()
+				releasePlugins()
+				if prefix.enabled() {
+					removeSandboxContainer(msg.SessionID)
+				}
+				fail("Could not prepare session skills")
+				return
+			}
+			pack = nil
+		}
+		if pack != nil {
+			guide += pack.guide()
+		}
+
+		if useClaudeCode && pack != nil {
+			pluginDirs = append(pluginDirs, pack.dir)
+		}
+		if pack != nil && !prefix.enabled() {
+			// The reserved namespace belongs only to this verified pack. Project
+			// frontmatter must not win the built-in resolver's first-name match.
+			trusted := make([]skills.Skill, 0, len(pack.entries)+len(skillList))
+			for _, entry := range pack.entries {
+				trusted = append(trusted, skills.Skill{Name: "blerg:" + entry.Name, Description: entry.Description, Dir: pack.dir + "/skills/" + entry.Name})
+			}
+			for _, entry := range skillList {
+				if !strings.HasPrefix(entry.Name, "blerg:") {
+					trusted = append(trusted, entry)
+				}
+			}
+			skillList = trusted
+			sess.skills = skillList
+		}
+	}
+	emitter.skillObserver = newSkillObserver(ctx, msg.SessionID, msg.Engine, effectiveSkillPolicy(msg.SkillPolicy))
+	emitter.skillObserver.pack = pack
+	emitter.skillObserver.initialPath = filepath.Join(sessionSkillDir(h.skillStateDir, msg.SessionID), "initial-delivered")
+	emitter.skillObserver.compact = pack == nil
 	// The MCP gateway config file, written before any turn (inside the
 	// container for a sandbox) so a session that cannot get its grant fails
 	// here rather than running without it.
@@ -1308,7 +1675,11 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 	}
 	// Whether a person is reading the chat as the session works: the driver says so in the
 	// system prompt of every unrestricted turn ("" from an older server is interactive).
-	ccOpts = append(ccOpts, withInteraction(msg.Interaction), withMarkerNonce(markerNonce))
+	ccOpts = append(ccOpts, withInteraction(msg.Interaction), func(o *ccOptions) {
+		o.Verbosity = msg.Verbosity
+		o.SkillPolicy = msg.SkillPolicy
+		o.VerbositySource = func() string { value, _ := sess.verbosity.Load().(string); return value }
+	}, withMarkerNonce(markerNonce))
 	if !msg.Sandbox && !msg.RestrictTools {
 		// Claude Code's own sandbox, when the person runs it: the session's settings let the
 		// messaging CLI through (claudesandbox.go). A restricted session has no shell to need it.
@@ -1368,12 +1739,16 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			SessionID: msg.SessionID, MarkerNonce: markerNonce, Emitter: emitter, Env: env,
 		})
 		if cx, ok := driver.(*codexDriver); ok {
-			cx.DeveloperInstructions = ccSystemPromptFor(msg.Interaction) + guide
-			cx.AskUser = h.questionAsker(msg.SessionID, emitter, markerNonce, func() string { cx.mu.Lock(); defer cx.mu.Unlock(); return cx.usageTurnID }, msg.SessionToken)
+			cx.Verbosity = msg.Verbosity
+			cx.SkillPolicy = msg.SkillPolicy
+			cx.skillPack = pack
+			cx.DeveloperInstructions = ccSystemPromptForPolicy(msg.Interaction, effectiveSkillPolicy(msg.SkillPolicy)) + verbosityParagraph(msg.Verbosity) + guide
+			cx.AskUser = h.questionAskerAt(msg.HostGeneration, msg.SessionID, emitter, markerNonce, func() string { cx.mu.Lock(); defer cx.mu.Unlock(); return cx.usageTurnID }, msg.SessionToken)
 			cx.CodexHome = pluginHome
 			if pluginConfig != nil {
 				cx.RuntimeConfig = pluginConfig
 			}
+
 			if sess.codexRestricted != nil {
 				cx.RestrictedRuntime = sess.codexRestricted
 				if h.cfg.ServerHTTP != "" && msg.SessionToken != "" {
@@ -1400,7 +1775,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 				cx.seedKnownChildren(append(append([]OpenSubagent(nil), ad.rec.KnownSubagents...), ad.rec.OpenSubagents...))
 				cx.usageTurnID = ad.rec.CurrentTurnID
 				// What was cut off, then why the daemon restarted (as finishAdoption shows it).
-				note := cutOffNotice(ad.rec.OpenCalls, ad.rec.OpenTasks, ad.rec.OpenSubagents)
+				note := h.adoptionWork(ad.rec)
 				if note != "" && ad.resumeID != "" {
 					note += "\n\n" + h.restartCauseWords(ad.rec)
 				}
@@ -1426,24 +1801,30 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 				nativeDriver.SetNativeResumeGate(h.waitRecoveryReady)
 			}
 		}
+		if ox, ok := driver.(*openclawDriver); ok {
+			ox.skillGuide = compactSessionGuide(msg.Interaction, effectiveSkillPolicy(msg.SkillPolicy)) + guide + " " + agent.MarkerInstructions(markerNonce)
+		}
 		if hx, ok := driver.(*hermesDriver); ok {
 			if sess.record != nil {
 				hx.onOpenWork = sess.record.setOpenWork
 			}
-			hx.DeveloperInstructions = ccSystemPromptFor(msg.Interaction) + guide
+			hx.DeveloperInstructions = ccSystemPromptForPolicy(msg.Interaction, effectiveSkillPolicy(msg.SkillPolicy)) + verbosityParagraph(msg.Verbosity) + guide + " " + agent.MarkerInstructions(markerNonce)
 			if ad != nil {
-				hx.adoptionNote = cutOffNotice(ad.rec.OpenCalls, ad.rec.OpenTasks, ad.rec.OpenSubagents)
+				hx.adoptionNote = h.adoptionWork(ad.rec)
 				if hx.adoptionNote != "" {
 					hx.adoptionNote += "\n\n" + h.restartCauseWords(ad.rec)
 				}
 			}
-			hx.AskUser = h.questionAsker(msg.SessionID, emitter, markerNonce, nil, msg.SessionToken)
+			hx.AskUser = h.questionAskerAt(msg.HostGeneration, msg.SessionID, emitter, markerNonce, nil, msg.SessionToken)
 		}
 	case useClaudeCode:
 		log.Printf("agent session %s: claude-code driver (the engine's own login)", msg.SessionID)
 		cc := newClaudeCodeDriver(workDir, model, msg.Effort, emitter, env, ccOpts...)
 		cc.skills, cc.home = skillList, h.cfg.HomeDir
 		cc.workspaceGuide = guide
+		if pack != nil {
+			cc.workflowPluginDir = pack.dir
+		}
 		if h.cfg.UsageLimits != nil {
 			cc.onRateLimit = h.cfg.UsageLimits.ClaudeRateLimited
 		}
@@ -1458,7 +1839,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 			// What was cut off goes with the next message: the person's, or recovery's own continue
 			// (finishAdoption).
 			a := adoption{hadConversation: ad.rec.ClaudeSessionID != "", cutOff: ad.rec.TurnActive,
-				work:  cutOffNotice(ad.rec.OpenCalls, ad.rec.OpenTasks, ad.rec.OpenSubagents),
+				work:  h.adoptionWork(ad.rec),
 				cause: h.restartCauseWords(ad.rec)}
 			cc.adopt(ad.resumeID, a)
 			cc.usageTurnID = ad.rec.CurrentTurnID
@@ -1470,16 +1851,14 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		// The native loop's provider, registry, data-plane context and system prompt (with the
 		// enabled plugins' SessionStart hook context) are built here, after the engine decision:
 		// a CLI engine never uses them, and preparing them runs plugin hook commands.
-		messenger := &httpMessenger{
-			base: h.cfg.ServerHTTP, tokenSource: h.nativeHTTPToken(msg), sessionID: msg.SessionID, markerNonce: markerNonce,
-			client: &http.Client{Timeout: 60 * time.Second},
-			ctx:    ctx,
-			onAnswer: func(answer string) {
+		messenger := NewLoopMessenger(LoopMessengerConfig{
+			Context: ctx, BaseURL: h.cfg.ServerHTTP, TokenSource: h.nativeHTTPToken(msg), SessionID: msg.SessionID, MarkerNonce: markerNonce, HostGeneration: msg.HostGeneration,
+			OnAnswer: func(answer agent.AskAnswer) {
 				if loop != nil {
-					loop.Enqueue(answer, "ask_answer")
+					loop.AnswerAsk(answer)
 				}
 			},
-		}
+		})
 		loopCfg := h.nativeLoopConfig(msg, nativeLoopInputs{
 			workDir: workDir, env: env, model: model, skills: skillList, agentTypes: agentTypes, workspaceGuide: guide, startCommand: startCommand,
 			emitter: emitter, messenger: messenger, confined: msg.Sandbox || msg.RestrictTools || prefix.enabled(),
@@ -1490,7 +1869,7 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		loop.InstallMessagingTools()
 		driver = loop
 	}
-	if startCommand != nil {
+	{
 		bounded, ok := driver.(interface{ useCommandBoundary(func(*exec.Cmd) error) })
 		_, native := driver.(*agent.Loop)
 		if !ok && !native {
@@ -1519,6 +1898,9 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		}
 		sb.useSandbox(prefix)
 	}
+	if restore != nil || note != "" || ad != nil || msg.RecoverQuestions {
+		h.recoverOrDeferQuestions(ctx, msg)
+	}
 	if len(restore) > 0 {
 		driver.RestoreContext(restore)
 	}
@@ -1546,14 +1928,20 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		if err := local.host.driverStarting(); err != nil {
 			cancel()
 			releasePlugins()
-			fail("host lifecycle journal unavailable")
+			fail(hostDriverStartRefusal(err))
 			return
 		}
 	}
 	runDone := make(chan struct{})
 	sess.runDone = runDone
 	sess.loop = driver
+	var savedClock *persontime.Account
+	if ad != nil {
+		savedClock = ad.rec.PersonTime
+	}
+	sess.bindInputClock(driver, savedClock)
 	sess.cancel = cancel
+	go sess.processMonitor.run(ctx)
 	sess.plugins = len(pluginDirs) > 0
 	sess.pluginSpecs = appliedPluginSpecs
 	if ad != nil {
@@ -1637,72 +2025,136 @@ func (h *AgentHost) spawn(msg protocol.SpawnSession, restore []agent.RestoredEve
 		gated.SetRecoveryInputGate(h.waitRecoveryReady, h.recoveryInputReady)
 	}
 	var initialInput agent.Input
+	metadata := h.initialPlanNudge(ctx, msg.SessionID, agent.Input{ClientID: msg.InitialPromptClientID, Source: msg.InitialPromptSource}, ad != nil || strings.TrimSpace(msg.InitialPrompt) == "")
+	sess.inputClock.Apply(agent.Input{PersonTime: metadata.PersonTime})
 	if ad == nil && strings.TrimSpace(msg.InitialPrompt) != "" {
 		source := msg.InitialPromptSource
 		if source == "" {
 			source = "chat"
 		}
 		initialInput = agent.Input{Text: msg.InitialPrompt, Source: source, ClientID: msg.InitialPromptClientID}
-		initialInput.PlanNudge = h.initialPlanNudge(ctx, msg.SessionID, initialInput)
-	}
-	if ctx.Err() != nil {
-		return
-	}
-	driver.Start()
-	if prefix.enabled() {
-		// A container that stops ends the session with Docker's reason, whatever the engine.
-		h.sandboxWatches.Add(1)
-		go func() {
-			defer h.sandboxWatches.Done()
-			h.watchSandbox(ctx, msg.SessionID, sess, prefix.container(), sess.sandboxCheck)
-		}()
-	}
-	if source, ok := driver.(mcpStatusSource); ok {
-		if gate, supported := driver.(interface{ SetMCPInputGate(func(context.Context)) }); supported {
-			engine := msg.Engine
-			if engine == "" {
-				engine = "claude"
-			}
-			tracker := newMCPTracker(ctx, engine, source, emitter, mcpTrackerOptions{
-				Wait:      parseMCPPromptWait(os.Getenv("BLERG_RUNNER_MCP_PROMPT_WAIT_S")),
-				FirstUsed: mcpFirstPromptUsed(restore, ad),
-			})
-			sess.mcpState.Store(tracker)
-			gate.SetMCPInputGate(tracker.beforeFirstPrompt)
-		}
+		initialInput.PlanNudge, initialInput.PersonTime = metadata.PlanNudge, metadata.PersonTime
 	}
 	nativeOwned = true
-	go func() {
-		func() {
-			defer close(runDone)
-			if native != nil {
-				defer func() { _ = native.root.Close() }()
+	startSession := func() {
+		runOwnsRoot := false
+		defer func() {
+			if native != nil && !runOwnsRoot {
+				_ = native.root.Close()
 			}
-			driver.Run(ctx)
 		}()
-		if ctx.Err() == nil {
-			h.runtimeStopped(msg.SessionID, sess) //nolint:contextcheck // teardown deliberately uses its own bounded deadline after engine cancellation
+		if msg.CommandSteps != nil && ad == nil && !msg.RecoverQuestions {
+			redactions := []string{msg.SessionToken, msg.BoardToken, msg.GitToken, h.cfg.DaemonToken, h.cfg.APIKey}
+			for _, value := range msg.ExtraEnv {
+				redactions = append(redactions, value)
+			}
+			if h.cfg.DaemonTokenSource != nil {
+				redactions = append(redactions, h.cfg.DaemonTokenSource())
+			}
+			if msg.MCPGateway != nil {
+				for _, server := range msg.MCPGateway.Servers {
+					redactions = append(redactions, server.Token)
+				}
+			}
+			results, err := commandsteps.RunWithStart(ctx, msg.CommandSteps, workDir, env, []string(prefix), startCommand, redactions...)
+			for _, result := range results {
+				emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "cron_command_result", Payload: result})
+			}
+			if err != nil {
+				exitCode, reason := 1, "fixed command steps could not complete"
+				if ctx.Err() != nil {
+					exitCode, reason = 0, "Stopped fixed command steps and the pending turn."
+				}
+				cancel()
+				close(runDone)
+				h.killWith(msg.SessionID, exitCode, reason) //nolint:contextcheck // teardown must finish after startup cancellation using its own bounded cleanup deadline
+				return
+			}
+			initialInput.Text += commandsteps.Prompt(results)
 		}
-	}()
-	if ad != nil {
-		h.finishAdoption(ad, sess, driver, msg)
-		return
+		if msg.CommandSteps != nil && ad == nil && !msg.RecoverQuestions {
+			sess.stepMu.Lock()
+			defer sess.stepMu.Unlock()
+		}
+		if ctx.Err() != nil {
+			close(runDone)
+			if msg.CommandSteps != nil && ad == nil && !msg.RecoverQuestions {
+				h.killWith(msg.SessionID, 0, "Stopped fixed command steps and the pending turn.") //nolint:contextcheck // startup owns teardown after cancellation
+			}
+			return
+		}
+		driver.Start()
+		if prefix.enabled() {
+			// A container that stops ends the session with Docker's reason, whatever the engine.
+			h.sandboxWatches.Add(1)
+			go func() {
+				defer h.sandboxWatches.Done()
+				h.watchSandbox(ctx, msg.SessionID, sess, prefix.container(), sess.sandboxCheck)
+			}()
+		}
+		if source, ok := driver.(mcpStatusSource); ok {
+			if gate, supported := driver.(interface{ SetMCPInputGate(func(context.Context)) }); supported {
+				engine := msg.Engine
+				if engine == "" {
+					engine = "claude"
+				}
+				tracker := newMCPTracker(ctx, engine, source, emitter, mcpTrackerOptions{
+					Wait:      parseMCPPromptWait(os.Getenv("BLERG_RUNNER_MCP_PROMPT_WAIT_S")),
+					FirstUsed: mcpFirstPromptUsed(restore, ad),
+				})
+				sess.mcpState.Store(tracker)
+				gate.SetMCPInputGate(tracker.beforeFirstPrompt)
+			}
+		}
+		runOwnsRoot = true
+		go func() {
+			func() {
+				defer close(runDone)
+				if native != nil {
+					defer func() { _ = native.root.Close() }()
+				}
+				driver.Run(ctx)
+			}()
+			if ctx.Err() == nil {
+				h.runtimeStopped(msg.SessionID, sess) //nolint:contextcheck // teardown deliberately uses its own bounded deadline after engine cancellation
+			}
+		}()
+		if ad != nil {
+			h.finishAdoption(ad, sess, driver, msg)
+			return
+		}
+		if note != "" {
+			// The daemon's note, not the person's: source "system" keeps it off their name.
+			driver.EnqueueInput(agent.Input{Text: note, Source: "system"})
+		}
+		if strings.TrimSpace(msg.InitialPrompt) != "" {
+			if msg.CommandSteps != nil && ad == nil && !msg.RecoverQuestions {
+				h.deliverInput(sess, msg.SessionID, initialInput)
+			} else {
+				h.UserInput(msg.SessionID, initialInput) //nolint:contextcheck // durable input and adoption queues own delivery lifetime independently of startup
+			}
+		} else if note == "" {
+			// Nothing queued: the session is ready and waiting for its first
+			// message. Say so now — otherwise the row sits at "starting" until
+			// the next heartbeat reconciles it, and the browser keeps showing
+			// the start panel for a session that is already live. (With work
+			// queued, the driver's own "running" is the transition.)
+			_ = h.sender.Send(protocol.SessionStateChanged{
+				Type: "session_state_changed", SessionID: msg.SessionID, Status: "idle",
+			})
+		}
+		if msg.CommandSteps != nil && ad == nil && !msg.RecoverQuestions {
+			for _, in := range sess.stepInputs {
+				h.deliverInput(sess, msg.SessionID, in)
+			}
+			sess.stepInputs = nil
+			sess.stepsPending = false
+		}
 	}
-	if note != "" {
-		// The daemon's note, not the person's: source "system" keeps it off their name.
-		driver.EnqueueInput(agent.Input{Text: note, Source: "system"})
-	}
-	if strings.TrimSpace(msg.InitialPrompt) != "" {
-		h.UserInput(msg.SessionID, initialInput)
-	} else if note == "" {
-		// Nothing queued: the session is ready and waiting for its first
-		// message. Say so now — otherwise the row sits at "starting" until
-		// the next heartbeat reconciles it, and the browser keeps showing
-		// the start panel for a session that is already live. (With work
-		// queued, the driver's own "running" is the transition.)
-		_ = h.sender.Send(protocol.SessionStateChanged{
-			Type: "session_state_changed", SessionID: msg.SessionID, Status: "idle",
-		})
+	if msg.CommandSteps != nil && ad == nil && !msg.RecoverQuestions {
+		go startSession()
+	} else {
+		startSession()
 	}
 }
 
@@ -1733,6 +2185,17 @@ func (h *AgentHost) UserInput(sessionID string, in agent.Input) {
 		h.reportUndelivered(sessionID, in.ClientID)
 		return
 	}
+	in = sess.inputClock.Apply(in)
+	sess.stepMu.Lock()
+	defer sess.stepMu.Unlock()
+	if sess.stepsPending {
+		sess.stepInputs = append(sess.stepInputs, in)
+		return
+	}
+	h.deliverInput(sess, sessionID, in)
+}
+
+func (h *AgentHost) deliverInput(sess *agentSession, sessionID string, in agent.Input) {
 	if sess.inputFault.Load() {
 		h.reportUndelivered(sessionID, in.ClientID)
 		return
@@ -1752,7 +2215,7 @@ func (h *AgentHost) UserInput(sessionID string, in agent.Input) {
 	}
 	send, receipt, err := sess.inputs.accept(in)
 	if err != nil {
-		sess.emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "error", Payload: agent.ErrorPayload{Message: "Message not delivered: it could not be safely queued.", Retryable: true, ClientID: in.ClientID}})
+		sess.emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "error", Payload: agent.ErrorPayload{Message: "Message not delivered: it could not be safely queued (" + err.Error() + ").", Retryable: true, ClientID: in.ClientID}})
 		return
 	}
 	if receipt != nil {
@@ -1762,13 +2225,29 @@ func (h *AgentHost) UserInput(sessionID string, in agent.Input) {
 	if !send {
 		return
 	}
+	if notice := sess.processLimit.Swap(nil); notice != nil {
+		in.ProcessLimit = *notice
+	}
 	if resolved, ok, err := skills.ResolveSlash(sess.skills, trimmed); sess.engine != "codex" && err == nil && ok {
 		// The engine gets the skill's instructions; the transcript keeps what the person typed.
 		in.Text, in.Shown = resolved, text
-		sess.loop.EnqueueInput(in)
+		sess.loop.EnqueueInput(sess.withVerbosity(in))
 		return
 	}
-	sess.loop.EnqueueInput(in)
+	sess.loop.EnqueueInput(sess.withVerbosity(in))
+}
+
+// TaskLimit tells a session that its process tree refused a new task. The person reads the line at
+// once. The agent reads it with its next input, whatever that is: this never sends one, because a
+// background process must not start turns, and no engine can promise that a message sent during a turn
+// starts no other (the turn can end first, or its last response can already be on its way).
+func (h *AgentHost) TaskLimit(sessionID, message string) {
+	sess := h.get(sessionID)
+	if sess == nil {
+		return
+	}
+	sess.processLimit.Store(&message)
+	sess.emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "user_message", Payload: agent.UserMessagePayload{Text: message, Source: "system"}})
 }
 
 // SetModel applies a model/effort change from the UI.
@@ -1829,10 +2308,83 @@ func (h *AgentHost) ReleaseHeldPrompt(sessionID string) {
 	}
 }
 
-func (h *AgentHost) Interrupt(sessionID string) {
-	if sess := h.get(sessionID); sess != nil {
-		sess.loop.Interrupt()
+// The optional legacy target is accepted for wire compatibility, never compared.
+func (h *AgentHost) Interrupt(sessionID string, _ ...string) {
+	sess := h.get(sessionID)
+	if sess == nil {
+		h.mu.Lock()
+		pending := h.adopting[sessionID]
+		reason := "The worker is not available. No work was deleted."
+		if pending != nil && pending.failed != "" {
+			reason = pending.failed + " Stop cannot finish until workspace cleanup can be verified. All work is retained."
+		}
+		h.mu.Unlock()
+		newWSEmitter(h.sender, sessionID, nil).Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "stop_result", Payload: map[string]string{"state": "failed", "message": reason}})
+		return
 	}
+	sess.stepMu.Lock()
+	if sess.stepsPending {
+		sess.cancel()
+		sess.stepInputs = nil
+		sess.stepMu.Unlock()
+		sess.emitStopResult("stopped", "Stopped fixed command steps and the pending turn.")
+		return
+	}
+	sess.stepMu.Unlock()
+	work := sess.status.Load() != "idle"
+	if driver, ok := sess.loop.(interface{ HasInterruptibleWork() bool }); ok {
+		work = driver.HasInterruptibleWork()
+	}
+	sess.stopMu.Lock()
+	if sess.stopInProgress {
+		sess.stopMu.Unlock()
+		sess.emitStopResult("stopping", "Stopping the current work.")
+		return
+	}
+	if !sess.stopCompleted.IsZero() && time.Since(sess.stopCompleted) < 500*time.Millisecond {
+		sess.stopMu.Unlock()
+		// This reports the previous Stop without settling the new turn's recovery state.
+		sess.emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "stop_result", Payload: map[string]string{"state": "stopped", "message": "Stopped the previous work. The next turn is starting; try Stop again.", "notice_only": "true"}})
+		return
+	}
+	if !work && len(sess.stopBackground) > 0 {
+		sess.stopCompleted = time.Now()
+		sess.stopMu.Unlock()
+		sess.record.requestStop()
+		sess.emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "background_wait_stopped", Payload: map[string]string{"message": "Stopped waiting; background work may still be running."}})
+		sess.emitStopResult("stopped", "Stopped waiting; background work may still be running.")
+		return
+	}
+	if !work {
+		sess.stopMu.Unlock()
+		sess.emitStopResult("idle", "There is no active turn to stop.")
+		return
+	}
+	sess.stopInProgress = true
+	sess.stopMu.Unlock()
+	sess.record.requestStop()
+	sess.emitStopResult("stopping", "Stopping the current work.")
+	sess.loop.Interrupt()
+	// A natural completion can race admission of Stop. Do not retain intent for
+	// unrelated queued work when the driver found nothing left to interrupt.
+	remaining := sess.status.Load() != "idle"
+	if driver, ok := sess.loop.(interface{ HasInterruptibleWork() bool }); ok {
+		remaining = driver.HasInterruptibleWork()
+	}
+	if !remaining {
+		sess.stopMu.Lock()
+		pending := sess.stopInProgress
+		sess.stopInProgress = false
+		sess.stopMu.Unlock()
+		if pending {
+			sess.record.turnEnded("interrupted")
+			sess.emitStopResult("idle", "There is no active turn to stop.")
+		}
+	}
+}
+
+func (sess *agentSession) emitStopResult(state, message string) {
+	sess.emitter.Emit(agent.Event{ClientEventID: ccUUID(), Ts: time.Now(), Kind: "stop_result", Payload: map[string]string{"state": state, "message": message}})
 }
 
 // agentDriverStopTimeout bounds teardown when a driver fails to honor cancellation.
@@ -1849,6 +2401,7 @@ func (h *AgentHost) killWith(sessionID string, exitCode int, reason string) {
 	h.mu.Lock()
 	sess := h.sessions[sessionID]
 	delete(h.sessions, sessionID)
+	delete(h.questionRecovery, sessionID)
 	h.mu.Unlock()
 	if sess == nil {
 		return
@@ -1865,6 +2418,7 @@ func (h *AgentHost) killWith(sessionID string, exitCode int, reason string) {
 			return
 		}
 	}
+	cleanupProven := true
 	if sess.localWorkspace != nil && sess.localWorkspace.host != nil {
 		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		err := sess.localWorkspace.host.writers.Stop(cleanup)
@@ -1872,12 +2426,14 @@ func (h *AgentHost) killWith(sessionID string, exitCode int, reason string) {
 		if err != nil {
 			exitCode = 1
 			reason = "host writer cleanup unproven"
+			cleanupProven = false
 		}
 	}
 	if h.cfg.BeforeDriverStop != nil {
 		if err := h.cfg.BeforeDriverStop(sessionID); err != nil {
 			exitCode = 1
 			reason = "workspace writer cleanup unproven; storage retained"
+			cleanupProven = false
 		}
 	}
 	sess.emitter.close() // release any Emit blocked on a full buffer
@@ -1886,14 +2442,24 @@ func (h *AgentHost) killWith(sessionID string, exitCode int, reason string) {
 	// Drivers finish subprocess teardown and final filesystem writes after their
 	// context is canceled. Keep their container, plugin home and records intact
 	// until then; otherwise cleanup can race deletion or recreate killed state.
+	writersStopped := true
 	if sess.runDone != nil {
 		timer := time.NewTimer(agentDriverStopTimeout)
 		select {
 		case <-sess.runDone:
 		case <-timer.C:
+			writersStopped = false
 			log.Printf("agent session %s: driver did not stop before the cleanup deadline", sessionID)
 		}
 		timer.Stop()
+	}
+	if writersStopped && !h.frozen.Load() {
+		if sess.emitter.skillObserver != nil {
+			sess.emitter.skillObserver.pack.remove()
+		}
+		if err := os.RemoveAll(sessionSkillDir(h.skillStateDir, sessionID)); err != nil {
+			failurelog.Default.Event("session_skill_cleanup", slog.LevelWarn, "cause", failurelog.Cause(err))
+		}
 	}
 	sess.mcp.Remove() // before the container goes, so the file is deleted in it too
 	if sess.codexRestricted != nil {
@@ -1915,6 +2481,7 @@ func (h *AgentHost) killWith(sessionID string, exitCode int, reason string) {
 		if stopErr != nil {
 			exitCode = 1
 			reason = "workspace stop retained unresolved work"
+			cleanupProven = false
 		}
 	} else if sess.sandboxed {
 		// The clone's leftover work is committed inside the container before it goes, the
@@ -1931,6 +2498,18 @@ func (h *AgentHost) killWith(sessionID string, exitCode int, reason string) {
 	for _, generation := range sess.pluginGenerations {
 		h.cfg.Plugins.release(generation)
 		h.cfg.Plugins.releaseCodex(generation)
+	}
+	if sess.scratch != nil {
+		report := ""
+		if !writersStopped || scratchClonePending(sessionID) || (sess.sandboxed && !sandboxContainerGone(dockerContainerName(sessionID))) || !cleanupProven || h.scratchInUse(sess.scratch) {
+			report = fmt.Sprintf("Scratch folder kept at %s: session cleanup needs attention", sess.scratch.path)
+		} else {
+			report = sess.scratch.remove()
+		}
+		if report != "" {
+			log.Printf("%s", report)
+		}
+		reason = appendScratchReport(reason, report)
 	}
 	if sess.localWorkspace != nil {
 		message := protocol.SessionEnded{Type: "session_ended", SessionID: sessionID, ExitCode: exitCode, Message: reason}
@@ -2089,6 +2668,10 @@ type nativeLoopInputs struct {
 // nativeLoopConfig builds the native API loop's configuration: its provider, tool registry,
 // data-plane context and system prompt. Only the native driver calls it.
 func (h *AgentHost) nativeLoopConfig(msg protocol.SpawnSession, in nativeLoopInputs) agent.Config {
+	skillGuide := filterSkillGuide(sessionWorkGuidePrompt(), effectiveSkillPolicy(msg.SkillPolicy))
+	if msg.RestrictTools {
+		skillGuide = workflowSkillsPrompt(effectiveSkillPolicy(msg.SkillPolicy))
+	}
 	provider := h.cfg.Provider
 	if provider == nil {
 		provider = anthropic.New(h.cfg.APIKey, "")
@@ -2112,7 +2695,7 @@ func (h *AgentHost) nativeLoopConfig(msg protocol.SpawnSession, in nativeLoopInp
 		Provider:  provider,
 		Emitter:   in.emitter,
 		Registry:  agent.NewRegistry(registryTools...),
-		System:    BuildSystemPrompt(in.workDir, h.cfg.HomeDir, in.skills, in.agentTypes, msg.Interaction, !in.confined) + dataPlaneCtx + in.workspaceGuide,
+		System:    BuildSystemPrompt(in.workDir, h.cfg.HomeDir, in.skills, in.agentTypes, msg.Interaction, !in.confined) + verbosityParagraph(msg.Verbosity) + dataPlaneCtx + in.workspaceGuide + " " + skillGuide,
 		Model:     in.model,
 		Effort:    msg.Effort,
 		Messenger: in.messenger,

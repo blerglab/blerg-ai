@@ -177,3 +177,11 @@ for line in sys.stdin:
 		t.Fatalf("scoped queued prompts did not run exactly once: %s", raw)
 	}
 }
+
+func TestPodResumeAsksForQuestionRecovery(t *testing.T) {
+	for _, resume := range []bool{false, true} {
+		if spawn := podSpawn(Config{SessionID: "s1", Resume: resume}, t.TempDir()); spawn.RecoverQuestions != resume {
+			t.Fatalf("resume=%t RecoverQuestions=%t", resume, spawn.RecoverQuestions)
+		}
+	}
+}

@@ -370,3 +370,39 @@ func TestMarketplacePolicyLegacyDefaultUpgrade(t *testing.T) {
 		t.Fatal("custom initial policy widened")
 	}
 }
+
+func TestBuildDepsBaselinesNewAccountsBeforeTheirFirstVisit(t *testing.T) {
+	st := mainTestStore(t)
+	t.Setenv("BLERG_CORE_LOCAL_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)))
+	for _, version := range []string{"0.6.0", "0.7.0"} {
+		t.Setenv("BLERG_RELEASE", version)
+		if _, _, err := buildDeps(t.Context(), st); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := authprovider.NewLocal(st).CreateLocalAccount(t.Context(), "reader-"+strings.ReplaceAll(version, ".", "-"), "member"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var seen string
+	if err := st.Pool().QueryRow(t.Context(), "SELECT whats_new_seen FROM accounts WHERE provider_subject='reader-0-6-0'").Scan(&seen); err != nil || seen != "0.6.0" {
+		t.Fatalf("existing account: %q %v", seen, err)
+	}
+	if err := st.Pool().QueryRow(t.Context(), "SELECT whats_new_seen FROM accounts WHERE provider_subject='reader-0-7-0'").Scan(&seen); err != nil || seen != "0.7.0" {
+		t.Fatalf("new account: %q %v", seen, err)
+	}
+}
+
+func TestBuildDepsReleaseBaselineDoesNotMoveBackward(t *testing.T) {
+	st := mainTestStore(t)
+	t.Setenv("BLERG_CORE_LOCAL_KEY", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32)))
+	for _, version := range []string{"0.10.0", "0.9.9", "0.6.0"} {
+		t.Setenv("BLERG_RELEASE", version)
+		if _, _, err := buildDeps(t.Context(), st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var version string
+	if err := st.Pool().QueryRow(t.Context(), "SELECT version FROM app_release_baseline").Scan(&version); err != nil || version != "0.10.0" {
+		t.Fatalf("baseline moved backward: %q %v", version, err)
+	}
+}

@@ -13,7 +13,8 @@ daemon does not know the session existed, and the server leaves the row in `erro
 finalizes it as `daemon_lost` thirty minutes later. The session cannot be continued. A message
 sent to it meanwhile is dropped, and the contract's `send_message` answers `{"ok": true}`.
 
-Terminal (tmux) sessions have an on-disk record and a recovery pass. Cluster pods are resumed by
+At the time of this design, Terminal (tmux) sessions had an on-disk record and a recovery pass
+(the session kind was removed in 0.5.0). Cluster pods are resumed by
 the next message. Desktop agent sessions are the gap, and they are the sessions a person works
 in. It also makes the daemon impossible to develop from a desktop session: the update that tests
 a change ends the session that made it.
@@ -206,9 +207,15 @@ once it is; a `kill_session` for it means it is never hosted. For each record:
 
    Process attribution accepts ordinary installer commands, make invocations and
    background launches followed by wait loops, without a whole-command allowlist.
-   The wait must be in the **same tool call**, with a Bash timeout covering the build
-   and restart (120 seconds by default, 600 seconds maximum); if that call finishes
-   or times out first, ordinary recovery applies.
+   A delayed Linux user timer can instead be attributed by its literal, uniquely
+   named `systemd-run --user --unit=NAME --on-active=5s` invocation and the installer's
+   kernel cgroup membership. Agents should arm the timer and end the tool step,
+   without polling across the restart. The arming call remains observed until the
+   next tool or new turn, for at most 45 minutes; the engine must still be alive.
+   This also covers the older single-call arm-and-wait shape. The normal installer's
+   begin/prepare ancestry and replacement executable checks still apply. Session
+   done files (including `rc=0`) are never recovery proof. Unsupported timer shapes
+   fail closed. See [daemon recovery](../../install/desktop/DAEMON.md#commands-a-restart-never-continues).
    Recovery still checks the full shell input for additional destructive work.
    Another session, a changed call, two interrupted calls, pending background work,
    an unsuccessful update or expired evidence keeps the normal pause. Conversation,
@@ -325,6 +332,13 @@ The reconcile path sets it without an unread badge or a push.
   answering an ask nobody reads. Their cards show the waiting "?" with the tooltip "paused by a
   restart" (a banner count with a "Resume all" button was tried and removed for 0.2.0; it may
   come back in a better form).
+- **A refused adoption identifies the session in diagnostics.** The `adoption refused`
+  failure includes `session_id` and a developer-owned refusal `reason`, retaining the fixed
+  `safety_check` cause. Repeated failures are bounded per session so one refusal cannot hide
+  another session. Workspace paths are omitted; unrecognized startup errors point to the
+  session's full restart pause detail and preceding typed failure causes. The existing
+  `session_paused` path carries that detail to the chat's paused banner and a retryable
+  transcript error, retaining the recovery record for a later retry.
 - **A daemon is told which of its sessions have a question open** (`open_asks`, after each
   hello), for the continue rule above.
 - **A daemon that does not have a session it is asked to message says so**, with a retryable

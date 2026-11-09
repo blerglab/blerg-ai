@@ -1,7 +1,7 @@
 // The transcript's rows for what a session works through: a checklist change (one compact row,
 // collapsed, that opens to the list; consecutive changes are folded into the latest by the
 // timeline) and a pinned ticket (one compact row; consecutive pins, or unpins, folded into one). Everything they say is in the
-// event's payload: the server recorded the change, so nothing here compares events.
+// event's payload: the timeline reconstructs compact checklist changes before drawing the row.
 import { useEffect, useState, type ReactNode } from 'react'
 import { checklistRowText, PIN_STATE_GLYPH, pinStateOfStatus, readChecklist, readTicketEvent, sourceLabel, ticketChanges, ticketHref, ticketRunOf } from '../../model/worklist'
 import type { PatchSummary } from '../../model/patch'

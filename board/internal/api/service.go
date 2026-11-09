@@ -3,10 +3,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/blerglab/blerg-ai/board/internal/auth"
 	"github.com/blerglab/blerg-ai/board/internal/db"
 	"github.com/blerglab/blerg-ai/board/internal/gate"
+	"github.com/blerglab/blerg-ai/contracts/releasecut"
 )
 
 // Service-layer entry points shared by the MCP surface. Each returns either a
@@ -39,6 +41,9 @@ func (a *API) CreateCardGated(ctx context.Context, p auth.Principal, boardID str
 	if err := p.RequireBoard(boardID, "card.write"); err != nil {
 		return CardWriteResult{}, err
 	}
+	if err := db.ValidateCommitSummary(params.CommitSummary); err != nil {
+		return CardWriteResult{}, err
+	}
 	if err := a.resolveArtifactLinks(&params); err != nil {
 		return CardWriteResult{}, err
 	}
@@ -69,6 +74,9 @@ func (a *API) UpdateCardGated(ctx context.Context, p auth.Principal, cardID stri
 		return CardWriteResult{}, err
 	}
 	if err := p.RequireBoard(card.BoardID, "card.write"); err != nil {
+		return CardWriteResult{}, err
+	}
+	if err := db.ValidateCommitSummary(params.CommitSummary); err != nil {
 		return CardWriteResult{}, err
 	}
 	if card.Sensitive && params.Body != nil {
@@ -140,7 +148,7 @@ func (a *API) ArchiveCardGated(ctx context.Context, p auth.Principal, cardID str
 	if err != nil {
 		return CardWriteResult{}, err
 	}
-	if err := p.RequireBoard(card.BoardID, "card.write"); err != nil {
+	if err := p.RequireArchive(card.BoardID); err != nil {
 		return CardWriteResult{}, err
 	}
 	board, err := db.GetBoard(ctx, a.Pool, card.BoardID)
@@ -161,4 +169,58 @@ func (a *API) ArchiveCardGated(ctx context.Context, p auth.Principal, cardID str
 	}
 	a.Hub.Broadcast(card.BoardID, "card_changed")
 	return CardWriteResult{Card: archived}, nil
+}
+
+// CloseReleaseGated reviews every archive before the atomic cut writes any card.
+func (a *API) CloseReleaseGated(ctx context.Context, p auth.Principal, boardID, id, next string, intents ...releasecut.Intent) (*gate.Outcome, error) {
+	if err := p.RequireArchive(boardID); err != nil {
+		return nil, err
+	}
+	if len(intents) > 1 {
+		return nil, errors.New("one cut intent is required")
+	}
+	if len(intents) == 1 && intents[0].AskID != "" {
+		if !p.FromCore || !p.PersonBehind || p.CoreAccountID == "" {
+			return nil, errors.New("cut execution requires the owner's live Core login")
+		}
+		intents[0].OwnerID = p.CoreAccountID
+	}
+	if len(intents) == 0 {
+		intents = []releasecut.Intent{{}}
+	}
+	intents[0].PersonAct = p.IsHuman() || (p.FromCore && p.PersonBehind && p.CoreAccountID != "")
+	if intents[0].OwnerID == "" {
+		intents[0].OwnerID = p.CoreAccountID
+		if intents[0].OwnerID == "" {
+			intents[0].OwnerID = p.SessionID
+		}
+	}
+	board, err := db.GetBoard(ctx, a.Pool, boardID)
+	if err != nil {
+		return nil, err
+	}
+	view, err := db.ReadRelease(ctx, a.Pool, boardID, id)
+	if err != nil {
+		return nil, err
+	}
+	done := map[string]bool{}
+	for _, cardID := range view.DoneCardIDs {
+		done[cardID] = true
+	}
+	reviews := map[string]db.ReleaseArchiveReview{}
+	for _, card := range view.Cards {
+		if card.ArchivedAt != nil || !done[card.ID] {
+			continue
+		}
+		payload, _ := json.Marshal(map[string]any{"card": card.Number, "archive": true})
+		out, e := a.gateFor(ctx, p, board, &card, "archive", payload, "", "")
+		if e != nil {
+			return nil, e
+		}
+		if !out.Allowed {
+			return out, nil
+		}
+		reviews[card.ID] = db.ReleaseArchiveReview{Version: card.Version, Meta: meta(p, out.ReviewID)}
+	}
+	return nil, db.CloseReleaseChecked(ctx, a.Pool, boardID, id, next, p.EventMeta(), reviews, intents...)
 }

@@ -67,3 +67,12 @@ dist-packages/
 
 # Local launch-sheet validation evidence and viewport captures.
 /.launch-shots/
+
+# Local gate timing records (worker and integrated runs).
+/.superpowers/gate-runs.jsonl
+__pycache__/
+
+# Release performance check (BLG-453) candidate baselines: working evidence
+# from a run, not a release artifact. Only the accepted file under
+# docs/performance-baselines/<version>.json is committed.
+/docs/performance-baselines/*-candidate.json

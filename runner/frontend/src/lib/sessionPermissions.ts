@@ -97,7 +97,7 @@ export function boardDetail(b: BoardAccess): string {
 /** For a started session's board held below its own level: "Capped at Read by the session that started it". */
 export function capNote(b: BoardAccess): string {
   if (!b.parent_level || !b.own_level || boardLevelRank(b.own_level) <= boardLevelRank(b.parent_level)) return ''
-  return `capped at ${BOARD_LEVEL_LABELS[b.parent_level]} by the session that started it (its own level is ${BOARD_LEVEL_LABELS[b.own_level]})`
+  return `capped at ${BOARD_LEVEL_LABELS[b.parent_level]} by the workspace that started it (its own level is ${BOARD_LEVEL_LABELS[b.own_level]})`
 }
 
 export function grantScope(g: ProposalGrant): string {
@@ -116,7 +116,7 @@ export function grantTarget(g: ProposalGrant): string {
   return g.kind === 'board_file' ? (g.board_name || g.board_id || '') : `${g.connection_name} · ${g.tool}`
 }
 
-const HOW: Record<string, string> = { card: 'Given from a card in the chat', panel: 'Given in the session panel', launch: 'Given at launch', parent: 'Passed down by the session that started it' }
+const HOW: Record<string, string> = { card: 'Given from a card in the chat', panel: 'Given in the workspace panel', launch: 'Given at launch', parent: 'Passed down by the workspace that started it' }
 
 /** How and when a grant was given, as the Permissions modal lists it. */
 export function grantDetail(g: ProposalGrant): string {

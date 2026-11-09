@@ -14,9 +14,19 @@ import (
 )
 
 func acceptSessionInput(ctx context.Context, h *Hub, pool *pgxpool.Pool, msg protocol.AgentUserMessage) (bool, error) {
-	if pool == nil || msg.ClientID == "" || harnessCommand(msg.Text) {
+	if pool == nil || harnessCommand(msg.Text) {
 		return true, nil
 	}
+	if msg.ClientID == "" {
+		if msg.AnswerMessageID == "" && (msg.Source == "" || msg.Source == "chat") {
+			if _, err := pool.Exec(ctx, `UPDATE messages SET cli_discussion=$2,question_turn='main' WHERE session_id=$1 AND kind='ask' AND status='open' AND question_session_posted AND NOT no_wait AND (NOT owner_only OR EXISTS(SELECT 1 FROM bound_asks WHERE message_id=messages.id))`, msg.SessionID, msg.Text); err != nil {
+				return false, err
+			}
+			signalQuestionDiscussions(ctx, h, pool, msg.SessionID)
+		}
+		return true, nil
+	}
+
 	if len(msg.ClientID) > db.SessionInputMaxClientIDBytes {
 		return false, db.ErrSessionInputID
 	}
@@ -38,9 +48,16 @@ func acceptSessionInput(ctx context.Context, h *Hub, pool *pgxpool.Pool, msg pro
 		return false, err
 	}
 	eventID := messageEventID(msg.ClientID, "input-accepted")
-	seq, fresh, err := db.AcceptSessionInput(ctx, pool, msg.SessionID, msg.ClientID, string(protocol.StripNUL(frame)), eventID, string(protocol.StripNUL(payload)))
+	var discussion []string
+	if msg.AnswerMessageID == "" && (msg.Source == "" || msg.Source == "chat") {
+		discussion = []string{msg.Text}
+	}
+	seq, fresh, err := db.AcceptSessionInput(ctx, pool, msg.SessionID, msg.ClientID, string(protocol.StripNUL(frame)), eventID, string(protocol.StripNUL(payload)), discussion...)
 	if err == nil && fresh {
 		fanOutServerEvent(h, msg.SessionID, eventID, "input_accepted", payload, seq, time.Now())
+		if msg.AnswerMessageID == "" && (msg.Source == "" || msg.Source == "chat") {
+			signalQuestionDiscussions(ctx, h, pool, msg.SessionID)
+		}
 	}
 	return fresh, err
 }
@@ -75,56 +92,78 @@ func replayPendingSessionInputs(ctx context.Context, h *Hub, pool *pgxpool.Pool,
 		// An answer to a question the agent did not wait on that a server restart cut off between
 		// its record and its delivery is sent now (questions.go); the client id dedupes a race.
 		redeliverQuestionAnswers(ctx, h, pool, id)
-		// Every heartbeat lists every active session: take the lock only when
-		// there is something to replay.
-		if pending, err := db.HasPendingSessionInputs(ctx, pool, id); err != nil || !pending {
-			if err != nil {
-				log.Printf("pending session inputs %s: %v", id, err)
-			}
-			continue
-		}
-		err := withLimitResumeActionLock(ctx, pool, id, func(conn *pgxpool.Conn) error {
-			return withParentInputGuard(ctx, pool, id, func() error {
-				row, err := db.GetSession(ctx, pool, id)
-				if err != nil {
-					return err
-				}
-				if row == nil || row.DaemonID != dc.ID {
-					return nil
-				}
-				if sessionInputsEnded(row) {
-					failPendingSessionInputs(ctx, h, pool, id)
-					return nil
-				}
-				pending, err := db.PendingSessionInputs(ctx, pool, id)
-				if err != nil {
-					return err
-				}
-				for _, input := range pending {
-					var msg protocol.AgentUserMessage
-					if json.Unmarshal([]byte(input.Frame), &msg) != nil {
-						continue
-					}
-					if (msg.Source == "" || answersAsk(msg.Source) || msg.AnswerMessageID != "") && answerAskFrom(ctx, h, pool, id, msg.Text, msg.ClientID, msg.AnswerMessageID, "", msg.Source) {
-						continue
-					}
-					if err := ctx.Err(); err != nil {
-						return err
-					}
-					if !h.trySendToDaemon(dc, []byte(input.Frame)) {
-						return nil // disconnected, replaced, or busy: retried on the next heartbeat
-					}
-				}
-				return nil
-			})
-		})
-		if errors.Is(err, db.ErrDelegationEnded) {
-			failPendingSessionInputs(ctx, h, pool, id)
-			continue
-		}
+		replaySessionInputs(ctx, h, pool, dc, id)
+	}
+}
+
+// replaySessionInputs sends one session's pending inputs.
+func replaySessionInputs(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *DaemonConn, id string) {
+	// Every heartbeat lists every active session: take the lock only when
+	// there is something to replay.
+	if pending, err := db.HasPendingSessionInputs(ctx, pool, id); err != nil || !pending {
 		if err != nil {
 			log.Printf("pending session inputs %s: %v", id, err)
 		}
+		return
+	}
+	err := withLimitResumeActionLock(ctx, pool, id, func(conn *pgxpool.Conn) error {
+		return withParentInputGuard(ctx, pool, id, func() error {
+			row, err := db.GetSession(ctx, pool, id)
+			if err != nil {
+				return err
+			}
+			if row == nil || row.DaemonID != dc.ID {
+				return nil
+			}
+			if sessionInputsEnded(row) {
+				failPendingSessionInputs(ctx, h, pool, id)
+				return nil
+			}
+			pending, err := db.PendingSessionInputs(ctx, pool, id)
+			if err != nil {
+				return err
+			}
+			for _, input := range pending {
+				var msg protocol.AgentUserMessage
+				if json.Unmarshal([]byte(input.Frame), &msg) != nil {
+					continue
+				}
+				// Legacy bound frames are never deliverable, even after a failed answer transaction.
+				if msg.AnswerMessageID != "" {
+					var bound bool
+					if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM bound_asks WHERE message_id::text=$1)`, msg.AnswerMessageID).Scan(&bound); err != nil {
+						return err
+					}
+					if bound {
+						if err := db.SettleSessionInput(ctx, pool, msg.SessionID, msg.ClientID); err != nil {
+							return err
+						}
+						continue
+					}
+				}
+				// Replay never answers: this input may predate any open question.
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if msg.Source == childTurnSource {
+					// Unknown/deleted legacy workers still deliver their fixed generic
+					// notice and settle normally; they must not become immortal inputs.
+					if !sendWorkerFrame(ctx, h, pool, dc, msg, []byte(input.Frame)) {
+						continue
+					}
+				} else if !h.trySendToDaemon(dc, []byte(input.Frame)) {
+					return nil // disconnected, replaced, or busy: retried on the next heartbeat
+				}
+			}
+			return nil
+		})
+	})
+	if errors.Is(err, db.ErrDelegationEnded) {
+		failPendingSessionInputs(ctx, h, pool, id)
+		return
+	}
+	if err != nil {
+		log.Printf("pending session inputs %s: %v", id, err)
 	}
 }
 
@@ -189,6 +228,20 @@ func (dc *DaemonConn) SetInputReceipts(v bool) {
 	dc.liveMu.Unlock()
 }
 
+// CanAuthoritativeAnswers reports a daemon whose native loop takes an ask's result only from its
+// server poll. An older one treats any input as the answer, so question routing stays off for its
+// sessions (older_host_routing.go).
+func (dc *DaemonConn) CanAuthoritativeAnswers() bool {
+	dc.liveMu.RLock()
+	defer dc.liveMu.RUnlock()
+	return dc.authoritativeAnswers
+}
+func (dc *DaemonConn) SetAuthoritativeAnswers(v bool) {
+	dc.liveMu.Lock()
+	dc.authoritativeAnswers = v
+	dc.liveMu.Unlock()
+}
+
 // sessionInputAPIError preserves retry/validation semantics without exposing
 // database details or conversational content.
 func sessionInputAPIError(err error) *APIError {
@@ -206,4 +259,16 @@ func sessionInputAPIError(err error) *APIError {
 
 func failPendingSessionInputs(ctx context.Context, hub *Hub, pool *pgxpool.Pool, sessionID string) {
 	_ = failPendingSessionInputsChecked(ctx, hub, pool, sessionID)
+}
+
+func signalQuestionDiscussions(ctx context.Context, h *Hub, pool *pgxpool.Pool, session string) {
+	rows, err := db.ListOpenAsks(ctx, pool, session)
+	if err != nil {
+		return
+	}
+	for _, row := range rows {
+		if !row.NoWait {
+			h.SignalAskAnswered(row.ID)
+		}
+	}
 }

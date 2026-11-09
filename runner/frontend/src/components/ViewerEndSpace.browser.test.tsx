@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import { page, userEvent } from 'vitest/browser'
@@ -64,7 +65,7 @@ function sessionIsContained() {
   expect(root.scrollHeight).toBe(root.clientHeight); expect(root.scrollWidth).toBe(root.clientWidth)
   expect(columns.scrollTop).toBe(0); expect(root.scrollTop).toBe(0)
 }
-for (const width of [390, 3840]) {
+for (const width of browserWidths([390, 3840])) {
   for (const mode of ['code', 'raw', 'diff', 'markdown', 'artifact-code', 'artifact-text'] as const) {
     it(`scrolls beyond the last ${mode} line inside its viewer at ${width} px`, async () => {
       await page.viewport(width, width === 390 ? 844 : 2160)

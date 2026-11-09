@@ -604,3 +604,138 @@ func TestChildMergedRead(t *testing.T) {
 		}
 	}
 }
+
+func TestCustomChildMergedRead(t *testing.T) {
+	t.Setenv(DaemonStateDirEnv, t.TempDir())
+	dir, b := commitFixture(t)
+	commitFile(t, dir, "README.md", "one\n", "Root")
+	child := "0f0e0d0c-0b0a-4908-8706-050403020100"
+	if err := recordWorkBranch(protocol.SpawnSession{SessionID: child, Sandbox: true, WorkBranch: "dev/person/child"}); err != nil {
+		t.Fatal(err)
+	}
+	if res := readChildMerged(t.Context(), "s", b, child); res.OK || res.ErrorCode != "not_found" {
+		t.Fatalf("no branch: %+v", res)
+	}
+	if _, err := createSandboxClone(dir, child, filepath.Dir(dir)); err != nil {
+		t.Fatal(err)
+	}
+	originGit(t, dir, "branch", sandboxBranch(child))
+	if res := readChildMerged(t.Context(), "s", b, child); !res.OK || res.Merged {
+		t.Fatalf("untouched recent base: %+v", res)
+	}
+	originGit(t, dir, "checkout", "-q", sandboxBranch(child))
+	commitFile(t, dir, "work.txt", "w\n", "Child work")
+	originGit(t, dir, "checkout", "-q", "main")
+	res := readChildMerged(t.Context(), "s", b, child)
+	if !res.OK || res.Merged {
+		t.Fatalf("unmerged: %+v", res)
+	}
+
+	originGit(t, dir, "-c", "core.hooksPath=/dev/null", "merge", "-q", "--no-edit", "--no-ff", sandboxBranch(child))
+	if res := readChildMerged(t.Context(), "s", b, child); !res.OK || !res.Merged {
+		t.Fatalf("merged: %+v", res)
+	}
+	originGit(t, dir, "checkout", "-q", sandboxBranch(child))
+	if res := readChildMerged(t.Context(), "s", b, child); !res.OK || res.Merged {
+		t.Fatalf("checked out child: %+v", res)
+	}
+	originGit(t, dir, "checkout", "-q", "main")
+	originGit(t, dir, "branch", sandboxBranch(child)+".incoming")
+	if res := readChildMerged(t.Context(), "s", b, child); !res.OK || res.Merged {
+		t.Fatalf("incoming work: %+v", res)
+	}
+	originGit(t, dir, "branch", "-D", sandboxBranch(child)+".incoming")
+	otherWorktree := filepath.Join(t.TempDir(), "child-worktree")
+	originGit(t, dir, "worktree", "add", "-q", otherWorktree, sandboxBranch(child))
+	if res := readChildMerged(t.Context(), "s", b, child); !res.OK || res.Merged {
+		t.Fatalf("child checked out elsewhere: %+v", res)
+	}
+	originGit(t, dir, "worktree", "remove", otherWorktree)
+
+	parent := "af0e0d0c-0b0a-4908-8706-050403020100"
+	if err := recordWorkBranch(protocol.SpawnSession{SessionID: parent, Sandbox: true, WorkBranch: "dev/person/parent"}); err != nil {
+		t.Fatal(err)
+	}
+	parentDir, err := createSandboxClone(dir, parent, filepath.Dir(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	originGit(t, dir, "branch", sandboxBranch(parent))
+	originGit(t, dir, "checkout", "-q", "main~1")
+	if res := readChildMerged(t.Context(), parent, originBinding(t, parentDir), child); !res.OK || !res.Merged {
+		t.Fatalf("sandboxed parent branch: %+v", res)
+	}
+	for _, bad := range []string{"HEAD", "main", "../x", "0F0E0D0C-0B0A-4908-8706-050403020100", child + "^", "--all"} {
+		if res := readChildMerged(t.Context(), "s", b, bad); res.OK || res.ErrorCode != "invalid" {
+			t.Fatalf("%q: %+v", bad, res)
+		}
+	}
+}
+
+func TestBranchGitLocalHistoryAndDiff(t *testing.T) {
+	dir, binding := commitFixture(t)
+	originGit(t, dir, "remote", "add", "origin", "ssh://git@git.example.com/example-org/private.git")
+	commitFile(t, dir, "a.txt", "base\n", "Base")
+	originGit(t, dir, "checkout", "-qb", "work/card")
+	tip := commitFile(t, dir, "a.txt", "changed\n", "Card work")
+	res := readWorkspaceBranch(t.Context(), "s", binding, "work/card", "main", false)
+	if !res.OK || res.Branch == nil || len(res.Branch.Commits) != 1 || res.Branch.Commits[0].SHA != tip {
+		t.Fatalf("history: %+v", res)
+	}
+	patch := readWorkspaceBranch(t.Context(), "s", binding, "work/card", "main", true)
+	if !strings.Contains(patchText(t, patch), "+changed") {
+		t.Fatal("missing local change")
+	}
+	for _, branch := range []string{"--all", "main..HEAD", "../other", "main^{tree}"} {
+		if res := readWorkspaceBranch(t.Context(), "s", binding, branch, "main", false); res.OK {
+			t.Fatalf("accepted %q", branch)
+		}
+	}
+}
+
+func TestBranchGitLongSubjectKeepsHistory(t *testing.T) {
+	dir, binding := commitFixture(t)
+	commitFile(t, dir, "a.txt", "base\n", "Base")
+	originGit(t, dir, "checkout", "-qb", "work/card")
+	commitFile(t, dir, "a.txt", "first\n", strings.Repeat("Long subject ", 8000))
+	commitFile(t, dir, "a.txt", "second\n", "Second")
+	res := readWorkspaceBranch(t.Context(), "s", binding, "work/card", "main", false)
+	if !res.OK || res.Branch == nil || len(res.Branch.Commits) != 2 {
+		t.Fatalf("long subject blanked history: %+v", res)
+	}
+	if len(res.Branch.Commits[1].Message) > protocol.CommitSubjectMaxBytes {
+		t.Fatal("unbounded subject")
+	}
+}
+
+func TestCommitFileVersionsOnWip(t *testing.T) {
+	dir, binding := commitFixture(t)
+	root := commitFile(t, dir, "a.txt", "original\ncomplete\n", "root")
+	originGit(t, dir, "checkout", "-qb", "wip/file-preview")
+	changed := commitFile(t, dir, "a.txt", "changed\ncomplete\n", "change")
+	originGit(t, dir, "checkout", "-q", "main")
+	for _, tc := range []struct {
+		sha, path, want string
+		original        bool
+	}{
+		{changed, "a.txt", "changed\ncomplete\n", false},
+		{changed, "a.txt", "original\ncomplete\n", true},
+		{root, "a.txt", "original\ncomplete\n", false},
+	} {
+		result := readWorkspaceCommit(t.Context(), "session-1", binding, tc.sha, true, protocol.ReadCommit{FilePath: tc.path, Original: tc.original})
+		bytes, err := base64.StdEncoding.DecodeString(result.PatchB64)
+		if !result.OK || !result.File || err != nil || string(bytes) != tc.want {
+			t.Fatalf("file read: %+v, %v", result, err)
+		}
+	}
+	for _, path := range []string{"../a.txt", "/a.txt", "a/../a.txt", "missing.txt"} {
+		result := readWorkspaceCommit(t.Context(), "session-1", binding, changed, true, protocol.ReadCommit{FilePath: path})
+		if result.OK {
+			t.Fatalf("accepted invalid or absent file %q", path)
+		}
+	}
+	result := readWorkspaceCommit(t.Context(), "session-1", binding, root, true, protocol.ReadCommit{FilePath: "a.txt", Original: true})
+	if result.OK || result.ErrorCode != "not_found" {
+		t.Fatalf("root has original: %+v", result)
+	}
+}

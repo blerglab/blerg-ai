@@ -1,4 +1,4 @@
-/* Usage-limit meters under "Where sessions run" (UsageMeters.tsx): one quiet row per provider. */
+/* Usage-limit meters under "Where sessions run" (UsageMeters.tsx): one row per provider; accessibility presets add warning patterns. */
 .usage-meters {
   width: 100%;
   display: flex;
@@ -136,5 +136,13 @@
   .usage-meter--pulse .usage-meter__pct { animation: none; opacity: 1; }
   .usage-meter--pulse .usage-meter__pct,
   .usage-meter--pulse .usage-meter__critical { color: var(--danger); font-weight: 800; }
-  .usage-meter--pulse .usage-meter__critical { display: inline; flex: 0 0 auto; }
 }
+
+/* Accessibility presets keep severity visible without hue or motion: diagonal stripes at 80%,
+   vertical stripes at 90%, plus a persistent ! at 95% (for reduced motion too). The three
+   meter-* tokens are "off" by default; a colorblind/high-contrast theme (or reduced motion, in
+   brand/tokens.css) turns them on, so a future theme gets this by setting the same tokens, with
+   no change here. */
+.usage-meter--warning .usage-meter__fill { background-image: var(--meter-pattern-warning); }
+.usage-meter--danger .usage-meter__fill { background-image: var(--meter-pattern-danger); }
+.usage-meter--pulse .usage-meter__critical { display: var(--meter-critical-display); flex: 0 0 auto; }

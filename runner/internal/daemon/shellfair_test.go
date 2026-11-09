@@ -6,9 +6,6 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/blerglab/blerg-ai/runner/internal/shellruntime"
 	"github.com/gorilla/websocket"
-	"net"
-	"net/http"
-	"net/http/httptest"
 	"runtime"
 	"strings"
 	"sync"
@@ -35,8 +32,6 @@ func TestActualFileRepliesShareShellControlAndDataScheduler(t *testing.T) {
 				return ctx.Err()
 			}
 		}
-		c.writeMu.Lock()
-		defer c.writeMu.Unlock()
 		if err := conn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
 			return err
 		}
@@ -75,7 +70,8 @@ func TestActualFileRepliesShareShellControlAndDataScheduler(t *testing.T) {
 		c.workspaceOutput.mu.Lock()
 		queuedFiles := len(c.workspaceOutput.viewer)
 		c.workspaceOutput.mu.Unlock()
-		if control == 8 && data == 2 && ordinary >= 3 && ordinary+queuedFiles == 4 {
+		// The file lane holds the one reply the serial viewer queue lets through.
+		if control == 8 && data == 2 && ordinary == 2 && queuedFiles == 1 {
 			break
 		}
 		select {
@@ -115,59 +111,55 @@ func TestActualFileRepliesShareShellControlAndDataScheduler(t *testing.T) {
 	if len(order) != 15 || order[1] != "owner_shell_result" {
 		t.Fatalf("control was not prioritized: %v", order)
 	}
-	firstFile, firstAgent, firstShell := 99, 99, 99
-	for i, kind := range order {
-		switch kind {
-		case "workspace_file_result":
-			firstFile = min(firstFile, i)
-		case "agent_event":
-			firstAgent = min(firstAgent, i)
-		case "owner_shell_output":
-			firstShell = min(firstShell, i)
+	// The gate can be claimed by next or by the idle select. Only next
+	// advances the ordinary/shell turn, so either data lane may go first.
+	// Check the policy itself: at most four controls between data turns,
+	// and alternating ordinary/shell turns while both remain queued.
+	remaining := map[string]int{"owner_shell_result": 8, "agent_event": 2, "owner_shell_output": 2, "workspace_file_result": 2}
+	controls, lastData := 0, ""
+	for _, kind := range order[1:] {
+		if remaining[kind] == 0 {
+			t.Fatalf("unexpected or duplicate frame: %v", order)
 		}
+		switch kind {
+		case "owner_shell_result":
+			controls++
+			if controls > 4 && (remaining["agent_event"] > 0 || remaining["owner_shell_output"] > 0) {
+				t.Fatalf("control burst starved data: %v", order)
+			}
+		case "agent_event", "owner_shell_output":
+			if remaining["agent_event"] > 0 && remaining["owner_shell_output"] > 0 && kind == lastData {
+				t.Fatalf("data lanes did not alternate: %v", order)
+			}
+			controls, lastData = 0, kind
+		case "workspace_file_result":
+			if remaining["owner_shell_result"] > 0 {
+				t.Fatalf("file overtook queued control: %v", order)
+			}
+		}
+		remaining[kind]--
 	}
-	if min(firstFile, firstAgent) > 10 || max(firstFile, firstAgent) > 14 || firstShell > 10 {
-		t.Fatalf("file/agent/shell starvation: %v", order)
+	for kind, count := range remaining {
+		if count != 0 {
+			t.Fatalf("%s did not make progress: %v", kind, order)
+		}
 	}
 }
 
 func TestStalledActualFileClosesLinkAndNewControlMakesProgress(t *testing.T) {
-	release := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		if tcp, ok := conn.NetConn().(*net.TCPConn); ok {
-			_ = tcp.SetReadBuffer(1024)
-		}
-		<-release
-	}))
-	defer func() { close(release); srv.Close() }()
-	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	if tcp, ok := conn.NetConn().(*net.TCPConn); ok {
-		_ = tcp.SetWriteBuffer(1024)
-	}
+	conn, observed := stalledWorkspacePeer(t)
 	c := NewWSClient(Config{})
 	c.conn = conn
 	fileDone := make(chan error, 1)
 	go func() {
-		fileDone <- c.SendWorkspaceFileResultBy(protocol.WorkspaceFileResult{Type: "workspace_file_result", ContentB64: strings.Repeat("A", 8<<20)}, time.Now().Add(5*time.Second))
+		fileDone <- c.SendWorkspaceFileResultBy(protocol.WorkspaceFileResult{Type: "workspace_file_result", ContentB64: "QQ=="}, time.Now().Add(5*time.Second))
 	}()
-	// Wait until the actual large socket write owns the writer, then enqueue
+	// Wait until a partial frame owns the writer, then enqueue
 	// control behind it. Deadline closure, rather than a second writer, releases it.
-	deadline := time.Now().Add(time.Second)
-	for c.writeMu.TryLock() {
-		c.writeMu.Unlock()
-		if time.Now().After(deadline) {
-			t.Fatal("file write never started")
-		}
-		runtime.Gosched()
+	select {
+	case <-observed.writing:
+	case <-time.After(time.Second):
+		t.Fatal("file write never started")
 	}
 	started := time.Now()
 	_ = c.Send(shellruntime.RPC{Type: "owner_shell_result", Op: "close_launch"})

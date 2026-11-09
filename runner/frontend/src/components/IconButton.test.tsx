@@ -20,7 +20,7 @@ describe('IconMenu', () => {
   it('leaves keys in a dialog an item opened to that dialog: an arrow neither reopens the menu nor moves focus', () => {
     render(<IconMenu label="More actions"><ParentDiscardAction sessionId="s" title="Work" menu hint="Stop and archive" /></IconMenu>)
     fireEvent.click(screen.getByRole('button', { name: 'More actions' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Discard session and children' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Discard workspace' }))
     expect(screen.getByRole('menu', { hidden: true })).toHaveAttribute('hidden')
     const cancel = screen.getByRole('button', { name: 'Cancel' })
     cancel.focus()
@@ -28,6 +28,6 @@ describe('IconMenu', () => {
     fireEvent.keyDown(cancel, { key: 'ArrowUp' })
     expect(screen.getByRole('menu', { hidden: true })).toHaveAttribute('hidden')
     expect(cancel).toHaveFocus()
-    expect(screen.getByRole('alertdialog', { name: 'Discard session and all children?' })).toBeInTheDocument()
+    expect(screen.getByRole('alertdialog', { name: 'Discard workspace and all workers and channels?' })).toBeInTheDocument()
   })
 })

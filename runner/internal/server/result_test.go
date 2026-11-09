@@ -58,6 +58,7 @@ func TestRunnerRuntimeAxisDaemonSession(t *testing.T) {
 			hub := NewHub()
 			daemon := &DaemonConn{ID: "fixture-daemon"}
 			daemon.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+			daemon.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 			hub.Register(daemon)
 			hub.SetSessionOwner("fixture-session", daemon.ID)
 			api := &API{hub: hub}

@@ -25,6 +25,7 @@ export default function FilesPanel({ onClose, ...list }: Props) {
   }
 
   return createPortal(
+    // button-guard-ignore: useBackdropClose supplies pointer handlers only; this overlay is not a button
     <div className="artifact-overlay" data-testid="artifacts-overlay" {...backdrop}>
       <div
         ref={dialogRef}

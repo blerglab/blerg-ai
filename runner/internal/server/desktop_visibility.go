@@ -33,14 +33,19 @@ func desktopInReadSnapshot(ctx context.Context, dc *DaemonConn) bool {
 // Enumerate persisted ownership before looking up any live metadata. Neither
 // administrator permission nor a same-name repository is desktop authority.
 func (h *Hub) ownedHostDaemons(ctx context.Context, account string) []*DaemonConn {
+	rows, _ := h.initialStateDaemons(ctx, account)
+	return rows
+}
+
+func (h *Hub) initialStateDaemons(ctx context.Context, account string) ([]*DaemonConn, error) {
 	account = desktopViewer(ctx, account)
 	out := []*DaemonConn{}
 	if account == "" || h.desktopPool == nil {
-		return out
+		return out, nil
 	}
 	rows, err := db.ListDesktops(ctx, h.desktopPool, account, false)
 	if err != nil {
-		return out
+		return nil, err
 	}
 	for _, row := range rows {
 		dc := h.GetHostDaemon(row.ID)
@@ -48,7 +53,7 @@ func (h *Hub) ownedHostDaemons(ctx context.Context, account string) []*DaemonCon
 			out = append(out, dc)
 		}
 	}
-	return out
+	return out, ctx.Err()
 }
 func (h *Hub) desktopConnectionMatches(ctx context.Context, dc *DaemonConn, row db.DesktopRow, account string) bool {
 	if dc != nil && dc.LegacyDesktop && dc.Compatibility && row.Compatibility && row.OwnerID == "" {
@@ -77,6 +82,9 @@ func (h *Hub) ownedHostDaemon(ctx context.Context, account, id string) *DaemonCo
 }
 func (h *Hub) ownsDesktopID(ctx context.Context, account, id string) bool {
 	account = desktopViewer(ctx, account)
+	if p := projectionFor(ctx, h.desktopPool, account); p != nil {
+		return p.Accessible[id]
+	}
 	if h.desktopPool == nil || account == "" {
 		return false
 	}
@@ -100,7 +108,7 @@ func (h *Hub) sessionInfoFor(ctx context.Context, row db.SessionRow, account str
 	}
 	info := sessionRowToInfo(row, account)
 	if h.desktopPool != nil && h.desktopSessionVisible(ctx, account, &row) {
-		d, err := db.GetDesktop(ctx, h.desktopPool, row.DaemonID)
+		d, err := h.projectionDesktop(ctx, account, row.DaemonID)
 		if err == nil && d != nil {
 			info.DesktopCompatibility = d.Compatibility
 			info.DesktopStatus = d.Status
@@ -110,9 +118,12 @@ func (h *Hub) sessionInfoFor(ctx context.Context, row db.SessionRow, account str
 	// Membership and recovery locations are never borrowed from a public
 	// conversation. They remain the launching person's immutable selection.
 	if h.desktopPool != nil && ownsSession(account, &row) && h.desktopSessionVisible(ctx, account, &row) {
-		if ws, err := db.GetSessionWorkspace(ctx, h.desktopPool, row.ID); err == nil && ws != nil {
+		if ws, err := h.projectionWorkspace(ctx, account, row.ID); err == nil && ws != nil {
 			info.Workspace = ws.Manifest
 			info.WorkspaceResults = ws.Results
+		}
+		if op, err := h.projectionOperation(ctx, account, row.ID); err == nil {
+			info.RepositoryRequest = repositoryRequest(op)
 		}
 	}
 	return info
@@ -135,7 +146,7 @@ func (h *Hub) broadcastOwnedDesktop(dc *DaemonConn, build func() any) {
 	})
 }
 
-var desktopSessionFields = []string{"daemon_id", "daemon_name", "project_path", "repo", "repo_path", "git_url", "repo_origins", "repo_remotes", "workspace", "workspace_results", "branch", "repos_root", "error_reason", "recovery_location", "desktop_compatibility", "desktop_status", "desktop_status_reason"}
+var desktopSessionFields = []string{"daemon_id", "daemon_name", "project_path", "repo", "repo_path", "git_url", "repo_origins", "repo_remotes", "workspace", "workspace_results", "repository_request", "branch", "repos_root", "error_reason", "recovery_location", "desktop_compatibility", "desktop_status", "desktop_status_reason"}
 
 func clearDesktopSessionFields(m map[string]any) {
 	for _, key := range desktopSessionFields {
@@ -160,6 +171,45 @@ func (h *Hub) desktopPayloadFor(ctx context.Context, account string, raw []byte)
 		return nil, false
 	}
 	typ, _ := m["type"].(string)
+	// Rebuild for each projection, including the final call inside the delivery
+	// fence. Never carry collection-time authority into transport delivery.
+	if typ == "initial_state" && h.desktopPool != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, initialStateTimeout)
+		defer cancel()
+		ids := []string{}
+		desktops := []string{}
+		if list, ok := m["sessions"].([]any); ok {
+			for _, v := range list {
+				if item, ok := v.(map[string]any); ok {
+					if id, ok := item["id"].(string); ok {
+						ids = append(ids, id)
+					}
+				}
+			}
+		}
+		if list, ok := m["daemons"].([]any); ok {
+			for _, v := range list {
+				if item, ok := v.(map[string]any); ok {
+					if id, ok := item["id"].(string); ok {
+						desktops = append(desktops, id)
+					}
+				}
+			}
+		}
+		rows, err := db.ListBrowserSessions(ctx, h.desktopPool, account, ids)
+		if err != nil {
+			logInitialStateFailure("delivery_sessions", err)
+			return nil, false
+		}
+		p, err := db.LoadBrowserProjection(ctx, h.desktopPool, account, rows, false, desktops...)
+		if err != nil {
+			logInitialStateFailure("delivery_metadata", err)
+			return nil, false
+		}
+		ctx = context.WithValue(ctx, browserProjectionKey{}, &browserProjection{account, h.desktopPool, p})
+	}
+
 	if typ == "desktop_ownership_changed" || typ == "desktop_inventory_invalidated" {
 		return raw, true
 	}
@@ -168,7 +218,7 @@ func (h *Hub) desktopPayloadFor(ctx context.Context, account string, raw []byte)
 		id, _ := m["session_id"].(string)
 		visible := false
 		if h.desktopPool != nil {
-			row, err := db.GetSession(ctx, h.desktopPool, id)
+			row, err := h.projectionSession(ctx, account, id)
 			visible = err == nil && h.desktopSessionVisible(ctx, account, row)
 		}
 		if !visible {
@@ -198,7 +248,7 @@ func (h *Hub) desktopPayloadFor(ctx context.Context, account string, raw []byte)
 			return false
 		}
 		if revision, ok := d["ownership_revision"].(float64); ok {
-			row, err := db.GetDesktop(ctx, h.desktopPool, id)
+			row, err := h.projectionDesktop(ctx, account, id)
 			if err != nil || row == nil || row.Revision != int64(revision) {
 				return false
 			}
@@ -240,7 +290,7 @@ func (h *Hub) desktopPayloadFor(ctx context.Context, account string, raw []byte)
 			changed = true
 			return
 		}
-		row, err := db.GetSession(ctx, h.desktopPool, id)
+		row, err := h.projectionSession(ctx, account, id)
 		if reason, ok := d["error_reason"].(string); ok && err == nil && row != nil {
 			projected := podErrorReasonFor(row, account, reason)
 			if projected != reason {
@@ -418,6 +468,11 @@ func (h *Hub) automaticDesktopEventVisible(ctx context.Context, account, sid str
 	return err == nil && row != nil && ownsSession(desktopViewer(ctx, account), row) && h.desktopSessionVisible(ctx, account, row)
 }
 func (h *Hub) desktopEventPayload(ctx context.Context, account, sid, kind, raw string) json.RawMessage {
+	if kind == "user_message" && strings.Contains(raw, "Workspace repositories (immutable selection;") && h.desktopPool != nil {
+		if workspace, err := db.GetSessionWorkspace(ctx, h.desktopPool, sid); err == nil && workspace != nil {
+			raw = string(cleanLegacyWorkspaceMessage(json.RawMessage(raw), workspace.Manifest))
+		}
+	}
 	if !isDesktopAutomaticEvent(kind) || h.automaticDesktopEventVisible(ctx, account, sid) {
 		return json.RawMessage(raw)
 	}
@@ -469,6 +524,12 @@ func (a *API) replayedDesktopEvent(ctx context.Context, account string, row db.A
 // against ownership changes on every Runner replica. Enqueue-time filtering
 // alone cannot revoke a payload already waiting in a socket's send queue.
 func (h *Hub) deliverDesktopPayload(ctx context.Context, account string, raw []byte, send func([]byte) error) error {
+	if isInitialState(raw) {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, initialStateTimeout)
+		defer cancel()
+	}
+
 	if !desktopPayloadNeedsCheck(raw) {
 		return send(raw)
 	}
@@ -515,6 +576,9 @@ func (h *Hub) deliverDesktopPayload(ctx context.Context, account string, raw []b
 	return db.WithDesktopSnapshotFences(ctx, h.desktopPool, names, func(fenced context.Context) error {
 		filtered, ok := h.desktopPayloadFor(fenced, account, raw)
 		if !ok {
+			if isInitialState(raw) {
+				return errDiscoveryUnavailable
+			}
 			return nil
 		}
 		return send(filtered)

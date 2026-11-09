@@ -187,7 +187,14 @@ func TestChildrenLiveETagTracksEveryChildNotOnlyLargestLocalSequence(t *testing.
 	if after.Code != http.StatusOK || after.Header().Get("ETag") == before {
 		t.Fatal("lower-sequence child's turn failed to invalidate parent live ETag")
 	}
-	if _, err := db.CreateMessage(t.Context(), fx.pool, second, "ask", "fixture ask"); err != nil {
+	id, err := db.CreateMessage(t.Context(), fx.pool, second, "ask", "fixture ask")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := childrenLiveGet(t, fx, "owner-1", after.Header().Get("ETag")); got.Code != http.StatusNotModified {
+		t.Fatalf("pending worker question changed parent attention: %d", got.Code)
+	}
+	if err = fx.api.escalateChildQuestion(t.Context(), fx.row(second), fx.row(fx.parent), id); err != nil {
 		t.Fatal(err)
 	}
 	if got := childrenLiveGet(t, fx, "owner-1", after.Header().Get("ETag")); got.Code != http.StatusOK {

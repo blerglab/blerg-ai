@@ -1,24 +1,32 @@
+import { browserWidths } from '../test/browserWidths'
 import { useLayoutEffect } from 'react'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { beforeEach, expect, it } from 'vitest'
+import { beforeEach, expect, it, vi } from 'vitest'
 import { page, userEvent } from 'vitest/browser'
 import { MemoryRouter } from 'react-router-dom'
 import CommandPaletteProvider from './CommandPalette'
-import SessionTabBar from './SessionTabBar'
+import SessionTabBar, { ShellToggleButton } from './SessionTabBar'
 import SessionGroups, { sessionTabDragType } from './SessionGroups'
 import { sessionTabsKey, useSessionTabs, type SessionTabs } from '../hooks/useSessionTabs'
 import { useExplorerLayout } from '../hooks/useExplorerLayout'
 import { useIsMobile } from '../hooks/useIsMobile'
 import '../index.css'
 
+vi.mock('../ws', () => import('../test/wsMock'))
 let tabs: SessionTabs
 const names = Array.from({ length: 20 }, (_, i) => `feature-${String(i).padStart(2, '0')}-with-a-long-file-name-for-overflow.ts`)
 function Workspace() {
   const state = useSessionTabs('owner', 'overflow', useIsMobile())
   useLayoutEffect(() => { tabs = state })
   const explorer = useExplorerLayout(false)
-  const bar = (group: typeof state.groups[number], ends = { start: true, end: true }) => <SessionTabBar tabs={state} explorer={explorer} group={group} grouped={!state.phone && state.groups.length > 1} {...ends} shellOpen={false} shell={() => state.open({ kind: 'shell', shellId: 'new', label: 'Newly opened shell', runtime: 'host', folder: 'project' })} panel={<button className="icon-btn" aria-label="Panel">▥</button>} />
+  const bar = (group: typeof state.groups[number], ends = { start: true, end: true }) => <SessionTabBar tabs={state} explorer={explorer} group={group} grouped={!state.phone && state.groups.length > 1} {...ends} shellOpen={false} />
+  // New shell and the panel toggle live in the session header now, not in the tab bar (card
+  // BLG-450); keep them available to this harness outside the <nav> the overflow math measures.
   return <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+    <div className="icon-btn-group">
+      <ShellToggleButton tabs={state} onOpen={() => state.open({ kind: 'shell', shellId: 'new', label: 'Newly opened shell', runtime: 'host', folder: 'project' })} />
+      <button className="icon-btn" aria-label="Panel">▥</button>
+    </div>
     {(state.phone || state.groups.length === 1) && bar(state.groups[0])}
     <SessionGroups tabs={state} bar={bar} />
   </div>
@@ -34,7 +42,7 @@ function activeVisible(element = strip()) {
   expect(active.left).toBeGreaterThanOrEqual(box.left - 1)
   expect(active.right).toBeLessThanOrEqual(box.right + 1)
 }
-for (const width of [390, 1024, 3840]) it(`scrolls overflowing tabs, reveals selections and pins tools at ${width}`, async () => {
+for (const width of browserWidths([390, 1024, 3840])) it(`scrolls overflowing tabs, reveals selections and pins tools at ${width}`, async () => {
   await page.viewport(width, width === 390 ? 844 : 1000); mount()
   const all = await screen.findByRole('button', { name: 'All tabs' })
   expect(strip().scrollWidth).toBeGreaterThan(strip().clientWidth)
@@ -110,8 +118,14 @@ it('auto-scrolls in both directions, reveals after reordering and preserves scro
   await waitFor(() => activeVisible(element))
   expect(tabs.tabs[0].id).not.toBe(`workspace:${names[0]}`)
   act(() => tabs.select(`workspace:${names.at(-1)}`))
-  await waitFor(() => activeVisible(element))
+  // Visibility can already be true before the deferred reveal finishes. The last tab's
+  // reveal is complete only when the list has reached its right scroll boundary.
+  await waitFor(() => {
+    activeVisible(element)
+    expect(Math.abs(element.scrollWidth - element.clientWidth - element.scrollLeft)).toBeLessThanOrEqual(1)
+  })
   const end = element.scrollLeft
+  expect(end).toBeGreaterThan(50)
   drag(element.querySelector('.session-tab.active')!, 'dragstart')
   drag(element, 'dragover', box.left + 2)
   await waitFor(() => expect(element.scrollLeft).toBeLessThan(end - 50))
@@ -144,7 +158,7 @@ it('preserves manual scrolling on repeated selection of the current tab', async 
   expect(strip().scrollLeft).toBe(0)
 })
 
-for (const width of [390, 3840]) it(`keeps previews without toggling focus and keeps phone navigation unambiguous at ${width}`, async () => {
+for (const width of browserWidths([390, 3840])) it(`keeps previews without toggling focus and keeps phone navigation unambiguous at ${width}`, async () => {
   await page.viewport(width, 1000); mount()
   const preview = () => screen.getByRole('tab', { name: new RegExp(names.at(-1)!) })
   act(() => tabs.select(`workspace:${names.at(-1)}`))
@@ -161,12 +175,12 @@ for (const width of [390, 3840]) it(`keeps previews without toggling focus and k
   await userEvent.dblClick(screen.getByRole('tab', { name: /another-preview/ }))
   expect(tabs.tabFocused).toBe(false)
   if (width === 390) {
-    await userEvent.dblClick(screen.getByRole('button', { name: /← Chat/ }))
+    await userEvent.dblClick(screen.getByRole('button', { name: /← Main/ }))
     expect(tabs.active).toBe('chat')
     expect(tabs.tabFocused).toBe(false)
     await userEvent.click(screen.getByRole('button', { name: /open files/ }))
     const menu = screen.getByRole('menu', { name: 'Kept open' })
-    expect(within(menu).queryByRole('menuitem', { name: 'Chat' })).toBeNull()
+    expect(within(menu).queryByRole('menuitem', { name: 'Main' })).toBeNull()
     expect(within(menu).getAllByRole('menuitem')).toHaveLength(tabs.tabs.length)
   }
 })
@@ -220,13 +234,94 @@ it('preserves manual scrolling through label width changes, but reveals on strip
 
 it('does not toggle focus from repeated phone back taps', async () => {
   await page.viewport(390, 844); mount()
-  await userEvent.dblClick(screen.getByRole('button', { name: /← Chat/ }))
+  await userEvent.dblClick(screen.getByRole('button', { name: /← Main/ }))
   expect(tabs.tabFocused).toBe(false)
 })
 it('lists only kept tabs in the phone kept-files menu', async () => {
   await page.viewport(390, 844); mount()
   await userEvent.click(screen.getByRole('button', { name: /open files/ }))
   const menu = screen.getByRole('menu', { name: 'Kept open' })
-  expect(within(menu).queryByRole('menuitem', { name: 'Chat' })).toBeNull()
+  expect(within(menu).queryByRole('menuitem', { name: 'Main' })).toBeNull()
   expect(within(menu).getAllByRole('menuitem')).toHaveLength(19)
+})
+
+// #306: the strip measured itself during React's commit (clientWidth in a layout effect), forcing a
+// full style and layout of a freshly drawn session (~100-180 ms per switch in Firefox). It now waits
+// for the ResizeObserver, which reports after the browser's own layout, before the frame is shown.
+it('reads no layout during the commit that draws it, and still shows overflow and the active tab', async () => {
+  await page.viewport(1024, 1000)
+  const proto = Element.prototype
+  const original = Object.getOwnPropertyDescriptor(proto, 'clientWidth')!
+  let duringCommit = 0, committing = false
+  Object.defineProperty(proto, 'clientWidth', { configurable: true, get(this: HTMLElement) {
+    if (committing && this.classList?.contains('session-tabs')) duringCommit++
+    return original.get!.call(this)
+  } })
+  try {
+    committing = true
+    act(() => { mount() })
+    committing = false
+    expect(duringCommit).toBe(0)
+    await screen.findByRole('button', { name: 'All tabs' })
+    activeVisible()
+    committing = true
+    act(() => tabs.select(`workspace:${names.at(-1)}`))
+    committing = false
+    expect(duringCommit).toBe(0)
+    await waitFor(() => activeVisible())
+  } finally {
+    Object.defineProperty(proto, 'clientWidth', original)
+  }
+})
+
+// Review of #306: a tab dragged from another window over this strip and dropped elsewhere sends its
+// dragend to that window. The strip must not stay "dragging" and stop revealing the active tab.
+it('reveals again after a foreign drag that never ended here', async () => {
+  await page.viewport(1024, 900); mount()
+  await screen.findByRole('button', { name: 'All tabs' })
+  const element = strip(), box = element.getBoundingClientRect(), transfer = new DataTransfer()
+  transfer.setData(sessionTabDragType, 'elsewhere')
+  act(() => { element.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, composed: true, dataTransfer: transfer, clientX: box.left + box.width / 2, clientY: box.top + 12 })) })
+  act(() => { element.dispatchEvent(new DragEvent('dragleave', { bubbles: true, cancelable: true, composed: true, dataTransfer: transfer, relatedTarget: document.body })) })
+  await new Promise(r => setTimeout(r, 400))
+  element.scrollLeft = 0
+  act(() => tabs.select(`workspace:${names.at(-1)}`))
+  await waitFor(() => activeVisible(element))
+})
+
+// Re-review of #306: applying the overflow state inside the observer must not resize what it observes
+// ("ResizeObserver loop completed with undelivered notifications").
+it('draws and toggles overflow without a ResizeObserver loop', async () => {
+  const loops: string[] = []
+  const onError = (event: ErrorEvent) => { if (/ResizeObserver loop/.test(event.message)) loops.push(event.message) }
+  window.addEventListener('error', onError)
+  try {
+    await page.viewport(1024, 900); mount()
+    await screen.findByRole('button', { name: 'All tabs' })
+    // Close tabs until the strip no longer overflows (the button goes), then open them again.
+    for (const path of names.slice(2)) {
+      act(() => tabs.close(`workspace:${path}`))
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
+    }
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'All tabs' })).toBeNull())
+    for (const path of names.slice(2)) {
+      act(() => tabs.open({ kind: 'workspace', path }, true))
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
+    }
+    await screen.findByRole('button', { name: 'All tabs' })
+    await new Promise(r => setTimeout(r, 150))
+  } finally {
+    window.removeEventListener('error', onError)
+  }
+  expect(loops).toEqual([])
+})
+
+// Re-review of #306: opening with the last tab active, the overflow button appears after the first
+// reveal and takes 28px; the active tab must end up fully visible.
+it('keeps the last tab fully visible once the overflow button appears', async () => {
+  localStorage.setItem(sessionTabsKey('owner', 'overflow'), JSON.stringify({ tabs: names.map((path, i) => ({ id: `workspace:${path}`, view: { kind: 'workspace', path }, preview: i === names.length - 1 })), active: `workspace:${names.at(-1)}` }))
+  await page.viewport(1024, 900); mount()
+  await screen.findByRole('button', { name: 'All tabs' })
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
+  activeVisible()
 })

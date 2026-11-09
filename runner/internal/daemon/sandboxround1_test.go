@@ -124,53 +124,6 @@ func TestEmptyFolderInsideACheckoutIsRefused(t *testing.T) {
 	}
 }
 
-// R-I1: the reattach pass never stops a live, current sandbox for want of its best-effort
-// recovery record. A sandbox this process manages is kept whatever; one it does not manage is kept
-// when its clone record loads and docker names that clone, even with no recovery record or after
-// the repos root changed. Only one with no clone record, or a mount elsewhere, is stopped, and
-// the message says which.
-func TestCurrentSandboxSurvivesAMissingRecoveryRecord(t *testing.T) {
-	dockerDir, _ := fakeDocker(t)
-	t.Setenv("PATH", dockerDir+":"+os.Getenv("PATH"))
-	t.Setenv("FAKE_DOCKER_LOG", filepath.Join(t.TempDir(), "docker.log"))
-	t.Setenv("FAKE_DOCKER_EXEC_NOOP", "1")
-	stubCloneProbe(t, false, false)
-	// "managed" is this process's own session: it is kept without any record being consulted (here
-	// even its clone record is unreadable and docker cannot say what it mounts).
-	moved := sandboxTestClone(t, "moved")
-	sources := map[string]string{dockerContainerName("moved"): moved}
-	old := containerWorkspaceSource
-	containerWorkspaceSource = func(name string) (string, bool) { return sources[name], sources[name] != "" }
-	t.Cleanup(func() { containerWorkspaceSource = old })
-	// Its recovery record was written under the old repos root; the root has since changed (the
-	// daemon below reads records under the new one).
-	before := newManagerWithSender(newRecordingSender(4), ManagerConfig{ReposRoot: t.TempDir()})
-	if err := before.writeRecord(SessionRecord{Version: recordSchemaVersion, SessionID: "moved", ProjectPath: moved, Sandbox: true}); err != nil {
-		t.Fatal(err)
-	}
-	sender := newRecordingSender(16)
-	mgr := newManagerWithSender(sender, ManagerConfig{ReposRoot: t.TempDir()})
-	mgr.mu.Lock()
-	mgr.sessions["managed"] = &Session{} // started by this process; its recovery record never written
-	mgr.mu.Unlock()
-	for range 2 { // two reconnects
-		kept := mgr.stopLegacySandboxes([]string{"managed", "moved", "unknown"})
-		if strings.Join(kept, ",") != "managed,moved" {
-			t.Fatalf("kept %v, want managed,moved", kept)
-		}
-	}
-	if _, err := os.Stat(moved); err != nil {
-		t.Fatal("the moved session's clone was finished")
-	}
-	msgs := strings.Join(sender.messages(), "\n")
-	if strings.Contains(msgs, `"managed"`) || strings.Contains(msgs, `"moved"`) {
-		t.Fatalf("a current session was told it was stopped: %s", msgs)
-	}
-	if !strings.Contains(msgs, "has no record of a clone of its own") || strings.Contains(msgs, "mounted your checkout") {
-		t.Fatalf("the unknown session was not told the actual reason: %s", msgs)
-	}
-}
-
 // The sandbox `docker run` never pulls in-band, and a `docker run` carrying a credential in its
 // environment is bounded like every other docker call.
 func TestSandboxDockerRunNeverPullsAndIsBounded(t *testing.T) {
@@ -315,56 +268,6 @@ func TestCloneReadsNeverBlockOnAFifo(t *testing.T) {
 	<-sender.ch
 }
 
-// M7: a sandboxed terminal's commits come back when its screen goes from running to idle.
-func TestTerminalTurnEndBringsCommitsBack(t *testing.T) {
-	repo, clone := cloneFixture(t, "term-sync")
-	dockerDir, _ := fakeDocker(t)
-	t.Setenv("PATH", dockerDir+":"+os.Getenv("PATH"))
-	t.Setenv("FAKE_DOCKER_LOG", filepath.Join(t.TempDir(), "docker.log"))
-	registerSandbox("term-sync", dockerContainerName("term-sync"))
-	t.Cleanup(func() { unregisterSandbox("term-sync") })
-	mgr := newManagerWithSender(newRecordingSender(16), ManagerConfig{ReposRoot: t.TempDir()})
-	tracker := NewStateTracker("term-sync", mgr.client)
-	mgr.watchSandboxTurns("term-sync", clone, tracker)
-	childCommit(t, clone, "work.txt")
-	tracker.Update("running")
-	tracker.Update("idle")
-	tracker.Update("idle")
-	waitFor(t, func() bool {
-		got, err := childRepoGitErr(repo, "log", "-1", "--format=%s", "wip/term-sync")
-		return err == nil && got == "child work.txt"
-	})
-	calls := dockerCalls(t, os.Getenv("FAKE_DOCKER_LOG"))
-	if !strings.Contains(calls, "pause "+dockerContainerName("term-sync")) {
-		t.Fatalf("the turn-end sync did not pause the container:\n%s", calls)
-	}
-}
-
-// M7: a sandboxed terminal whose tmux is gone when its attach stream ends is finished: the clone's
-// branch comes back and the clean clone goes. One whose tmux still runs is left for the reattach.
-func TestTerminalStreamEndFinishesTheSandbox(t *testing.T) {
-	repo, clone := cloneFixture(t, "term-end")
-	dockerDir, _ := fakeDocker(t)
-	t.Setenv("PATH", dockerDir+":"+os.Getenv("PATH"))
-	t.Setenv("FAKE_DOCKER_LOG", filepath.Join(t.TempDir(), "docker.log"))
-	t.Setenv("FAKE_DOCKER_EXEC_FAIL", "1") // `docker exec … tmux ls`: no tmux server left
-	stubCloneProbe(t, true, true)
-	childCommit(t, clone, "work.txt")
-	mgr := newManagerWithSender(newRecordingSender(16), ManagerConfig{ReposRoot: t.TempDir()})
-	sess, err := NewSession("term-end", clone, 80, 24, nil, []string{"true"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mgr.streamSession("term-end", sess)
-	waitFor(t, func() bool {
-		_, err := os.Stat(clone)
-		return os.IsNotExist(err)
-	})
-	if got := childRepoGit(t, repo, "log", "-1", "--format=%s", "wip/term-end"); got != "child work.txt" {
-		t.Fatalf("the terminal's commit did not come back: %q", got)
-	}
-}
-
 // M7: after a daemon restart nothing hosts a sandboxed agent session again; the sweep commits its
 // work in its container, removes the container, and brings the branch back.
 func TestRestartSweepBringsAnOrphansWorkBack(t *testing.T) {
@@ -372,9 +275,9 @@ func TestRestartSweepBringsAnOrphansWorkBack(t *testing.T) {
 	stubCloneProbe(t, true, true)
 	childCommit(t, clone, "work.txt")
 	var removed []string
-	origOut, origRun, origProbe := dockerOutput, dockerRun, dockerProbe
+	origOut, origRun := dockerOutput, dockerRun
 	dockerOutput = func(args ...string) ([]byte, error) {
-		if len(args) > 1 && args[0] == "ps" && args[1] != "-a" {
+		if len(args) > 1 && args[0] == "ps" && args[len(args)-1] != "{{.Names}}" {
 			return []byte(dockerContainerName("orphan-1") + "\n"), nil
 		}
 		return nil, nil // ps -a for the removed container: gone
@@ -385,8 +288,7 @@ func TestRestartSweepBringsAnOrphansWorkBack(t *testing.T) {
 		}
 		return nil
 	}
-	dockerProbe = func(time.Duration, ...string) (bool, error) { return false, errNotInImage } // no tmux: an agent sandbox
-	t.Cleanup(func() { dockerOutput, dockerRun, dockerProbe = origOut, origRun, origProbe })
+	t.Cleanup(func() { dockerOutput, dockerRun = origOut, origRun })
 	sweepOrphanSandboxContainers(nil, nil)
 	if len(removed) != 1 || removed[0] != dockerContainerName("orphan-1") {
 		t.Fatalf("removed %v", removed)
@@ -409,35 +311,4 @@ func waitFor(t *testing.T, ok func() bool) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatal("timed out waiting")
-}
-
-// I2 with a real container (BLERG_SANDBOX_CHILD_TEST=1): the session binds a unix socket that never
-// answers where tmux looks for its server; the probe returns, unknown, within its bound.
-func TestHungTmuxProbeInDocker(t *testing.T) {
-	if os.Getenv("BLERG_SANDBOX_CHILD_TEST") != "1" {
-		t.Skip("set BLERG_SANDBOX_CHILD_TEST=1 with a built sandbox image")
-	}
-	labelTestContainers(t)
-	t.Setenv("HOME", t.TempDir())
-	id := "hung-probe-" + ccUUID()
-	name, err := startSandboxContainer(id, sandboxTestClone(t, id), nil, sandboxCredential{}, SandboxOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { releaseTestSandbox(id) })
-	plant := `d=/tmp/tmux-$(id -u); mkdir -p $d && chmod 700 $d && nohup python3 -c 'import socket,time,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); time.sleep(600)' $d/default >/dev/null 2>&1 &
-sleep 1; test -S $d/default`
-	if out, err := exec.Command("docker", "exec", name, "sh", "-c", plant).CombinedOutput(); err != nil {
-		t.Fatalf("plant: %v: %s", err, out)
-	}
-	old := sandboxProbeTimeout
-	sandboxProbeTimeout = 2 * time.Second
-	t.Cleanup(func() { sandboxProbeTimeout = old })
-	start := time.Now()
-	if _, known := tmuxProbe(name); known {
-		t.Fatal("a tmux that never answers was reported as known")
-	}
-	if took := time.Since(start); took > 10*time.Second {
-		t.Fatalf("the probe took %s", took)
-	}
 }

@@ -372,3 +372,5 @@ td.diff-empty { background: color-mix(in srgb, var(--chat-fg) 4%, transparent); 
 .review-inline-mode .diff-unified .diff-col-num { width: 56px; }
 .review-inline-mode .diff-unified .diff-code { white-space: pre-wrap; overflow-wrap: anywhere; }
 .review-inline-mode .diff-unified .diff-hunk { white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff-file-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.diff-file-head:has(.diff-file-actions) { flex-wrap: wrap; }

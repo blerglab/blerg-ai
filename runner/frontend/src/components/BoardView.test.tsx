@@ -11,7 +11,6 @@ import * as wsMock from '../test/wsMock'
 // Mock boardApi before importing component
 vi.mock('../lib/boardApi', () => ({
   getBoard: vi.fn(),
-  spawnAssist: vi.fn(),
   createTicket: vi.fn(),
   moveTicket: vi.fn(),
   patchColumn: vi.fn(),
@@ -125,7 +124,6 @@ beforeEach(() => {
     columns: COLUMNS,
     tickets: TICKETS,
   })
-  vi.mocked(boardApi.spawnAssist).mockResolvedValue({ session_id: 'sess-assist-1' })
   vi.mocked(boardApi.createTicket).mockResolvedValue(
     makeTicket({ id: 't-new', title: 'New ticket' }),
   )
@@ -228,7 +226,6 @@ describe('BoardView', () => {
       renderBoardView('b1')
       await waitFor(() => expect(screen.getByText('Sprint Board')).toBeInTheDocument())
       expect(screen.queryByTestId('assist-button')).toBeNull()
-      expect(boardApi.spawnAssist).not.toHaveBeenCalled()
     })
   })
 

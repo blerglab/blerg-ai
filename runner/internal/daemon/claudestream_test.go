@@ -3,11 +3,17 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -543,7 +549,7 @@ func TestSteeringIgnoresOutputOfAProcessBeingKilled(t *testing.T) {
 	em := &collectEmitter{}
 	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", em, nil)
 	d.steer.legacy = false
-	p := &ccProc{dying: true, killedByDriver: true}
+	p := claudeTestProc(t, d, &ccProc{dying: true, killedByDriver: true})
 	d.steer.proc = p
 	d.onLine(p, []byte(`{"type":"user","message":{"role":"user","content":"late"},"isReplay":true,"uuid":"u1"}`))
 	d.onLine(p, []byte(`{"type":"result","subtype":"success","is_error":false,"result":"late"}`))
@@ -572,7 +578,7 @@ func TestSteeringKeepsHarnessMessagesOffThePersonsName(t *testing.T) {
 	em := &collectEmitter{}
 	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", em, nil)
 	d.steer.legacy = false
-	p := &ccProc{}
+	p := claudeTestProc(t, d, &ccProc{})
 	d.steer.proc = p
 	for i, text := range []string{
 		"<task-notification>\n<task-id>abc</task-id>\n<summary>Agent \"Research\" finished</summary>\n</task-notification>",
@@ -617,7 +623,7 @@ func TestSteeringInterruptAckAfterPreviousResult(t *testing.T) {
 	em := &collectEmitter{}
 	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", em, nil)
 	d.steer.legacy = false
-	p := &ccProc{gen: 1, sawInit: true, inTurn: true, writeCh: make(chan []byte, 8)}
+	p := claudeTestProc(t, d, &ccProc{gen: 1, sawInit: true, inTurn: true, writeCh: make(chan []byte, 8)})
 	d.steer.proc, d.steer.running = p, true
 	t.Cleanup(func() {
 		d.sm.Lock()
@@ -656,7 +662,7 @@ func TestSteeringInterruptAckAfterPreviousResult(t *testing.T) {
 func TestSteeringOutstandingInterruptsAreBounded(t *testing.T) {
 	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", &collectEmitter{}, nil)
 	d.steer.legacy = false
-	p := &ccProc{inTurn: true, writeCh: make(chan []byte, ccMaxPending*2)}
+	p := claudeTestProc(t, d, &ccProc{inTurn: true, writeCh: make(chan []byte, ccMaxPending*2)})
 	d.steer.proc, d.steer.running = p, true
 	t.Cleanup(func() { d.sm.Lock(); defer d.sm.Unlock(); d.stopTimerLocked(&d.steer.killTimer) })
 	for range ccMaxPending * 2 {
@@ -671,7 +677,7 @@ func TestSteeringInterruptAckBeforeInit(t *testing.T) {
 	em := &collectEmitter{}
 	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", em, nil)
 	d.steer.legacy = false
-	p := &ccProc{gen: 1, writeCh: make(chan []byte, 8)}
+	p := claudeTestProc(t, d, &ccProc{gen: 1, writeCh: make(chan []byte, 8)})
 	d.steer.proc, d.steer.running = p, true
 	d.steer.awaiting = []awaitMsg{{uuid: "pending"}}
 	t.Cleanup(func() {
@@ -694,7 +700,7 @@ func TestSteeringFailedInterruptsDoNotDisableFutureStop(t *testing.T) {
 	em := &collectEmitter{}
 	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", em, nil)
 	d.steer.legacy = false
-	p := &ccProc{gen: 1, writeCh: make(chan []byte, 2)}
+	p := claudeTestProc(t, d, &ccProc{gen: 1, writeCh: make(chan []byte, 2)})
 	d.steer.proc = p
 	t.Cleanup(func() {
 		d.sm.Lock()
@@ -974,7 +980,7 @@ func newInterruptFixture(t *testing.T) (*claudeCodeDriver, *ccProc, *collectEmit
 	d.steer.legacy = false
 	// No child process is needed: timeout tests exercise the real cancellation path
 	// with an empty command, whose Process is nil.
-	p := &ccProc{gen: 1, cmd: &exec.Cmd{}, writeCh: make(chan []byte, ccMaxPending*2)}
+	p := claudeTestProc(t, d, &ccProc{gen: 1, cmd: &exec.Cmd{}, writeCh: make(chan []byte, ccMaxPending*2)})
 	d.steer.proc = p
 	t.Cleanup(func() {
 		d.sm.Lock()
@@ -988,4 +994,337 @@ func newInterruptFixture(t *testing.T) (*claudeCodeDriver, *ccProc, *collectEmit
 
 func interruptReply(d *claudeCodeDriver, p *ccProc, id, subtype string) {
 	d.onControlResponse(p, []byte(fmt.Sprintf(`{"type":"control_response","response":{"subtype":%q,"request_id":%q}}`, subtype, id)))
+}
+
+func TestClaudeStopEndsTurnAndLeavesBackgroundRunAndQueuedInput(t *testing.T) {
+	d, em, logPath := newSteeringDriver(t, "FAKE_TOOL_MS=5000", "FAKE_BACKGROUND=1")
+	d.Enqueue("TOOL wait on background work", "chat")
+	waitUntil(t, "background run and foreground wait", func() bool { return countKind(em, "background_task_started") == 1 && em.count("tool_call") == 2 })
+	d.EnqueueInput(agent.Input{Text: "queued next", Source: "chat", ClientID: "next"})
+	d.Interrupt()
+	waitIdle(t, em, 2)
+	if em.count("turn_done:interrupted") != 1 || em.count("user:queued next") != 1 || !contains(em.outline(), "text:ok:queued next") {
+		t.Fatalf("Stop did not deliver the queued input: %v", em.outline())
+	}
+	if countKind(em, "background_task_done") != 0 || d.backgroundRunning() != 1 {
+		t.Fatal("Stop incorrectly ended the background run")
+	}
+	if n := len(starts(logLines(t, logPath))); n != 1 {
+		t.Fatalf("cooperative Stop restarted the engine %d times", n)
+	}
+}
+
+// The CLI can leave a background run alive after result, then accept input
+// without ever sending the next init. Both interrupt ACK orderings must end
+// Blerg's wait and deliver every unconsumed input once after resume.
+func TestClaudeStopWhileBackgroundInputNeverInitializes(t *testing.T) {
+	for _, ack := range []string{"0", "1"} {
+		t.Run("ack="+ack, func(t *testing.T) {
+			shrink(t, &ccInterruptKillAfter, 150*time.Millisecond)
+			shrink(t, &ccInterruptResultAfter, 250*time.Millisecond)
+			gate := filepath.Join(t.TempDir(), "blocked")
+			d, em, logPath := newSteeringDriver(t, "FAKE_BACKGROUND=1", "FAKE_STALL_INIT="+gate, "FAKE_STALL_ACK="+ack)
+			d.Enqueue("BGIDLE run tests", "chat")
+			waitIdle(t, em, 1)
+			if d.backgroundRunning() != 1 {
+				t.Fatal("fixture did not leave a background run")
+			}
+			for _, text := range []string{"BLOCKINIT next", "queued two", "queued three"} {
+				d.Enqueue(text, "chat")
+			}
+			waitUntil(t, "input held before init", func() bool { _, err := os.Stat(gate); return err == nil })
+			d.Interrupt()
+			waitIdle(t, em, 4)
+			for _, text := range []string{"BLOCKINIT next", "queued two", "queued three"} {
+				if em.count("user:"+text) != 1 || !contains(em.outline(), "text:ok:"+text) {
+					t.Fatalf("input lost or repeated: %v", em.outline())
+				}
+			}
+			lines := starts(logLines(t, logPath))
+			if len(lines) != 2 || !strings.Contains(lines[1], "--resume") {
+				t.Fatal("Stop did not resume after ending the background wait")
+			}
+			assertRetainedBackgroundTask(t, d, em, "bg-fixture")
+			if em.count("turn_done:interrupted") != 0 {
+				t.Fatal("Stop invented a completed turn for unconsumed input")
+			}
+		})
+	}
+}
+
+func TestClaudeRepeatedStopCannotExtendTheTurnDeadline(t *testing.T) {
+	for _, mode := range []string{"HANG", "SLOWCUT"} {
+		t.Run(mode, func(t *testing.T) {
+			shrink(t, &ccInterruptKillAfter, 200*time.Millisecond)
+			shrink(t, &ccInterruptResultAfter, 300*time.Millisecond)
+			d, em, _ := newSteeringDriver(t, "FAKE_CUT_MS=3000")
+			d.Enqueue(mode+" wait", "chat")
+			waitUntil(t, "the tool wait", func() bool { return em.count("tool_call") == 1 })
+			d.Interrupt()
+			deadline := time.Now().Add(2 * ccInterruptResultAfter)
+			for em.count("turn_done:interrupted") == 0 && time.Now().Before(deadline) {
+				time.Sleep(20 * time.Millisecond)
+				d.Interrupt()
+			}
+			if em.count("turn_done:interrupted") != 1 {
+				t.Fatal("repeated Stop extended the cancellation deadline")
+			}
+		})
+	}
+}
+
+func TestClaudeStopResumesBackgroundQueuedInputAcrossResultAckOrder(t *testing.T) {
+	for _, lateAck := range []string{"0", "1"} {
+		t.Run("late-ack="+lateAck, func(t *testing.T) {
+			shrink(t, &ccInterruptKillAfter, 150*time.Millisecond)
+			shrink(t, &ccInterruptResultAfter, 250*time.Millisecond)
+			shrink(t, &ccSettleAfter, 100*time.Millisecond)
+			gate := filepath.Join(t.TempDir(), "blocked")
+			d, em, logPath := newSteeringDriver(t, "FAKE_BACKGROUND=1", "FAKE_TOOL_MS=5000", "FAKE_STALL_INIT="+gate, "FAKE_STALL_ACK=1", "FAKE_ACK_AFTER_RESULT="+lateAck)
+			d.Enqueue("TOOL wait", "chat")
+			waitUntil(t, "the background wait", func() bool { return countKind(em, "background_task_started") == 1 && em.count("tool_call") == 2 })
+			for _, text := range []string{"BLOCKINIT next", "queued two", "queued three"} {
+				d.Enqueue(text, "chat")
+			}
+			d.Interrupt()
+			waitIdle(t, em, 4)
+			for _, text := range []string{"BLOCKINIT next", "queued two", "queued three"} {
+				if em.count("user:"+text) != 1 || !contains(em.outline(), "text:ok:"+text) {
+					t.Fatalf("input lost or repeated: %v", em.outline())
+				}
+			}
+			if em.count("turn_done:interrupted") != 1 {
+				t.Fatal("Stop must end only the original active turn")
+			}
+			lines := starts(logLines(t, logPath))
+			if len(lines) != 2 || !strings.Contains(lines[1], "--resume") {
+				t.Fatal("queued background input was not resumed after Stop")
+			}
+		})
+	}
+}
+
+func TestClaudeStopRefusalKeepsTurnAndCanRetry(t *testing.T) {
+	shrink(t, &ccInterruptKillAfter, 60*time.Millisecond)
+	d, em, _ := newSteeringDriver(t, "FAKE_ECHO_STEER=1")
+	var refuse atomic.Bool
+	refuse.Store(true)
+	d.startCommand = func(cmd *exec.Cmd) error {
+		cmd.Cancel = func() error {
+			if refuse.Load() {
+				return errors.New("fixture stop refusal")
+			}
+			return cmd.Process.Kill()
+		}
+		return cmd.Start()
+	}
+	defer refuse.Store(false)
+	d.Enqueue("HANG wait", "chat")
+	waitUntil(t, "hung tool", func() bool { return em.count("tool_call") == 1 })
+	d.Interrupt()
+	d.Enqueue("next", "chat")
+	waitUntil(t, "stop refusal", func() bool { return em.count("error:") > 0 })
+	if em.count("turn_done:interrupted") != 0 || em.count("user:next") != 0 {
+		t.Fatalf("refused Stop reported success: %v", em.outline())
+	}
+	d.Enqueue("after refusal", "chat")
+	time.Sleep(150 * time.Millisecond)
+	if em.count("user:") != 1 {
+		t.Fatal("input reached the engine while Stop was refused", em.outline())
+	}
+	refuse.Store(false)
+	d.Interrupt()
+	waitIdle(t, em, 3)
+	if em.count("user:next") != 1 {
+		t.Fatal(em.outline())
+	}
+}
+
+func TestClaudeNaturalBackgroundEndDoesNotSettleHeldInput(t *testing.T) {
+	shrink(t, &ccSettleAfter, 40*time.Millisecond)
+	shrink(t, &ccInterruptKillAfter, 60*time.Millisecond)
+	shrink(t, &ccInterruptResultAfter, 80*time.Millisecond)
+	gate := filepath.Join(t.TempDir(), "gate")
+	d, em, _ := newSteeringDriver(t, "FAKE_BACKGROUND=1", "FAKE_STALL_INIT="+gate)
+	d.Enqueue("BGIDLE run", "chat")
+	waitIdle(t, em, 1)
+	d.Enqueue("BLOCKINIT next", "chat")
+	waitUntil(t, "input held", func() bool { _, err := os.Stat(gate); return err == nil })
+	d.sm.Lock()
+	gen, turn := d.steer.proc.gen, d.steer.turnSeq
+	d.sm.Unlock()
+	d.settleFired(gen, turn)
+	if em.count("user:BLOCKINIT next") != 0 {
+		t.Fatal("unconsumed input marked delivered")
+	}
+	d.Interrupt()
+	waitIdle(t, em, 2)
+	if em.count("user:BLOCKINIT next") != 1 {
+		t.Fatal(em.outline())
+	}
+}
+
+func TestClaudeStopDeadlineStartsAfterTurnEndCallbacks(t *testing.T) {
+	shrink(t, &ccInterruptKillAfter, 60*time.Millisecond)
+	shrink(t, &ccInterruptResultAfter, 100*time.Millisecond)
+	d, em, logPath := newSteeringDriver(t, "FAKE_BACKGROUND=1", "FAKE_TOOL_MS=5000")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	d.emitter = limitResumeEmitter(func(e agent.Event) {
+		if p, ok := e.Payload.(agent.TurnDonePayload); ok && p.StopReason == "interrupted" {
+			once.Do(func() { close(entered); <-release })
+		}
+		em.Emit(e)
+	})
+	d.Enqueue("TOOL wait", "chat")
+	waitUntil(t, "tool", func() bool { return em.count("tool_call") == 2 })
+	d.Enqueue("next", "chat")
+	d.Interrupt()
+	<-entered
+	time.Sleep(200 * time.Millisecond)
+	close(release)
+	waitIdle(t, em, 2)
+	if len(starts(logLines(t, logPath))) != 1 || countKind(em, "background_task_done") != 0 || em.count("user:next") != 1 {
+		t.Fatalf("healthy engine killed or input repeated: %v", em.outline())
+	}
+}
+
+func TestClaudeStopFallbackKillsBackgroundChild(t *testing.T) {
+	shrink(t, &ccInterruptKillAfter, 60*time.Millisecond)
+	pidFile := filepath.Join(t.TempDir(), "child")
+	d, em, _ := newSteeringDriver(t, "FAKE_CHILD_PID="+pidFile)
+	d.Enqueue("HANG wait", "chat")
+	waitUntil(t, "hung tool", func() bool { return em.count("tool_call") == 1 })
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Kill(pid, syscall.SIGKILL) }()
+	d.Interrupt()
+	waitIdle(t, em, 1)
+	waitUntil(t, "background child stopped", func() bool {
+		raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		return os.IsNotExist(err) || strings.Contains(string(raw), ") Z ")
+	})
+}
+
+func TestClaudeStartRefusalDoesNotDeliverInput(t *testing.T) {
+	d, em, _ := newSteeringDriver(t)
+	d.startCommand = func(*exec.Cmd) error { return errors.New("fixture containment refusal") }
+	d.EnqueueInput(agent.Input{Text: "next", ClientID: "not-delivered"})
+	waitUntil(t, "start refusal", func() bool { return countKind(em, "error") == 1 })
+	if countKind(em, "user_message") != 0 {
+		t.Fatal("start refusal recorded an undelivered input as user_message")
+	}
+	p := em.snapshot()[0].Payload.(agent.ErrorPayload)
+	if p.ClientID != "not-delivered" || !strings.Contains(p.Message, "could not start") || !strings.Contains(p.Message, "fixture containment refusal") {
+		t.Fatalf("unclear refusal: %+v", p)
+	}
+}
+
+func TestClaudeBackgroundQueueDeadlineStartsAfterInputGate(t *testing.T) {
+	shrink(t, &ccInterruptKillAfter, 60*time.Millisecond)
+	gate := make(chan struct{})
+	entered := make(chan struct{})
+	d, em, logPath := newSteeringDriver(t, "FAKE_BACKGROUND=1", "FAKE_TOOL_MS=5000")
+	d.Enqueue("TOOL wait", "chat")
+	waitUntil(t, "foreground wait", func() bool { return em.count("tool_call") == 2 })
+	d.sm.Lock()
+	d.steer.mcpInputGate = func(ctx context.Context) {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		select {
+		case <-gate:
+		case <-ctx.Done():
+		}
+	}
+	d.sm.Unlock()
+	d.Enqueue("next", "chat")
+	<-entered
+	d.Interrupt()
+	waitUntil(t, "stopped turn", func() bool { return em.count("turn_done:interrupted") == 1 })
+	time.Sleep(150 * time.Millisecond)
+	close(gate)
+	waitIdle(t, em, 2)
+	if len(starts(logLines(t, logPath))) != 1 || countKind(em, "background_task_done") != 0 || em.count("user:next") != 1 {
+		t.Fatal("gate delay killed a healthy engine", em.outline())
+	}
+}
+
+func TestClaudeEchoBehindBlockedEmitIsNeverRedelivered(t *testing.T) {
+	shrink(t, &ccInterruptKillAfter, 60*time.Millisecond)
+	d, em, logPath := newSteeringDriver(t, "FAKE_ECHO_STEER=1")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	d.emitter = limitResumeEmitter(func(e agent.Event) {
+		if e.Kind == "tool_call" {
+			once.Do(func() { close(entered); <-release })
+		}
+		em.Emit(e)
+	})
+	d.Enqueue("HANG first", "chat")
+	<-entered
+	d.Enqueue("next", "chat")
+	waitUntil(t, "engine consumed held input", func() bool { return contains(logLines(t, logPath), "consumed:next") })
+	d.Interrupt()
+	waitUntil(t, "stop fallback", func() bool { d.sm.Lock(); defer d.sm.Unlock(); return d.steer.proc.killedByDriver })
+	close(release)
+	waitUntil(t, "echo delivered", func() bool { return em.count("user:next") == 1 })
+	time.Sleep(200 * time.Millisecond)
+	consumed := 0
+	for _, line := range logLines(t, logPath) {
+		if line == "consumed:next" {
+			consumed++
+		}
+	}
+	if consumed != 1 || em.count("user:next") != 1 {
+		t.Fatalf("echoed input consumed %d times: %v", consumed, em.outline())
+	}
+}
+
+func TestClaudeStopDeadlineWaitsForPendingEventCapacity(t *testing.T) {
+	shrink(t, &ccInterruptKillAfter, 60*time.Millisecond)
+	shrink(t, &ccInterruptResultAfter, 100*time.Millisecond)
+	d, em, logPath := newSteeringDriver(t, "FAKE_BACKGROUND=1", "FAKE_TOOL_MS=60000")
+	sender := &agentTestSender{}
+	wire := newWSEmitter(sender, "pending-stop", func(e agent.Event) {
+		if !strings.HasPrefix(e.ClientEventID, "buffer-") {
+			em.Emit(e)
+		}
+	})
+	defer wire.close()
+	d.emitter = wire
+	d.Enqueue("TOOL wait", "chat")
+	waitUntil(t, "foreground and background work", func() bool { return em.count("tool_call") == 2 && countKind(em, "background_task_started") == 1 })
+	d.Enqueue("next", "chat")
+	wire.mu.Lock()
+	pending := len(wire.pending)
+	wire.mu.Unlock()
+	for i := pending; i < pendingCap-1; i++ {
+		wire.Emit(agent.Event{ClientEventID: fmt.Sprintf("buffer-%d", i), Ts: time.Now(), Kind: "assistant_text", Payload: agent.AssistantTextPayload{Text: "buffered", Done: true}})
+	}
+	d.Interrupt()
+	waitUntil(t, "turn-end emission blocked by capacity", func() bool { return em.count("turn_done:interrupted") == 1 })
+	time.Sleep(200 * time.Millisecond)
+	d.sm.Lock()
+	killed := d.steer.proc.killedByDriver
+	d.sm.Unlock()
+	if killed || len(starts(logLines(t, logPath))) != 1 {
+		t.Fatal("event backpressure killed a healthy engine")
+	}
+	events := sender.agentEvents()
+	for _, e := range events[:128] {
+		wire.ack(e.ClientEventID)
+	}
+	waitIdle(t, em, 2)
+	if em.count("user:next") != 1 || countKind(em, "background_task_done") != 0 {
+		t.Fatal("blocked delivery lost input or background work", em.outline())
+	}
 }

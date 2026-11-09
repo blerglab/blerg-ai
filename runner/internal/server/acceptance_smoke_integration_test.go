@@ -181,6 +181,7 @@ func TestAcceptanceClusterSmoke(t *testing.T) {
 	mux.HandleFunc("POST /api/sessions", f.api.HandlePostSessions)
 	mux.HandleFunc("DELETE /api/sessions/{id}", f.api.HandleDeleteSession)
 	mux.HandleFunc("POST /api/runner/sessions/{id}/message", f.api.HandleRunnerMessage)
+	mux.HandleFunc("GET /api/runner/sessions/{id}/events", f.api.HandleRunnerEvents)
 	apiServer := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	apiListener, err := net.Listen("tcp", ":8080")
 	if err != nil {
@@ -318,7 +319,11 @@ func TestAcceptanceClusterSmoke(t *testing.T) {
 	}
 	request("DELETE", "/api/shells/"+shell.Handle, nil, 204)
 	advanceStart(ctx, f.hub, f.pool, sid, true, stage("shell_open", "Owner shell", protocol.StageStateDone, "Stage completed"))
-	request("POST", "/api/runner/sessions/"+sid+"/message", map[string]string{"text": "commit smoke marker in every member", "client_id": newUUID()}, 202)
+	clientID := newUUID()
+	request("POST", "/api/runner/sessions/"+sid+"/message", map[string]string{"text": "commit smoke marker in every member", "client_id": clientID}, 202)
+	p6EnabledWait(t, 90*time.Second, "HTTP assistant reply and successful turn", func() bool {
+		return smokeReply(request("GET", "/api/runner/sessions/"+sid+"/events?limit=400", nil, 200), clientID, "Smoke fixture turn complete.")
+	})
 	p6EnabledWait(t, 3*time.Minute, "scripted commits and sync push receipts", func() bool {
 		current, e := db.GetSessionWorkspace(ctx, f.pool, sid)
 		if e != nil || current == nil || len(current.Results) != len(sources) {

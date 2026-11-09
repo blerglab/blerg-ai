@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -69,6 +70,8 @@ func NormalizePinPolicy(s string) string {
 // Credential is what core hands the gateway for one connection: where to call and the
 // header carrying the secret. HeaderName and Value are empty for a connection with no auth.
 type Credential struct {
+	session *SessionDispatchRequest // control-plane proof; never serialized
+
 	URL        string
 	HeaderName string
 	Value      string
@@ -91,6 +94,13 @@ type CoreClient interface {
 // HTTPCoreClient implements CoreClient against core's
 // POST /internal/mcp/connections/token (spec 4.5), guarded by the internal key.
 type HTTPCoreClient struct {
+	directTransportOnce sync.Once
+	directTransport     http.RoundTripper
+
+	ClusterDeployment bool // operator configuration, never inferred from a hostname
+
+	scopedWait func(context.Context, time.Duration) error // deterministic refresh-contention scheduler in tests
+
 	BaseURL     string
 	InternalKey string
 	HTTP        *http.Client // nil: a client with a 10 second timeout
@@ -173,4 +183,23 @@ func (c *HTTPCoreClient) Token(ctx context.Context, proof Proof, connectionID st
 func isCoreNotFound(resp *http.Response) bool {
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 	return strings.TrimSpace(string(raw)) == "not found"
+}
+
+// proxyFreeTransport keeps pooled direct connections and never mutates caller configuration.
+// A custom nonstandard transport is a trusted injection seam; production uses *http.Transport.
+func (c *HTTPCoreClient) proxyFreeTransport() http.RoundTripper {
+	c.directTransportOnce.Do(func() {
+		base := http.DefaultTransport
+		if c.HTTP != nil && c.HTTP.Transport != nil {
+			base = c.HTTP.Transport
+		}
+		if standard, ok := base.(*http.Transport); ok {
+			clone := standard.Clone()
+			clone.Proxy = nil
+			c.directTransport = clone
+		} else {
+			c.directTransport = base
+		}
+	})
+	return c.directTransport
 }

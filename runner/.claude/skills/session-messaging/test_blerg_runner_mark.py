@@ -68,6 +68,37 @@ class TestMark(unittest.TestCase):
             f.write("\n".join(lines) + "\n")
         return path
 
+    def test_review_import_preserves_structured_fields(self):
+        server = make_topic_server(reply={"recorded": 1})
+        mark = dict(kind="review", text="Approved", at="2026-10-01T12:00:00Z", by="hermes", card=7, board_id="board-a", verdict="approved", findings=[], target="abcdef1", round=3)
+        result = self._run(["--import", self._file([json.dumps(mark)])], server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(server.recorded[0]["body"]["round"], 3)
+        self.assertEqual(server.recorded[0]["body"]["findings"], [])
+
+    def test_failure_posts_and_imports_structured_fields(self):
+        server = make_topic_server(reply={"recorded": 1})
+        result = self._run(["failure", "Gate failed", "--card", "368", "--type", "gate", "--severity", "high", "--suite", "board tests", "--rerun-passed"], server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = server.recorded[0]["body"]
+        self.assertEqual(body["type"], "gate")
+        self.assertEqual(body["severity"], "high")
+        self.assertTrue(body["rerun_passed"])
+        body.update(at="2026-10-01T12:00:00Z", board_id="board-a")
+        server = make_topic_server(reply={"recorded": 1})
+        result = self._run(["--import", self._file([json.dumps(body)])], server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(server.recorded[0]["body"]["rerun_passed"])
+
+    def test_review_posts_structured_fields(self):
+        server = make_topic_server(reply={"recorded": 1})
+        result = self._run(["review", "Two findings", "--by", "codex", "--card", "368", "--verdict", "changes", "--findings", "high,low", "--target", "abcdef1", "--round", "2"], server)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = server.recorded[0]["body"]
+        self.assertEqual(body["findings"], ["high", "low"])
+        self.assertEqual(body["verdict"], "changes")
+        self.assertEqual(body["round"], 2)
+
     def test_a_decision_posts_its_fields_and_says_whose(self):
         server = make_topic_server(reply={"marks": [{"kind": "decision", "by": "person", "text": "Ship Friday"}], "recorded": 1})
         result = self._run(["decision", "Ship Friday", "--by", "person", "--commit", "abc1234,def5678", "--card", "115",
@@ -112,7 +143,7 @@ class TestMark(unittest.TestCase):
         for args, words in [
             ([], "give the kind"),
             (["decision"], "give the text"),
-            (["attention", "x"], "decision, milestone or finding"),
+            (["attention", "x"], "decision, milestone, finding, review or failure"),
             (["finding", "  "], "give the text"),
             (["finding", "x", "--commit", "nope"], "not a commit sha"),
             (["finding", "x", "--card", "0"], "card number"),
@@ -130,6 +161,13 @@ class TestMark(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("blerg-runner mark:", result.stderr)
         self.assertIn("forbidden", result.stderr)
+
+    def test_capacity_refusal_exits_nonzero_and_explains_nothing_was_recorded(self):
+        message = "this session would hold 50001 marks; at most 50000 (nothing was recorded)"
+        server = make_topic_server(status=409, reply={"error": message})
+        result = self._run(["finding", "x"], server)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(message, result.stderr)
 
     def test_an_older_server_records_nothing_and_says_so(self):
         server = make_topic_server(status=200, ctype="text/html", raw=b"<html></html>")
@@ -163,7 +201,7 @@ class TestMark(unittest.TestCase):
             ("not json", "not a JSON object"),
             ("[1]", "not a JSON object"),
             (json.dumps({"kind": "finding", "text": "x"}), "needs its time"),
-            (json.dumps({"at": "2026-01-10T09:00Z", "kind": "nope", "text": "x"}), "decision, milestone or finding"),
+            (json.dumps({"at": "2026-01-10T09:00Z", "kind": "nope", "text": "x"}), "decision, milestone, finding, review or failure"),
             (json.dumps({"at": "2026-01-10T09:00Z", "kind": "finding", "text": "x", "html": "<b>"}), "unknown field 'html'"),
             (json.dumps({"at": "2026-01-10T09:00Z", "kind": "finding", "text": "x", "card": "7"}), "card number"),
         ]:

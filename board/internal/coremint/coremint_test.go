@@ -103,3 +103,32 @@ func TestMintSwitchedOffIsNotMissingKey(t *testing.T) {
 		t.Fatalf("switched off: %q does not name the setting", err)
 	}
 }
+
+func TestIdentitySendsOnlyProofAndDoesNotExposeErrorBodies(t *testing.T) {
+	for _, code := range []int{200, 404, 500} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/internal/tokens/board-automation/identity" || r.Header.Get("Authorization") != "Bearer test-key" {
+				t.Error("missing key or wrong route")
+			}
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if len(body) != 1 || body["access_token"] != "test-proof" {
+				t.Error("wrong proof body")
+			}
+			w.WriteHeader(code)
+			if code == 200 {
+				_, _ = w.Write([]byte(`{"username":"example-user"}`))
+			} else {
+				_, _ = w.Write([]byte("secret-detail"))
+			}
+		}))
+		name, err := New(srv.URL, "test-key", nil).Identity(context.Background(), "test-proof")
+		srv.Close()
+		if code == 200 && (err != nil || name != "example-user") {
+			t.Fatalf("identity: %q %v", name, err)
+		}
+		if code != 200 && (err == nil || strings.Contains(err.Error(), "secret-detail")) {
+			t.Fatalf("unsafe error: %v", err)
+		}
+	}
+}

@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { page } from 'vitest/browser'
@@ -16,7 +17,7 @@ function Reader() {
 }
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 for (const type of ['desktop_ownership_changed', 'desktop_inventory_invalidated'] as const) {
-  it.each([390, 3840])(`remounts real capability reader safely on ${type} at %ipx`, async width => {
+  it.each(browserWidths([390, 3840]))(`remounts real capability reader safely on ${type} at %ipx`, async width => {
     await page.viewport(width, 900)
     useTranscriptStore.setState({ sessions: {} })
     useSessionStore.setState({ daemons: [makeDaemon({ id: 'desktop-a' })], sessions: [makeSession({ id: 'cached', daemon_id: 'desktop-a' })] })

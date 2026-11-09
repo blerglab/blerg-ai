@@ -1,3 +1,4 @@
+import { CodeActions } from './ContentActions'
 // CodeViewer: a block of code or pasted text in hand, shown large: its language, line numbers,
 // Copy. Unlike ArtifactViewer it needs no file, session or transport, so it works wherever a
 // block can be drawn (the board's proxied chat included). It reuses the viewer's frame and CSS.
@@ -29,6 +30,7 @@ export default function CodeViewer({ text, lang, title, onClose }: {
   useEffect(() => dialogRef.current?.focus(), [])
 
   return createPortal(
+    // button-guard-ignore: useBackdropClose supplies pointer handlers only; this overlay is not a button
     <div className="artifact-overlay artifact-overlay-viewer" data-testid="code-viewer-overlay" {...backdrop}>
       <div
         ref={dialogRef}
@@ -58,6 +60,7 @@ export default function CodeViewer({ text, lang, title, onClose }: {
               {copied ? 'Copied' : 'Copy'}
             </button>
           )}
+          <CodeActions text={text} lang={lang} content={() => dialogRef.current?.querySelector('.artifact-body') ?? null} />
           <WrapToggle kind={kind} available={lines <= WRAP_MAX_LINES} text />
           <button type="button" className="artifact-close" aria-label="Close" onClick={onClose}>✕</button>
         </header>

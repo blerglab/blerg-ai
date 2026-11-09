@@ -1,6 +1,7 @@
 // The transport contract and the two adapters that ship with the package. (ArtifactInfo and
 // UploadedFile are the model's; the package root exports them from there.)
 export type {
+  AnswerRequest,
   CommitDetails,
   CommitDiff,
   FileLimits,

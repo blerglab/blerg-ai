@@ -221,8 +221,11 @@ Invoke-BlergStartup $requestedAction $Distro $LinuxUser
         root = DESKTOP.parent.parent
         workflow = (root / ".github/workflows/ci.yml").read_text().split("\n  scripts:\n", 1)[1]
         self.assertRegex(workflow, r"(?m)^\s+(?:- )?run: bash install/desktop/wsl_startup_test\.sh$")
-        target = (root / "Makefile").read_text().split("\ncheck-scripts:\n", 1)[1].split("\nbuild:", 1)[0]
-        self.assertIn("\tbash ./install/desktop/wsl_startup_test.sh\n", target)
+        # Follow prerequisites too: check-scripts delegates to the CLI and
+        # other-script targets so the integrated gate does not run CLI twice.
+        target = subprocess.run(["make", "--no-print-directory", "-n", "check-scripts"],
+                                cwd=root, check=True, capture_output=True, text=True).stdout
+        self.assertIn("bash ./install/desktop/wsl_startup_test.sh\n", target)
         # A developer/CI without pwsh must fail instead of claiming a partial pass.
         # Supply every other suite dependency so an unrelated missing tool cannot
         # masquerade as a deliberate refusal to skip PowerShell behavior.

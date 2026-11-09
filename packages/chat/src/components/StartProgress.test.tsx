@@ -38,7 +38,7 @@ describe('StartProgress', () => {
     expect(items[2]).toHaveAttribute('aria-current', 'step')
     expect(screen.getByText('Pulling the image and creating the container')).toBeInTheDocument()
     expect(screen.queryByText('org/r')).not.toBeInTheDocument()
-    expect(screen.getByText('Starting session')).toBeInTheDocument()
+    expect(screen.getByText('Starting workspace')).toBeInTheDocument()
   })
 
   it('ticks the elapsed time every second', () => {
@@ -57,7 +57,7 @@ describe('StartProgress', () => {
       ],
     })
     render(<StartProgress attempt={a} session={{ ...session, status: 'error' }} />)
-    expect(screen.getByText("Couldn't start the session")).toBeInTheDocument()
+    expect(screen.getByText("Couldn't start the workspace")).toBeInTheDocument()
     expect(screen.getByText(/ImagePullBackOff/)).toBeInTheDocument()
     expect(screen.getByTestId('start-hint')).toHaveTextContent('Check BLERG_RUNNER_AGENT_IMAGE')
     // The session has ended: the clock stops.
@@ -76,10 +76,10 @@ describe('StartProgress', () => {
       ],
     })
     render(<StartProgress attempt={a} session={session} onStop={vi.fn()} />)
-    expect(screen.queryByText("Couldn't start the session")).not.toBeInTheDocument()
+    expect(screen.queryByText("Couldn't start the workspace")).not.toBeInTheDocument()
     expect(screen.getAllByText(/still retrying/).length).toBeGreaterThan(0)
     expect(screen.getByText(/not enough memory/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Stop session' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Stop workspace' })).toBeInTheDocument()
     act(() => { vi.advanceTimersByTime(3000) })
     expect(screen.getByTestId('start-elapsed')).toHaveTextContent('0:03')
     act(() => { vi.advanceTimersByTime(STILL_STARTING_MS) })
@@ -106,24 +106,24 @@ describe('StartProgress', () => {
     expect(screen.getByTestId('start-slow')).toHaveTextContent('Pulling image')
     fireEvent.click(screen.getByRole('button', { name: 'View details' }))
     expect(screen.getByText('org/r')).toBeInTheDocument() // pending stage detail now visible
-    expect(screen.getByText(/session: s1/)).toBeInTheDocument()
+    expect(screen.getByText(/Workspace ID: s1/)).toBeInTheDocument()
   })
 
   // Card #142: a confirmation anchored to the button, never a second press on the same button.
   it('asks in an alertdialog, focused on Cancel, and ends the session on End session', async () => {
     const onStop = vi.fn(() => Promise.resolve())
     render(<StartProgress attempt={attempt()} session={session} onStop={onStop} />)
-    const stop = screen.getByRole('button', { name: 'Stop session' })
+    const stop = screen.getByRole('button', { name: 'Stop workspace' })
     fireEvent.click(stop)
     expect(onStop).not.toHaveBeenCalled()
     // The button itself never arms: same words, no second-press state.
-    expect(stop).toHaveTextContent('Stop session')
+    expect(stop).toHaveTextContent('Stop workspace')
     expect(stop.className).not.toContain('armed')
-    const dialog = screen.getByRole('alertdialog', { name: 'End this session?' })
+    const dialog = screen.getByRole('alertdialog', { name: 'End this workspace?' })
     expect(dialog).toHaveAttribute('aria-describedby')
     expect(document.getElementById(dialog.getAttribute('aria-describedby')!)).toHaveTextContent('its pod is removed')
     expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus()
-    await act(async () => { fireEvent.click(within(dialog).getByRole('button', { name: 'End session' })) })
+    await act(async () => { fireEvent.click(within(dialog).getByRole('button', { name: 'End workspace' })) })
     expect(onStop).toHaveBeenCalledTimes(1)
     expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(screen.queryByText(/Stop failed/)).toBeNull()
@@ -132,7 +132,7 @@ describe('StartProgress', () => {
   it('cancels on Esc, on Cancel and on a press outside, the focus back on the button', () => {
     const onStop = vi.fn(() => Promise.resolve())
     render(<StartProgress attempt={attempt()} session={session} onStop={onStop} />)
-    const stop = screen.getByRole('button', { name: 'Stop session' })
+    const stop = screen.getByRole('button', { name: 'Stop workspace' })
     fireEvent.click(stop)
     fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
     expect(screen.queryByRole('alertdialog')).toBeNull()
@@ -154,12 +154,12 @@ describe('StartProgress', () => {
   it('offers End session, not Delete, on a failed start, worded by the session runtime', () => {
     const failed = attempt({ runtime: undefined, failed: true, stages: [{ id: 'image', label: 'Pulling image', state: 'failed', detail: 'ImagePullBackOff' }] })
     const { rerender } = render(<StartProgress attempt={failed} session={{ id: 's1', status: 'error', runtime: 'docker' }} onStop={vi.fn(() => Promise.resolve())} />)
-    expect(screen.queryByRole('button', { name: 'Delete session' })).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: 'End session' }))
-    expect(screen.getByRole('alertdialog', { name: 'End this session?' })).toHaveAccessibleDescription('The agent stops and its sandbox container is removed. The conversation, files and commits are kept.')
+    expect(screen.queryByRole('button', { name: 'Delete workspace' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'End workspace' }))
+    expect(screen.getByRole('alertdialog', { name: 'End this workspace?' })).toHaveAccessibleDescription('The agent stops and its sandbox container is removed. The conversation, files and commits are kept.')
     fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
     rerender(<StartProgress attempt={failed} session={{ id: 's1', status: 'error' }} onStop={vi.fn(() => Promise.resolve())} />)
-    fireEvent.click(screen.getByRole('button', { name: 'End session' }))
+    fireEvent.click(screen.getByRole('button', { name: 'End workspace' }))
     expect(screen.getByRole('alertdialog')).toHaveAccessibleDescription('The agent stops. Work not yet saved may be lost; the conversation is kept.')
   })
 
@@ -167,9 +167,9 @@ describe('StartProgress', () => {
     let fail: (e: Error) => void = () => {}
     const onStop = vi.fn(() => new Promise<void>((_, reject) => { fail = reject }))
     render(<StartProgress attempt={attempt()} session={session} onStop={onStop} />)
-    const stop = screen.getByRole('button', { name: 'Stop session' })
+    const stop = screen.getByRole('button', { name: 'Stop workspace' })
     fireEvent.click(stop)
-    await act(async () => { fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'End session' })) })
+    await act(async () => { fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'End workspace' })) })
     expect(stop).toBeDisabled()
     expect(stop).toHaveAttribute('aria-busy', 'true')
     fireEvent.click(stop)
@@ -183,17 +183,17 @@ describe('StartProgress', () => {
   it('says when the stop failed', async () => {
     const onStop = vi.fn(() => Promise.reject(new Error('HTTP 500')))
     render(<StartProgress attempt={attempt()} session={session} onStop={onStop} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Stop session' }))
-    await act(async () => { fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'End session' })) })
+    fireEvent.click(screen.getByRole('button', { name: 'Stop workspace' }))
+    await act(async () => { fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'End workspace' })) })
     expect(screen.getByText('Stop failed: HTTP 500')).toBeInTheDocument()
   })
 
   it('offers no stop while there is no session yet, nor without a way to stop', () => {
     const { unmount } = render(<StartProgress attempt={attempt()} onStop={vi.fn()} />)
-    expect(screen.queryByRole('button', { name: 'Stop session' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Stop workspace' })).not.toBeInTheDocument()
     unmount()
     render(<StartProgress attempt={attempt()} session={session} />)
-    expect(screen.queryByRole('button', { name: 'Stop session' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Stop workspace' })).not.toBeInTheDocument()
   })
 
   it('renders a plugins stage from data, with its label and states', () => {
@@ -230,6 +230,6 @@ describe('StartProgress', () => {
     expect(item).toHaveAttribute('data-state', 'warning')
     expect(item).toHaveTextContent("plugins skipped: your plugin list couldn't be loaded")
     expect(item).toHaveTextContent('done with a warning')
-    expect(screen.getByText('Starting session')).toBeInTheDocument() // not a failed start
+    expect(screen.getByText('Starting workspace')).toBeInTheDocument() // not a failed start
   })
 })

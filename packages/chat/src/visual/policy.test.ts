@@ -271,6 +271,18 @@ describe('Vega-Lite charts the viewer can draw', () => {
       bar,
     ]}],
     ['datasets referenced by name', {datasets: {tickets: values}, data: {name: 'tickets'}, ...bar}],
+    // BLG-452 case 2b: boxplot is a deliberate policy change. Cover the bare mark, config.boxplot
+    // (free once boxplot is in MARKS, since checkConfig's MARKS.has(key) branch already
+    // generalizes), and the sub-mark override objects (box/median/outliers/rule/ticks).
+    ['a bare boxplot mark', {data: {values}, mark: 'boxplot', encoding: {x: {field: 'team', type: 'nominal'}, y: {field: 'open', type: 'quantitative'}}}],
+    ['a themed config.boxplot', {
+      data: {values}, mark: 'boxplot', encoding: {x: {field: 'team', type: 'nominal'}, y: {field: 'open', type: 'quantitative'}},
+      config: {boxplot: {size: 14, extent: 1.5}},
+    }],
+    ['a boxplot with sub-mark overrides', {
+      data: {values}, encoding: {x: {field: 'team', type: 'nominal'}, y: {field: 'open', type: 'quantitative'}},
+      mark: {type: 'boxplot', extent: 'min-max', box: {color: '#2f6fdb'}, median: {color: '#172130'}, outliers: {color: '#d9622b', size: 20}, rule: true, ticks: true},
+    }],
     ['checked dates in a datum, a scale domain, axis values, a sort and a timed test', {
       data: {values: [{when: '2026-01-05', n: 1}, {when: '2026-03-02', n: 4}]},
       layer: [
@@ -303,4 +315,12 @@ describe('Vega-Lite charts the viewer can draw', () => {
     expect(concat).not.toHaveProperty('width')
     expect(concat).toMatchObject({autosize: {type: 'pad'}, padding: 16, background: 'transparent'})
   })
+})
+
+it('allows bounded literal spacing in concatenated dashboards', () => {
+  const spec = {config: {concat: {spacing: 24}}, hconcat: [{data: {values: [{x: 1}]}, mark: 'point', encoding: {x: {field: 'x', type: 'quantitative'}}}]}
+  expect(parseVegaLite(JSON.stringify(spec)).config).toEqual(spec.config)
+  for (const spacing of [-1, 129, '24', {expr: '1'}]) {
+    expect(() => parseVegaLite(JSON.stringify({...spec, config: {concat: {spacing}}}))).toThrow()
+  }
 })

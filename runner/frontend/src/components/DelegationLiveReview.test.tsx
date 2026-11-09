@@ -16,7 +16,7 @@ describe('live delegation approval independent of conversation history', () => {
   expect(await screen.findByText('Review fixture')).toBeInTheDocument()
   expect(screen.getByText('Public fixture prompt')).toBeInTheDocument()
   expect(screen.getByRole('button',{name:'Allow once'})).toBeInTheDocument()
-  expect(screen.queryByRole('button',{name:'Allow for this session'})).not.toBeInTheDocument()
+  expect(screen.queryByRole('button',{name:'Allow for this workspace'})).not.toBeInTheDocument()
   expect(fetchMock).toHaveBeenCalledTimes(1)
   fireEvent.click(screen.getByRole('button',{name:'Deny'}))
   await waitFor(()=>expect(fetchMock).toHaveBeenCalledTimes(2))

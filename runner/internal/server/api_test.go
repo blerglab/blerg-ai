@@ -501,6 +501,9 @@ func TestGetSessionsReportsRuntimeAndKind(t *testing.T) {
 func TestSessionStartedBroadcastCarriesRuntimeAndKind(t *testing.T) {
 	api, hub, dc, pool := spawnTokenFixture(t)
 	sessionID := postSpawnSessionID(t, api, dc.ID, "docker", "agent")
+	if _, err := pool.Exec(t.Context(), `UPDATE sessions SET color='blue' WHERE id=$1`, sessionID); err != nil {
+		t.Fatal(err)
+	}
 
 	bc := &BrowserConn{ID: "b1", send: make(chan []byte, 8)}
 	hub.RegisterBrowser(bc)
@@ -515,6 +518,9 @@ func TestSessionStartedBroadcastCarriesRuntimeAndKind(t *testing.T) {
 		case raw := <-bc.send:
 			if err := json.Unmarshal(raw, &started); err != nil || started.Type != "session_started" {
 				continue
+			}
+			if started.Session.Color != "blue" {
+				t.Fatalf("session_started lost saved color: %q", started.Session.Color)
 			}
 			if started.Session.Runtime != "docker" || started.Session.Kind != "agent" {
 				t.Fatalf("session_started = runtime %q kind %q, want docker/agent",

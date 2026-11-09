@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, expect, it } from 'vitest'
 import { page, userEvent } from 'vitest/browser'
@@ -13,7 +14,7 @@ const cases = [
   ['chart.vl.json', 'json', '{"mark":"bar","data":{"values":[]}}'],
 ] as const
 afterEach(() => document.documentElement.style.removeProperty('--chat-code-keyword'))
-for (const width of [390, 3840]) for (const kind of ['workspace', 'published']) {
+for (const width of browserWidths([390, 3840])) for (const kind of ['workspace', 'published']) {
   for (const [name, view, text] of cases) it(`toggles ${kind} ${name} source and rendering at ${width}`, async () => {
     await page.viewport(width, 900)
     const files: TransportFiles = {
@@ -23,7 +24,7 @@ for (const width of [390, 3840]) for (const kind of ['workspace', 'published']) 
     const props = { sessionId: 'source', files, onClose: () => {} }
     render(kind === 'workspace' ? <WorkspaceFileViewer {...props} path={name} /> : <ArtifactViewer {...props} artifact={{ id: name, name, view, content_type: 'text/plain', size: text.length }} />)
     const dialog = screen.getByRole('dialog', { name })
-    await userEvent.click(await within(dialog).findByRole('button', { name: 'Raw' }))
+    await page.elementLocator(dialog).getByRole('button', { name: 'Raw', exact: true }).click()
     await waitFor(() => expect(dialog.querySelector('[class*="hljs-"]')).not.toBeNull(), { timeout: 10000 })
     expect(dialog.querySelector('code')?.textContent).toBe(text)
     if (name.endsWith('.mmd')) {
@@ -39,7 +40,7 @@ for (const width of [390, 3840]) for (const kind of ['workspace', 'published']) 
   })
 }
 
-for (const width of [390, 3840]) for (const kind of ['workspace', 'published']) {
+for (const width of browserWidths([390, 3840])) for (const kind of ['workspace', 'published']) {
   it(`keeps a large ${kind} Raw diff plain and complete at ${width}`, async () => {
     await page.viewport(width, 900)
     const name = 'large.patch'
@@ -51,7 +52,7 @@ for (const width of [390, 3840]) for (const kind of ['workspace', 'published']) 
     const props = { sessionId: 'large-source', files, onClose: () => {} }
     render(kind === 'workspace' ? <WorkspaceFileViewer {...props} path={name} /> : <ArtifactViewer {...props} artifact={{ id: name, name, view: 'diff', content_type: 'text/plain', size: text.length }} />)
     const dialog = screen.getByRole('dialog', { name })
-    await userEvent.click(await within(dialog).findByRole('button', { name: 'Raw' }))
+    await page.elementLocator(dialog).getByRole('button', { name: 'Raw', exact: true }).click()
     const code = dialog.querySelector('[data-testid="workspace-code"] code')!
     // Structural budget: deterministic, unlike a wall-clock assertion on a shared test host.
     expect(code.querySelectorAll('span').length).toBe(0)

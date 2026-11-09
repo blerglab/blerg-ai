@@ -8,6 +8,7 @@ import { useBoardStore, useBoard } from '../hooks/useBoardStore'
 import { useSessionStore } from '../hooks/useSessionStore'
 import type { SessionInfo } from '../types'
 import * as boardApi from '../lib/boardApi'
+import { mark } from '../lib/releasePerfMarks'
 import type { Column, Ticket } from '../types'
 import BoardFilterBar, { type FilterState } from './BoardFilterBar'
 import { applyFilter } from './applyFilter'
@@ -203,7 +204,7 @@ function ColumnView({
                 zIndex: 30,
                 minWidth: 140,
                 padding: 4,
-                boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
+                boxShadow: '0 4px 16px var(--shadow-5)',
               }}
               onClick={() => setMenuOpen(false)}
             >
@@ -413,6 +414,8 @@ export default function BoardView() {
   const isMobile = useIsMobile()
 
   const { board, columns, tickets } = useBoard(boardId)
+  // BLG-453: a no-op everywhere except the release-perf harness.
+  useEffect(() => { if (tickets.length) mark('board-rendered') }, [tickets])
   const sessions = useSessionStore((s) => s.sessions)
   // Use individual selectors for stable action references (functions never change)
   const subscribeBoard = useBoardStore((s) => s.subscribeBoard)

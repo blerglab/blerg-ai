@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"time"
@@ -14,7 +15,8 @@ var errDiscardPending = errors.New("parent discard is pending")
 // Discard accepts either the own-parent delegate credential or the signed-in owner.
 // Other users, agent credentials and unrelated children have no authority here.
 func (a *API) handleChildDiscard(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
+	defer cancel()
 	var parent *db.SessionRow
 	var child string
 	var actor runnerPrincipal
@@ -96,6 +98,14 @@ func (a *API) handleChildDiscard(w http.ResponseWriter, r *http.Request) {
 			if current.DiscardRequestedAt != nil {
 				return errDiscardPending
 			}
+			questions, err := db.ListOpenAsks(ctx, a.dbPool, child)
+			if err != nil {
+				return err
+			}
+			questionIDs := make([]string, 0, len(questions))
+			for _, question := range questions {
+				questionIDs = append(questionIDs, question.ID)
+			}
 			var localPending bool
 			if err := a.dbPool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM local_workspace_authority WHERE session_id=$1 AND NOT aborted AND final_digest IS NULL)`, child).Scan(&localPending); err != nil {
 				return err
@@ -109,6 +119,9 @@ func (a *API) handleChildDiscard(w http.ResponseWriter, r *http.Request) {
 					return err
 				}
 			}
+			if err := a.withdrawDiscardQuestions(ctx, child, questionIDs); err != nil {
+				return err
+			}
 			at, err := db.ArchiveChildSession(ctx, a.dbPool, child, parent.ID, account)
 			if err != nil {
 				return err
@@ -121,7 +134,7 @@ func (a *API) handleChildDiscard(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err != nil {
-			writeError(w, 503, "could not stop and archive the child; retry discard")
+			writeError(w, 503, "Could not finish workspace cleanup. All work is retained; retry discard when the worker daemon is available.")
 			return
 		}
 	}

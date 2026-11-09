@@ -28,4 +28,23 @@ type WorkspaceFileResult struct {
 	Error       string `json:"error,omitempty"`
 	// RequestedPath binds an absolute reference to the normalized relative Path.
 	RequestedPath string `json:"requested_path,omitempty"`
+	// Chunks is how many workspace_file_chunk frames came before this one and
+	// carry ContentB64 instead of it. Zero means the content is inline.
+	Chunks int `json:"chunks,omitempty"`
+}
+
+// WorkspaceFileChunkBytes bounds the base64 text in one chunk, so a file reply
+// holds the daemon's socket for one small frame at a time.
+const WorkspaceFileChunkBytes = 128 << 10
+
+// WorkspaceFileChunk carries part of a reply's ContentB64, in order. It is sent
+// only to a server that set DaemonWelcome.WorkspaceFileChunks; the reply's
+// workspace_file_result comes last, with Chunks set and no content.
+type WorkspaceFileChunk struct {
+	WorkspaceRuntimeRef
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	SessionID string `json:"session_id"`
+	Seq       int    `json:"seq"`
+	Data      string `json:"data"`
 }

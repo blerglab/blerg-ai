@@ -3,9 +3,10 @@ package daemon
 // Commit lookup: a commit chip's hovercard and its on-demand diff, read from the session's own
 // workspace by the daemon that runs it. The server asks (read_commit) only for a session the
 // person may read; the daemon answers from the workspace the live launch is bound to, never from a
-// path in the request. The one value from the request that reaches git is the sha, accepted only as
+// filesystem path in the request. The sha is accepted only as
 // 7 to 64 lowercase hex digits and resolved with rev-parse --verify --end-of-options <sha>^{commit};
-// every later git call names the full sha rev-parse printed.
+// later git calls name the full sha rev-parse printed. A file read adds only a
+// validated literal repository-relative blob path to that resolved revision.
 //
 // A sandboxed session's clone is written by the session's container, so host Git never runs in
 // it (sandboxclone.go). Its commits come back to the person's repository on wip/<id> at each
@@ -20,7 +21,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -30,6 +30,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/workbranch"
 )
 
 // commitReadTimeout bounds one read (every git call of it together).
@@ -128,7 +129,7 @@ func underSandboxCloneRoot(path string) bool {
 
 // readWorkspaceCommit reads sha's summary (patch false) or its diff (patch true). It never logs
 // content, paths or git's diagnostics.
-func readWorkspaceCommit(parent context.Context, sessionID string, binding workspaceFileBinding, sha string, patch bool) protocol.CommitResult {
+func readWorkspaceCommit(parent context.Context, sessionID string, binding workspaceFileBinding, sha string, patch bool, fileRequest ...protocol.ReadCommit) protocol.CommitResult {
 	fail := func(code string) protocol.CommitResult { return protocol.CommitResult{ErrorCode: code} }
 	if !protocol.ValidCommitLookupSHA(sha) {
 		return fail("invalid")
@@ -151,9 +152,37 @@ func readWorkspaceCommit(parent context.Context, sessionID string, binding works
 		return fail(code)
 	}
 	var res protocol.CommitResult
-	if patch {
+	switch {
+	case len(fileRequest) > 0 && fileRequest[0].FilePath != "":
+		req := fileRequest[0]
+		if !protocol.ValidCommitFilePath(req.FilePath) {
+			return fail("invalid")
+		}
+		revision := full
+		if req.Original {
+			// Only a resolved commit's first parent can be selected; no caller revision syntax.
+			parentOut := &cappedOutput{max: 100, strict: true}
+			if err := dir.git(ctx, parentOut, "rev-parse", "--verify", "--end-of-options", full+"^1"); err != nil {
+				return fail("not_found")
+			}
+			revision = strings.TrimSpace(parentOut.buf.String())
+			if !protocol.ValidSessionOriginCommit(revision) {
+				return fail("unavailable")
+			}
+		}
+		out := &cappedOutput{max: protocol.CommitPatchMaxBytes, strict: true}
+		// cat-file reads only blobs, so symlinks are returned as text and gitlinks refused.
+		err := dir.git(ctx, out, "cat-file", "blob", revision+":"+req.FilePath)
+		if out.over {
+			return fail("too_large")
+		}
+		if err != nil {
+			return fail("not_found")
+		}
+		res = protocol.CommitResult{OK: true, File: true, PatchB64: base64.StdEncoding.EncodeToString(out.buf.Bytes())}
+	case patch:
 		res = readCommitPatch(ctx, dir, full)
-	} else {
+	default:
 		res = readCommitSummary(ctx, dir, full)
 	}
 	// An engine end or replacement during the read must not answer for the session as it is now.
@@ -169,7 +198,7 @@ func readWorkspaceCommit(parent context.Context, sessionID string, binding works
 func readChildMerged(parent context.Context, sessionID string, binding workspaceFileBinding, child string) protocol.CommitResult {
 	return readChildMergedBase(parent, sessionID, binding, child, "", "")
 }
-func readChildMergedBase(parent context.Context, sessionID string, binding workspaceFileBinding, child, base, target string) protocol.CommitResult {
+func readChildMergedBase(parent context.Context, sessionID string, binding workspaceFileBinding, child, base, target string, recorded ...string) protocol.CommitResult {
 	fail := func(code string) protocol.CommitResult { return protocol.CommitResult{ErrorCode: code} }
 	if !protocol.ValidChildBranchID(child) {
 		return fail("invalid")
@@ -187,7 +216,14 @@ func readChildMergedBase(parent context.Context, sessionID string, binding works
 	if !dir.vet(ctx, trusted) {
 		return fail("unavailable")
 	}
-	tip, code := resolveRef(ctx, dir, "refs/heads/wip/"+child)
+	branch := sandboxBranch(child)
+	if len(recorded) > 0 && recorded[0] != "" {
+		branch = recorded[0]
+	}
+	if !workbranch.Valid(branch) {
+		return fail("invalid")
+	}
+	tip, code := resolveRef(ctx, dir, "refs/heads/"+branch)
 	if code != "" {
 		return fail(code)
 	}
@@ -209,17 +245,17 @@ func readChildMergedBase(parent context.Context, sessionID string, binding works
 		return fail("unavailable")
 	}
 	for _, line := range strings.Split(worktrees.buf.String(), "\n") {
-		if line == "branch refs/heads/wip/"+child {
+		if line == "branch refs/heads/"+branch {
 			return res
 		}
 	}
-	if _, code := resolveRef(ctx, dir, "refs/heads/wip/"+child+".incoming"); code != "not_found" {
+	if _, code := resolveRef(ctx, dir, "refs/heads/"+branch+".incoming"); code != "not_found" {
 		return res
 	}
 	if target == "" {
 		target = "HEAD"
 		if trusted {
-			target = "refs/heads/wip/" + sessionID
+			target = "refs/heads/" + sandboxBranch(sessionID)
 		}
 	}
 	head, code := resolveRef(ctx, dir, target)
@@ -302,6 +338,7 @@ func readCommitSummary(ctx context.Context, dir *pinnedGitDir, full string) prot
 		parts = append(parts, "")
 	}
 	if parts[0] != full {
+		logDaemonFailure("commit summary identity mismatch", nil)
 		return protocol.CommitResult{ErrorCode: "unavailable"}
 	}
 	info := &protocol.CommitInfo{SHA: full, Short: full[:7], Parents: []string{}, Files: []protocol.CommitFile{}}
@@ -441,9 +478,12 @@ func acquireCommitRead(sessionID string) (func(), bool) {
 func queueCommitRead(ctx context.Context, sender Sender, req protocol.ReadCommit, binding workspaceFileBinding) {
 	queueCommitReadUsing(ctx, sender, req, func(ctx context.Context) protocol.CommitResult {
 		if req.MergedChild != "" {
-			return readChildMerged(ctx, req.SessionID, binding, req.MergedChild)
+			return readChildMergedBase(ctx, req.SessionID, binding, req.MergedChild, "", "", req.ChildBranch)
 		}
-		return readWorkspaceCommit(ctx, req.SessionID, binding, req.SHA, req.Patch)
+		if req.Branch != "" {
+			return readWorkspaceBranch(ctx, req.SessionID, binding, req.Branch, req.Base, req.Patch)
+		}
+		return readWorkspaceCommit(ctx, req.SessionID, binding, req.SHA, req.Patch, req)
 	})
 }
 
@@ -457,17 +497,19 @@ func queueCommitReadUsing(ctx context.Context, sender Sender, req protocol.ReadC
 			res.Commit.WorkspaceGitRef = req.WorkspaceGitRef
 		}
 		res.Type, res.RequestID, res.SessionID = "commit_result", req.RequestID, req.SessionID
-		outcome := res.ErrorCode
-		if res.OK {
-			outcome = "ok"
+		if !res.OK {
+			logDaemonFailure("commit read result: "+safeFailureCode(res.ErrorCode), nil)
 		}
-		log.Printf("commit_read session=%q patch=%t outcome=%s", req.SessionID, req.Patch, outcome)
 		if bounded, ok := sender.(interface {
 			SendCommitResult(protocol.CommitResult) error
 		}); ok {
-			_ = bounded.SendCommitResult(res)
+			if err := bounded.SendCommitResult(res); err != nil {
+				logDaemonFailure("commit reply send failed", err)
+			}
 		} else {
-			_ = sender.Send(res)
+			if err := sender.Send(res); err != nil {
+				logDaemonFailure("commit reply send failed", err)
+			}
 		}
 	}
 	release, ok := acquireCommitRead(req.SessionID)

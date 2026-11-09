@@ -3,6 +3,8 @@
 // base, the session's publish of the same name carries status and reply per request
 // (docs/design/feedback-tools.md, "One model for both").
 
+import { parseWorkspaceAnchor, type WorkspaceAnchor } from './workspaceAnchor'
+
 /** A position in one immutable published patch; indices and lines are 1-based. */
 export interface DiffAnchor {
   file: string
@@ -23,6 +25,7 @@ export interface Anchor {
   sourceArtifactId?: string
   unavailable?: boolean
   diff?: DiffAnchor
+  workspace?: WorkspaceAnchor
   quote?: string
   heading?: string
   /** PDF only, 1-based. */
@@ -200,6 +203,13 @@ function parseAnchor(v: unknown): Anchor | null {
     const diff = parseDiffAnchor(v.diff)
     if (v.kind !== 'text' || !diff || (typeof v.quote === 'string' && v.quote.length > 32768)) return null
     a.diff = diff
+  }
+  if (v.workspace !== undefined) {
+    const workspace = parseWorkspaceAnchor(v.workspace)
+    if (!workspace || v.diff !== undefined || v.sourceArtifactId !== undefined || v.kind !== 'text' ||
+      typeof v.quote !== 'string' || v.quote.length > 32768 ||
+      (workspace.start === 0 ? v.quote !== '' : v.quote.split('\n').length !== workspace.end - workspace.start + 1)) return null
+    a.workspace = workspace
   }
   if (v.quote !== undefined) a.quote = v.quote
   if (v.heading !== undefined) a.heading = v.heading

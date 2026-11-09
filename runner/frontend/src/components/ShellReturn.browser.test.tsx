@@ -27,6 +27,7 @@ class LiveSocket {
   static OPEN = 1
   static instances: LiveSocket[] = []
   static openDelay = 0
+  static holdOpen = false
   readyState = 1; bufferedAmount = 0; binaryType = ''
   closed = false
   sent: string[] = []
@@ -34,7 +35,7 @@ class LiveSocket {
   onopen?: () => void
   onmessage?: (event: { data: ArrayBuffer | string }) => void
   onclose?: () => void
-  constructor(url: URL | string) { this.url = String(url); LiveSocket.instances.push(this); if (LiveSocket.openDelay) setTimeout(() => this.onopen?.(), LiveSocket.openDelay); else queueMicrotask(() => this.onopen?.()) }
+  constructor(url: URL | string) { this.url = String(url); LiveSocket.instances.push(this); if (LiveSocket.holdOpen) return; if (LiveSocket.openDelay) setTimeout(() => this.onopen?.(), LiveSocket.openDelay); else queueMicrotask(() => this.onopen?.()) }
   send(frame: string) { this.sent.push(frame) }
   close() { this.closed = true }
 }
@@ -53,6 +54,7 @@ const server = { held: null as ReturnType<typeof pending<void>> | null, capabili
 beforeEach(() => {
   LiveSocket.instances = []
   LiveSocket.openDelay = 0
+  LiveSocket.holdOpen = false
   vi.stubGlobal('WebSocket', LiveSocket)
   server.held = null; server.capability = null; server.refuse = false; server.inventories = []
   auth.renewal = async () => true
@@ -95,6 +97,34 @@ async function visit(session: string, text: string) {
 }
 
 for (const [width, height] of [[390, 844], [3840, 2160]] as const) {
+  it(`a slow workspace return overlays its spinner without moving the terminal at ${width}px`, async () => {
+    await page.viewport(width, height)
+    ;(await visit('a', 'project $ echo kept-a\r\nkept-a\r\n')).unmount()
+    ;(await visit('b', 'project $ echo kept-b\r\n')).unmount()
+    LiveSocket.holdOpen = true
+    const sockets = LiveSocket.instances.length
+    render(view('a'))
+    await waitFor(() => expect(LiveSocket.instances.length).toBe(sockets + 1))
+    const renderer = document.querySelector('.shell-terminal-renderer')!
+    const geometry = () => {
+      const { x, y, width, height } = renderer.getBoundingClientRect()
+      return { x, y, width, height }
+    }
+    const before = geometry()
+    expect(screen.queryByRole('status', { name: 'Reconnecting shell' })).toBeNull()
+    await waitFor(() => expect(screen.getByRole('status', { name: 'Reconnecting shell' })).toBeTruthy(), { timeout: 2000 })
+    expect(geometry()).toEqual(before)
+    expect(screenText()).toContain('echo kept-a')
+    const shots = import.meta.env.VITE_SHELL_TAB_SHOTS_DIR
+    if (shots) await page.screenshot({ path: `${shots}/reconnect-${width}.png` })
+    const fresh = LiveSocket.instances.at(-1)!
+    await act(() => fresh.onopen?.())
+    await replay(fresh, 'project $ echo kept-a\r\nkept-a\r\n')
+    await waitFor(() => expect(screen.queryByRole('status', { name: 'Reconnecting shell' })).toBeNull())
+    expect(geometry()).toEqual(before)
+    expect(document.querySelector('.shell-connection')).toBeNull()
+  })
+
   it(`A→B→A shows A's terminal picture at once, then the server replay replaces it once, at ${width}px`, async () => {
     await page.viewport(width, height)
     ;(await visit('a', 'project $ echo kept-a\r\nkept-a\r\n')).unmount()
@@ -107,7 +137,7 @@ for (const [width, height] of [[390, 844], [3840, 2160]] as const) {
     await new Promise(r => requestAnimationFrame(() => r(null)))
     expect(screenText()).toContain('echo kept-a')
     expect(screen.queryByText('Connecting…')).toBeNull()
-    expect(screen.queryByText(/^(Disconnected\.|Controlled in another tab\.)$/)).toBeNull()
+    expect(screen.queryByText(/^(Disconnected\.|This shell was opened in another tab with the same browser sign-in\.)$/)).toBeNull()
     // The socket was closed when A was left: the inventory (the only read) reconnects it, asking the
     // server's replay, whose reset and history replace the picture once.
     expect(server.inventories.length).toBe(inventoriesBefore + 1)
@@ -123,7 +153,7 @@ for (const [width, height] of [[390, 844], [3840, 2160]] as const) {
     await waitFor(() => expect(screenText()).toContain('echo after'))
     // The picture was replaced, not added to: nothing shows twice.
     expect(screenText().split('echo kept-a').length - 1).toBe(1)
-    expect(screen.queryByText(/^(Disconnected\.|Controlled in another tab\.)$/)).toBeNull()
+    expect(screen.queryByText(/^(Disconnected\.|This shell was opened in another tab with the same browser sign-in\.)$/)).toBeNull()
   })
 }
 
@@ -150,12 +180,12 @@ it('A→B→A never shows the connection line while the kept terminal reconnects
   expect(flashes).toEqual([])
 })
 
-it('a slow reconnect behind a kept picture still says Connecting…', async () => {
+it('a slow reconnect behind a kept picture shows a quiet spinner', async () => {
   ;(await visit('a', 'project $ echo kept-a\r\n')).unmount()
   ;(await visit('b', 'project $ echo kept-b\r\n')).unmount()
   LiveSocket.openDelay = 2500
   render(view('a'))
-  await waitFor(() => expect(screen.getByText('Connecting…')).toBeTruthy(), { timeout: 2000 })
+  await waitFor(() => expect(screen.getByRole('status', { name: 'Reconnecting shell' })).toBeTruthy(), { timeout: 2000 })
   expect(screenText()).toContain('echo kept-a')
 })
 

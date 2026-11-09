@@ -43,6 +43,7 @@ func newIngestFixture(t *testing.T) *ingestFixture {
 	hub.Subscribe(sessionID, "b1", sub)
 	dc := &DaemonConn{ID: daemonID, inputReceipts: true, send: make(chan []byte, 64)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	hub.Register(dc)
 	return &ingestFixture{ctx: ctx, hub: hub, pool: pool, sessionID: sessionID, dc: dc, sub: sub}
 }
@@ -359,5 +360,61 @@ func TestIngestHoldExpiresOnInactivity(t *testing.T) {
 	g.forget("s")
 	if len(g.m) != 0 {
 		t.Fatal("forget kept the hold")
+	}
+}
+
+func TestBackgroundWaitStopIsReplayedWithoutEndingTasksOrQueuedInput(t *testing.T) {
+	f := newIngestFixture(t)
+	f.ingest("task", "background_task_started", `{"task_id":"task-1","call_id":"call-1","kind":"bash"}`, "")
+	_, _, err := db.AcceptSessionInput(f.ctx, f.pool, f.sessionID, "queued-input", `{"type":"agent_user_message","text":"queued"}`, cid("accepted"), `{"client_id":"queued-input","text":"queued","source":"chat"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		f.ingest("stop", "background_wait_stopped", `{}`, "")
+	}
+	row, err := db.GetSession(f.ctx, f.pool, f.sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Status != "idle" || row.BackgroundTasks != 1 {
+		t.Fatalf("Stop changed task or worker lifecycle: %+v", row)
+	}
+	pending, err := db.PendingSessionInputs(f.ctx, f.pool, f.sessionID)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("Stop lost queued input: %v %v", pending, err)
+	}
+	n := 0
+	for _, ev := range f.stored(t) {
+		if ev.Kind == "turn_done" {
+			t.Fatal("idle background Stop invented a completed turn")
+		}
+		if ev.Kind == "background_wait_stopped" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("Stop acknowledgment persisted %d times", n)
+	}
+}
+
+func TestTurnDonePreparesInsightTiming(t *testing.T) {
+	f := newIngestFixture(t)
+	if _, err := f.pool.Exec(f.ctx, `UPDATE sessions SET spawning_account_id='turn-timing-owner' WHERE id=$1`, f.sessionID); err != nil {
+		t.Fatal(err)
+	}
+	f.ingest("timing-running", "status_changed", `{"status":"running"}`, time.Now().Add(-time.Minute).Format(time.RFC3339Nano))
+	f.ingest("timing-done", "turn_done", `{"stop_reason":"end_turn"}`, time.Now().Format(time.RFC3339Nano))
+	f.ingest("timing-done-again", "turn_done", `{"stop_reason":"end_turn"}`, time.Now().Format(time.RFC3339Nano))
+	var inline int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM session_insight_timings WHERE session_id=$1`, f.sessionID).Scan(&inline); err != nil || inline != 0 {
+		t.Fatalf("turn completion computed history inline: %d %v", inline, err)
+	}
+	if n := db.ProcessQueuedInsightTimings(f.ctx, f.pool); n != 1 {
+		t.Fatalf("queued turn completions = %d", n)
+	}
+	var seq int
+	if err := f.pool.QueryRow(f.ctx, `SELECT (fingerprint_inputs->>'event_seq')::integer FROM session_insight_timings WHERE session_id=$1`, f.sessionID).Scan(&seq); err != nil || seq != 3 {
+		t.Fatalf("turn timing not prepared: seq=%d err=%v", seq, err)
 	}
 }

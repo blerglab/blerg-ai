@@ -44,7 +44,7 @@ describe('CronRuns', () => {
   it('links a started run to its session', async () => {
     serve([run({ id: 'r1', session_id: 'sess-9' })])
     renderRuns()
-    const link = await screen.findByRole('link', { name: /open session/i })
+    const link = await screen.findByRole('link', { name: /open run/i })
     expect(link).toHaveAttribute('href', '/sessions/sess-9')
   })
 
@@ -62,7 +62,7 @@ describe('CronRuns', () => {
     expect(screen.getByTestId('cron-run-b')).toHaveTextContent('no daemon connected')
     expect(screen.getByTestId('cron-run-c')).toHaveTextContent('failed')
     expect(screen.getByTestId('cron-run-c')).toHaveTextContent(/manual/i)
-    expect(screen.queryByRole('link', { name: /open session/i })).toBeNull()
+    expect(screen.queryByRole('link', { name: /open run/i })).toBeNull()
   })
 
   it('shows the server error', async () => {

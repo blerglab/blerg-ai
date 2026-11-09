@@ -5,7 +5,10 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/blerglab/blerg-ai/runner/internal/activity"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -15,6 +18,9 @@ import (
 
 // SessionRow is the result of listing sessions (includes joined daemon name).
 type SessionRow struct {
+	WorkerKind         string
+	WorkBranch         string
+	WorkBranchCustom   bool
 	WorkspaceKind      string
 	ID                 string
 	DaemonID           string
@@ -33,6 +39,8 @@ type SessionRow struct {
 	DiscardRequestedAt *time.Time // durable admission fence, not process termination
 	Unread             bool
 	Starred            bool
+	Emoji              string
+	Color              string
 	// SpawningAccountID is the verified account id (identity.Principal.Sub)
 	// of the human who requested this session, set by HandlePostSessions
 	// right after InsertSession. Nil for sessions created before this column
@@ -45,6 +53,7 @@ type SessionRow struct {
 	// SkipPermissions whether engine permission prompts were bypassed. Both are
 	// posture facts the UI states plainly (R5) — nil/false for rows older than
 	// migration 012. ErrorReason is the daemon's spawn/run failure text (Task 6).
+	RuntimeTargetID *string
 	Runtime         *string
 	SkipPermissions bool
 	ErrorReason     *string
@@ -90,12 +99,14 @@ type SessionRow struct {
 	// or "unattended" (nobody does). "" on a row started before the column existed; the server
 	// reads that through one rule (server.effectiveInteraction), never directly.
 	Interaction string
+	Verbosity   string
 	// BackgroundTasks is how many background tasks the session's agent has running (migration
 	// 040), from its background_task_* events; 0 once it is revived or ends.
 	BackgroundTasks int
 	// PausedReason is why the session is paused waiting for a message (migration 043): "restart"
 	// (a daemon restart cut it off and did not continue it), "" when it is not.
 	PausedReason string
+	PausedDetail string
 	// ParentSessionID is the session that started this one (migration 008 column, written for
 	// children only since 059); nil for every other session. BoardID (migration 009) is the board
 	// of a board-started or assist session. DelegationVia is how a child was allowed ("rule:<id>" |
@@ -110,6 +121,8 @@ type SessionRow struct {
 // IdempotencyRow is one runner_idempotency record: which session a
 // (scope, key) pair produced, and a hash of the request that produced it.
 type IdempotencyRow struct {
+	RefusalCode string
+	RefusalVia  string
 	Scope       string
 	Key         string
 	RequestHash string
@@ -129,6 +142,8 @@ type SessionEventRow struct {
 
 // PushSubscriptionRow is one row from push_subscriptions.
 type PushSubscriptionRow struct {
+	AccountID string
+	SessionID string
 	ID        string
 	Endpoint  string
 	P256dh    string
@@ -211,19 +226,19 @@ func GetDaemonByName(ctx context.Context, conn *pgxpool.Pool, name string) (*Dae
 
 // GetSession looks up a single session by ID. Returns nil, nil if not found.
 // DaemonName is not populated (no join is performed).
-func GetSession(ctx context.Context, conn *pgxpool.Pool, sessionID string) (*SessionRow, error) {
+func GetSession(ctx context.Context, conn DBTX, sessionID string) (*SessionRow, error) {
 	row := conn.QueryRow(ctx, `
-		SELECT id, daemon_id, status, project_path, repo, title, model, NULLIF(engine, ''), effort, started_at, ended_at, unread, starred, spawning_account_id, runtime, skip_permissions, error_reason, token_id, callback_url, callback_secret, git_url, auto_stop, kind, end_reason, ended_by_kind, ended_by_account, private, cron_id::text, started_by_kind, started_by_name, interaction, background_tasks, COALESCE(paused_reason, ''), parent_session_id::text, board_id::text, COALESCE(delegation_via, ''), keep_running
-		       , delegation_ended_at, archived_at, restrict_tools, discard_requested_at, workspace_kind FROM sessions
+		SELECT id, daemon_id, status, project_path, repo, title, model, NULLIF(engine, ''), effort, started_at, ended_at, unread, starred, color, emoji, spawning_account_id, runtime, runtime_target_id, skip_permissions, error_reason, token_id, callback_url, callback_secret, git_url, auto_stop, kind, end_reason, ended_by_kind, ended_by_account, private, cron_id::text, started_by_kind, started_by_name, interaction, verbosity, background_tasks, COALESCE(paused_reason, ''), COALESCE(paused_detail, ''), parent_session_id::text, board_id::text, COALESCE(delegation_via, ''), keep_running
+		       , delegation_ended_at, archived_at, restrict_tools, discard_requested_at, workspace_kind, work_branch, work_branch_custom, worker_kind FROM sessions
 		 WHERE id = $1
 	`, sessionID)
 	var r SessionRow
 	err := row.Scan(&r.ID, &r.DaemonID, &r.Status, &r.ProjectPath, &r.Repo,
-		&r.Title, &r.Model, &r.Engine, &r.Effort, &r.StartedAt, &r.EndedAt, &r.Unread, &r.Starred, &r.SpawningAccountID,
-		&r.Runtime, &r.SkipPermissions, &r.ErrorReason,
+		&r.Title, &r.Model, &r.Engine, &r.Effort, &r.StartedAt, &r.EndedAt, &r.Unread, &r.Starred, &r.Color, &r.Emoji, &r.SpawningAccountID,
+		&r.Runtime, &r.RuntimeTargetID, &r.SkipPermissions, &r.ErrorReason,
 		&r.TokenID, &r.CallbackURL, &r.CallbackSecret, &r.GitURL, &r.AutoStop, &r.Kind,
-		&r.EndReason, &r.EndedByKind, &r.EndedByAccount, &r.Private, &r.CronID, &r.StartedByKind, &r.StartedByName, &r.Interaction, &r.BackgroundTasks, &r.PausedReason,
-		&r.ParentSessionID, &r.BoardID, &r.DelegationVia, &r.KeepRunning, &r.DelegationEndedAt, &r.ArchivedAt, &r.RestrictTools, &r.DiscardRequestedAt, &r.WorkspaceKind)
+		&r.EndReason, &r.EndedByKind, &r.EndedByAccount, &r.Private, &r.CronID, &r.StartedByKind, &r.StartedByName, &r.Interaction, &r.Verbosity, &r.BackgroundTasks, &r.PausedReason, &r.PausedDetail,
+		&r.ParentSessionID, &r.BoardID, &r.DelegationVia, &r.KeepRunning, &r.DelegationEndedAt, &r.ArchivedAt, &r.RestrictTools, &r.DiscardRequestedAt, &r.WorkspaceKind, &r.WorkBranch, &r.WorkBranchCustom, &r.WorkerKind)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -316,6 +331,8 @@ func InsertSession(ctx context.Context, conn *pgxpool.Pool, id, daemonID, status
 // another account in the window between a plain insert and a follow-up write.
 // The zero value adds nothing (an ordinary session).
 type SessionOrigin struct {
+	WorkerKind      string
+	RuntimeTargetID string
 	// SpawningAccount is the verified account the session is started for. A
 	// private session is private TO this account, so it goes in with the flag.
 	SpawningAccount string
@@ -372,9 +389,9 @@ func insertSessionAs(ctx context.Context, conn sessionWriteExecutor, id, daemonI
 	tag, err := conn.Exec(ctx, `
 		INSERT INTO sessions (id, daemon_id, status, project_path, repo, title, model,
 		                      spawning_account_id, private, cron_id,
-		                      parent_session_id, delegation_via, keep_running)
+		                      parent_session_id, delegation_via, keep_running, worker_kind)
 		SELECT $1::uuid, $2::uuid, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), $8::text, $9::boolean, $10::uuid,
-		       $11::uuid, $12::text, $13::boolean
+		       $11::uuid, $12::text, $13::boolean, $15::text
  WHERE $14::text='' OR EXISTS (SELECT 1 FROM sessions WHERE id=$1 AND `+runtimeWriteGuard("$14")+`)
 		ON CONFLICT (id) DO UPDATE
 		  SET daemon_id         = EXCLUDED.daemon_id,
@@ -412,7 +429,7 @@ func insertSessionAs(ctx context.Context, conn sessionWriteExecutor, id, daemonI
    -- A cluster row moves only to its own pod (the runtime authority above names the session's
    -- token): a daemon without one cannot claim it.
    AND ($14::text <> '' OR COALESCE(sessions.runtime, '') <> 'cluster')
-	`, id, daemonID, status, projectPath, repo, title, model, account, private, cronID, parent, via, o.KeepRunning, runtimeAuthorityToken(ctx))
+	`, id, daemonID, status, projectPath, repo, title, model, account, private, cronID, parent, via, o.KeepRunning, runtimeAuthorityToken(ctx), o.WorkerKind)
 	if err == nil && tag.RowsAffected() == 0 {
 		if runtimeAuthorityToken(ctx) != "" {
 			return ErrTokenInvalid
@@ -465,9 +482,9 @@ func insertClusterSessionAs(ctx context.Context, conn sessionWriteExecutor, id, 
 	_, err := conn.Exec(ctx, `
 		INSERT INTO sessions (id, daemon_id, status, project_path, repo, title, model, runtime,
 		                      spawning_account_id, private, cron_id,
-		                      parent_session_id, delegation_via, keep_running)
+		                      parent_session_id, delegation_via, keep_running, runtime_target_id, worker_kind)
 		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), 'cluster', $8, $9, $10::uuid,
-		        $11::uuid, $12::text, $13::boolean)
+		        $11::uuid, $12::text, $13::boolean, NULLIF($14,''), $15::text)
 		ON CONFLICT (id) DO UPDATE
 		  SET daemon_id         = EXCLUDED.daemon_id,
 		      spawning_account_id = COALESCE(EXCLUDED.spawning_account_id, sessions.spawning_account_id),
@@ -489,7 +506,7 @@ func insertClusterSessionAs(ctx context.Context, conn sessionWriteExecutor, id, 
 		      daemon_lost_at    = NULL,
 		      background_tasks  = 0,
 		      paused_reason     = NULL
-	`, id, daemonID, status, projectPath, repo, title, model, account, private, cronID, parent, via, o.KeepRunning)
+	`, id, daemonID, status, projectPath, repo, title, model, account, private, cronID, parent, via, o.KeepRunning, o.RuntimeTargetID, o.WorkerKind)
 	return err
 }
 
@@ -523,20 +540,6 @@ func GetSessionLaunchProof(ctx context.Context, conn *pgxpool.Pool, id string) (
 // deleted. Deleting a missing row is a no-op.
 func DeleteSession(ctx context.Context, conn *pgxpool.Pool, id string) error {
 	_, err := conn.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, id)
-	return err
-}
-
-// CreateAssistSession pre-creates an assist session row with status "starting",
-// board_id, optional ticket_id, and assist=true. Must be called before
-// MintBoardToken and SetTicketSession so their FKs resolve immediately.
-// ON CONFLICT (id) DO NOTHING makes it idempotent: a daemon resend of
-// session_started for the same ID is a harmless no-op.
-func CreateAssistSession(ctx context.Context, conn *pgxpool.Pool, sessionID, daemonID, boardID string, ticketID *string, repo, title string) error {
-	_, err := conn.Exec(ctx, `
-		INSERT INTO sessions (id, daemon_id, status, project_path, repo, title, board_id, ticket_id, assist, kind)
-		VALUES ($1, $2, 'starting', '', $3, NULLIF($4, ''), $5, $6, true, 'tmux')
-		ON CONFLICT (id) DO NOTHING
-	`, sessionID, daemonID, repo, title, boardID, ticketID)
 	return err
 }
 
@@ -607,16 +610,29 @@ func ClearSessionError(ctx context.Context, conn *pgxpool.Pool, sessionID string
 // ListSessions returns all sessions joined with their daemon's name, ordered
 // by started_at descending.
 func ListSessions(ctx context.Context, conn *pgxpool.Pool) ([]SessionRow, error) {
+	return listSessions(ctx, conn, "", nil, false)
+}
+
+// ListBrowserSessions retains the complete history visible to a human account.
+// Public conversations remain shared; other accounts' private rows stay in SQL.
+// ids optionally restricts a fresh delivery-time projection.
+func ListBrowserSessions(ctx context.Context, conn *pgxpool.Pool, account string, ids []string) ([]SessionRow, error) {
+	return listSessions(ctx, conn, account, ids, true)
+}
+
+func listSessions(ctx context.Context, conn *pgxpool.Pool, account string, ids []string, browser bool) ([]SessionRow, error) {
 	rows, err := conn.Query(ctx, `
 		SELECT s.id, s.daemon_id, d.name, s.status, s.project_path, s.repo,
-		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
-		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
+		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred, s.color, s.emoji,
+		       s.runtime, s.runtime_target_id, s.skip_permissions, s.error_reason, s.kind,
 		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
-		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at, s.workspace_kind
+		       s.started_by_kind, s.started_by_name, s.interaction, s.verbosity, s.background_tasks, COALESCE(s.paused_reason, ''), COALESCE(s.paused_detail, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at, s.workspace_kind, s.work_branch, s.work_branch_custom, s.worker_kind
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
+		 WHERE (NOT $3::boolean OR NOT s.private OR ($1::text <> '' AND s.spawning_account_id = $1))
+           AND ($2::uuid[] IS NULL OR s.id = ANY($2::uuid[]))
 		 ORDER BY s.started_at DESC
-	`)
+	`, account, ids, browser)
 	if err != nil {
 		return nil, err
 	}
@@ -627,10 +643,10 @@ func ListSessions(ctx context.Context, conn *pgxpool.Pool) ([]SessionRow, error)
 func ListSessionsByStatus(ctx context.Context, conn *pgxpool.Pool, status string) ([]SessionRow, error) {
 	rows, err := conn.Query(ctx, `
 		SELECT s.id, s.daemon_id, d.name, s.status, s.project_path, s.repo,
-		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
-		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
+		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred, s.color, s.emoji,
+		       s.runtime, s.runtime_target_id, s.skip_permissions, s.error_reason, s.kind,
 		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
-		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at, s.workspace_kind
+		       s.started_by_kind, s.started_by_name, s.interaction, s.verbosity, s.background_tasks, COALESCE(s.paused_reason, ''), COALESCE(s.paused_detail, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at, s.workspace_kind, s.work_branch, s.work_branch_custom, s.worker_kind
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 WHERE s.status = $1
@@ -868,10 +884,10 @@ func FinishClusterSession(ctx context.Context, conn *pgxpool.Pool, sessionID, st
 func ListSessionsByDaemon(ctx context.Context, conn *pgxpool.Pool, daemonID string) ([]SessionRow, error) {
 	rows, err := conn.Query(ctx, `
 		SELECT s.id, s.daemon_id, d.name, s.status, s.project_path, s.repo,
-		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
-		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
+		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred, s.color, s.emoji,
+		       s.runtime, s.runtime_target_id, s.skip_permissions, s.error_reason, s.kind,
 		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
-		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at, s.workspace_kind
+		       s.started_by_kind, s.started_by_name, s.interaction, s.verbosity, s.background_tasks, COALESCE(s.paused_reason, ''), COALESCE(s.paused_detail, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at, s.workspace_kind, s.work_branch, s.work_branch_custom, s.worker_kind
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 WHERE s.daemon_id = $1
@@ -897,10 +913,10 @@ func ListSessionsByDaemon(ctx context.Context, conn *pgxpool.Pool, daemonID stri
 func ListSessionsByDaemonMode(ctx context.Context, conn *pgxpool.Pool, mode string) ([]SessionRow, error) {
 	rows, err := conn.Query(ctx, `
 		SELECT s.id, s.daemon_id, d.name, s.status, s.project_path, s.repo,
-		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred,
-		       s.runtime, s.skip_permissions, s.error_reason, s.kind,
+		       s.title, s.model, NULLIF(s.engine, ''), s.effort, s.started_at, s.ended_at, s.unread, s.starred, s.color, s.emoji,
+		       s.runtime, s.runtime_target_id, s.skip_permissions, s.error_reason, s.kind,
 		       s.end_reason, s.ended_by_kind, s.ended_by_account, s.spawning_account_id, s.private, s.cron_id::text,
-		       s.started_by_kind, s.started_by_name, s.interaction, s.background_tasks, COALESCE(s.paused_reason, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at, s.workspace_kind
+		       s.started_by_kind, s.started_by_name, s.interaction, s.verbosity, s.background_tasks, COALESCE(s.paused_reason, ''), COALESCE(s.paused_detail, ''), s.parent_session_id::text, s.board_id::text, COALESCE(s.delegation_via, ''), s.keep_running, s.archived_at, s.workspace_kind, s.work_branch, s.work_branch_custom, s.worker_kind
 		  FROM sessions s
 		  JOIN daemons d ON d.id = s.daemon_id
 		 WHERE d.mode = $1
@@ -919,11 +935,11 @@ func scanSessionRows(rows pgx.Rows) ([]SessionRow, error) {
 		var r SessionRow
 		if err := rows.Scan(
 			&r.ID, &r.DaemonID, &r.DaemonName, &r.Status,
-			&r.ProjectPath, &r.Repo, &r.Title, &r.Model, &r.Engine, &r.Effort, &r.StartedAt, &r.EndedAt, &r.Unread, &r.Starred,
-			&r.Runtime, &r.SkipPermissions, &r.ErrorReason, &r.Kind,
+			&r.ProjectPath, &r.Repo, &r.Title, &r.Model, &r.Engine, &r.Effort, &r.StartedAt, &r.EndedAt, &r.Unread, &r.Starred, &r.Color, &r.Emoji,
+			&r.Runtime, &r.RuntimeTargetID, &r.SkipPermissions, &r.ErrorReason, &r.Kind,
 			&r.EndReason, &r.EndedByKind, &r.EndedByAccount, &r.SpawningAccountID, &r.Private, &r.CronID,
-			&r.StartedByKind, &r.StartedByName, &r.Interaction, &r.BackgroundTasks, &r.PausedReason,
-			&r.ParentSessionID, &r.BoardID, &r.DelegationVia, &r.KeepRunning, &r.ArchivedAt, &r.WorkspaceKind,
+			&r.StartedByKind, &r.StartedByName, &r.Interaction, &r.Verbosity, &r.BackgroundTasks, &r.PausedReason, &r.PausedDetail,
+			&r.ParentSessionID, &r.BoardID, &r.DelegationVia, &r.KeepRunning, &r.ArchivedAt, &r.WorkspaceKind, &r.WorkBranch, &r.WorkBranchCustom, &r.WorkerKind,
 		); err != nil {
 			return nil, err
 		}
@@ -1130,29 +1146,45 @@ func fetchSessionEventsPage(ctx context.Context, conn *pgxpool.Pool, sessionID s
 
 // ─── Push subscriptions ───────────────────────────────────────────────────────
 
-// UpsertPushSubscription inserts or updates a push subscription by endpoint.
-func UpsertPushSubscription(ctx context.Context, conn *pgxpool.Pool, endpoint, p256dh, auth string) error {
-	_, err := conn.Exec(ctx, `
-		INSERT INTO push_subscriptions (endpoint, p256dh, auth)
-		VALUES ($1, $2, $3)
+// ErrPushSubscriptionConflict means another account supplied different keys.
+var ErrPushSubscriptionConflict = errors.New("push subscription keys do not match")
+
+// UpsertPushSubscription transfers an endpoint only when both stored keys match.
+// The current owner may rotate its keys without changing account ownership.
+func UpsertPushSubscription(ctx context.Context, conn *pgxpool.Pool, endpoint, p256dh, auth string, account ...string) error {
+	owner, session := "", ""
+	if len(account) > 0 {
+		owner = account[0]
+	}
+	if len(account) > 1 {
+		session = account[1]
+	}
+	result, err := conn.Exec(ctx, `
+		INSERT INTO push_subscriptions (endpoint, p256dh, auth, account_id, session_id)
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (endpoint) DO UPDATE
 		  SET p256dh = EXCLUDED.p256dh,
-		      auth   = EXCLUDED.auth
-	`, endpoint, p256dh, auth)
+		      auth   = EXCLUDED.auth, account_id = EXCLUDED.account_id, session_id = EXCLUDED.session_id
+		WHERE push_subscriptions.account_id = EXCLUDED.account_id
+		   OR (push_subscriptions.p256dh = EXCLUDED.p256dh AND push_subscriptions.auth = EXCLUDED.auth)
+	`, endpoint, p256dh, auth, owner, session)
+	if err == nil && result.RowsAffected() == 0 {
+		return ErrPushSubscriptionConflict
+	}
 	return err
 }
 
 // DeletePushSubscription removes the subscription for endpoint (the browser turned push off).
 // Removing one that is not there is not an error.
-func DeletePushSubscription(ctx context.Context, conn *pgxpool.Pool, endpoint string) error {
-	_, err := conn.Exec(ctx, `DELETE FROM push_subscriptions WHERE endpoint = $1`, endpoint)
+func DeletePushSubscription(ctx context.Context, conn *pgxpool.Pool, endpoint, account string) error {
+	_, err := conn.Exec(ctx, `DELETE FROM push_subscriptions WHERE endpoint = $1 AND account_id = $2 AND account_id <> ''`, endpoint, account)
 	return err
 }
 
 // ListPushSubscriptions returns all push subscriptions.
 func ListPushSubscriptions(ctx context.Context, conn *pgxpool.Pool) ([]PushSubscriptionRow, error) {
 	rows, err := conn.Query(ctx, `
-		SELECT id, endpoint, p256dh, auth, created_at
+		SELECT id, endpoint, p256dh, auth, created_at, account_id, session_id
 		  FROM push_subscriptions
 		 ORDER BY created_at ASC
 	`)
@@ -1164,7 +1196,7 @@ func ListPushSubscriptions(ctx context.Context, conn *pgxpool.Pool) ([]PushSubsc
 	var result []PushSubscriptionRow
 	for rows.Next() {
 		var r PushSubscriptionRow
-		if err := rows.Scan(&r.ID, &r.Endpoint, &r.P256dh, &r.Auth, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Endpoint, &r.P256dh, &r.Auth, &r.CreatedAt, &r.AccountID, &r.SessionID); err != nil {
 			return nil, err
 		}
 		result = append(result, r)
@@ -1177,17 +1209,31 @@ func ListPushSubscriptions(ctx context.Context, conn *pgxpool.Pool) ([]PushSubsc
 // MessageRow is a session→user message. `answer` is overloaded: nil (an update,
 // nothing to reply to), "" (closed/expired/session-ended), or real text (a reply).
 type MessageRow struct {
-	ID         string
-	SessionID  string
-	Kind       string // "update" | "ask" | "note"
-	Body       string
-	Status     string // "open" | "answered"
-	Answer     *string
-	CreatedAt  time.Time
-	AnsweredAt *time.Time
+	// CLIWaitReleased routes final resolutions to the outbox without changing authority.
+	CLIWaitReleased  bool
+	QuestionRevision int64
+	QuestionTurn     string
+	Decision         bool
+	Urgent           bool
+	ID               string
+	SessionID        string
+	Kind             string // "update" | "ask" | "note"
+	Body             string
+	Status           string // "open" | "answered"
+	Answer           *string
+	CreatedAt        time.Time
+	AnsweredAt       *time.Time
 	// OwnerOnly asks (an engine's command approval) accept an answer only from
 	// the session's signed-in owner.
 	OwnerOnly bool
+	// ChildEscalated makes a child question visible and answerable to its owner.
+	ChildEscalated   bool
+	PersonRequired   bool
+	AnsweredBy       string
+	EscalatedBy      string
+	EscalationReason string
+	// WaiterEnded: the blocked caller is gone; a person-only question stays open for the person.
+	WaiterEnded bool
 	// NoWait asks (`blerg-runner ask --no-wait`) are questions the agent does not wait on: their
 	// answer is sent to the session as a message, and only an answer addressed to them closes them.
 	NoWait bool
@@ -1219,41 +1265,56 @@ func MessageBoardID(ctx context.Context, conn *pgxpool.Pool, messageID string) (
 
 // CreateMessage inserts a message and returns its id. An "update" has nothing to
 // reply to, so it is created already-answered; "ask"/"note" are created "open".
-func CreateMessage(ctx context.Context, conn *pgxpool.Pool, sessionID, kind, body string) (string, error) {
+func CreateMessage(ctx context.Context, conn *pgxpool.Pool, sessionID, kind, body string, personRequired ...bool) (string, error) {
 	status := "open"
 	if kind == "update" {
 		status = "answered"
 	}
 	var id string
 	err := conn.QueryRow(ctx, `
-		INSERT INTO messages (session_id, kind, body, status, answered_at)
-		VALUES ($1, $2, $3, $4, CASE WHEN $4 = 'answered' THEN now() ELSE NULL END)
+		INSERT INTO messages (session_id, kind, body, status, answered_at, person_required)
+		VALUES ($1, $2, $3, $4, CASE WHEN $4 = 'answered' THEN now() ELSE NULL END, $5)
 		RETURNING id
-	`, sessionID, kind, body, status).Scan(&id)
+	`, sessionID, kind, body, status, len(personRequired) > 0 && personRequired[0]).Scan(&id)
 	return id, err
 }
 
 // CreateAsk inserts an open ask; ownerOnly limits who may answer it to the
 // session's signed-in owner.
-func CreateAsk(ctx context.Context, conn *pgxpool.Pool, sessionID, body string, ownerOnly bool) (string, error) {
+func CreateAsk(ctx context.Context, conn *pgxpool.Pool, sessionID, body string, ownerOnly bool, personRequired ...bool) (string, error) {
 	var id string
 	err := conn.QueryRow(ctx, `
-		INSERT INTO messages (session_id, kind, body, status, owner_only)
-		VALUES ($1, 'ask', $2, 'open', $3)
+		INSERT INTO messages (session_id, kind, body, status, owner_only, person_required)
+		VALUES ($1, 'ask', $2, 'open', $3, $4)
 		RETURNING id
-	`, sessionID, body, ownerOnly).Scan(&id)
+	`, sessionID, body, ownerOnly, len(personRequired) > 0 && personRequired[0]).Scan(&id)
+	return id, err
+}
+
+// CreateHostedAsk inserts an open ask stamped with the hosting that asked (migration 101).
+func CreateHostedAsk(ctx context.Context, conn *pgxpool.Pool, sessionID, body string, ownerOnly, noWait, personRequired bool, generation int64, urgent ...bool) (string, error) {
+	return CreateHostedAskWithSource(ctx, conn, sessionID, body, ownerOnly, noWait, personRequired, generation, len(urgent) > 0 && urgent[0], false)
+}
+
+func CreateHostedAskWithSource(ctx context.Context, conn *pgxpool.Pool, sessionID, body string, ownerOnly, noWait, personRequired bool, generation int64, urgent, sessionPosted bool) (string, error) {
+	var id string
+	err := conn.QueryRow(ctx, `
+		INSERT INTO messages (session_id, kind, body, status, owner_only, no_wait, person_required, host_generation, urgent, question_session_posted)
+		VALUES ($1, 'ask', $2, 'open', $3, $4, $5, $6, $7, $8)
+		RETURNING id
+	`, sessionID, body, ownerOnly, noWait, personRequired, generation, urgent, sessionPosted).Scan(&id)
 	return id, err
 }
 
 // CreateQuestion inserts an open ask the agent does not wait on (`blerg-runner ask --no-wait`). It
 // is owner-only: the person who started the session answers it.
-func CreateQuestion(ctx context.Context, conn *pgxpool.Pool, sessionID, body string) (string, error) {
+func CreateQuestion(ctx context.Context, conn *pgxpool.Pool, sessionID, body string, personRequired ...bool) (string, error) {
 	var id string
 	err := conn.QueryRow(ctx, `
-		INSERT INTO messages (session_id, kind, body, status, owner_only, no_wait)
-		VALUES ($1, 'ask', $2, 'open', true, true)
+		INSERT INTO messages (session_id, kind, body, status, owner_only, no_wait, person_required)
+		VALUES ($1, 'ask', $2, 'open', true, true, $3)
 		RETURNING id
-	`, sessionID, body).Scan(&id)
+	`, sessionID, body, len(personRequired) > 0 && personRequired[0]).Scan(&id)
 	return id, err
 }
 
@@ -1263,7 +1324,7 @@ func scanMessageRows(rows pgx.Rows) ([]MessageRow, error) {
 	for rows.Next() {
 		var m MessageRow
 		if err := rows.Scan(&m.ID, &m.SessionID, &m.Kind, &m.Body, &m.Status,
-			&m.Answer, &m.CreatedAt, &m.AnsweredAt, &m.OwnerOnly, &m.NoWait, &m.Dismissed, &m.DismissedBy); err != nil {
+			&m.Answer, &m.CreatedAt, &m.AnsweredAt, &m.OwnerOnly, &m.NoWait, &m.Dismissed, &m.DismissedBy, &m.ChildEscalated, &m.PersonRequired, &m.AnsweredBy, &m.EscalatedBy, &m.EscalationReason, &m.WaiterEnded, &m.Urgent, &m.Decision, &m.QuestionTurn, &m.QuestionRevision, &m.CLIWaitReleased); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -1271,7 +1332,7 @@ func scanMessageRows(rows pgx.Rows) ([]MessageRow, error) {
 	return out, rows.Err()
 }
 
-const messageCols = `id, session_id, kind, body, status, answer, created_at, answered_at, owner_only, no_wait, dismissed, dismissed_by`
+const messageCols = `id, session_id, kind, body, status, answer, created_at, answered_at, owner_only, no_wait, dismissed, dismissed_by, child_escalated, person_required, answered_by, escalated_by, escalation_reason, waiter_ended, urgent, id IN (SELECT message_id FROM bound_asks WHERE subject->>'kind' IN ('plan','draft','cut','live_binding')), question_turn, question_revision, cli_wait_released`
 
 // GetMessage returns one message, or (nil, nil) if not found.
 func GetMessage(ctx context.Context, conn *pgxpool.Pool, id string) (*MessageRow, error) {
@@ -1338,6 +1399,17 @@ func ListMessagesBySession(ctx context.Context, conn *pgxpool.Pool, sessionID st
 	return scanMessageRows(rows)
 }
 
+// ListWorkerNotes bounds explicit worker note reads at the database boundary.
+func ListWorkerNotes(ctx context.Context, conn *pgxpool.Pool, sessionID string) ([]MessageRow, error) {
+	cols := strings.Replace(messageCols, "body,", "left(body,4097),", 1)
+	rows, err := conn.Query(ctx, `SELECT `+cols+` FROM messages
+ WHERE session_id=$1 AND kind='note' ORDER BY created_at DESC,id DESC LIMIT 20`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return scanMessageRows(rows)
+}
+
 // ListOpenAsks returns a session's open asks, newest first.
 func ListOpenAsks(ctx context.Context, conn *pgxpool.Pool, sessionID string) ([]MessageRow, error) {
 	rows, err := conn.Query(ctx, `
@@ -1346,6 +1418,22 @@ func ListOpenAsks(ctx context.Context, conn *pgxpool.Pool, sessionID string) ([]
            AND NOT EXISTS (SELECT 1 FROM session_failure_alerts f WHERE f.message_id=messages.id)
 		 ORDER BY created_at DESC
 	`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return scanMessageRows(rows)
+}
+
+// ListWorkerAsks bounds explicit reads at the database boundary, including
+// oversized bodies. The extra row/character lets the caller report truncation.
+func ListWorkerAsks(ctx context.Context, conn *pgxpool.Pool, sessionID string, open bool) ([]MessageRow, error) {
+	cols := strings.Replace(messageCols, "body,", "left(body,4097),", 1)
+	cols = strings.Replace(cols, "answer,", "left(answer,4097),", 1)
+	rows, err := conn.Query(ctx, `SELECT `+cols+` FROM messages WHERE session_id=$1 AND kind='ask' AND (status='open')=$2
+ AND NOT EXISTS(SELECT 1 FROM session_failure_alerts f WHERE f.message_id=messages.id)
+ ORDER BY CASE WHEN $2 AND (NOT no_wait OR waiter_ended) THEN 0 ELSE 1 END,
+ CASE WHEN $2 THEN created_at END ASC,
+ CASE WHEN NOT $2 THEN COALESCE(answered_at,created_at) END DESC,id LIMIT 21`, sessionID, open)
 	if err != nil {
 		return nil, err
 	}
@@ -1381,11 +1469,21 @@ func SessionsWithOpenAsks(ctx context.Context, conn *pgxpool.Pool, ids []string)
 // AnswerMessage sets a message's answer and marks it answered, but only if it is
 // still open. Returns whether a row changed (false = already answered/closed, or
 // not found) so callers can 409 a double-reply.
-func AnswerMessage(ctx context.Context, conn *pgxpool.Pool, id, answer string) (bool, error) {
+func AnswerMessage(ctx context.Context, conn *pgxpool.Pool, id, answer string, parentOnly ...bool) (bool, error) {
+	return AnswerMessageAs(ctx, conn, id, answer, len(parentOnly) > 0 && parentOnly[0], "")
+}
+
+// AnswerMessageAs records the deciding credential with the answer. A parent may
+// answer only while the question is open and does not require the person.
+func AnswerMessageAs(ctx context.Context, conn *pgxpool.Pool, id, answer string, pendingOnly bool, by string, revision ...int64) (bool, error) {
+	expected := int64(0)
+	if len(revision) > 0 {
+		expected = revision[0]
+	}
 	tag, err := conn.Exec(ctx, `
-		UPDATE messages SET answer = $2, status = 'answered', answered_at = now()
-		 WHERE id = $1 AND status = 'open'
-	`, id, answer)
+		UPDATE messages SET answer = $2, status = 'answered', answered_at = now(), answered_by=$4, child_parent_notified=false
+		 WHERE id = $1 AND status = 'open' AND (NOT $3 OR (NOT child_escalated AND NOT person_required)) AND (NOT $6 OR question_revision=$5)
+	`, id, answer, pendingOnly, by, expected, len(revision) > 0)
 	if err != nil {
 		return false, err
 	}
@@ -1394,11 +1492,15 @@ func AnswerMessage(ctx context.Context, conn *pgxpool.Pool, id, answer string) (
 
 // DismissMessage closes an open ask as dismissed by the person: no answer (”), and marked so the
 // agent and the CLI can tell it from an answer or an expiry. false when it was not open.
-func DismissMessage(ctx context.Context, conn *pgxpool.Pool, id, by string) (bool, error) {
+func DismissMessage(ctx context.Context, conn *pgxpool.Pool, id, by string, revision ...int64) (bool, error) {
+	expected := int64(0)
+	if len(revision) > 0 {
+		expected = revision[0]
+	}
 	tag, err := conn.Exec(ctx, `
-		UPDATE messages SET answer = '', status = 'answered', answered_at = now(), dismissed = true, dismissed_by = $2
-		 WHERE id = $1 AND status = 'open' AND kind = 'ask'
-	`, id, by)
+		UPDATE messages SET answer = '', status = 'answered', answered_at = now(), dismissed = true, dismissed_by = $2, child_parent_notified=false
+		 WHERE id = $1 AND status = 'open' AND kind = 'ask' AND (NOT $4 OR question_revision=$3)
+	`, id, by, expected, len(revision) > 0)
 	if err != nil {
 		return false, err
 	}
@@ -1408,12 +1510,15 @@ func DismissMessage(ctx context.Context, conn *pgxpool.Pool, id, by string) (boo
 // CloseOpenMessagesForSession closes (answer=”) a session's still-open messages —
 // used when the session ends, since a dead session can neither receive an `ask`
 // answer nor have a `note` injected. Returns the rows it closed so the caller can
-// broadcast them.
+// broadcast them. Questions orphaned by a parent ending remain for escalation;
+// explicit discard withdraws them separately.
 func CloseOpenMessagesForSession(ctx context.Context, conn *pgxpool.Pool, sessionID string) ([]MessageRow, error) {
 	rows, err := conn.Query(ctx, `
 		UPDATE messages SET answer = '', status = 'answered', answered_at = now()
 		 WHERE session_id = $1 AND status = 'open'
            AND NOT EXISTS (SELECT 1 FROM session_failure_alerts f WHERE f.message_id=messages.id)
+           AND NOT (kind='ask' AND EXISTS(SELECT 1 FROM sessions c WHERE c.id=messages.session_id
+             AND c.parent_session_id IS NOT NULL AND c.end_reason='parent_ended' AND c.archived_at IS NULL))
 		 RETURNING `+messageCols+`
 	`, sessionID)
 	if err != nil {
@@ -1429,6 +1534,14 @@ func CloseOpenMessagesForSession(ctx context.Context, conn *pgxpool.Pool, sessio
 // later goes to the session as a message instead of to an ask nobody reads. A question the agent
 // does not wait on (no_wait) is no process's: it stays open.
 func CloseOpenAsksForSession(ctx context.Context, conn *pgxpool.Pool, sessionID string) ([]MessageRow, error) {
+	if _, err := conn.Exec(ctx, `
+		UPDATE messages SET no_wait = true, waiter_ended = true
+		 WHERE session_id = $1 AND kind = 'ask' AND status = 'open' AND NOT no_wait
+		   AND (person_required OR child_escalated OR owner_only)
+		   AND NOT EXISTS (SELECT 1 FROM session_failure_alerts f WHERE f.message_id=messages.id)
+	`, sessionID); err != nil {
+		return nil, err
+	}
 	rows, err := conn.Query(ctx, `
 		UPDATE messages SET answer = '', status = 'answered', answered_at = now()
 		 WHERE session_id = $1 AND kind = 'ask' AND status = 'open' AND NOT no_wait
@@ -1438,6 +1551,35 @@ func CloseOpenAsksForSession(ctx context.Context, conn *pgxpool.Pool, sessionID 
 		return nil, err
 	}
 	return scanMessageRows(rows)
+}
+
+// HoldPersonQuestion records that a person-only question has no waiter left.
+func HoldPersonQuestion(ctx context.Context, conn *pgxpool.Pool, id string) (bool, error) {
+	tag, err := conn.Exec(ctx, `UPDATE messages SET no_wait = true, waiter_ended = true WHERE id = $1 AND status = 'open' AND NOT no_wait`, id)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// HighestHostGeneration is the highest hosting that has asked in the session (0 when none has).
+func HighestHostGeneration(ctx context.Context, conn *pgxpool.Pool, sessionID string) (int64, error) {
+	var highest int64
+	err := conn.QueryRow(ctx, `SELECT COALESCE(MAX(host_generation), 0) FROM messages WHERE session_id = $1`, sessionID).Scan(&highest)
+	return highest, err
+}
+
+// EndAnswerWaiter records that a blocked caller left without reading its committed answer, so
+// the answer goes to the session as a question that was not waited on (UndeliveredQuestionAnswers
+// retries it). A repeat changes nothing.
+func EndAnswerWaiter(ctx context.Context, conn *pgxpool.Pool, id string) (bool, error) {
+	tag, err := conn.Exec(ctx, `UPDATE messages SET no_wait = true, waiter_ended = true
+		 WHERE id = $1 AND kind = 'ask' AND status = 'answered' AND NOT no_wait AND NOT dismissed AND COALESCE(answer, '') <> ''
+		   AND NOT EXISTS (SELECT 1 FROM session_failure_alerts f WHERE f.message_id=messages.id)`, id)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // SetSessionPaused records why a live session is paused (migration 043) and reports whether it
@@ -1451,9 +1593,9 @@ func SetSessionPaused(ctx context.Context, conn *pgxpool.Pool, sessionID, reason
 // SetSessionPausedWithDetail records the pause and its recovery reason together.
 func SetSessionPausedWithDetail(ctx context.Context, conn *pgxpool.Pool, sessionID, reason, detail string) (bool, error) {
 	tag, err := conn.Exec(ctx, `
-		UPDATE sessions SET paused_reason = $2, paused_detail=$3, status_changed_at=now()
+		UPDATE sessions SET paused_reason = $2, paused_detail=$3, status='waiting', status_changed_at=now()
 		 WHERE id = $1 AND ended_at IS NULL AND status NOT IN ('stopped', 'ended')
-		   AND paused_reason IS DISTINCT FROM $2
+		   AND (paused_reason IS DISTINCT FROM $2 OR paused_detail IS DISTINCT FROM $3 OR status <> 'waiting')
 	`, sessionID, reason, detail)
 	if err != nil {
 		return false, err
@@ -1462,9 +1604,11 @@ func SetSessionPausedWithDetail(ctx context.Context, conn *pgxpool.Pool, session
 }
 
 // ClearSessionPaused drops a session's paused reason and reports whether it had one: a message
-// for it was accepted, so it is about to run.
+// for it was accepted, so it is about to run. A recovery refusal (the daemon
+// prefixes its durable detail with "Recovery paused:") is cleared only by a
+// confirmed running status, never by merely queuing another adoption attempt.
 func ClearSessionPaused(ctx context.Context, conn *pgxpool.Pool, sessionID string) (bool, error) {
-	tag, err := conn.Exec(ctx, `UPDATE sessions SET paused_reason = NULL WHERE id = $1 AND paused_reason IS NOT NULL`, sessionID)
+	tag, err := conn.Exec(ctx, `UPDATE sessions SET paused_reason = NULL WHERE id = $1 AND paused_reason IS NOT NULL AND COALESCE(paused_detail, '') NOT LIKE 'Recovery paused:%'`, sessionID)
 	if err != nil {
 		return false, err
 	}
@@ -1502,6 +1646,7 @@ func AppendAgentEventAt(ctx context.Context, conn *pgxpool.Pool, sessionID, clie
 // transaction. In a transaction each attempt runs under a savepoint (tx.Begin), so a collision
 // that fails one attempt does not abort the caller's transaction.
 func appendAgentEvent(ctx context.Context, q DBTX, sessionID, clientEventID, kind, payload string, ts time.Time) (int64, bool, error) {
+	payload = activity.CaptureGateEvidence(kind, payload)
 	var at *time.Time
 	if !ts.IsZero() {
 		at = &ts
@@ -1591,12 +1736,20 @@ func ListAgentEvents(ctx context.Context, conn *pgxpool.Pool, sessionID string, 
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	if err := seedChecklistPage(ctx, conn, out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ListAgentEventsBefore returns up to limit events of the session with seq below
 // beforeSeq, oldest first: the newest such events, so beforeSeq 0 means the very
-// end of the transcript. more says whether earlier events remain.
+// end of the transcript. more says whether earlier events remain. Process telemetry
+// is accounting, not transcript, so it never takes a place in this window.
 func ListAgentEventsBefore(ctx context.Context, conn *pgxpool.Pool, sessionID string, beforeSeq int64, limit int) (rows []AgentEventRow, more bool, err error) {
 	if limit <= 0 {
 		limit = 200
@@ -1608,7 +1761,7 @@ func ListAgentEventsBefore(ctx context.Context, conn *pgxpool.Pool, sessionID st
 	res, err := conn.Query(ctx, `
 		SELECT session_id, seq, client_event_id, kind, payload::text, ts
 		  FROM agent_events
-		 WHERE session_id = $1 AND ($2 = 0 OR seq < $2)
+		 WHERE session_id = $1 AND ($2 = 0 OR seq < $2) AND kind <> 'process_activity'
 		 ORDER BY seq DESC
 		 LIMIT $3
 	`, sessionID, beforeSeq, limit+1)
@@ -1632,6 +1785,10 @@ func ListAgentEventsBefore(ctx context.Context, conn *pgxpool.Pool, sessionID st
 	}
 	for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
 		rows[i], rows[j] = rows[j], rows[i]
+	}
+	res.Close()
+	if err = seedChecklistPage(ctx, conn, rows); err != nil {
+		return nil, false, err
 	}
 	return rows, more, nil
 }
@@ -1948,11 +2105,12 @@ func ClaimIdempotencyKey(ctx context.Context, conn *pgxpool.Pool, scope, key, re
 		ON CONFLICT (scope, key) DO UPDATE
 		   SET request_hash = EXCLUDED.request_hash,
 		       session_id   = EXCLUDED.session_id,
-		       created_at   = now()
+		       created_at   = now(),
+           refusal_code = '', refusal_via = ''
 		 WHERE runner_idempotency.created_at < now() - $5::interval
-		RETURNING scope, key, request_hash, session_id, created_at
+		RETURNING scope, key, request_hash, session_id, created_at, refusal_code, refusal_via
 	`, scope, key, requestHash, sessionID, ttl.String()).
-		Scan(&row.Scope, &row.Key, &row.RequestHash, &row.SessionID, &row.CreatedAt)
+		Scan(&row.Scope, &row.Key, &row.RequestHash, &row.SessionID, &row.CreatedAt, &row.RefusalCode, &row.RefusalVia)
 	if err == nil {
 		return &row, true, nil
 	}
@@ -1962,10 +2120,10 @@ func ClaimIdempotencyKey(ctx context.Context, conn *pgxpool.Pool, scope, key, re
 	// The conflicting row was still fresh: the DO UPDATE's WHERE suppressed
 	// the write and RETURNING produced nothing. Read back what holds the key.
 	err = conn.QueryRow(ctx, `
-		SELECT scope, key, request_hash, session_id, created_at
+		SELECT scope, key, request_hash, session_id, created_at, refusal_code, refusal_via
 		  FROM runner_idempotency
 		 WHERE scope = $1 AND key = $2
-	`, scope, key).Scan(&row.Scope, &row.Key, &row.RequestHash, &row.SessionID, &row.CreatedAt)
+	`, scope, key).Scan(&row.Scope, &row.Key, &row.RequestHash, &row.SessionID, &row.CreatedAt, &row.RefusalCode, &row.RefusalVia)
 	if err != nil {
 		// Vanished between the two statements (a concurrent prune): report
 		// it as unclaimed with no existing row so the caller can retry.
@@ -2000,7 +2158,7 @@ func PruneIdempotency(ctx context.Context, conn *pgxpool.Pool, ttl time.Duration
 // capped at limit (at most 1000).
 // LatestUserMessageSeq is the seq of the session's newest user_message (0 with none): the input
 // its current turn answers.
-func LatestUserMessageSeq(ctx context.Context, conn *pgxpool.Pool, sessionID string) (int64, error) {
+func LatestUserMessageSeq(ctx context.Context, conn DBTX, sessionID string) (int64, error) {
 	var seq int64
 	err := conn.QueryRow(ctx, `SELECT COALESCE(max(seq), 0) FROM agent_events WHERE session_id = $1 AND kind = 'user_message'`, sessionID).Scan(&seq)
 	return seq, err
@@ -2068,19 +2226,33 @@ func ListAgentEventsTail(ctx context.Context, conn *pgxpool.Pool, sessionID, kin
 	return out, rows.Err()
 }
 
-// UndeliveredQuestionAnswers are a session's questions the agent did not wait on (no_wait) that
+// ReleaseExpiredCLIWaiters preserves answer authority while moving abandoned
+// discussion handoffs to durable session input delivery.
+func ReleaseExpiredCLIWaiters(ctx context.Context, conn *pgxpool.Pool, sessionID string) error {
+	_, err := conn.Exec(ctx, `UPDATE messages SET cli_wait_released=true
+ WHERE session_id=$1 AND kind='ask' AND question_session_posted
+ AND NOT no_wait AND NOT cli_wait_released AND cli_discussion<>''
+ AND cli_poll_until < now()`, sessionID)
+	return err
+}
+
+// UndeliveredQuestionAnswers are questions not waited on, or whose CLI wait was released, that
 // the person answered, or dismissed (card #155), within the last day but whose answer or dismissal
 // never reached the session's input outbox (no session_inputs row 'question-<id>', or
 // 'question-dismissed-<id>'): the server stopped, or the delivery failed, between the decision and
 // its delivery. They are delivered again (questions.go).
 func UndeliveredQuestionAnswers(ctx context.Context, conn *pgxpool.Pool, sessionID string) ([]MessageRow, error) {
+	if err := ReleaseExpiredCLIWaiters(ctx, conn, sessionID); err != nil {
+		return nil, err
+	}
+
 	rows, err := conn.Query(ctx, `
 		SELECT `+messageCols+` FROM messages m
-		 WHERE m.session_id = $1 AND m.kind = 'ask' AND m.no_wait AND m.status = 'answered'
+		 WHERE m.session_id = $1 AND m.kind = 'ask' AND (m.no_wait OR m.cli_wait_released) AND m.status = 'answered'
 		   AND NOT EXISTS (SELECT 1 FROM session_failure_alerts f WHERE f.message_id=m.id)
 		   AND m.answered_at > now() - interval '1 day'
 		   AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = m.session_id AND s.kind = 'agent')
-		   AND ((COALESCE(m.answer, '') <> '' AND NOT m.dismissed
+		   AND (((COALESCE(m.answer, '') <> '' OR EXISTS(SELECT 1 FROM bound_asks b WHERE b.message_id=m.id AND b.status='canceled' AND b.note IN ('stale_revision','changed_proposal','frozen','missing_milestone','stale_draft'))) AND NOT m.dismissed
 		         AND NOT EXISTS (SELECT 1 FROM session_inputs i WHERE i.session_id = m.session_id AND i.client_id = 'question-' || m.id::text))
 		     OR (m.dismissed
 		         AND NOT EXISTS (SELECT 1 FROM session_inputs i WHERE i.session_id = m.session_id AND i.client_id = 'question-dismissed-' || m.id::text)))
@@ -2103,4 +2275,10 @@ func RecordClusterPodFailure(ctx context.Context, conn *pgxpool.Pool, row Reconc
  AND greatest(started_at, coalesce(status_changed_at, started_at))=$4
  AND error_reason IS DISTINCT FROM $2`, row.ID, reason, row.Status, row.LastChange)
 	return tag.RowsAffected() > 0, err
+}
+
+// RefuseIdempotencyKey retains a safe terminal outcome even when no child row survives.
+func RefuseIdempotencyKey(ctx context.Context, conn *pgxpool.Pool, scope, key, sessionID, code, via string) error {
+	_, err := conn.Exec(ctx, `UPDATE runner_idempotency SET refusal_code=$4, refusal_via=$5 WHERE scope=$1 AND key=$2 AND session_id=$3`, scope, key, sessionID, code, via)
+	return err
 }

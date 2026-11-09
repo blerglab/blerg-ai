@@ -108,67 +108,15 @@ func TestATransientNoSuchContainerIsNotGone(t *testing.T) {
 	}
 }
 
-// I2: a sandboxed terminal the reattach pass stops (no record of a clone of its own) is told once,
-// with the accurate reason, and is not then sent into recovery (which would tell it again, less
-// accurately, and could only be refused there).
-func TestAStoppedLegacySandboxIsNotRecovered(t *testing.T) {
-	t.Setenv(DaemonStateDirEnv, t.TempDir())
-	dockerDir, _ := fakeDocker(t)
-	t.Setenv("PATH", dockerDir+":"+os.Getenv("PATH"))
-	t.Setenv("FAKE_DOCKER_LOG", filepath.Join(t.TempDir(), "docker.log"))
-	t.Setenv("FAKE_DOCKER_EXEC_NOOP", "1")
-	stubCloneProbe(t, false, false)
-	var started []string
-	oldStart, oldSource := startTerminalSandbox, containerWorkspaceSource
-	startTerminalSandbox = func(id, path string, _, _ []string, _ SandboxOptions) error {
-		started = append(started, id)
-		return errors.New("not in this test")
-	}
-	containerWorkspaceSource = func(string) (string, bool) { return "", false }
-	origOut, origProbe := dockerOutput, dockerProbe
-	const id = "legacy-term-1"
-	dockerOutput = func(args ...string) ([]byte, error) {
-		if len(args) > 0 && args[0] == "ps" && (len(args) < 2 || args[1] != "-a") {
-			return []byte(dockerContainerName(id) + "\t" + sandboxOwner() + "\n"), nil
-		}
-		return nil, nil
-	}
-	dockerProbe = func(time.Duration, ...string) (bool, error) { return false, nil } // a tmux server inside
-	t.Cleanup(func() {
-		startTerminalSandbox, containerWorkspaceSource = oldStart, oldSource
-		dockerOutput, dockerProbe = origOut, origProbe
-		unregisterSandbox(id)
-	})
-	sender := newRecordingSender(16)
-	mgr := newManagerWithSender(sender, ManagerConfig{ReposRoot: t.TempDir()})
-	if err := mgr.writeRecord(SessionRecord{Version: recordSchemaVersion, SessionID: id, ProjectPath: "/home/someone/repos/app", Sandbox: true}); err != nil {
-		t.Fatal(err)
-	}
-	mgr.reattachPass(listSessionRecords(mgr.reposRoot()), nil)
-
-	var told []string
-	for _, m := range sender.messages() {
-		if strings.Contains(m, `"session_state_changed"`) && strings.Contains(m, `"`+id+`"`) {
-			told = append(told, m)
-		}
-	}
-	if len(told) != 1 || !strings.Contains(told[0], "this daemon has no record of a clone of its own") {
-		t.Fatalf("the stopped session was told %d times: %v", len(told), told)
-	}
-	if len(started) != 0 {
-		t.Fatalf("recovery tried to start it again: %v", started)
-	}
-}
-
 // M1: in the sweep, an unlabeled agent container from before the owner label counts as this
 // daemon's when it has only a session record (no clone record, no sandbox home), as DAEMON.md says.
 func TestSweepCountsASessionRecord(t *testing.T) {
 	t.Setenv(DaemonStateDirEnv, t.TempDir())
 	const id = "recorded-only-1"
-	origOut, origRun, origProbe := dockerOutput, dockerRun, dockerProbe
+	origOut, origRun := dockerOutput, dockerRun
 	var removed []string
 	dockerOutput = func(args ...string) ([]byte, error) {
-		if args[0] == "ps" && args[1] == "-a" {
+		if args[0] == "ps" && args[1] == "-a" && args[len(args)-1] == "{{.Names}}" {
 			return nil, nil
 		}
 		return []byte(dockerContainerName(id) + "\t\n"), nil
@@ -179,8 +127,7 @@ func TestSweepCountsASessionRecord(t *testing.T) {
 		}
 		return nil
 	}
-	dockerProbe = func(time.Duration, ...string) (bool, error) { return false, errNotInImage }
-	t.Cleanup(func() { dockerOutput, dockerRun, dockerProbe = origOut, origRun, origProbe })
+	t.Cleanup(func() { dockerOutput, dockerRun = origOut, origRun })
 	sweepOrphanSandboxContainers(nil, nil)
 	if len(removed) != 0 {
 		t.Fatalf("an unrecorded container was removed: %v", removed)

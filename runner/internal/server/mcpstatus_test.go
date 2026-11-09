@@ -15,6 +15,7 @@ func TestMCPStatusSanitizedBeforePersistFanoutAndReplay(t *testing.T) {
 	fx := newLiveFx(t)
 	dc := &DaemonConn{ID: "fixture-mcp", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	fx.api.hub.Register(dc)
 	sub := make(chan []byte, 8)
 	fx.api.hub.Subscribe(fx.sess, "fixture-browser", sub)
@@ -75,6 +76,7 @@ func TestMCPStatusMalformedAckAndUnknownEventCompatibility(t *testing.T) {
 	h := NewHub()
 	dc := &DaemonConn{ID: "fixture", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	h.Register(dc)
 	sub := make(chan []byte, 8)
 	h.Subscribe("fixture-session", "fixture-browser", sub)
@@ -97,6 +99,7 @@ func TestMCPTransientFrameCannotBypassSanitization(t *testing.T) {
 	h := NewHub()
 	dc := &DaemonConn{ID: "fixture", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	h.Register(dc)
 	sub := make(chan []byte, 8)
 	h.Subscribe("fixture-session", "fixture-browser", sub)

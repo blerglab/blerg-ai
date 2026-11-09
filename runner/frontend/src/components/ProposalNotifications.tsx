@@ -1,3 +1,4 @@
+import { IconButton } from '@blerglab/chat'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
@@ -16,24 +17,24 @@ import { useMyReviewRequests, type MyReviewRequest } from '../hooks/useMyReviewR
 import { disableNotifications, enableNotifications, pushState, type PushState } from '../lib/push'
 
 
-// The questions agents asked without waiting (`blerg-runner ask --no-wait`) that are still open and
+// The questions agents asked that are still open and
 // this person answers (the server marks them answerable for the session's owner only): the bell
 // lists them beside the proposals, each opening its session, where Needs you answers it. Other
 // viewers see them read-only in the session, never here.
 function openQuestions(messages: readonly MessageInfo[]): MessageInfo[] {
-  return messages.filter(m => m.kind === 'ask' && m.no_wait === true && m.answerable === true && m.status === 'open')
+  return messages.filter(m => m.kind === 'ask' && m.answerable === true && m.status === 'open')
 }
 
 function QuestionRow({ question }: { question: MessageInfo }) {
   const session = useSessionStore(s => s.sessions.find(x => x.id === question.session_id))
   return <article className="proposal-question" data-testid="bell-question">
-    <div className="proposal-question-kicker">Question · {session ? sessionLabel(session) : 'a session'}</div>
+    <div className="proposal-question-kicker">Question · {question.question_turn === 'main' ? 'Main’s turn' : 'Your turn'} · {session ? sessionLabel(session) : 'a workspace'}{question.waiter_ended ? ' · no longer waited on' : ''}</div>
     <p className="proposal-question-text">{question.body}</p>
     <div className="proposal-question-actions">
-      <Link to={`/sessions/${encodeURIComponent(question.session_id)}`}>Answer in the session</Link>
-      <button type="button" className="btn small" data-testid="bell-dismiss" aria-label={`Dismiss question: ${question.body.slice(0, 80)}`}
+      <Link to={`/sessions/${encodeURIComponent(question.session_id)}`}>Answer in the workspace</Link>
+      {(!question.owner_only || question.no_wait) && <button type="button" className="btn small" data-testid="bell-dismiss" aria-label={`Dismiss question: ${question.body.slice(0, 80)}`}
         title="Dismiss: you answered elsewhere, or it no longer needs you. The agent is told."
-        onClick={() => dismissWithUndo(`ask:${question.id}`, `Question: ${question.body.slice(0, 80)}`)}>Dismiss</button>
+        onClick={() => dismissWithUndo(`ask:${question.id}`, `Question: ${question.body.slice(0, 80)}`)}>Dismiss</button>}
     </div>
   </article>
 }
@@ -43,10 +44,10 @@ function QuestionRow({ question }: { question: MessageInfo }) {
 function ReviewRow({ review }: { review: MyReviewRequest }) {
   const session = useSessionStore(s => s.sessions.find(x => x.id === review.session_id))
   return <article className="proposal-question" data-testid="bell-review">
-    <div className="proposal-question-kicker">Review · {session ? sessionLabel(session) : 'a session'}</div>
+    <div className="proposal-question-kicker">Review · {session ? sessionLabel(session) : 'a workspace'}</div>
     <p className="proposal-question-text"><strong>{review.artifact_name}</strong>{review.artifact_version > 1 ? ` v${review.artifact_version}` : ''}{review.ask ? `: ${review.ask}` : ''}</p>
     <div className="proposal-question-actions">
-      <Link to={review.url}>Review in the session</Link>
+      <Link to={review.url}>Review in the workspace</Link>
       <button type="button" className="btn small" data-testid="bell-dismiss" aria-label={`Dismiss review request: ${review.artifact_name}`}
         title="Dismiss: you answered elsewhere, or it no longer needs you. The agent is told."
         onClick={() => dismissWithUndo(`review:${review.request_id}`, `Review: ${review.artifact_name}`)}>Dismiss</button>
@@ -129,7 +130,7 @@ export function ProposalBell({ inbox }: { inbox: ProposalInbox }) {
     </button>
     {open && createPortal(<section className="proposal-notification-list" aria-label="Notifications" style={place ?? undefined}>
       <div className="proposal-attention-actions"><h2>Needs you</h2><button type="button" onClick={() => setOpen(false)}>Close notifications</button></div>
-      {inbox.error && <p role="alert">{inbox.error} <button type="button" className="btn small" onClick={() => void inbox.refresh()}>Retry</button></p>}
+      {inbox.error && <p role="alert">{inbox.error} <IconButton label="Retry" onClick={() => inbox.refresh()} /></p>}
       {questions.map(q => <QuestionRow key={q.id} question={q} />)}
       {reviews.map(r => <ReviewRow key={r.request_id} review={r} />)}
       {!inbox.error && inbox.pending.length === 0 && <p>No proposals waiting.</p>}

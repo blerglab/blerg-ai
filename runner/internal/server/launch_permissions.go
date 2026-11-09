@@ -42,6 +42,22 @@ type launchBoardLevel struct {
 	Level   string `json:"level"`
 }
 
+// Permission grants are a closed schema. In particular, an unrecognized
+// restriction must not disappear while the session starts without it.
+func launchPermissionsJSONProblem(raw json.RawMessage, kind string) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var permissions *launchPermissions
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&permissions); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		// Decoder errors include caller-controlled field names. Do not echo them.
+		return "unsupported or invalid session permissions"
+	}
+	return launchPermissionsProblem(permissions, kind)
+}
+
 func (p *launchPermissions) empty() bool {
 	return p == nil || len(p.Children) == 0 && len(p.Boards) == 0 && len(p.BoardLevels) == 0 && len(p.MCPTools) == 0
 }

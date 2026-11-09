@@ -19,7 +19,7 @@ function card(onActivate: () => void, extra?: React.ReactNode) {
 describe('RunCard', () => {
   it('a click on the card body jumps when the card sits inside the phone drawer (a dialog)', () => {
     const go = vi.fn()
-    render(<div role="dialog" aria-label="Session panel">{card(go)}</div>)
+    render(<div role="dialog" aria-label="Workspace panel">{card(go)}</div>)
     fireEvent.click(screen.getByTestId('clock'))
     expect(go).toHaveBeenCalledOnce()
   })

@@ -16,13 +16,14 @@ export const useMessageStore = create<MessageStore>(() => {
   })
 
   onMessage<MessageCreated>('message_created', (msg) => {
-    // De-dupe: if the message is already present, ignore it (and skip the toast).
-    // Done outside setState so the side effect (addToast) never rides inside a
-    // Zustand updater that React could re-run.
-    if (useMessageStore.getState().messages.some(m => m.id === msg.message.id)) return
-
-    // Prepend newest-first.
-    useMessageStore.setState((state) => ({ messages: [msg.message, ...state.messages] }))
+    const previous = useMessageStore.getState().messages.find(m => m.id === msg.message.id)
+    // A repeated creation also carries escalation. Preserve settled state if an old delivery arrives.
+    if (previous && previous.status !== 'open' && msg.message.status === 'open') return
+    if (previous?.answerable === true && msg.quiet && msg.message.answerable !== true) return
+    useMessageStore.setState(state => ({ messages: previous
+      ? state.messages.map(m => m.id === msg.message.id ? msg.message : m)
+      : [msg.message, ...state.messages] }))
+    if (previous && !(previous.answerable !== true && msg.message.answerable === true)) return
 
     // Fire a toast for the newly received live message — unless the server marks it quiet (an ask
     // from a session nobody attends).
@@ -31,7 +32,8 @@ export const useMessageStore = create<MessageStore>(() => {
     const label = session ? sessionLabel(session) : msg.message.session_id
     useToastStore.getState().addToast({
       title: `${label} · ${msg.message.kind}`,
-      body: msg.message.body,
+      // Only the first paragraph: a long question (a plan change) lives in Needs you and its dialog.
+      body: toastBody(msg.message.body),
       url: `/sessions/${msg.message.session_id}`,
       variant: 'message',
     })
@@ -61,4 +63,10 @@ export function selectOpenCount(state: MessageStore): number {
  */
 export function selectBySession(sessionId: string): (state: MessageStore) => MessageInfo[] {
   return (state) => state.messages.filter(m => m.session_id === sessionId)
+}
+
+/** A toast names the message, it doesn't carry it: the first paragraph, at most 240 characters. */
+export function toastBody(body: string): string {
+  const first = body.split(/\n\s*\n/)[0].replace(/\s+/g, ' ').trim()
+  return first.length > 240 ? first.slice(0, 239).trimEnd() + '…' : first
 }

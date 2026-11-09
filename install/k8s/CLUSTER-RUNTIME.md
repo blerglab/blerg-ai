@@ -1,5 +1,10 @@
 # Cluster runtime (ephemeral per-session agent Jobs)
 
+Get a session's recorded branch with `blerg-runner session result <id>` and use
+its `branch` value wherever `<work-branch>` appears below. For a child, pass the
+child's ID. Branch names stay fixed after a rename; never derive them from IDs
+or titles. Workspace results also report each member's branch.
+
 Written so an operator — or an LLM configuring this on someone's behalf — can
 follow it start to finish without reading any Go source.
 
@@ -8,7 +13,7 @@ follow it start to finish without reading any Go source.
 Agent-kind sessions have to run *somewhere*. There are two places:
 
 - **A workstation daemon** — the `blerg-runner` daemon running on a human's
-  machine, driving their own `claude`/`codex`/`hermes` CLI in tmux. Optional;
+  machine, driving their own engine CLI. Optional;
   see the main [`README.md`](README.md)'s "Connecting the workstation daemon".
 - **Cluster runtime** — the in-cluster runner server creates a throwaway
   Kubernetes `Job` per session, in its own namespace, running the
@@ -360,7 +365,7 @@ the person's git host and starts the session in it: type `owner/name`, pick GitH
 Private or Public, and launch (**Create & Launch →**). The runner uses the person's own `github` /
 `gitlab` token from Settings to create it — under their account when `owner` is their login,
 otherwise under that organization or group — with an initial commit, and the pod clones it like
-any other repository. The default branch is the provider's; the agent works on `wip/<session>`.
+any other repository. The default branch is the provider's; the agent works on `<work-branch>`.
 
 An existing repository is refused (409): launch it as an existing one instead. When the
 repository cannot be created — no token in Settings, a token without permission to create
@@ -736,7 +741,7 @@ in `install/k8s/.env` and redeploy before resuming to use a larger limit.
 
 Workspace v2 keeps repository files and mid-turn commits on the retained projects
 PVC. Resume mounts that same volume; a killed turn may not have pushed its commits
-to `wip/<session>` yet. Files outside the retained workspace (including temporary
+to `<work-branch>` yet. Files outside the retained workspace (including temporary
 files and legacy ephemeral checkouts) are not protected. Keep the retained claim;
 do not delete it to clear a pod-health alert. See [workspace recovery](../../docs/cluster-workspace.md).
 

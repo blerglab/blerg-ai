@@ -20,7 +20,9 @@ import (
 
 type FilesystemWorkspaceStorage struct {
 	Root string
-	mu   sync.Mutex
+	// authorityKey stays in memory in the keeper; host storage reads its private key.
+	authorityKey []byte
+	mu           sync.Mutex
 }
 type workspaceQuotaRecord struct {
 	LoopDevice    string                   `json:"loop_device,omitempty"`
@@ -41,12 +43,22 @@ func (s *FilesystemWorkspaceStorage) paths(session string) (directory, image, mo
 	tree = filepath.Join(mount, "tree")
 	return
 }
-func saveWorkspaceQuota(directory string, record workspaceQuotaRecord) error {
+func (s *FilesystemWorkspaceStorage) quotaKey() ([]byte, error) {
+	if s.authorityKey != nil {
+		if len(s.authorityKey) != 32 {
+			return nil, errors.New("invalid quota authority")
+		}
+		return s.authorityKey, nil
+	}
+	return workspaceManifestKey()
+}
+
+func (s *FilesystemWorkspaceStorage) saveQuota(directory string, record workspaceQuotaRecord) error {
 	raw, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
-	key, err := workspaceManifestKey()
+	key, err := s.quotaKey()
 	if err != nil {
 		return err
 	}
@@ -58,7 +70,7 @@ func saveWorkspaceQuota(directory string, record workspaceQuotaRecord) error {
 	}
 	return writeWorkspacePrivate(filepath.Join(directory, "allocation.json"), envelope)
 }
-func readWorkspaceQuota(directory string) (workspaceQuotaRecord, error) {
+func (s *FilesystemWorkspaceStorage) readQuota(directory string) (workspaceQuotaRecord, error) {
 	var record workspaceQuotaRecord
 	path := filepath.Join(directory, "allocation.json")
 	info, err := os.Lstat(path)
@@ -73,7 +85,7 @@ func readWorkspaceQuota(directory string) (workspaceQuotaRecord, error) {
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return record, err
 	}
-	key, err := workspaceManifestKey()
+	key, err := s.quotaKey()
 	if err != nil {
 		return record, err
 	}

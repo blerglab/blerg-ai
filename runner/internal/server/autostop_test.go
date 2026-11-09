@@ -50,6 +50,7 @@ func turnDoneWithReason(t *testing.T, api *API, pool *pgxpool.Pool, sessionID, s
 	t.Helper()
 	dc := &DaemonConn{ID: newUUID(), send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	api.hub.Register(dc)
 	api.hub.SetSessionOwner(sessionID, dc.ID)
 	HandleAgentEvent(context.Background(), api.hub, pool, dc, protocol.AgentEvent{

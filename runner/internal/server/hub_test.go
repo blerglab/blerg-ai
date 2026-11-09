@@ -167,23 +167,26 @@ func TestReleaseActiveBrowserPromotes(t *testing.T) {
 func TestActiveWithin(t *testing.T) {
 	h := NewHub()
 
-	if h.ActiveWithin(3 * time.Minute) {
+	if h.ActiveWithin("acct-active", 3*time.Minute) {
 		t.Error("ActiveWithin should be false before any activity")
 	}
 
-	h.MarkActivity()
-	if !h.ActiveWithin(3 * time.Minute) {
+	h.MarkActivity("acct-active")
+	if !h.ActiveWithin("acct-active", 3*time.Minute) {
 		t.Error("ActiveWithin should be true immediately after MarkActivity")
 	}
 
+	if h.ActiveWithin("another-account", 3*time.Minute) {
+		t.Fatal("activity crossed accounts")
+	}
 	// Backdate the last interaction beyond the window.
 	h.mu.Lock()
-	h.lastActivity = time.Now().Add(-5 * time.Minute)
+	h.activityByAccount["acct-active"] = time.Now().Add(-5 * time.Minute)
 	h.mu.Unlock()
-	if h.ActiveWithin(3 * time.Minute) {
+	if h.ActiveWithin("acct-active", 3*time.Minute) {
 		t.Error("ActiveWithin should be false once activity is older than the window")
 	}
-	if !h.ActiveWithin(10 * time.Minute) {
+	if !h.ActiveWithin("acct-active", 10*time.Minute) {
 		t.Error("ActiveWithin should be true for a window that still covers the activity")
 	}
 }
@@ -465,6 +468,7 @@ func TestHub_InvalidToken(t *testing.T) {
 func TestDaemonConnSandboxAvailable(t *testing.T) {
 	dc := &DaemonConn{ID: "d1"}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	if dc.SandboxAvailable() {
 		t.Fatal("zero-value DaemonConn should report sandbox unavailable")
 	}
@@ -484,6 +488,7 @@ func TestDaemonConnSandboxAvailable(t *testing.T) {
 func TestDaemonConnAvailableEngines(t *testing.T) {
 	dc := &DaemonConn{ID: "d1"}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	if got := dc.AvailableEngines(); len(got) != 0 {
 		t.Fatalf("zero-value DaemonConn should report no available engines, got %v", got)
 	}
@@ -506,6 +511,7 @@ func TestDaemonConnAvailableEngines(t *testing.T) {
 func TestDaemonConnCheckedOutRepos(t *testing.T) {
 	dc := &DaemonConn{ID: "d1"}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	if got := dc.CheckedOutRepos(); len(got) != 0 {
 		t.Fatalf("zero-value DaemonConn.CheckedOutRepos() = %v, want empty", got)
 	}

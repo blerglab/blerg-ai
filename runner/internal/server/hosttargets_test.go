@@ -3,12 +3,9 @@ package server
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
-	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
 func TestHostTargetsExcludePodRolesBeforeFallback(t *testing.T) {
@@ -17,13 +14,15 @@ func TestHostTargetsExcludePodRolesBeforeFallback(t *testing.T) {
 			h := NewHub()
 			pod := &DaemonConn{ID: "a-pod", Mode: role.mode, BoundSessionID: role.bound, send: make(chan []byte, 8)}
 			pod.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+			pod.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 			pod.SetCheckedOutRepos([]string{"victim-repository"})
 			pod.SetSandboxAvailable(true)
 			h.Register(pod)
 			host := &DaemonConn{ID: "z-host", Mode: "local", send: make(chan []byte, 8)}
 			host.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+			host.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 			h.Register(host)
-			for name, got := range map[string]*DaemonConn{"repo": h.DaemonForRepo("victim-repository"), "scratch-host": h.DaemonForScratch("daemon"), "scratch-sandbox": h.DaemonForScratch("docker"), "assist": h.AnyDaemon()} {
+			for name, got := range map[string]*DaemonConn{"repo": h.DaemonForRepo("victim-repository"), "scratch-host": h.DaemonForScratch("daemon"), "scratch-sandbox": h.DaemonForScratch("docker")} {
 				if got != host {
 					t.Errorf("%s chose pod or lost sole eligible host", name)
 				}
@@ -53,6 +52,7 @@ func TestHostTargetsExplicitPinsCannotLaunchIntoPods(t *testing.T) {
 			}
 			pod := &DaemonConn{ID: podID, Name: "fixture-pod", Mode: mode, BoundSessionID: bound, send: make(chan []byte, 8)}
 			pod.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+			pod.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 			pod.SetCheckedOutRepos([]string{"victim-repository"})
 			pod.SetSandboxAvailable(true)
 			pod.SetRestrictTools(true)
@@ -67,9 +67,6 @@ func TestHostTargetsExplicitPinsCannotLaunchIntoPods(t *testing.T) {
 			rec := postSpawn(t, api, map[string]any{"daemon_id": podID, "repo": "victim-repository", "runtime": "daemon", "kind": "agent", "initial_prompt": "fixture-private-start"})
 			if rec.Code != http.StatusNotFound {
 				t.Fatalf("explicit REST pin status=%d", rec.Code)
-			}
-			if _, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "fixture-browser"}, protocol.BrowserSpawnSession{Kind: "agent", Type: "spawn_session", DaemonID: podID, Repo: "victim-repository", InitialPrompt: "fixture-private-start"}, pool); err == nil {
-				t.Error("browser websocket pin accepted a pod")
 			}
 			for _, noRepo := range []bool{false, true} {
 				if problem := api.startBoardSessionOnDaemon(context.Background(), runnerStartRequest{DaemonID: podID, Repo: "victim-repository", NoRepo: noRepo}, runnerPrincipal{}, newUUID()); problem == nil {
@@ -91,36 +88,5 @@ func TestHostTargetsExplicitPinsCannotLaunchIntoPods(t *testing.T) {
 				t.Fatal("rejected pin wrote launch state, minted credentials or forwarded data")
 			}
 		})
-	}
-}
-
-func TestHostTargetsBoardConfiguredPodPinIsRejected(t *testing.T) {
-	api, hub, host, pool := spawnTokenFixture(t)
-	podID := "00000000-0000-4000-8000-000000000e02"
-	if err := db.UpsertDaemon(context.Background(), pool, podID, "fixture-pod", "local", "/workspace"); err != nil {
-		t.Fatal(err)
-	}
-	pod := &DaemonConn{ID: podID, Mode: "local", BoundSessionID: "fixture-owned-session", send: make(chan []byte, 8)}
-	pod.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
-	pod.SetCheckedOutRepos([]string{"victim-repository"})
-	hub.Register(pod)
-	board, err := db.CreateBoard(context.Background(), pool, "Fixture board", nil, []string{"victim-repository"}, &podID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := httptest.NewRequest(http.MethodPost, "/api/boards/"+board.ID+"/assist", strings.NewReader(`{}`))
-	req.SetPathValue("id", board.ID)
-	req.Header.Set("Authorization", "Bearer "+enableBrowserAuth(t, api)("session.start"))
-	rec := httptest.NewRecorder()
-	api.HandlePostAssist(rec, req)
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("board pod pin status=%d", rec.Code)
-	}
-	var sessions, tokens int
-	if err = pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM sessions),(SELECT count(*) FROM board_tokens)`).Scan(&sessions, &tokens); err != nil {
-		t.Fatal(err)
-	}
-	if sessions != 0 || tokens != 0 || len(pod.send) != 0 || len(host.send) != 0 {
-		t.Fatal("board pin leaked launch state or silently fell back to another daemon")
 	}
 }

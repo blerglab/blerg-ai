@@ -5,9 +5,11 @@
 // counts the enabled ones for the tab's badge. On top: the report's header card, then one toolbar row
 // (the filter and, for the session's owner, "+ Add", which opens the plugin browser, PluginBrowser).
 // An MCP server that needs a sign-in gets its action under the row (McpSignIn), for the owner.
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { McpLive } from '@blerglab/chat'
 import type { CapabilitiesReport } from '../lib/capabilities'
+import { apiFetch } from "../apiFetch"
+import { withWorkflowSkills, type WorkflowPolicy } from "../lib/workflowSkills"
 import type { useSessionPlugins } from '../hooks/useSessionPlugins'
 import { CapabilitiesView } from './CapabilitiesPanel'
 import { PluginAddButton, PluginRequests, DisallowedPlugins } from './SessionPlugins'
@@ -16,6 +18,7 @@ import McpSignIn from './McpSignIn'
 import './CapabilitiesPanel.css'
 
 export interface CapabilitiesTabProps {
+  sessionId?: string
   loading?: boolean
   active?: boolean
   startedBySession?: boolean
@@ -32,14 +35,26 @@ export interface CapabilitiesTabProps {
   machine?: string
 }
 
-export default function CapabilitiesTab({ loading = false, active = true, report, pendingToolChanges, liveMcp, startedBySession, plugins, runtime, machine }: CapabilitiesTabProps) {
+export default function CapabilitiesTab({ sessionId, loading = false, active = true, report, pendingToolChanges, liveMcp, startedBySession, plugins, runtime, machine }: CapabilitiesTabProps) {
   // Open for one session only: a switch to another session closes the form.
   const [addFor, setAddFor] = useState<string | null>(null)
   const adding = !!plugins && addFor === plugins.sessionId
+  const [inventory, setInventory] = useState<{ id: string; policy: WorkflowPolicy | null } | null>(null)
+  useEffect(() => {
+    if (!active || !sessionId) return
+    const controller = new AbortController()
+    void apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/skills`, { signal: controller.signal }).then(async response => {
+      if (!response.ok) return
+      const policy = await response.json() as WorkflowPolicy | null
+      if (!controller.signal.aborted) setInventory({ id: sessionId, policy })
+    }).catch(() => {})
+    return () => controller.abort()
+  }, [active, sessionId])
+  const appliedReport = withWorkflowSkills(report, inventory && inventory.id === sessionId ? inventory.policy : null)
   return (
     <div className="rail-capabilities" data-testid="rail-capabilities">
-      {startedBySession && <p className="rail-empty caps-skipped">Plugins: skipped (started by another session)</p>}
-      <CapabilitiesView initialLoading={loading && active} report={report} pendingToolChanges={pendingToolChanges} liveMcp={liveMcp}
+      {startedBySession && <p className="rail-empty caps-skipped">Plugins: skipped (started by another workspace)</p>}
+      <CapabilitiesView initialLoading={loading && active} report={appliedReport} pendingToolChanges={pendingToolChanges} liveMcp={liveMcp}
         toolbarAction={plugins && <PluginAddButton open={adding} onToggle={() => setAddFor(adding ? null : plugins.sessionId)} />}
         belowToolbar={plugins && (
           <div className="caps-addons">

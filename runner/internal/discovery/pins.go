@@ -27,6 +27,15 @@ type BoundPins struct {
 	Sources        []SourcePin                `json:"-"`
 }
 
+func (p *SourcePin) Close() {
+	if p.Directory != nil {
+		_ = p.Directory.Close()
+	}
+	if p.CommonDirectory != nil {
+		_ = p.CommonDirectory.Close()
+	}
+}
+
 func (pins *BoundPins) Close() {
 	if pins.ConfiguredRoot != nil {
 		_ = pins.ConfiguredRoot.Close()

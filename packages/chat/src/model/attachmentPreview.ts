@@ -137,7 +137,9 @@ async function pdfThumb(bytes: Uint8Array, signal: AbortSignal): Promise<Attachm
     const viewport = page.getViewport({scale: Math.min(size.width / base.width, size.height / base.height)})
     if (!validDimensions(viewport.width, viewport.height) || viewport.width > WIDTH || viewport.height > HEIGHT) return
     canvas.width = Math.max(1, Math.floor(viewport.width)); canvas.height = Math.max(1, Math.floor(viewport.height))
-    await Promise.race([page.render({canvas, viewport, annotationMode: 0, background: '#ffffff'}).promise, cancelled])
+    // pdf.js renders into a detached, unstyled canvas, which can't resolve a CSS var(); #ffffff mirrors
+    // --chat-document-bg, the same in every theme by design (a rendered page is always on white paper).
+    await Promise.race([page.render({canvas, viewport, annotationMode: 0, background: '#ffffff'}).promise, cancelled]) // themecheck:allow BLG-473: see above
     return signal.aborted ? undefined : thumbnail('pdf', canvas)
   } finally {
     signal.removeEventListener('abort', abort)

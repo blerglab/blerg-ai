@@ -120,6 +120,7 @@ func open(t testing.TB, env, key string, migrate func(context.Context, *pgxpool.
 		template = databases.templates[identity]
 		if template == "" {
 			template = databaseName()
+			phase := Phase(t, "template_migrate")
 			// A failed CREATE response may arrive after PostgreSQL created it.
 			databases.cleanup = append(databases.cleanup, func() error { return drop(cfg, template) })
 			if _, err := admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{template}.Sanitize()+" TEMPLATE template0 STRATEGY WAL_LOG"); err != nil {
@@ -139,18 +140,23 @@ func open(t testing.TB, env, key string, migrate func(context.Context, *pgxpool.
 			if err != nil {
 				t.Fatal("migrate test database template failed")
 			}
+			phase.End()
 			databases.templates[identity] = template
 		}
 	}
 	name := databaseName()
 	t.Cleanup(func() {
+		phase := Phase(t, "drop")
+		defer phase.End()
 		if err := drop(cfg, name); err != nil {
 			t.Error("remove isolated test database failed")
 		}
 	})
+	clonePhase := Phase(t, "clone")
 	if _, err := admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()+" TEMPLATE "+pgx.Identifier{template}.Sanitize()+" STRATEGY WAL_LOG"); err != nil {
 		t.Fatal("copy isolated test database failed; database user needs CREATEDB")
 	}
+	clonePhase.End()
 	if err := run.mark(ctx, admin, name); err != nil {
 		t.Fatal("mark isolated test database failed")
 	}
@@ -178,10 +184,16 @@ func open(t testing.TB, env, key string, migrate func(context.Context, *pgxpool.
 	}
 	cloned.ConnConfig = parsedConfig.ConnConfig
 	cloned.MaxConns = 8
+	connectPhase := Phase(t, "pool_connect")
 	pool, err := pgxpool.NewWithConfig(ctx, cloned)
 	if err != nil {
 		t.Fatal("open isolated test database failed")
 	}
-	t.Cleanup(pool.Close)
+	connectPhase.End()
+	t.Cleanup(func() {
+		phase := Phase(t, "close")
+		pool.Close()
+		phase.End()
+	})
 	return pool
 }

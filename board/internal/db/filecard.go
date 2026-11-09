@@ -60,7 +60,7 @@ func FileApprovedCard(ctx context.Context, pool *pgxpool.Pool, boardID, account,
 	if err != nil {
 		return FilingReceipt{}, false, err
 	}
-	params := CardParams{Title: &draft.Title, Type: &draft.Type}
+	params := CardParams{Title: &draft.Title, Type: &draft.Type, Size: emptyToNil(&draft.Size), Risk: emptyToNil(&draft.Risk), Complexity: emptyToNil(&draft.Complexity)}
 	if !draft.Sensitive {
 		params.Body = &draft.Body
 	}

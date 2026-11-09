@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { afterEach, describe, expect, it } from 'vitest'
 import { render, waitFor } from '@testing-library/react'
 import { page } from 'vitest/browser'
@@ -28,7 +29,7 @@ describe('corpus regressions through chat and file viewers', () => {
     }
   }, 40_000)
 
-  for (const width of [390, 3840]) {
+  for (const width of browserWidths([390, 3840])) {
     it.each(samples)(`shows all of $id in a .mmd viewer at ${width}px`, async sample => {
       await page.viewport(width, width === 390 ? 844 : 2160)
       const files: TransportFiles = {

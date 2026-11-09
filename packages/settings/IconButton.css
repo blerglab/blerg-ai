@@ -1,0 +1,32 @@
+button.refresh-control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  vertical-align: middle;
+  cursor: pointer;
+}
+/* A labeled control is the real call to action, so it keeps a button's outline. */
+button.refresh-control:has(> span) { border: 1px solid var(--chat-border, #555); }
+button.refresh-control:hover { background: var(--chat-surface-2, #333); }
+button.refresh-control:focus-visible { outline: 2px solid var(--chat-accent, #df8b38); outline-offset: 2px; }
+button.refresh-control:disabled { opacity: .6; cursor: default; }
+.refresh-control svg { flex: none; }
+.refresh-control-spin { animation: refresh-control-turn .8s linear infinite; }
+@keyframes refresh-control-turn { to { transform: rotate(360deg); } }
+@media (max-width: 768px), (pointer: coarse) {
+  button.refresh-control { min-width: 44px; min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .refresh-control-spin { animation-duration: 2s; }
+}

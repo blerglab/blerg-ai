@@ -48,7 +48,7 @@ func startMCPGateway(ctx context.Context, env func(string) string, pool *pgxpool
 	}
 	cfg := mcpgw.Config{
 		DB:   pool,
-		Core: &mcpgw.HTTPCoreClient{BaseURL: coreURL, InternalKey: coreInternalKey},
+		Core: &mcpgw.HTTPCoreClient{BaseURL: coreURL, InternalKey: coreInternalKey, ClusterDeployment: env("BLERG_MCP_CLUSTER_DEPLOYMENT") == "true"},
 		Policy: netguard.Policy{
 			AllowHTTPHosts:    netguard.ParseHostList(env("BLERG_RUNNER_MCP_ALLOW_HTTP_HOSTS")),
 			AllowPrivateHosts: netguard.ParseHostList(env("BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS")),

@@ -63,10 +63,10 @@ const list: CodeTheme[] = [
   {
     id: 'blerg', name: 'Blerg',
     // Follows the app's palette (the var() references), so it matches the rest of the page.
-    tokens: t('var(--chat-fg)', 'var(--chat-bg)', 'var(--chat-muted-2)', '#b69cf0', '#8fc9a0', '#e0b36a', '#7d8798',
-      '#7fb2ee', '#6fc7c7', '#e0b36a', '#6fc7c7', 'var(--chat-muted)', 'var(--diff-add, #8ed6a6)', 'var(--diff-del, #ff9d94)'),
-    light: t('var(--chat-fg)', 'var(--chat-bg)', 'var(--chat-muted-2)', '#7a52c7', '#2f7a4a', '#a15f0d', '#6b7684',
-      '#2f62b8', '#1f7f7f', '#a15f0d', '#1f7f7f', 'var(--chat-muted)', 'var(--diff-add, #2f8a52)', 'var(--diff-del, #cf4b4b)'),
+    tokens: t('var(--chat-fg)', 'var(--chat-bg)', 'var(--chat-muted-2)', 'var(--code-keyword, #b69cf0)', 'var(--code-string, #8fc9a0)', 'var(--code-number, #e0b36a)', 'var(--code-comment, #7d8798)',
+      'var(--code-title, #7fb2ee)', 'var(--code-type, #6fc7c7)', 'var(--code-variable, #e0b36a)', 'var(--code-builtin, #6fc7c7)', 'var(--chat-muted)', 'var(--diff-add, #8ed6a6)', 'var(--diff-del, #ff9d94)'),
+    light: t('var(--chat-fg)', 'var(--chat-bg)', 'var(--chat-muted-2)', 'var(--code-keyword, #7a52c7)', 'var(--code-string, #2f7a4a)', 'var(--code-number, #a15f0d)', 'var(--code-comment, #6b7684)',
+      'var(--code-title, #2f62b8)', 'var(--code-type, #1f7f7f)', 'var(--code-variable, #a15f0d)', 'var(--code-builtin, #1f7f7f)', 'var(--chat-muted)', 'var(--diff-add, #2f8a52)', 'var(--diff-del, #cf4b4b)'),
   },
   { id: 'github-dark', name: 'GitHub Dark', tokens: t('#c9d1d9', '#0d1117', '#6e7681', '#ff7b72', '#a5d6ff', '#79c0ff', '#8b949e', '#d2a8ff', '#ffa657', '#79c0ff', '#79c0ff', '#c9d1d9', '#7ee787', '#ffa198') },
   { id: 'github-light', name: 'GitHub Light', tokens: t('#24292f', '#ffffff', '#8c959f', '#cf222e', '#0a3069', '#0550ae', '#6e7781', '#8250df', '#953800', '#0550ae', '#0550ae', '#24292f', '#116329', '#82071e') },
@@ -166,10 +166,21 @@ export function applyCodeColours(el: HTMLElement, colours: CodeColours, mode: Co
   applyCodeTheme(el, colours[mode], mode, colours.overrides[mode])
 }
 
+// LIGHT_THEME_IDS are every packages/settings/theme.ts THEMES id whose own brand/tokens.css block
+// sets `color-scheme: light`. BLG-474 review (round 2) found currentCodeMode fell through to the
+// OS preference for every bundled scheme — none of their ids matched this function's old
+// hardcoded dark/light pair — so a person on a light bundled theme with a dark OS preference saw
+// code blocks rendered in dark syntax colors on a light background. Every id not listed here is
+// treated as dark; keep this in sync with packages/settings/theme.ts (brand.contrast.test.ts's
+// "covers every theme" check guards the token side of that list, not this one).
+const LIGHT_THEME_IDS = new Set(['light', 'colorblind-light', 'catppuccin-latte'])
+
 /** The mode the page shows now: an explicit data-theme on the root wins, else the OS preference. */
 export function currentCodeMode(): CodeMode {
   if (typeof document === 'undefined') return 'dark'
   const pinned = document.documentElement.getAttribute('data-theme')
-  if (pinned === 'light' || pinned === 'dark') return pinned
-  return typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+  if (pinned === null || pinned === 'system') {
+    return typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+  }
+  return LIGHT_THEME_IDS.has(pinned) ? 'light' : 'dark'
 }

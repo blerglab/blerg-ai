@@ -71,7 +71,12 @@ func TestWorkspaceAuthorityRefusalSurvivesConnectionReplacement(t *testing.T) {
 			// The reconnect lands after the reply was delivered to this call, before it is read.
 			workspaceReplyReceived = func() { client.mu.Lock(); client.conn = second; client.mu.Unlock() }
 			defer func() { workspaceReplyReceived = func() {} }()
-			err := authority.Current(t.Context(), protocol.SupervisorLaunch{SessionID: "session"}, protocol.WorkspaceRuntimeBinding{})
+			ctx := t.Context()
+			if c.refused {
+				ctx = context.WithValue(ctx, workspaceSyncKey{}, true)
+				client.sleep = func(context.Context, time.Duration) bool { t.Error("definitive refusal retried"); return false }
+			}
+			err := authority.Current(ctx, protocol.SupervisorLaunch{SessionID: "session"}, protocol.WorkspaceRuntimeBinding{})
 			var refused *WorkspaceRefusedError
 			if got := errors.As(err, &refused); got != c.refused {
 				t.Fatalf("Current = %v, definitive refusal %t, want %t", err, got, c.refused)

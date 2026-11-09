@@ -75,7 +75,8 @@ beforeEach(() => {
   apiFetch.mockImplementation((url: string) => url.endsWith('/plugins/catalog')
     // An engine without a catalog: "+ Add" falls back to the add-by-name form (card #144).
     ? Promise.resolve(new Response(JSON.stringify({ code: 'unsupported', error: 'none' }), { status: 409, headers: { 'Content-Type': 'application/json' } }))
-    : json(url.endsWith('/capabilities') ? CAPS : url.endsWith('/plugins') ? PLUGINS : {}))
+    : json(url.endsWith('/capabilities') ? CAPS : url.endsWith('/plugins') ? PLUGINS
+      : url.endsWith('/skills') ? { 'test-driven-development': true, 'ux-design': true, visualizing: true, coordinating: false } : {}))
 })
 
 function show(mode: 'panel' | 'drawer') {
@@ -101,7 +102,7 @@ describe.each([
     show(mode)
     await userEvent.click(screen.getByRole('tab', { name: /^Capabilities/ }))
     await screen.findByText('frontend-design')
-    const rail = mode === 'drawer' ? screen.getByRole('dialog', { name: 'Session panel' }) : screen.getByTestId('session-rail')
+    const rail = mode === 'drawer' ? screen.getByRole('dialog', { name: 'Workspace panel' }) : screen.getByTestId('session-rail')
     if (mode === 'drawer') await waitFor(() => expect(box(rail).right).toBe(width))
     return rail
   }
@@ -246,7 +247,7 @@ describe.each([
     const heads = Array.from(rail.querySelectorAll('.caps-group-head'))
     const sizes = new Set(heads.map(h => getComputedStyle(h).fontSize))
     expect(sizes.size).toBe(1)
-    expect(screen.getByTestId('caps-count-skills').textContent).toBe('18')
+    await waitFor(() => expect(screen.getByTestId('caps-count-skills').textContent).toBe('22'))
     expect(screen.getByTestId('caps-count-plugins').textContent).toBe('3')
     expect(screen.getByTestId('caps-count-mcp').textContent).toBe('2')
     const plugins = screen.getByTestId('caps-group-plugins')
@@ -265,6 +266,9 @@ describe.each([
     expect(within(screen.getByTestId('caps-group-commands')).getByText('not reported by this engine')).toBeTruthy()
     // Long groups start closed; their header opens them.
     await userEvent.click(screen.getByTestId('caps-group-skills').querySelector('.caps-group-head button')!)
+    for (const name of ['test-driven-development', 'ux-design', 'visualizing', 'coordinating']) {
+      expect(within(screen.getByTestId('caps-group-skills')).getByText(name)).toBeTruthy()
+    }
     const desc = within(screen.getByTestId('caps-group-skills')).getByText(/Writes release notes/)
     expect(box(desc).height).toBeLessThan(24)
     // A cut description is a button with the whole text in its tooltip; a press shows it whole.
@@ -280,7 +284,7 @@ describe.each([
     expect(short.closest('button')).toBeNull()
 
     await userEvent.fill(screen.getByRole('searchbox', { name: 'Filter skills, plugins and tools' }), 'release')
-    await waitFor(() => expect(screen.getByTestId('caps-count-skills').textContent).toBe('1 of 18'))
+    await waitFor(() => expect(screen.getByTestId('caps-count-skills').textContent).toBe('1 of 22'))
     expect(screen.queryByTestId('caps-group-plugins')).toBeNull()
     expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
   })

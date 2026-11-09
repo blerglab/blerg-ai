@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 // Settings → Shells in a real browser: the administrator's limit controls fit a phone (stacked,
 // nothing scrolling sideways) and use a 4K screen (the two limit groups side by side).
 import { describe, expect, it, vi, afterEach } from 'vitest'
@@ -17,7 +18,7 @@ const json = (body: unknown, status = 200) => Promise.resolve(new Response(JSON.
 afterEach(() => vi.restoreAllMocks())
 
 describe('Shell limits', () => {
-  it.each([390, 3840])('fits and uses the space at %i px', async width => {
+  it.each(browserWidths([390, 3840]))('fits and uses the space at %i px', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 844)
     apiFetch.mockImplementation((path: string) => path === '/api/shells/settings'
       ? json({ ...defaults, defaults, stored: { desktop: { detached_seconds: null, idle_seconds: null }, cluster: { detached_seconds: null, idle_seconds: null } }, min_seconds: 600, max_seconds: 87600 * 3600 }) : json({}, 404))

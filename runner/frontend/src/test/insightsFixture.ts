@@ -26,6 +26,7 @@ export const richInsights: InsightsResponse = {
     lifetime_seconds: q(9_360, 41_000, 190_000, 171),
     running_seconds: 402_000, waiting_seconds: 61_000, idle_seconds: 730_000, busy_fraction: 0.34,
     by_day: days.map((d) => ({ day: d.day, started: d.turns / 8 })),
+    main: 42, channels: 112, workers: 30,
   },
   startup: {
     groups: [
@@ -61,9 +62,30 @@ export const richInsights: InsightsResponse = {
       { session_id: 'sess-top-2', title: 'Postgres for managed apps', runtime: 'daemon', started_at: '2026-10-10T09:00:00Z', ...tok(140, 30_000, 190_000, 11_000_000, 610_000, 21.4) },
     ],
     unpriced_models: ['claude-haiku-5-20261001-experimental'],
+    by_engine_day:Array.from({length:14},(_,i)=>({at:`2026-10-${25+Math.floor(i/2)}T10:00:00Z`,day:`2026-10-${25+Math.floor(i/2)}`,engine:i%2?'codex':'claude',complete:true,turns:5,input:20000,output:4000,cache_read:10000,cache_write:0,cost_usd:1.3+i*.2})),
   },
   cluster: { active: 6, max: 12, peak_concurrent: 11 },
   crons: { runs: 58, late: 2, manual: 3, by_status: [{ key: 'started', count: 55 }, { key: 'failed', count: 3 }], seconds: q(300, 600, 900, 58) },
+  // BLG-464 round 2: one line per conversation across richActivity's own window (Oct 25 - Nov 1,
+  // the fixture every other chart renders against). Main (sess-top-1) rises and compacts once;
+  // six other conversations (one more than the chart's 5-fullest cap) so the real-app screenshots
+  // exercise "See all" too, not only ContextFillChart.test.tsx.
+  context_fill: [
+    { session_id: 'sess-top-1', title: 'Refactor the session store so a daemon restart keeps every agent session alive', role: 'main', at: '2026-10-25T10:00:00Z', percent: 22, compacted: false },
+    { session_id: 'sess-top-1', title: 'Refactor the session store so a daemon restart keeps every agent session alive', role: 'main', at: '2026-10-26T10:00:00Z', percent: 58, compacted: false },
+    { session_id: 'sess-top-1', title: 'Refactor the session store so a daemon restart keeps every agent session alive', role: 'main', at: '2026-10-27T10:00:00Z', percent: 91, compacted: false },
+    { session_id: 'sess-top-1', title: 'Refactor the session store so a daemon restart keeps every agent session alive', role: 'main', at: '2026-10-27T14:00:00Z', percent: 12, compacted: true },
+    { session_id: 'sess-top-1', title: 'Refactor the session store so a daemon restart keeps every agent session alive', role: 'main', at: '2026-10-30T10:00:00Z', percent: 36, compacted: false },
+    { session_id: 'sess-top-1', title: 'Refactor the session store so a daemon restart keeps every agent session alive', role: 'main', at: '2026-10-30T20:00:00Z', percent: 67, compacted: false },
+    { session_id: 'sess-top-1', title: 'Refactor the session store so a daemon restart keeps every agent session alive', role: 'main', at: '2026-10-31T09:00:00Z', percent: 81, compacted: false },
+    { session_id: 'sess-top-2', title: 'Postgres for managed apps', role: 'worker', at: '2026-10-29T10:00:00Z', percent: 95, compacted: false },
+    { session_id: 'sess-top-2', title: 'Postgres for managed apps', role: 'worker', at: '2026-10-29T15:00:00Z', percent: 18, compacted: true },
+    { session_id: 'sess-ctx-b', title: 'Check phone layout', role: 'worker', at: '2026-10-26T12:00:00Z', percent: 72, compacted: false },
+    { session_id: 'sess-ctx-c', title: 'Verify recorded reviews', role: 'channel', at: '2026-10-27T09:00:00Z', percent: 65, compacted: false },
+    { session_id: 'sess-ctx-d', title: 'Measure gate time', role: 'worker', at: '2026-10-28T11:00:00Z', percent: 60, compacted: false },
+    { session_id: 'sess-ctx-e', title: 'Improve ticket flow', role: 'channel', at: '2026-10-30T09:00:00Z', percent: 55, compacted: false },
+    { session_id: 'sess-ctx-f', title: 'Draft the release notes', role: 'worker', at: '2026-10-31T08:00:00Z', percent: 40, compacted: false },
+  ],
 }
 
 export const richPrices: ModelPrice[] = [

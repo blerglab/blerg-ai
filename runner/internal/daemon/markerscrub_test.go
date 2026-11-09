@@ -65,7 +65,7 @@ func TestUnmatchedRelayEchoNeverCarriesTheCode(t *testing.T) {
 	em := &collectEmitter{}
 	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", em, nil, withMarkerNonce(testMarkerNonce))
 	d.steer.legacy = false
-	p := &ccProc{}
+	p := claudeTestProc(t, d, &ccProc{})
 	d.steer.proc = p
 	relay := agent.Input{Text: "Review of plan.md v1: APPROVED", Source: "review"}.ModelText(testMarkerNonce)
 	other := "<system-reminder>\nThe file changed. " + testMarkerNonce + "\n</system-reminder>"

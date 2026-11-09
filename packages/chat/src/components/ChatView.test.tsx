@@ -22,6 +22,20 @@ describe('ChatView', () => {
     localStorage.removeItem(COMPACT)
   })
 
+  it.each([false, true])('renders fixed commands and Show through buildTimeline in readOnly=%s; cron output has no live links', readOnly => {
+    seed(
+      ev({seq:1,kind:'ui_reveal',payload:{action:'open',target:'readme.md'}}),
+      ev({seq:2,kind:'cron_command_result',payload:{index:1,exit_code:0,output:'[unsafe](https://example.com)'}}),
+      ev({seq:3,kind:'user_message',payload:{source:'cron',text:'[unsafe](https://example.com)'}}),
+    )
+    const t = createFakeTransport()
+    const view = render(<ChatView session={SESSION} transport={t.transport} meta={meta()} readOnly={readOnly} />)
+    expect(screen.getByTestId('cron-command-result')).toBeTruthy()
+    expect(view.container.querySelector('a[href="https://example.com"]')).toBeNull()
+    fireEvent.click(screen.getByRole('button', {name:'Show'}))
+    expect(screen.getByText('Workspace files are unavailable in this conversation.')).toBeTruthy()
+  })
+
   it('renders a scripted transcript', () => {
     // The full-card view: compact tool calls are the default, and are covered in ChatView.tools.test.tsx.
     localStorage.setItem(COMPACT, '0')
@@ -280,7 +294,7 @@ describe('ChatView start and ready', () => {
     const t = createFakeTransport()
     render(<ChatView session={SESSION} transport={t.transport} meta={meta({ status: 'starting', runtime: 'cluster' })} />)
     const panel = screen.getByTestId('start-progress')
-    expect(panel).toHaveTextContent('Starting session')
+    expect(panel).toHaveTextContent('Starting workspace')
     expect(panel.querySelector('[data-stage="image"]')).toHaveAttribute('data-state', 'active')
     expect(panel.querySelector('[data-stage="schedule"]')).toHaveAttribute('data-state', 'done')
     expect(screen.queryByTestId('ready-card')).not.toBeInTheDocument()
@@ -296,7 +310,7 @@ describe('ChatView start and ready', () => {
     const t = createFakeTransport()
     render(<ChatView session={SESSION} transport={t.transport} meta={meta({ status: 'error', error_reason: 'Git authentication failed' })} />)
     const panel = screen.getByTestId('start-progress')
-    expect(panel).toHaveTextContent("Couldn't start the session")
+    expect(panel).toHaveTextContent("Couldn't start the workspace")
     expect(panel.querySelector('[data-stage="clone"]')).toHaveAttribute('data-state', 'failed')
     expect(screen.getByTestId('start-hint')).toHaveTextContent('Check the credential')
   })
@@ -305,10 +319,10 @@ describe('ChatView start and ready', () => {
     seed(ev({ seq: 1, kind: 'start_stage', payload: plan }))
     const t = createFakeTransport()
     render(<ChatView session={SESSION} transport={t.transport} meta={meta({ status: 'starting' })} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Stop session' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Stop workspace' }))
     expect(t.stops).toBe(0)
-    const dialog = screen.getByRole('alertdialog', { name: 'End this session?' })
-    await act(async () => { fireEvent.click(within(dialog).getByRole('button', { name: 'End session' })) })
+    const dialog = screen.getByRole('alertdialog', { name: 'End this workspace?' })
+    await act(async () => { fireEvent.click(within(dialog).getByRole('button', { name: 'End workspace' })) })
     expect(t.stops).toBe(1)
   })
 
@@ -321,7 +335,7 @@ describe('ChatView start and ready', () => {
     render(<ChatView session={SESSION} transport={t.transport} meta={meta({ status: 'idle', runtime: 'cluster', engine: 'claude', effort: 'high' })} />)
     expect(screen.queryByTestId('start-progress')).not.toBeInTheDocument()
     const card = screen.getByTestId('ready-card')
-    expect(card).toHaveTextContent('Session ready')
+    expect(card).toHaveTextContent('Workspace ready')
     expect(card).toHaveTextContent(/claude/i)
     expect(within(card).getByTitle('claude-sonnet-5')).toHaveTextContent('sonnet-5')
     expect(within(card).getByTitle('Configured effort')).toHaveTextContent('high')
@@ -539,6 +553,19 @@ describe('ChatView working indicator', () => {
     expect(screen.getByTestId('waiting')).toHaveTextContent('Waiting for your answer')
     expect(screen.getByTestId('waiting')).toHaveAttribute('role', 'status')
     expect(screen.queryByTestId('working')).not.toBeInTheDocument()
+  })
+
+  it.each(['running', 'waiting'] as const)('keeps a recovery pause quiet over stale %s activity', status => {
+    seed()
+    const t = createFakeTransport()
+    const view = render(<ChatView session={SESSION} transport={t.transport} meta={meta({ status })} recoveryPaused />)
+    expect(screen.queryByTestId('waiting')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('working')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('working-compact')).not.toBeInTheDocument()
+    expect(report()?.busy).toBe(false)
+    expect(report()?.inFlight).toBe(false)
+    view.rerender(<ChatView session={SESSION} transport={t.transport} meta={meta({ status })} />)
+    expect(screen.getByTestId(status === 'waiting' ? 'waiting' : 'working')).toBeInTheDocument()
   })
 
   it('uses static dots under prefers-reduced-motion', () => {

@@ -37,10 +37,10 @@ try {
     });
     await page.route('**/brand/tokens.css', async route => route.fulfill({ status: 200, contentType: 'text/css', body: await readFile('../internal/landing/static/tokens.css', 'utf8') }));
     const token = caps => `x.${Buffer.from(JSON.stringify({ caps })).toString('base64url')}.y`;
-    await page.goto(`${origin}settings#access_token=${token(['account.manage'])}`);
+    await page.goto(`${origin}settings?section=install#access_token=${token(['account.manage'])}`);
     const section = page.getByTestId('child-limits');
-    const parallel = page.getByLabel('Child sessions at once, per parent');
-    const hourly = page.getByLabel('Child starts per rolling hour, per parent');
+    const parallel = page.getByLabel('Workers at once, per agent');
+    const hourly = page.getByLabel('Worker starts per rolling hour, per agent');
     await parallel.waitFor();
     await section.scrollIntoViewIfNeeded();
     assert.equal(await parallel.inputValue(), '3');
@@ -51,7 +51,7 @@ try {
     assert.equal(await parallel.evaluate(el => el.checkValidity()), false);
     await parallel.fill('8');
     await hourly.fill('240');
-    await page.getByRole('button', { name: 'Save child limits', exact: true }).click();
+    await page.getByRole('button', { name: 'Save worker limits', exact: true }).click();
     await section.getByRole('status').waitFor();
     assert.deepEqual(puts, [{ parallel: 8, starts_per_hour: 240 }]);
     for (const field of [parallel, hourly]) {
@@ -60,8 +60,8 @@ try {
     }
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `horizontal overflow at ${width}px`);
     await page.goto('about:blank');
-    await page.goto(`${origin}settings#access_token=${token(['card.read'])}`);
-    await page.getByRole('heading', { name: 'Credentials', exact: true }).waitFor();
+    await page.goto(`${origin}settings?section=install#access_token=${token(['card.read'])}`);
+    await page.getByRole('heading', { name: 'Account', exact: true }).waitFor();
     assert.equal(await page.getByTestId('child-limits').count(), 0);
     assert.deepEqual(errors, []);
     await page.close();

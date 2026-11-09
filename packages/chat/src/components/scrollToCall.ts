@@ -11,9 +11,16 @@ function escape(id: string): string {
   return typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(id) : id.replace(/["\\]/g, '\\$&')
 }
 
+// Every deliberate jump relinquishes live following before smooth scrolling starts.
+export const TIMELINE_JUMP = 'chat-timeline-jump'
+export function jumpToElement(el: Element, options: ScrollIntoViewOptions = { block: 'center', behavior: 'smooth' }) {
+  el.closest('.agent-timeline')?.dispatchEvent(new Event(TIMELINE_JUMP))
+  el.scrollIntoView?.(options)
+}
+
 function flash(el: Element | null): boolean {
   if (!el) return false
-  el.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
+  jumpToElement(el)
   el.classList.add('bg-flash')
   setTimeout(() => el.classList.remove('bg-flash'), FLASH_MS)
   return true

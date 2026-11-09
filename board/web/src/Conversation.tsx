@@ -170,10 +170,10 @@ function RunAsMeCta({ targets, onDone }: { targets: RunTargets | null; onDone: (
           <button className="btn small" type="button" disabled={busy} onClick={() => void runAsMe()}>
             {busy ? "Setting up…" : "Run as me"}
           </button>
-          <span className="spawn-hint">This board can't start sessions yet. Run as me makes its sessions run as you, on your own credentials.</span>
+          <span className="spawn-hint">This board can't start workspaces yet. Run as me makes its workspaces run as you, on your own credentials.</span>
         </>
       ) : (
-        <span className="spawn-hint" title={targets.automation_problem}>This board can't start sessions yet: a board admin can choose Run as me in the board's settings.</span>
+        <span className="spawn-hint" title={targets.automation_problem}>This board can't start workspaces yet: a board admin can choose Run as me in the board's settings.</span>
       )}
       {error && <p role="alert" style={{ color: "var(--danger)", fontSize: 13, margin: 0 }}>{error}</p>}
     </div>
@@ -207,7 +207,7 @@ function RunWhere({ targets, value, onChange }: { targets: RunTargets | null; va
 // the conversation itself is the shared chat (SessionChat), live from the runner
 // through the board's proxy.
 export function Conversation({ cardId }: { cardId: string }) {
-  const { sessions, reload, current } = useCardSessions(cardId);
+  const { reload, current } = useCardSessions(cardId);
   const [spawning, setSpawning] = useState(false);
   const [error, setError] = useState("");
   const [where, setWhere] = useState("");
@@ -280,15 +280,14 @@ export function Conversation({ cardId }: { cardId: string }) {
         <span className={`convo-state ${current.lifecycle}`}>
           {current.lifecycle === "waiting" ? "? waiting on you" : current.lifecycle}
         </span>
-        <span className="mono" style={{ color: "var(--fog-dim)", fontSize: 11 }}>
-          {current.role === "discuss" ? "discussion · " : ""}{current.runner} · {current.external_session_id.slice(0, 8)}
-          {current.model && <> · <span title={current.model}>{modelDisplayName(current.model)}</span></>}
-          {sessions.length > 1 ? ` · attempt ${sessions.length}` : ""}
-        </span>
+        {(current.role === "discuss" || current.model) && <span className="mono" style={{ color: "var(--fog-dim)", fontSize: 11 }}>
+          {current.role === "discuss" && <>Discussion{current.model ? ' · ' : ''}</>}
+          {current.model && <span title={current.model}>{modelDisplayName(current.model)}</span>}
+        </span>}
         <span className="spacer" />
         {current.role === "discuss" && (
           <button className="btn small" onClick={() => spawn("run")} disabled={spawning}
-            title="move the card to in progress and start an executing session">
+            title="move the card to in progress and start an executing workspace">
             ▶ Run this card
           </button>
         )}
@@ -298,7 +297,7 @@ export function Conversation({ cardId }: { cardId: string }) {
         )}
       </div>
       {(current.role === "discuss" || over) && <RunAsMeCta targets={runTargets} onDone={reloadRunTargets} />}
-      <SessionChat session={current} placeholder="steer the session… (Shift+Enter for newline)" />
+      <SessionChat session={current} placeholder="steer the workspace… (Shift+Enter for newline)" />
     </div>
   );
 }

@@ -3,8 +3,10 @@ package db
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -30,28 +32,38 @@ type SessionInput struct {
 }
 
 // AcceptSessionInput commits both the outbox entry and its transcript acceptance together.
-func AcceptSessionInput(ctx context.Context, pool *pgxpool.Pool, sessionID, clientID, frame, eventID, payload string) (int64, bool, error) {
+func AcceptSessionInput(ctx context.Context, pool *pgxpool.Pool, sessionID, clientID, frame, eventID, payload string, discussion ...string) (int64, bool, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	seq, fresh, err := AcceptSessionInputTx(ctx, tx, sessionID, clientID, frame, eventID, payload, discussion...)
+	if err != nil {
+		return 0, false, err
+	}
+	return seq, fresh, tx.Commit(ctx)
+}
+
+// AcceptSessionInputTx lets a domain mutation share the durable input transaction.
+// Typed ordinary chat may supply discussion text; other frames remain opaque.
+func AcceptSessionInputTx(ctx context.Context, tx pgx.Tx, sessionID, clientID, frame, eventID, payload string, discussion ...string) (int64, bool, error) {
 	if clientID == "" || len(clientID) > SessionInputMaxClientIDBytes {
 		return 0, false, ErrSessionInputID
 	}
 	if len(frame) > SessionInputMaxBytes || len(payload) > SessionInputMaxBytes {
 		return 0, false, ErrSessionInputTooLarge
 	}
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return 0, false, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 	// The session lock serializes queue bounds and races with the session ending.
 	var status string
 	var endedAt *time.Time
 	var endReason *string
-	if err = tx.QueryRow(ctx, `SELECT status,ended_at,end_reason FROM sessions WHERE id=$1 FOR UPDATE`, sessionID).Scan(&status, &endedAt, &endReason); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT status,ended_at,end_reason FROM sessions WHERE id=$1 FOR UPDATE`, sessionID).Scan(&status, &endedAt, &endReason); err != nil {
 		return 0, false, err
 	}
 	var existingSeq int64
 	var same bool
-	err = tx.QueryRow(ctx, `SELECT event_seq,frame=$3::jsonb FROM session_inputs WHERE session_id=$1 AND client_id=$2`, sessionID, clientID, frame).Scan(&existingSeq, &same)
+	err := tx.QueryRow(ctx, `SELECT event_seq,frame=$3::jsonb FROM session_inputs WHERE session_id=$1 AND client_id=$2`, sessionID, clientID, frame).Scan(&existingSeq, &same)
 	if err == nil {
 		if !same {
 			return 0, false, ErrSessionInputConflict
@@ -85,7 +97,24 @@ func AcceptSessionInput(ctx context.Context, pool *pgxpool.Pool, sessionID, clie
 	if _, err = tx.Exec(ctx, `UPDATE session_inputs SET event_seq=$3 WHERE session_id=$1 AND client_id=$2`, sessionID, clientID, seq); err != nil {
 		return 0, false, err
 	}
-	return seq, true, tx.Commit(ctx)
+	if len(discussion) > 0 && discussion[0] != "" {
+		// Discussion handoff is optional metadata. A failed bound lookup must not
+		// roll back the person's ordinary conversation input and its receipt.
+		handoff, err := tx.Begin(ctx)
+		if err != nil {
+			return 0, false, err
+		}
+		if _, err = handoff.Exec(ctx, `UPDATE messages SET cli_discussion=$2,question_turn='main' WHERE session_id=$1 AND kind='ask' AND status='open' AND question_session_posted AND NOT no_wait AND (NOT owner_only OR EXISTS(SELECT 1 FROM bound_asks WHERE message_id=messages.id))`, sessionID, discussion[0]); err != nil {
+			if rollbackErr := handoff.Rollback(ctx); rollbackErr != nil {
+				return 0, false, rollbackErr
+			}
+			failurelog.Default.Event("question_discussion_handoff", slog.LevelWarn, "component", "runner", "cause", failurelog.Cause(err))
+		} else if err := handoff.Commit(ctx); err != nil {
+			return 0, false, err
+		}
+	}
+
+	return seq, true, nil
 }
 
 // FailSessionInput atomically records why an input cannot run and settles its outbox entry.
@@ -163,4 +192,33 @@ func RecordSettledSessionInput(ctx context.Context, pool *pgxpool.Pool, sessionI
 		}
 	}
 	return seq, true, tx.Commit(ctx)
+}
+
+// RefreshChildTurnInput replaces the summary of an already queued Blerg notice.
+// It never creates another input or wakes the engine. A consumed receipt stays
+// consumed: the parent already received the instruction to read this child.
+func RefreshChildTurnInput(ctx context.Context, pool *pgxpool.Pool, sessionID, clientID, text string) (bool, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var seq int64
+	var settled *time.Time
+	err = tx.QueryRow(ctx, `SELECT event_seq,settled_at FROM session_inputs WHERE session_id=$1 AND client_id=$2 AND frame->>'source'='child_turn' FOR UPDATE`, sessionID, clientID).Scan(&seq, &settled)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if settled == nil {
+		if _, err = tx.Exec(ctx, `UPDATE session_inputs SET frame=jsonb_set(frame,'{text}',to_jsonb($3::text)) WHERE session_id=$1 AND client_id=$2`, sessionID, clientID, text); err != nil {
+			return false, err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE agent_events SET payload=jsonb_set(payload,'{text}',to_jsonb($3::text)) WHERE session_id=$1 AND seq=$2 AND kind='input_accepted'`, sessionID, seq, text); err != nil {
+			return false, err
+		}
+	}
+	return true, tx.Commit(ctx)
 }

@@ -6,6 +6,7 @@ package mcpgw
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"sort"
@@ -17,8 +18,8 @@ import (
 )
 
 var (
-	wantReadTools = []string{"blerg_board_get", "blerg_board_list", "blerg_board_schema", "blerg_column_list", "blerg_card_search", "blerg_card_get"}
-	wantFullTools = []string{"blerg_card_create", "blerg_card_update", "blerg_card_move", "blerg_card_comment", "blerg_card_link",
+	wantReadTools = []string{"blerg_release_list", "blerg_release_get", "blerg_board_get", "blerg_board_list", "blerg_board_schema", "blerg_column_list", "blerg_card_search", "blerg_card_get"}
+	wantFullTools = []string{"blerg_card_archive", "blerg_card_create", "blerg_card_update", "blerg_card_move", "blerg_card_comment", "blerg_card_link",
 		"blerg_column_create", "blerg_column_update", "blerg_column_move", "blerg_column_delete"}
 )
 
@@ -80,7 +81,7 @@ func TestBoardToolLevelsCoverTheFixedSetExactly(t *testing.T) {
 	if !slices.Equal(all, want) {
 		t.Fatalf("tools %v, want %v", all, want)
 	}
-	for _, n := range []string{"blerg_card_archive", "blerg_board_update", "blerg_board_create", ""} {
+	for _, n := range []string{"blerg_board_update", "blerg_board_create", ""} {
 		if BoardToolLevel(n) != "" || BoardLevelAllows(db.BoardLevelFull, n) {
 			t.Errorf("%q is callable", n)
 		}
@@ -107,7 +108,7 @@ func TestLaunchBoardGrantServesTheCurrentLevelOnEveryCall(t *testing.T) {
 		return got
 	}
 	// A person launched it: full includes column management.
-	all := append(append([]string(nil), wantBoardTools...), wantColumnTools...)
+	all := append(append([]string(nil), wantBoardTools...), wantPersonTools...)
 	sort.Strings(all)
 	// No row: the launch board is full, as before 0.4.4.
 	if got := listed(); !slices.Equal(got, all) {
@@ -196,7 +197,7 @@ func TestCallBoardReadsWithAReadOnlyCredentialAndRevokesIt(t *testing.T) {
 	// Refused before any exchange: a write marked read-only, a tool outside the set, no proof.
 	for _, c := range []BoardCall{
 		{Proof: proof, BoardID: boardTestID, Tool: "blerg_card_create", ReadOnly: true},
-		{Proof: proof, BoardID: boardTestID, Tool: "blerg_card_archive"},
+		{Proof: Proof{AccountID: "acct-1", TokenID: boardTestCron}, BoardID: boardTestID, Tool: "blerg_card_archive"},
 		{Proof: proof, BoardID: "", Tool: "blerg_card_get", ReadOnly: true},
 		{Proof: Proof{AccountID: "acct-1"}, BoardID: boardTestID, Tool: "blerg_card_get", ReadOnly: true},
 	} {
@@ -317,7 +318,7 @@ func TestCallBoardUnrevokedLimitIsSettable(t *testing.T) {
 func TestColumnToolsFollowTheLevel(t *testing.T) {
 	b := newBoardHarness(t, nil)
 	gh := b.levelSession()
-	for _, tool := range wantColumnTools {
+	for _, tool := range wantPersonTools {
 		if r := b.callTool(gh, tool, map[string]any{"column_id": "c1"}); r.errMessage() != "" {
 			t.Fatalf("full (launch): %s refused: %s", tool, r.raw)
 		}
@@ -331,7 +332,7 @@ func TestColumnToolsFollowTheLevel(t *testing.T) {
 	for _, level := range []string{db.BoardLevelRead, db.BoardLevelFile, db.BoardLevelPropose} {
 		b.setLevel(gh.sessionID, level)
 		_, _, before := b.up.snapshot()
-		for _, tool := range wantColumnTools {
+		for _, tool := range wantPersonTools {
 			if r := b.callTool(gh, tool, map[string]any{"column_id": "c1"}); !strings.Contains(r.errMessage(), "needs full access") {
 				t.Fatalf("%s: %s = %s", level, tool, r.raw)
 			}
@@ -351,7 +352,7 @@ func TestColumnToolsFollowTheLevel(t *testing.T) {
 func TestColumnToolsNeedAPersonBehindTheAccess(t *testing.T) {
 	b := newBoardHarness(t, nil)
 	gh := b.grant() // a cron's grant: token proof
-	for _, tool := range wantColumnTools {
+	for _, tool := range wantPersonTools {
 		if slices.Contains(toolNames(b.call(gh, "tools/list", map[string]any{})), tool) {
 			t.Errorf("cron lists %s", tool)
 		}
@@ -383,7 +384,7 @@ func TestGatewayHonoursAPersonsFullAfterATokenLaunch(t *testing.T) {
 	b := newBoardHarness(t, nil)
 	gh := b.levelSessionWith(Proof{AccountID: "acct-1", TokenID: boardTestCron})
 	listed := func() []string { return toolNames(b.call(gh, "tools/list", map[string]any{})) }
-	for _, tool := range wantColumnTools {
+	for _, tool := range wantPersonTools {
 		if slices.Contains(listed(), tool) {
 			t.Fatalf("token launch lists %s", tool)
 		}
@@ -392,7 +393,7 @@ func TestGatewayHonoursAPersonsFullAfterATokenLaunch(t *testing.T) {
 		}
 	}
 	b.setLevel(gh.sessionID, db.BoardLevelFull)
-	for _, tool := range wantColumnTools {
+	for _, tool := range wantPersonTools {
 		if !slices.Contains(listed(), tool) {
 			t.Fatalf("after Full, %s is not listed", tool)
 		}
@@ -424,12 +425,64 @@ func TestGatewayListsWithTheLivePermissionAfterTheLaunchTokenIsGone(t *testing.T
 	b.ex.mu.Unlock()
 	r := b.call(gh, "tools/list", map[string]any{})
 	got := toolNames(r)
-	for _, tool := range append(append([]string(nil), wantBoardTools...), wantColumnTools...) {
+	for _, tool := range append(append([]string(nil), wantBoardTools...), wantPersonTools...) {
 		if !slices.Contains(got, tool) {
 			t.Fatalf("tools/list after the launch token is gone lacks %s: %s", tool, r.raw)
 		}
 	}
 	if r := b.callTool(gh, "blerg_card_get", map[string]any{"card_id": "c1"}); r.errMessage() != "" {
 		t.Fatalf("card read after the launch token is gone: %s", r.raw)
+	}
+}
+
+// Exercise both session CallBoard and the engine HTTP gateway, including MCP serialization.
+func TestOversizedBoardPageFailsWithoutPartialJSON(t *testing.T) {
+	forBothTransports(t, func(t *testing.T, sse bool) {
+		b := newBoardHarness(t, nil)
+		b.up.setSSE(sse)
+		page, _ := json.Marshal(map[string]any{"cards": []any{map[string]any{"body": strings.Repeat("x", DefaultMaxResultBytes+1)}}, "next_cursor": ""})
+		b.up.callBody = func(string, json.RawMessage) any {
+			return map[string]any{"content": []map[string]string{{"type": "text", "text": string(page)}}}
+		}
+		check := func(raw json.RawMessage) {
+			t.Helper()
+			var result struct {
+				IsError bool
+				Content []struct{ Text string }
+			}
+			if err := json.Unmarshal(raw, &result); err != nil {
+				t.Fatal(err)
+			}
+			if !result.IsError || len(result.Content) != 1 || !strings.Contains(result.Content[0].Text, "smaller") || strings.Contains(result.Content[0].Text, "cards") {
+				t.Fatalf("oversized page must become a plain error, got %.300s", raw)
+			}
+		}
+		res, err := b.gw.CallBoard(t.Context(), BoardCall{Proof: Proof{AccountID: "acct-1", SessionID: "login-1"}, BoardID: boardTestID, SessionRef: "s-1", Tool: "blerg_card_search", Arguments: []byte(`{"page":true}`), ReadOnly: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(res)
+		gh := b.levelSession()
+		r := b.callTool(gh, "blerg_card_search", map[string]any{"board_id": boardTestID, "page": true})
+		raw, _ := json.Marshal(r.result())
+		check(raw)
+	})
+}
+
+func TestReleaseWritesRequireServerCutExecutor(t *testing.T) {
+	b := newBoardHarness(t, nil)
+	gh := b.levelSession()
+	for _, tool := range []string{"blerg_release_close", "blerg_release_save", "blerg_release_delete"} {
+		t.Run(tool, func(t *testing.T) {
+			if slices.Contains(BoardToolNames(), tool) {
+				t.Fatal("session grant advertises a release write")
+			}
+			if response := b.callTool(gh, tool, map[string]any{"release_id": "release"}); response.errMessage() == "" {
+				t.Fatal("session grant executed a release write")
+			}
+			if _, err := b.gw.CallBoard(t.Context(), BoardCall{Proof: Proof{AccountID: "acct-1", SessionID: "login-1"}, BoardID: boardTestID, SessionRef: gh.sessionID, Tool: tool, Arguments: json.RawMessage(`{}`)}); !errors.Is(err, ErrBoardCallInvalid) {
+				t.Fatalf("session board call: %v", err)
+			}
+		})
 	}
 }

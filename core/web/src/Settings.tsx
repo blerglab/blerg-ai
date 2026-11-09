@@ -1,19 +1,24 @@
+import { IconButton } from '../../../packages/settings/IconButton'
 import "../../../packages/settings/settings.css";
 import { useEffect, useState } from "react";
 import { Navigate } from "react-router-dom";
+import PersonTimeSettings from "./PersonTimeSettings";
 import { apiFetch } from "./apiFetch";
 import { getAccessToken } from "./authClient";
 import { mustChangePassword, tokenCaps } from "./claims";
 import PluginsSection from "./PluginsSection";
 import { useEngineDescriptors } from "./engineDescriptors";
 import ManagedCredentials, { type ManagedCredentialSummary } from "./ManagedCredentials";
+import GitReadOnlyTokensSection from "./GitReadOnlyTokensSection";
 import McpConnectionsSection from "./McpConnectionsSection";
 import UpdateNoticeSection from "./UpdateNoticeSection";
+import LiveDataSettingsSection from "./LiveDataSettingsSection";
 import ChildLimitsSection from "./ChildLimitsSection";
 import SessionStorageSection from "./SessionStorageSection";
 import BoardLimitsSection from "./BoardLimitsSection";
 import ShellPolicySection from "./ShellPolicySection";
 import PluginMarketplacesSection from "./PluginMarketplacesSection";
+import PeopleSection from "./PeopleSection";
 import DesktopsSection from "./DesktopsSection";
 import Shell, { useSite, type Site } from "./Shell";
 
@@ -67,10 +72,10 @@ const KIND_HELP: Record<Kind, React.ReactNode> = {
         {GITHUB_TOKEN_URL}
       </a>
       . Resource owner: your account or an organization you own; repository access: the repos
-      sessions may work on; permissions: Contents read and write, Metadata read. The launch sheet
-      lists the repos it can see, and it clones private ones for you. Cluster sessions also push
-      with it; a desktop session never does — a Local sandbox session can commit but not push
-      (push from your machine), and a This machine session pushes with your machine's own git
+      workspaces may work on; permissions: Contents read and write, Metadata read. The launch sheet
+      lists the repos it can see, and it clones private ones for you. Cluster workspaces also push
+      with it; a desktop workspace never does — a Local sandbox workspace can commit but not push
+      (push from your machine), and a This machine workspace pushes with your machine's own git
       login.
     </>
   ),
@@ -84,8 +89,8 @@ const KIND_HELP: Record<Kind, React.ReactNode> = {
       so the launch sheet can list your projects, and{" "}
       <code className="mono">read_repository</code> plus{" "}
       <code className="mono">write_repository</code> so private projects can be cloned for you
-      (and cluster sessions can push; a desktop session pushes, if at all, with your machine's own
-      git login — a Local sandbox session can commit but not push).
+      (and cluster workspaces can push; a desktop workspace pushes, if at all, with your machine's own
+      git login — a Local sandbox workspace can commit but not push).
       Projects inside subgroups are not listed yet.
     </>
   ),
@@ -100,7 +105,7 @@ type CredentialSummary = ManagedCredentialSummary;
 // when both come back 401: the first triggers the redirect, the second is handed its 401 back.
 // Rendering "Failed to load … (401)" for that is both noise and a lie about the cause; the
 // honest instruction is to reload.
-const SESSION_EXPIRED = "Your session has expired. Reload the page to sign in again.";
+const SESSION_EXPIRED = "Your sign-in has expired. Reload the page to sign in again.";
 
 // ── agent tokens (spec §2) ───────────────────────────────────────────────────
 //
@@ -120,7 +125,7 @@ const PRESETS = [
   {
     name: "run-sessions",
     aud: "blerg-runner",
-    summary: "Start and drive agent sessions on the runner (REST and MCP)",
+    summary: "Start and drive agent workspaces on the runner (REST and MCP)",
   },
   {
     name: "board",
@@ -674,6 +679,7 @@ function AccountSection() {
       <p className="eyebrow">Settings</p>
       <h2 className="settings-heading section-title">Account</h2>
       <p className="settings-description">Manage your sign-in details.</p>
+      <PersonTimeSettings />
       {loadError && (
         <p className="field-error" role="alert">
           {loadError}
@@ -782,6 +788,12 @@ export default function Settings() {
 }
 
 function SettingsScreen() {
+  const [requestedSection, setRequestedSection] = useState(() => new URLSearchParams(location.search).get("section") || "account");
+  useEffect(() => {
+    const changed = () => setRequestedSection(new URLSearchParams(location.search).get("section") || "account");
+    window.addEventListener("popstate", changed);
+    return () => window.removeEventListener("popstate", changed);
+  }, []);
  const discovery = useEngineDescriptors();
  const labels = { ...KIND_LABELS, ...Object.fromEntries((discovery.metadata?.engines ?? []).map(e => [e.id, KIND_LABELS[e.id] ?? e.name])) };
  const groups = [{ eyebrow: "Engines", kinds: (discovery.metadata?.engines ?? []).filter(e => e.credential_import === true).map(e => e.id) }, { eyebrow: "Git", kinds: GIT_KINDS }];
@@ -797,6 +809,13 @@ function SettingsScreen() {
   const site = useSite();
   // UI routing only (claims.ts): the server refuses the board limits to anyone without account.manage.
   const isAdministrator = tokenCaps(getAccessToken() ?? "").includes("account.manage");
+
+  const section = requestedSection === "integrations" || ((requestedSection === "install" || requestedSection === "people") && isAdministrator) ? requestedSection : "account";
+  const sections = [
+    { id: "account", title: "Account", description: "Manage your sign-in, desktops, and agent tokens." },
+    { id: "integrations", title: "Integrations", description: "Connect accounts, plugins, and tools for your workspaces." },
+    ...(isAdministrator ? [{ id: "people", title: "People", description: "Invite people and manage their desktops." }, { id: "install", title: "Install", description: "Manage release notices, worker limits, and workspace policies." }] : []),
+  ];
 
   const refresh = async () => {
     setLoading(true);
@@ -868,14 +887,30 @@ function SettingsScreen() {
 
   return (
     <Shell site={site} aside={<a className="btn btn-quiet" href="/app">Home</a>}>
-      <AccountSection />
+      <h1 className="settings-heading">Settings</h1>
+      <div className="settings-layout">
+        <nav className="settings-navigation" aria-label="Settings sections">
+          {sections.map(item => <a key={item.id} href={`?section=${item.id}`} aria-current={section === item.id ? "page" : undefined} onClick={event => {
+            if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+            event.preventDefault();
+            const url = new URL(location.href);
+            url.searchParams.set("section", item.id);
+            history.pushState(null, "", url);
+            setRequestedSection(item.id);
+          }}><strong>{item.title}</strong><span>{item.description}</span></a>)}
+        </nav>
+        <div className="settings-content">
+      {section === "account" && <>{new URLSearchParams(location.search).get("setup") === "desktop" && <section className="settings-section section"><h2 className="settings-heading section-title">Set up your desktop</h2><p className="settings-description">Choose Add a desktop below to get your one-time install command.</p></section>}<AccountSection />
       <DesktopsSection site={site} />
+      <AgentTokens site={site} /></>}
+      {section === "integrations" && <>
+
       <section className="settings-section section">
-        <p className="eyebrow">Sessions</p>
+        <p className="eyebrow">Workspaces</p>
         <h2 className="settings-heading section-title">Credentials</h2>
-        <p className="settings-description">Connect the accounts your sessions use to run agents and access repositories.</p>
+        <p className="settings-description">Connect the accounts your workspaces use to run agents and access repositories.</p>
         {!discovery.metadata && !discovery.error && <p className="muted">Loading engine integrations…</p>}
-        {discovery.error && <p role="alert">{discovery.error} <button className="settings-action" type="button" onClick={discovery.retry}>Retry engine discovery</button></p>}
+        {discovery.error && <p role="alert">{discovery.error} <IconButton label="Retry engine discovery" onClick={discovery.retry} /></p>}
         {loading && <p className="muted">Loading…</p>}
         {error && <p className="field-error" role="alert">{error}</p>}
         <ManagedCredentials summaries={summaries} labels={labels} onConnected={async () => { if (!await refresh()) throw new Error("Credential status unavailable"); }} />
@@ -906,6 +941,9 @@ function SettingsScreen() {
                           setDrafts((d) => ({ ...d, [kind]: e.target.value }))
                         }
                         placeholder="Paste credential…"
+                        autoComplete="off"
+                        spellCheck={false}
+                        autoCapitalize="off"
                       />
                       <div className="card-actions">
                         <button type="submit" className="settings-action btn btn-primary" disabled={submitting === kind || (drafts[kind] ?? "").trim() === ""}>
@@ -934,12 +972,19 @@ function SettingsScreen() {
           </div>
         ))}
       </section>
+      <GitReadOnlyTokensSection summaries={summaries} onChanged={refresh} />
       <PluginsSection metadata={discovery.metadata} discoveryError={discovery.error} retryDiscovery={discovery.retry} />
       <McpConnectionsSection site={site} />
-      <AgentTokens site={site} />
+      <LiveDataSettingsSection />
+      </>}
+      {section === "people" && <><PeopleSection /><DesktopsSection site={site} /></>}
+      {section === "install" && <>
       {isAdministrator && <BoardLimitsSection />}
       {isAdministrator && <><ChildLimitsSection /><SessionStorageSection /><UpdateNoticeSection /></>}
       {isAdministrator && <><ShellPolicySection /><PluginMarketplacesSection /></>}
+      </>}
+        </div>
+      </div>
     </Shell>
   );
 }

@@ -97,10 +97,30 @@ func (s *LocalWorkspaceService) abortRuntime(ctx context.Context, w *LocalWorksp
 // Finalize freezes a retryable payload before its first send. Results are
 // acknowledged before any terminal event; neither failure deletes recovery.
 // Results must implement idempotent replacement for this runtime/member tuple.
-func (s *LocalWorkspaceService) Finalize(ctx context.Context, w *LocalWorkspace, message protocol.SessionEnded, send func(protocol.SessionEnded) error) error {
+func (s *LocalWorkspaceService) Finalize(ctx context.Context, w *LocalWorkspace, message protocol.SessionEnded, send func(protocol.SessionEnded) error) (err error) {
 	ctx = cleanupContext(ctx)
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	defer func() {
+		var refused *WorkspaceRefusedError
+		if errors.As(err, &refused) {
+			w.state.AuthorityRefused = true
+			err = errors.Join(err, w.save())
+		}
+	}()
+	if w.state.AuthorityRefused {
+		return &WorkspaceRefusedError{Reason: "cleanup previously refused; local work retained"}
+	}
+	if !w.state.Host && w.state.StorageReleased && workspaceFinalComplete(w.state) {
+		storage := w.storage
+		if storage == nil {
+			storage = s.Storage
+		}
+		if storage == nil {
+			storage = defaultWorkspaceStorage()
+		}
+		return pruneWorkspaceStorage(w, storage)
+	}
 	if err := w.validateIntentJournal(true); err != nil {
 		return err
 	}
@@ -175,7 +195,20 @@ func (s *LocalWorkspaceService) Finalize(ctx context.Context, w *LocalWorkspace,
 	w.state.TerminalReceipt = receipt.Digest
 	w.state.TerminalAcknowledged = true
 	removeSessionAttachments(DaemonStateDir(), w.state.Session)
-	return w.save()
+	if err := w.save(); err != nil {
+		return err
+	}
+	if !w.state.Host && w.state.StorageReleased {
+		storage := w.storage
+		if storage == nil {
+			storage = s.Storage
+		}
+		if storage == nil {
+			storage = defaultWorkspaceStorage()
+		}
+		return pruneWorkspaceStorage(w, storage)
+	}
+	return nil
 }
 
 // Round-1 records can predate the start-token journal. They cannot be resumed
@@ -218,6 +251,9 @@ type WorkspaceFinalization = protocol.WorkspaceFinalization
 type WorkspaceFinalReceipt = protocol.WorkspaceFinalReceipt
 
 func (s *LocalWorkspaceService) reconnectHosted(ctx context.Context, w *LocalWorkspace, report func(protocol.SessionEnded) error) error {
+	if err := s.settleHostedMembership(ctx, w); err != nil {
+		return err
+	}
 	if w.host != nil {
 		return w.host.reconnect(ctx, report)
 	}
@@ -323,11 +359,16 @@ func workspaceFinalComplete(state workspacePrivateManifest) bool {
 func (w *LocalWorkspace) RequestStop(message protocol.SessionEnded) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if err := w.validateIntentJournal(false); err != nil {
-		return err
-	}
 	if message.Type != "session_ended" || message.SessionID != w.state.Session {
 		return errors.New("stop delivery session mismatch")
+	}
+	if w.host != nil {
+		if err := w.host.beginRetirement(); err != nil {
+			return err
+		}
+	}
+	if err := w.validateIntentJournal(false); err != nil {
+		return err
 	}
 	if w.state.StopDelivery == nil {
 		message.WorkspaceResults = nil

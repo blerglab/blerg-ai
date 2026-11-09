@@ -22,8 +22,9 @@ type FieldDef struct {
 
 // FieldError names the offending key so the 422 is actionable.
 type FieldError struct {
-	Key string
-	Msg string
+	CutCause string // safe machine-readable release-cut failure, when applicable
+	Key      string
+	Msg      string
 }
 
 func (e *FieldError) Error() string { return fmt.Sprintf("field %q: %s", e.Key, e.Msg) }

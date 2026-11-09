@@ -510,3 +510,22 @@ describe('CronForm standalone board discovery', () => {
     expect(posted[0].body.board_id).toBe('')
   })
 })
+
+describe('fixed command steps', () => {
+ it('requires fresh explicit approval after each definition edit', async () => {
+  await renderForm(existing())
+  const commands = screen.getByLabelText('Fixed command steps (JSON)')
+  fireEvent.change(commands, {target:{value:'[{"argv":["echo","hello"],"timeout_seconds":10,"max_output_bytes":1024}]'}})
+  save()
+  expect(await screen.findByText('Approve the exact fixed commands before saving.')).toBeInTheDocument()
+  expect(posted).toHaveLength(0)
+  fireEvent.click(screen.getByLabelText('I approve these exact commands for every run.'))
+  fireEvent.change(commands, {target:{value:'[{"argv":["echo","changed"],"timeout_seconds":10,"max_output_bytes":1024}]'}})
+  expect(screen.getByLabelText('I approve these exact commands for every run.')).not.toBeChecked()
+  fireEvent.click(screen.getByLabelText('I approve these exact commands for every run.'))
+  save()
+  await waitFor(() => expect(posted).toHaveLength(1))
+  expect(posted[0].body.command_steps).toEqual([{argv:['echo','changed'],timeout_seconds:10,max_output_bytes:1024}])
+  expect(posted[0].body.approve_command_steps).toBe(true)
+ })
+})

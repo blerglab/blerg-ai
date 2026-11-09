@@ -405,3 +405,11 @@ func TestCoreRegistrationSendsFullManifestEntry(t *testing.T) {
 		t.Errorf("derived URLs missing: %+v", got)
 	}
 }
+
+func TestRunnerManifestBuildCommit(t *testing.T) {
+	SetComponentCommit("1234567890abcdef")
+	defer SetComponentCommit("")
+	if got := RunnerManifest("https://runner.example.test").Commit; got != "1234567890abcdef" {
+		t.Fatalf("commit = %q", got)
+	}
+}

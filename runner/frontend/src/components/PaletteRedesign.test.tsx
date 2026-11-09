@@ -21,7 +21,7 @@ describe('grouped palette', () => {
     show(paletteGroups.flatMap(group => Array.from({ length: 8 }, (_, i) => item(`${group}-${i}`, { title: `match ${i}`, group }))))
     type('match')
     expect(screen.getAllByRole('group').map(g => g.getAttribute('aria-labelledby'))).toHaveLength(4)
-    for (const name of ['Sessions', 'Cards', 'Files', 'Commands']) {
+    for (const name of ['Workspaces', 'Cards', 'Files', 'Commands']) {
       const group = screen.getByRole('group', { name })
       expect(within(group).getAllByRole('option')).toHaveLength(6)
       expect(within(group).getByRole('option', { name: `More ${name.toLowerCase()} (3)` })).toBeInTheDocument()
@@ -29,13 +29,13 @@ describe('grouped palette', () => {
     const input = screen.getByRole('combobox')
     for (let i = 0; i < 5; i++) fireEvent.keyDown(input, { key: 'ArrowDown' })
     fireEvent.keyDown(input, { key: 'Enter' })
-    expect(within(screen.getByRole('group', { name: 'Sessions' })).getAllByRole('option')).toHaveLength(8)
+    expect(within(screen.getByRole('group', { name: 'Workspaces' })).getAllByRole('option')).toHaveLength(8)
     expect(screen.getByRole('option', { selected: true })).toHaveTextContent('match 5')
     for (let i = 0; i < 3; i++) fireEvent.keyDown(input, { key: 'ArrowDown' })
     expect(screen.getByRole('option', { selected: true }).closest('[role=group]')).toHaveAccessibleName('Cards')
     expect(document.getElementById(input.getAttribute('aria-activedescendant')!)).toBe(screen.getByRole('option', { selected: true }))
   })
-  it.each([['s ', 'Sessions'], ['session:', 'Sessions'], ['#', 'Cards'], ['/', 'Files'], ['>', 'Commands']])('turns %s into a removable %s chip', (prefix, name) => {
+  it.each([['s ', 'Workspaces'], ['session:', 'Workspaces'], ['#', 'Cards'], ['/', 'Files'], ['>', 'Commands']])('turns %s into a removable %s chip', (prefix, name) => {
     show(paletteGroups.map(group => item(group, { title: 'match', group })))
     type(`${prefix}match`)
     expect(screen.getByRole('combobox')).toHaveValue('match')
@@ -48,7 +48,7 @@ describe('grouped palette', () => {
   it('removes an empty chip on Backspace and preserves ordinary spaces while typing', () => {
     show([])
     type('s ')
-    expect(screen.getByRole('button', { name: 'Remove sessions scope' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Remove workspaces scope' })).toBeInTheDocument()
     fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Backspace' })
     expect(screen.queryByRole('button', { name: /Remove .* scope/ })).toBeNull()
     type('a normal query')
@@ -59,16 +59,16 @@ describe('grouped palette', () => {
     r.remember('session-7'); r.remember('danger')
     show([
       ...Array.from({ length: 8 }, (_, i) => item(`session-${i}`, { group: 'sessions', recentRank: i < 5 ? 4 - i : undefined })),
-      item('New session', { empty: true }), item('Open board', { empty: true }), item('Settings', { empty: true }),
+      item('New workspace', { empty: true }), item('Open board', { empty: true }), item('Settings', { empty: true }),
       item('danger', { destructive: true, empty: true }), item('uncommon'), item('file', { group: 'files' }),
       item('insights', { here: 7 }), item('quick open', { here: 1 }), item('shell', { here: 2, destructive: true }),
       item('model menu', { here: 3, refine: 'Switch model: ' }),
     ], [], r)
-    expect(screen.getAllByRole('group').map(g => g.getAttribute('aria-labelledby') && document.getElementById(g.getAttribute('aria-labelledby')!)?.textContent)).toEqual(['This session', 'Recent sessions', 'Commands'])
-    expect(within(screen.getByRole('group', { name: 'This session' })).getAllByRole('option').map(o => o.textContent?.trim())).toEqual(['quick open', 'shell', 'model menu', 'insights'])
+    expect(screen.getAllByRole('group').map(g => g.getAttribute('aria-labelledby') && document.getElementById(g.getAttribute('aria-labelledby')!)?.textContent)).toEqual(['This workspace', 'Recent workspaces', 'Commands'])
+    expect(within(screen.getByRole('group', { name: 'This workspace' })).getAllByRole('option').map(o => o.textContent?.trim())).toEqual(['quick open', 'shell', 'model menu', 'insights'])
     expect(screen.getByRole('option', { selected: true })).toHaveTextContent('quick open')
     // Recency in the registry does not reorder or add sessions: only recentRank counts.
-    expect(within(screen.getByRole('group', { name: 'Recent sessions' })).getAllByRole('option').map(o => o.textContent?.trim())).toEqual(['session-4', 'session-3', 'session-2'])
+    expect(within(screen.getByRole('group', { name: 'Recent workspaces' })).getAllByRole('option').map(o => o.textContent?.trim())).toEqual(['session-4', 'session-3', 'session-2'])
     expect(within(screen.getByRole('group', { name: 'Commands' })).getAllByRole('option')).toHaveLength(3)
     expect(screen.queryByRole('option', { name: 'danger' })).toBeNull()
     expect(screen.queryByRole('option', { name: 'uncommon' })).toBeNull()
@@ -106,7 +106,7 @@ describe('grouped palette', () => {
   it('requires an explicit arrow or pointer selection when only destructive actions match', () => {
     const r = new CommandRegistry(), danger = vi.fn()
     r.remember('danger')
-    show([item('danger', { title: 'Discard session…', destructive: true, run: danger })], [], r)
+    show([item('danger', { title: 'Discard workspace…', destructive: true, run: danger })], [], r)
     type('>Discard')
     const input = screen.getByRole('combobox')
     expect(input).not.toHaveAttribute('aria-activedescendant')
@@ -162,14 +162,15 @@ describe('card provider access', () => {
   it('searches only discovered boards, drops denied results, and binds modal references to the board', async () => {
     vi.mocked(apiFetch).mockImplementation(async path => new Response(JSON.stringify(
       path === '/api/session-boards' ? { boards: [{ id: 'design', name: 'Design' }, { id: 'denied', name: 'Denied' }] } :
-      path.includes('/design/') ? { cards: [{ board_id: 'untrusted', number: 218, title: 'Split view', column_name: 'Doing' }] } : {}
+      path.includes('/design/') ? { cards: [{ board_id: 'untrusted', number: 218, reference: 'AP-218', title: 'Split view', column_name: 'Doing' }] } : {}
     ), { status: path.includes('/denied/') ? 403 : 200 }))
     const open = vi.fn(), controller = new AbortController()
-    const result = await cardProvider(open).search('split', controller.signal)
+    const result = await cardProvider(open).search('AP-218', controller.signal)
+    expect(apiFetch).toHaveBeenCalledWith('/api/board-cards/design/search?q=AP-218', expect.anything())
     expect(result.items).toHaveLength(1)
-    expect(result.items[0]).toMatchObject({ title: '#218 Split view', detail: 'Design · Doing', group: 'cards' })
+    expect(result.items[0]).toMatchObject({ title: 'AP-218 Split view', detail: 'Design · Doing', group: 'cards' })
     result.items[0].run()
-    expect(open).toHaveBeenCalledWith(expect.objectContaining({ board_id: 'design', key: '#218' }))
+    expect(open).toHaveBeenCalledWith(expect.objectContaining({ board_id: 'design', key: 'AP-218' }))
     identity.account = 'another'
     result.items[0].run()
     expect(open).toHaveBeenCalledOnce()

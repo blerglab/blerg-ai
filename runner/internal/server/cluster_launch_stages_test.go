@@ -184,3 +184,14 @@ func TestClusterQueuedStageRecordsKubernetesReason(t *testing.T) {
 		})
 	}
 }
+
+func TestClusterWorkspaceFailureLaunchCauses(t *testing.T) {
+	for _, tc := range []struct{ detail, want string }{
+		{"Repository clone failed", "repository_clone_failed"},
+		{"Retained repository storage is missing; resume refused", "retained_storage_missing"},
+	} {
+		if got := launchDiagnosticReason(protocol.StartStage{State: protocol.StageStateFailed, Detail: tc.detail}); got != tc.want {
+			t.Errorf("%s: got %s", tc.want, got)
+		}
+	}
+}

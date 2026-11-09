@@ -1,3 +1,4 @@
+import { IconButton } from '@blerglab/chat'
 import { useId, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiFetch } from '../apiFetch'
@@ -73,14 +74,12 @@ export function PluginAddForm({ model, id, onStart }: { model: Model; id?: strin
     }
   }
   return (
-    <section className="session-plugins" aria-label="Session plugins" id={id}>
+    <section className="session-plugins" aria-label="Workspace plugins" id={id}>
       <div className="session-plugin-form">
         {error && (
           <p role="alert">
             {error}{' '}
-            <button type="button" onClick={() => void refresh()}>
-              Retry plugin choices
-            </button>
+            <IconButton label="Retry plugin choices" onClick={() => refresh()} />
           </p>
         )}
         {!data && !error && <p role="status">Loading plugin choices…</p>}
@@ -88,7 +87,7 @@ export function PluginAddForm({ model, id, onStart }: { model: Model; id?: strin
           <>
             {data.reason && <p>{data.reason}</p>}
             {!data.supported ? (
-              <p>Plugins cannot be added to this session.</p>
+              <p>Plugins cannot be added to this workspace.</p>
             ) : (
               <>
                 <p>
@@ -131,7 +130,7 @@ export function PluginAddForm({ model, id, onStart }: { model: Model; id?: strin
                   Apply plugin
                   <select value={effectiveScope} onChange={(e) => setScope(e.target.value as PluginScope)}>
                     <option value="session" disabled={!data.session_apply}>
-                      This session only
+                      This workspace only
                     </option>
                     <option value="always">Always on</option>
                   </select>
@@ -141,7 +140,7 @@ export function PluginAddForm({ model, id, onStart }: { model: Model; id?: strin
                     ? 'Loads between turns; your account settings stay unchanged.'
                     : data.session_apply
                       ? 'Saves to account settings and loads between turns.'
-                      : 'Saves to account settings for new sessions. This session keeps its current plugins.'}
+                      : 'Saves to account settings for new workspaces. This workspace keeps its current plugins.'}
                 </p>
                 <button
                   type="button"
@@ -149,7 +148,7 @@ export function PluginAddForm({ model, id, onStart }: { model: Model; id?: strin
                   aria-describedby={disabledReason ? reasonId : undefined}
                   onClick={() => void add()}
                 >
-                  {busy ? 'Saving…' : effectiveScope === 'session' ? 'Add to session' : 'Save always on'}
+                  {busy ? 'Saving…' : effectiveScope === 'session' ? 'Add to workspace' : 'Save always on'}
                 </button>
                 {disabledReason && <p id={reasonId}>{disabledReason}</p>}
               </>
@@ -163,7 +162,7 @@ export function PluginAddForm({ model, id, onStart }: { model: Model; id?: strin
   )
 }
 export function StartPluginSession({ onStart }: { onStart?: () => void }) {
-  return <button type="button" className="btn small" onClick={() => { onStart?.(); openLaunchSheet() }}>Start a new session with it</button>
+  return <button type="button" className="btn small" onClick={() => { onStart?.(); openLaunchSheet() }}>Start a new workspace with it</button>
 }
 
 export function PluginRequests({ model, pendingOnly = false }: { model: Model; pendingOnly?: boolean }) {
@@ -206,5 +205,5 @@ export function DisallowedPlugins({ model }: { model: Model }) {
   if (!data || data.any_marketplace) return null
   const disallowed = data.plugins.filter(p => !data.allowed_marketplaces.some(s => s.toLowerCase() === p.marketplace.toLowerCase()))
   if (!disallowed.length) return null
-  return <section className="session-plugins" aria-label="Disallowed saved plugins"><ul>{disallowed.map(p => <li key={`${p.marketplace}/${p.plugin}`}><strong>{p.plugin}</strong>: marketplace no longer allowed ({p.marketplace}). Kept in your account; it will not load in new sessions.</li>)}</ul></section>
+  return <section className="session-plugins" aria-label="Disallowed saved plugins"><ul>{disallowed.map(p => <li key={`${p.marketplace}/${p.plugin}`}><strong>{p.plugin}</strong>: marketplace no longer allowed ({p.marketplace}). Kept in your account; it will not load in new workspaces.</li>)}</ul></section>
 }

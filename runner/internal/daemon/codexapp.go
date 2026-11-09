@@ -17,7 +17,12 @@ import (
 
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/skills"
 )
+
+var codexInterruptResultAfter = 30 * time.Second
+
+const codexRPCTimeout = 30 * time.Second
 
 type codexQuestionStatus struct{ turn, status string }
 
@@ -44,6 +49,10 @@ type codexApp struct {
 	backlogBytes        int
 	failure             string
 	interruptRequested  bool
+	interruptTimer      *time.Timer
+	interruptEpoch      uint64
+	interruptWake       chan struct{}
+	stopFallback        bool
 	capRefreshing       bool
 	capRefreshAgain     bool
 	starting            bool
@@ -59,6 +68,7 @@ type codexApp struct {
 	planEpoch           uint64 // increments for each root turn/start attempt; protected by mu
 	planStarting        bool   // covers RPC response through accepted-turn binding; protected by mu
 
+	rpcTimeout           time.Duration // protected by mu; zero uses the production RPC deadline
 	terminalPollInterval time.Duration // zero uses the production polling interval
 	// Protected by d.mu; native MCP inventory is available before thread setup.
 	mcpInitialized bool
@@ -132,7 +142,7 @@ func (a *codexApp) writeContext(parent context.Context, v any) error {
 	}
 	_ = a.in.Close()
 	if a.d != nil {
-		a.stop()
+		_ = a.stop()
 	}
 	return err
 }
@@ -146,12 +156,16 @@ func (a *codexApp) callContext(ctx context.Context, method string, params any) (
 	id := a.next
 	ch := make(chan codexRPC, 1)
 	a.pending[id] = ch
+	timeout := a.rpcTimeout
+	if timeout <= 0 {
+		timeout = codexRPCTimeout
+	}
 	a.mu.Unlock()
 	defer func() { a.mu.Lock(); delete(a.pending, id); a.mu.Unlock() }()
 	if err := a.writeContext(ctx, map[string]any{"id": id, "method": method, "params": params}); err != nil {
 		return nil, err
 	}
-	timer := time.NewTimer(30 * time.Second)
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case r := <-ch:
@@ -238,6 +252,46 @@ func (a *codexApp) interrupt() {
 	}
 	// A stop directed at child-only work must not interrupt a future root turn.
 	a.interruptRequested = a.turn != "" || a.starting
+	// An ACK only confirms receipt. Include child-only turns in the same
+	// bounded completion wait, without assigning their Stop to a future root turn.
+	if len(targets) > 0 && a.interruptTimer == nil {
+		turn, planEpoch := a.turn, a.planEpoch
+		a.interruptEpoch++
+		epoch := a.interruptEpoch
+		a.interruptTimer = time.AfterFunc(codexInterruptResultAfter, func() {
+			a.mu.Lock()
+			if epoch != a.interruptEpoch || (a.ctx != nil && a.ctx.Err() != nil) {
+				a.mu.Unlock()
+				return
+			}
+			stop := turn != "" && a.turn == turn && a.planEpoch == planEpoch && a.interruptRequested
+			for _, t := range targets {
+				if t.thread != root && a.childTurns[t.thread] == t.turn && a.interruptedChildren[t.thread] == t.turn {
+					stop = true
+				}
+			}
+			if stop {
+				a.stopFallback = true
+			} else {
+				a.interruptTimer = nil
+			}
+			a.mu.Unlock()
+			if stop {
+				if err := a.stop(); err != nil {
+					a.mu.Lock()
+					a.stopFallback = false
+					a.interruptTimer = nil // another Stop may retry safe cancellation
+					a.mu.Unlock()
+					cause := a.d.safeCodexError(codexTurnError{Message: err.Error()})
+					a.d.emit("error", agent.ErrorPayload{Message: "The worker could not stop safely: " + cause + ". Queued messages are still waiting; try Stop again.", Retryable: true, Code: agent.ErrorCodeStopFailed})
+				}
+				select {
+				case a.interruptWake <- struct{}{}:
+				default:
+				}
+			}
+		})
+	}
 	if a.interruptedChildren == nil {
 		a.interruptedChildren = map[string]string{}
 	}
@@ -245,6 +299,10 @@ func (a *codexApp) interrupt() {
 		a.interruptedChildren[thread] = turn
 	}
 	a.mu.Unlock()
+	select {
+	case a.interruptWake <- struct{}{}:
+	default:
+	}
 	a.cancelDynamic("", "")
 	if len(targets) == 0 {
 		return
@@ -253,9 +311,26 @@ func (a *codexApp) interrupt() {
 		for _, t := range targets {
 			_, err := a.call("turn/interrupt", map[string]any{"threadId": t.thread, "turnId": t.turn})
 			if err != nil && a.ctx.Err() == nil {
+				a.mu.Lock()
+				fallback := a.stopFallback
+				current := a.turn == t.turn
+				stopping := a.interruptRequested
+				if t.thread != root {
+					current = a.childTurns[t.thread] == t.turn
+					stopping = a.interruptedChildren[t.thread] == t.turn
+				}
+				a.mu.Unlock()
+				if fallback || !current {
+					continue
+				}
 				var rejected codexRPCRejected
 				if !errors.As(err, &rejected) {
-					a.stop()
+					// A missing ACK is not a failed Stop. The completion deadline owns
+					// cleanup and reports an actual cancellation or restart refusal.
+					if stopping {
+						continue
+					}
+					_ = a.stop()
 				}
 				a.d.emit("error", agent.ErrorPayload{Message: err.Error(), Retryable: true})
 			}
@@ -266,7 +341,7 @@ func (a *codexApp) interrupt() {
 	}()
 }
 
-func (d *codexDriver) runApp(ctx context.Context) {
+func (d *codexDriver) runApp(ctx context.Context) (stopped bool) {
 	var connectionFailure string
 	appCtx, cancelApp := context.WithCancel(ctx)
 	defer cancelApp()
@@ -304,18 +379,27 @@ func (d *codexDriver) runApp(ctx context.Context) {
 	cmd.Stderr = diagnostic
 	d.recordProjectMCP()
 	if err = startEngineCommand(cmd, d.startCommand); err != nil {
-		d.emit("error", agent.ErrorPayload{Message: "Codex app-server could not start: " + err.Error(), Retryable: true})
+		cause := d.safeCodexError(codexTurnError{Message: err.Error()})
+		d.mu.Lock()
+		d.startFailure = cause
+		d.mu.Unlock()
+		d.emit("error", agent.ErrorPayload{Message: "Codex app-server could not start: " + cause, Retryable: true})
 		return
 	}
-	a := &codexApp{d: d, ctx: appCtx, in: in, pending: map[int]chan codexRPC{}, events: make(chan struct{}, 1), done: make(chan struct{})}
+	a := &codexApp{d: d, ctx: appCtx, interruptWake: make(chan struct{}, 1), in: in, pending: map[int]chan codexRPC{}, events: make(chan struct{}, 1), done: make(chan struct{})}
 	d.mu.Lock()
 	d.cmd = cmd
-	a.interruptRequested = d.interruptNext
-	d.interruptNext = false
+	d.startFailure = ""
 	d.app = a
 	d.mcpGeneration++
 	d.mu.Unlock()
 	defer func() {
+		a.mu.Lock()
+		stopped = a.stopFallback
+		if a.interruptTimer != nil {
+			a.interruptTimer.Stop()
+		}
+		a.mu.Unlock()
 		_ = in.Close()
 		_ = cancelEngineCommand(cmd, d.startCommand != nil || !d.prefix.enabled())
 		_ = cmd.Wait()
@@ -384,11 +468,11 @@ func (d *codexDriver) runApp(ctx context.Context) {
 	}
 	instructions := d.DeveloperInstructions
 	if instructions == "" {
-		instructions = ccSystemPromptFor("")
+		instructions = ccSystemPromptForPolicy("", effectiveSkillPolicy(d.SkillPolicy))
 	}
 	if d.codexToolsRestricted() {
 		params["sandbox"] = "read-only"
-		instructions = "This is a restricted Blerg session. Only the supplied workspace file tools and explicitly granted MCP tools are available."
+		instructions = "This is a restricted Blerg session. Only the supplied workspace file tools and explicitly granted MCP tools are available." + verbosityParagraph(d.Verbosity) + " " + workflowSkillsPrompt(effectiveSkillPolicy(d.SkillPolicy))
 	} else {
 		instructions += "\n\n" + codexQuestionHandoffInstructions
 	}
@@ -448,6 +532,14 @@ func (d *codexDriver) runApp(ctx context.Context) {
 	}
 	d.settingsMu.Lock()
 	d.mu.Lock()
+	if thread != "" && d.skillPack != nil && !d.codexToolsRestricted() {
+		// Existing Codex threads may ignore developerInstructions overrides.
+		// Refresh legacy random paths through the next acknowledged input too.
+		refresh := "Blerg current session rules and private skill catalog; replaces stale catalog paths: " + skills.AlwaysOn + d.skillPack.guide()
+		if !strings.HasPrefix(d.adoptionNote, refresh) {
+			d.adoptionNote = refresh + "\n\n" + d.adoptionNote
+		}
+	}
 	d.threadID = response.Thread.ID
 	a.mcpThreadReady = true
 	if d.settingsGeneration == settingsGeneration {
@@ -492,7 +584,10 @@ func (d *codexDriver) runApp(ctx context.Context) {
 	var retryDeadline <-chan time.Time
 	var heldInput chan queuedMsg
 	for {
-		if active == "" && heldInput == nil && a.restartForPlugins() {
+		a.mu.Lock()
+		stopping, fallback := (a.interruptRequested && (a.turn != "" || a.starting)) || len(a.interruptedChildren) > 0, a.stopFallback
+		a.mu.Unlock()
+		if !fallback && active == "" && heldInput == nil && a.restartForPlugins() {
 			return
 		}
 		input := (<-chan queuedMsg)(d.queue)
@@ -514,7 +609,12 @@ func (d *codexDriver) runApp(ctx context.Context) {
 			input = heldInput
 			retrying = false
 		}
+		if fallback || stopping {
+			input = nil
+		}
 		select {
+		case <-a.interruptWake:
+			continue
 		case <-d.pluginWake:
 			continue
 		case <-d.pluginUpdateWake():
@@ -528,8 +628,11 @@ func (d *codexDriver) runApp(ctx context.Context) {
 		case <-a.done:
 			if ctx.Err() == nil {
 				a.mu.Lock()
-				failure := a.failure
+				failure, fallback := a.failure, a.stopFallback
 				a.mu.Unlock()
+				if fallback {
+					return
+				}
 				if failure == "" {
 					failure = "Codex app-server disconnected; restart the session to resume its saved thread"
 				}
@@ -537,6 +640,18 @@ func (d *codexDriver) runApp(ctx context.Context) {
 			}
 			return
 		case msg := <-input:
+			// Stop can race the select above. Keep this unaccepted input ahead of
+			// the remaining queue; it belongs to the next turn, never the stopped one.
+			a.mu.Lock()
+			stopping := (a.interruptRequested && a.turn != "") || len(a.interruptedChildren) > 0
+			a.mu.Unlock()
+			if stopping {
+				heldInput = nil // this select consumed its only value; retryInput owns it now
+				d.mu.Lock()
+				d.retryInput = &msg
+				d.mu.Unlock()
+				continue
+			}
 			if active == "" && heldInput == nil && a.restartForPlugins() {
 				d.mu.Lock()
 				d.retryInput = &msg
@@ -646,10 +761,17 @@ func (d *codexDriver) runApp(ctx context.Context) {
 			result, e := a.call(method, p)
 			a.mu.Lock()
 			a.starting = false
+			rejectedStop := e != nil && active == "" && a.interruptRequested
 			if e != nil {
+				if active == "" {
+					a.interruptRequested = false
+				}
 				a.planStarting = false
 			}
 			a.mu.Unlock()
+			if rejectedStop {
+				d.emit("stop_result", map[string]string{"state": "idle", "message": "Nothing was running; the input was rejected."})
+			}
 			if e != nil {
 				var rejected codexRPCRejected
 				if errors.As(e, &rejected) {
@@ -670,6 +792,7 @@ func (d *codexDriver) runApp(ctx context.Context) {
 				d.emit("error", agent.ErrorPayload{Message: "Codex message delivery could not be confirmed; restarting the runtime to stop unconfirmed work", Retryable: true, ClientID: msg.ClientID})
 				return
 			}
+			d.recordAcceptedSkillInputs(inputs)
 			d.mu.Lock()
 			if note != "" {
 				if d.adoptionNote == note {
@@ -965,6 +1088,11 @@ func (d *codexDriver) runApp(ctx context.Context) {
 					// is canceled below) or now observes an inactive turn.
 					a.mu.Lock()
 					a.turn = ""
+					if a.interruptTimer != nil && len(a.interruptedChildren) == 0 {
+						a.interruptTimer.Stop()
+						a.interruptTimer = nil
+						a.interruptEpoch++
+					}
 					a.mu.Unlock()
 				}
 				a.cancelDynamic(n.ThreadID, n.Turn.ID)
@@ -1218,14 +1346,20 @@ type codexRPCRejected struct {
 }
 
 func (e codexRPCRejected) Error() string { return "Codex rejected " + e.method }
-func (a *codexApp) stop() {
+func (a *codexApp) stop() error {
 	a.d.mu.Lock()
 	cmd := a.d.cmd
 	same := a.d.app == a
 	a.d.mu.Unlock()
 	if same && cmd != nil && cmd.Process != nil {
-		_ = cancelEngineCommand(cmd, a.d.startCommand != nil)
+		if a.d.prefix.enabled() {
+			if err := a.d.prefix.killPID(sandboxTurnPIDFile); err != nil {
+				return err
+			}
+		}
+		return cancelEngineCommand(cmd, a.d.startCommand != nil)
 	}
+	return nil
 }
 
 type codexDynamicCall struct {

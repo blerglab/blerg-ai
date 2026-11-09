@@ -112,7 +112,7 @@ func TestWorkspaceSandboxAdmissionRequiresItsOwnCapability(t *testing.T) {
 func TestWorkspaceGuideNamesMembersAndCommitPolicy(t *testing.T) {
 	_, msg, _ := workspaceServiceFixture(t)
 	guide := workspaceGuide(msg.Workspace)
-	if !strings.Contains(guide, "/workspace/one") || !strings.Contains(guide, "Commit in each affected member") || strings.Contains(guide, "/private/") {
+	if !strings.Contains(guide, "Work in the affected member path") || !strings.Contains(guide, "This selection grants no shell permission") || !strings.Contains(guide, "report every commit ID") || !strings.Contains(guide, "Newly discovered repositories are not launch members") || !strings.Contains(guide, "/workspace/one") || !strings.Contains(guide, "Commit in each affected member") || strings.Contains(guide, "/private/") {
 		t.Fatal("invalid runtime workspace guide")
 	}
 }

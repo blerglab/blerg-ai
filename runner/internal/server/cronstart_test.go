@@ -337,7 +337,11 @@ func TestHTTPCronCore(t *testing.T) {
 func TestCronStartCluster(t *testing.T) {
 	cf := newCronFx(t)
 	ctx := context.Background()
-	c := cf.newCron(func(c *db.Cron) { c.Model, c.Effort = ptr("claude-sonnet-5"), ptr("high") })
+	c := cf.newCron(func(c *db.Cron) {
+		c.Model, c.Effort = ptr("claude-sonnet-5"), ptr("high")
+		c.Runtime = "cluster"
+		c.RuntimeTargetID = ptr("cluster")
+	})
 	run := cf.run(c)
 
 	sid, err := cf.svc.Start(ctx, c, run)
@@ -345,6 +349,9 @@ func TestCronStartCluster(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	row := cf.session(sid)
+	if row.RuntimeTargetID == nil || *row.RuntimeTargetID != "cluster" {
+		t.Fatalf("stored cron target lost: %+v", row.RuntimeTargetID)
+	}
 	if row.Runtime == nil || *row.Runtime != "cluster" {
 		t.Errorf("runtime = %v, want cluster (auto with a cluster configured)", row.Runtime)
 	}
@@ -503,6 +510,7 @@ func TestCronStartPinnedDaemon(t *testing.T) {
 	}
 	dc2 := &DaemonConn{ID: other, Name: "desk", ReposRoot: "/repos", send: make(chan []byte, 8)}
 	dc2.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc2.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	dc2.SetMCPGateway(true)
 	dc2.SetRestrictTools(true)
 	dc2.SetSandboxAvailable(true)

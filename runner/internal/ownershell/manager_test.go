@@ -291,14 +291,21 @@ func TestRenewalIdleAndAttachmentGrace(t *testing.T) {
 }
 func TestAuditCannotRecordPayloads(t *testing.T) {
 	f := setup(t)
+	f.r.binding.Runtime = "cluster"
+	f.r.binding.RuntimeTargetID = "cluster"
 	i, a := f.open(t)
 	_ = f.m.Input(t.Context(), f.actor, i.Handle, a.ID, 1, []byte("never-record-this"))
 	_ = f.m.Close(t.Context(), f.actor, i.Handle)
+	for _, event := range f.audit.events {
+		if event.RuntimeTargetID != "cluster" {
+			t.Fatalf("audit target: %+v", event)
+		}
+	}
 	b, _ := json.Marshal(f.audit.events)
 	if strings.Contains(string(b), "never-record-this") {
 		t.Fatal("payload recorded")
 	}
-	allowed := map[string]bool{"Actor": true, "Login": true, "Session": true, "Runtime": true, "RuntimeGeneration": true, "Connection": true, "Launch": true, "Shell": true, "PolicyRevision": true, "Event": true, "Reason": true, "At": true, "Duration": true}
+	allowed := map[string]bool{"Custody": true, "CustodyKind": true, "Epoch": true, "Outcome": true, "Actor": true, "Login": true, "Session": true, "Runtime": true, "RuntimeTargetID": true, "RuntimeGeneration": true, "Connection": true, "Launch": true, "Shell": true, "PolicyRevision": true, "Event": true, "Reason": true, "At": true, "Duration": true}
 	typ := reflect.TypeFor[Audit]()
 	for j := 0; j < typ.NumField(); j++ {
 		n := typ.Field(j).Name
@@ -1110,4 +1117,39 @@ func (r *lockedResolver) set(b Binding) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.binding = b
+}
+
+func TestAuditRefusedOpenHasDeniedOutcome(t *testing.T) {
+	f := setup(t)
+	f.r.binding.Live = false
+	if _, err := f.m.Open(t.Context(), f.actor, f.r.binding.Session); err == nil {
+		t.Fatal("unbound launch opened")
+	}
+	if len(f.audit.events) != 1 {
+		t.Fatal("refusal not audited")
+	}
+	raw, err := json.Marshal(f.audit.events[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err = json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if fields["outcome"] != "denied" {
+		t.Fatal("refused open reported success", fields["outcome"])
+	}
+}
+
+func TestNamedRuntimeTargetInShellMetadataAndAudit(t *testing.T) {
+	f := setup(t)
+	f.r.binding.Runtime = "cluster"
+	f.r.binding.RuntimeTargetID = "cluster"
+	info, _ := f.open(t)
+	if info.RuntimeTargetID != "cluster" {
+		t.Fatalf("shell target missing: %+v", info)
+	}
+	if len(f.audit.events) == 0 || f.audit.events[0].RuntimeTargetID != "cluster" {
+		t.Fatalf("audit target missing: %+v", f.audit.events)
+	}
 }

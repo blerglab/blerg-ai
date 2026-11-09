@@ -24,7 +24,7 @@ type testDirectWorkspaceWorker struct{}
 func (testDirectWorkspaceWorker) Cleanup(context.Context, string, string) error { return nil }
 
 func (testDirectWorkspaceWorker) Run(ctx context.Context, request workspaceWorkerRequest) (workspaceWorkerResponse, error) {
-	response := executeWorkspaceWorker(ctx, request)
+	response := executeWorkspaceWorkerWithPack(ctx, request, fetchWorkspaceWorkerPack)
 	if response.Error != "" {
 		return response, errors.New(response.Error)
 	}
@@ -167,6 +167,9 @@ func localWorkspaceFixture(t *testing.T) (*LocalWorkspace, *testWorkspaceRuntime
 func TestWorkspacePrepareAllAndKeepRootGate(t *testing.T) {
 	w, _, _, sources := localWorkspaceFixture(t)
 	for i, m := range w.state.Members {
+		if !m.Source.OwnObjects {
+			t.Fatal("workspace pack serving would require source Git objects")
+		}
 		if isSandboxClone(m.Clone, w.state.Session) {
 			t.Fatal("legacy session-root gate accepts a member")
 		}

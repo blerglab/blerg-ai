@@ -33,7 +33,7 @@ try {
       await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(body)});
     });
     const token = `x.${Buffer.from(JSON.stringify({caps:['account.manage']})).toString('base64url')}.y`;
-    await page.goto(`${server.resolvedUrls.local[0]}settings#access_token=${token}`);
+    await page.goto(`${server.resolvedUrls.local[0]}settings?section=install#access_token=${token}`);
     const notice = page.getByRole('link',{name:'v0.5.1 available ↗'});
     await notice.waitFor();
     assert.equal(await notice.getAttribute('href'),'https://github.com/blerglab/blerg-ai/releases/tag/v0.5.1');
@@ -41,7 +41,7 @@ try {
     const box = await notice.boundingBox();
     assert.ok(box && box.width > 0 && box.x >= 0 && box.x + box.width <= width);
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth <= innerWidth));
-    await page.goto(`${server.resolvedUrls.local[0]}settings#access_token=${token}`);
+    await page.goto(`${server.resolvedUrls.local[0]}settings?section=install#access_token=${token}`);
     const checkbox = page.getByRole('checkbox',{name:'Check for newer releases'});
     await checkbox.waitFor();
     assert.equal(await checkbox.isChecked(),true);

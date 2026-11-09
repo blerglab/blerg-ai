@@ -656,6 +656,7 @@ type k8sPod struct {
 	Status struct {
 		Phase      string `json:"phase"`
 		Reason     string `json:"reason"`
+		Message    string `json:"message"`
 		Conditions []struct {
 			Type    string `json:"type"`
 			Status  string `json:"status"`

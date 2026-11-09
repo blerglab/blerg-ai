@@ -3,12 +3,16 @@ package clusterworkspace
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"path"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
+	"github.com/blerglab/blerg-ai/runner/internal/activity"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/workbranch"
 )
 
 // Git is per-member; implementations must use immutable context/explicit
@@ -26,10 +30,16 @@ type SnapshotGit interface {
 	PushSnapshot(context.Context, Member, string, string) error
 }
 
-// Runtime serializes preparation, turn-end push, stop and recovery. A single
-// worker and rotating first member share one deadline; successful results are
-// preserved and pending members retained. Agent start is outside Prepare and
-// allowed only on success. No failed/uncertain allocation is deleted here.
+type preparationError struct {
+	cause  error
+	detail string
+}
+
+func (e *preparationError) Error() string { return e.detail }
+func (e *preparationError) Unwrap() error { return e.cause }
+
+// Runtime serializes preparation, turn-end push, stop and recovery. Successful
+// results are preserved; failed or uncertain allocations are retained.
 type Runtime struct {
 	copied           map[string]string
 	closing          atomic.Bool
@@ -53,6 +63,11 @@ func New(plan Plan, git Git) (*Runtime, error) {
 		return nil, ErrPlan
 	}
 	if err := plan.Validate(); err != nil {
+		cause := "workspace_plan_refused"
+		if errors.Is(err, ErrCredentialScope) {
+			cause = "credential_scope_refused"
+		}
+		failurelog.Default.Event("cluster_workspace:"+cause, slog.LevelError, "component", "cluster_workspace", "operation", "admit", "cause", cause)
 		return nil, err
 	}
 	// Own copies: callers cannot mutate authorization after admission.
@@ -69,7 +84,7 @@ func New(plan Plan, git Git) (*Runtime, error) {
 	}
 	r := &Runtime{copied: map[string]string{}, revision: 1, plan: plan, git: git, results: map[string]protocol.WorkspaceMemberResult{}}
 	for _, m := range plan.Members {
-		r.results[m.ID] = protocol.WorkspaceMemberResult{WorkspaceMemberRef: protocol.WorkspaceMemberRef{MemberID: m.ID, LaunchGeneration: plan.Manifest.LaunchGeneration}, Branch: "wip/" + plan.SessionID, Pending: true, RecoveryLocation: path.Join("projects", m.Path)}
+		r.results[m.ID] = protocol.WorkspaceMemberResult{WorkspaceMemberRef: protocol.WorkspaceMemberRef{MemberID: m.ID, LaunchGeneration: plan.Manifest.LaunchGeneration}, Branch: workbranch.Effective(plan.SessionID, plan.WorkBranch), Pending: true, RecoveryLocation: path.Join("projects", m.Path)}
 	}
 	for _, result := range plan.PreviousResults {
 		r.results[result.MemberID] = result
@@ -102,10 +117,20 @@ func (r *Runtime) Prepare(parent context.Context, resume bool) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		base, head, e := r.git.Prepare(ctx, m, "wip/"+r.plan.SessionID, resume)
+		base, head, e := r.git.Prepare(ctx, m, workbranch.Effective(r.plan.SessionID, r.plan.WorkBranch), resume)
 		v := r.results[m.ID]
 		if e != nil {
+			cause := "repository_preparation_failed"
 			v.SyncError = "repository preparation failed; uncertain data retained"
+			switch {
+			case errors.Is(e, ErrClone):
+				cause = "repository_clone_failed"
+				v.SyncError = "repository clone failed; uncertain data retained"
+			case errors.Is(e, ErrRetainedStorage):
+				cause = "retained_storage_missing"
+				v.SyncError = "retained repository storage is missing; resume refused"
+			}
+			failurelog.Default.Event("cluster_workspace:"+cause, slog.LevelError, "component", "cluster_workspace", "operation", "prepare", "cause", cause)
 			v.Pending = true
 			r.results[m.ID] = v
 			if rollback, ok := r.git.(interface{ RollbackUnused() []string }); ok {
@@ -115,6 +140,12 @@ func (r *Runtime) Prepare(parent context.Context, resume bool) error {
 					removed.SyncError = "unused clone rolled back after preparation failed"
 					r.results[id] = removed
 				}
+			}
+			if errors.Is(e, ErrClone) {
+				return &preparationError{ErrClone, v.SyncError}
+			}
+			if errors.Is(e, ErrRetainedStorage) {
+				return &preparationError{ErrRetainedStorage, v.SyncError}
 			}
 			return errors.New(v.SyncError)
 		}
@@ -179,7 +210,7 @@ func (r *Runtime) PushRound(parent context.Context) []protocol.WorkspaceMemberRe
 		}
 	}
 	if r.armed {
-		if err := r.writers.Freeze(ctx); err != nil {
+		if err := activity.Measure(ctx, "freeze", func() error { return r.writers.Freeze(ctx) }); err != nil {
 			r.retain("writer freeze unproven; storage retained")
 			r.stopped = true
 			return r.snapshot()
@@ -192,7 +223,7 @@ func (r *Runtime) PushRound(parent context.Context) []protocol.WorkspaceMemberRe
 			cleanup, stop := context.WithTimeout(cleanup, 5*time.Second)
 			defer stop()
 			if r.armed {
-				if err := r.writers.Thaw(cleanup); err != nil {
+				if err := activity.Measure(ctx, "thaw", func() error { return r.writers.Thaw(cleanup) }); err != nil {
 					r.retain("writer resume unproven; storage retained")
 					r.stopped = true
 					return

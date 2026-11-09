@@ -144,6 +144,11 @@ func (m *Manager) Recovered(ctx context.Context, a Actor, session string, proof 
 			return ErrDenied
 		}
 	}
+	for _, sibling := range m.retainedClosing {
+		if physicalLaunch(sibling.binding) == physicalLaunch(binding) {
+			return ErrDenied
+		}
+	}
 	delete(m.runtimeFenced, expected)
 	delete(m.fenced, expected)
 	delete(m.retryAfter, expected)

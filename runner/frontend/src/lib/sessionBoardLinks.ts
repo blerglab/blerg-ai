@@ -6,7 +6,7 @@ import { useEffect, useState } from 'react'
 import { apiFetch } from '../apiFetch'
 import { readPermissions, type PermissionsView } from './sessionPermissions'
 
-export interface BoardLink { id: string; name: string; launch: boolean }
+export interface BoardLink { id: string; name: string; launch: boolean; readable: boolean; movable: boolean }
 
 /** The session's boards, launch board first, one entry per board. Names fall back to `names`,
  *  then to the id. */
@@ -15,8 +15,8 @@ export function boardLinksOf(view: PermissionsView, names: Record<string, string
   for (const b of view.boards) {
     if (!b.board_id || (b.level === 'propose' && !b.launch)) continue
     const had = out.get(b.board_id)
-    const name = b.board_name || had?.name || names[b.board_id] || b.board_id
-    out.set(b.board_id, { id: b.board_id, name, launch: !!b.launch || !!had?.launch })
+    const name = names[b.board_id] || b.board_name || had?.name || b.board_id
+    out.set(b.board_id, { id: b.board_id, name, launch: !!b.launch || !!had?.launch, readable: b.level !== 'propose', movable: b.level === 'full' })
   }
   return [...out.values()].sort((x, y) => Number(y.launch) - Number(x.launch) || x.name.localeCompare(y.name) || x.id.localeCompare(y.id))
 }
@@ -29,6 +29,7 @@ export function boardPageUrl(origin: string, boardId: string): string {
 const held = new Map<string, BoardLink[]>()
 const listeners = new Map<string, Set<(links: BoardLink[]) => void>>()
 let names: Promise<Record<string, string>> | undefined
+let namesReadAt = 0
 /** Every read (and every panel publication) takes a ticket before it starts: the epoch it began in
  *  and its order. A reply is stored only in the same epoch, and only if no read of the session that
  *  began later has been stored already, so neither another account's late reply nor an older read
@@ -42,10 +43,11 @@ export function boardLinksTicket(): BoardLinksTicket { return { epoch, order: ++
 // reads still out belong to the old epoch and are dropped when they land.
 if (typeof window !== 'undefined') window.addEventListener('blerg-identity-changed', () => { held.clear(); storedOrder.clear(); names = undefined; epoch++ })
 
-// Board names for boards the permissions reply names by id only (an untouched launch board).
-// Read once per page; a failure is not remembered.
+// Discovery names override the saved grant name, which can predate a rename.
+// Ordinary buttons fetch missing names; a live tab refreshes them at most once a minute.
 function boardNames(): Promise<Record<string, string>> {
   if (!names) {
+    namesReadAt = Date.now()
     names = apiFetch('/api/session-boards').then(async r => {
       if (!r.ok) throw new Error('boards')
       const body = await r.json() as { boards?: { id?: unknown; name?: unknown }[] }
@@ -55,9 +57,16 @@ function boardNames(): Promise<Record<string, string>> {
   return names
 }
 
+/** Live tabs refresh names with their metadata, sharing one discovery read per minute. */
+export async function refreshSessionBoardNames(force = false): Promise<void> {
+  if (force || Date.now() - namesReadAt >= 60_000) names = undefined
+  if (!names) namesReadAt = Date.now()
+  await boardNames()
+}
+
 async function linksOf(view: PermissionsView): Promise<BoardLink[]> {
   const links = boardLinksOf(view)
-  if (!links.some(l => l.name === l.id)) return links
+  if (!names && !links.some(l => l.name === l.id)) return links
   return boardLinksOf(view, await boardNames())
 }
 
@@ -76,6 +85,33 @@ export function publishSessionPermissions(sessionId: string, view: PermissionsVi
   void linksOf(view).then(links => store(sessionId, links, ticket))
 }
 
+// The tab host and its buttons need the same permissions. Share their read while mounted;
+// leaving the last consumer still aborts it, so a later visit cannot inherit a stale writer.
+const reads = new Map<string, { users: number; ac: AbortController; promise: Promise<BoardLink[] | null> }>()
+function readLinks(sessionId: string, refreshKey: string) {
+  const key = JSON.stringify([epoch, sessionId, refreshKey])
+  let read = reads.get(key)
+  if (!read) {
+    const ac = new AbortController()
+    const ticket = boardLinksTicket()
+    const promise = apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/permissions`, { signal: ac.signal })
+      .then(async r => {
+        if (r.status === 404 || r.status === 403) return []
+        if (!r.ok) return null
+        return linksOf(readPermissions(await r.json()))
+      })
+      .catch(() => null)
+      .then(links => { if (!ac.signal.aborted && links) store(sessionId, links, ticket); return links })
+    read = { users: 0, ac, promise }
+    reads.set(key, read)
+  }
+  read.users++
+  const current = read
+  return { promise: current.promise, release: () => {
+    if (--current.users === 0) { current.ac.abort(); if (reads.get(key) === current) reads.delete(key) }
+  } }
+}
+
 /** The session's boards; empty until read, and when the session has none or they cannot be read. */
 export function useSessionBoardLinks(sessionId: string, refreshKey = ''): BoardLink[] {
   const [shown, setShown] = useState<{ sessionId: string; links: BoardLink[] }>(() => ({ sessionId, links: held.get(sessionId) ?? [] }))
@@ -86,30 +122,21 @@ export function useSessionBoardLinks(sessionId: string, refreshKey = ''): BoardL
     const mine = listeners.get(sessionId) ?? new Set()
     mine.add(set)
     listeners.set(sessionId, mine)
-    const ticket = boardLinksTicket()
-    const ac = new AbortController()
-    void apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/permissions`, { signal: ac.signal })
-      .then(async r => {
-        if (r.status === 404 || r.status === 403) return []
-        if (!r.ok) return null
-        return linksOf(readPermissions(await r.json()))
-      })
-      .catch(() => null)
-      .then(links => {
-        if (!live) return
-        if (links) store(sessionId, links, ticket)
-        set(held.get(sessionId) ?? [])
-      })
-    return () => { live = false; ac.abort(); mine.delete(set) }
+    const read = readLinks(sessionId, refreshKey)
+    void read.promise.then(() => { if (live) set(held.get(sessionId) ?? []) })
+    return () => { live = false; read.release(); mine.delete(set) }
   }, [sessionId, refreshKey])
   return shown.sessionId === sessionId ? shown.links : (held.get(sessionId) ?? [])
 }
 
 /** For tests: forget what was read. */
 export function resetSessionBoardLinksForTest(): void {
+  for (const read of reads.values()) read.ac.abort()
+  reads.clear()
   held.clear()
   listeners.clear()
   storedOrder.clear()
   names = undefined
+  namesReadAt = 0
   epoch++
 }

@@ -26,14 +26,16 @@ type ticketDetailInfo struct {
 
 // postTicketRequest is the body for POST /api/boards/{id}/tickets.
 type postTicketRequest struct {
-	Title    string   `json:"title"`
-	Body     *string  `json:"body"`
-	Repos    []string `json:"repos"`
-	ColumnID *string  `json:"column_id"`
-	Tags     []string `json:"tags"`
-	Priority string   `json:"priority"`
-	Size     *string  `json:"size"`
-	OpID     *string  `json:"op_id"`
+	Title      string   `json:"title"`
+	Body       *string  `json:"body"`
+	Repos      []string `json:"repos"`
+	ColumnID   *string  `json:"column_id"`
+	Tags       []string `json:"tags"`
+	Priority   string   `json:"priority"`
+	Size       *string  `json:"size"`
+	Risk       *string  `json:"risk"`
+	Complexity *string  `json:"complexity"`
+	OpID       *string  `json:"op_id"`
 }
 
 // listTicketsResponse is returned by GET /api/boards/{id}/tickets.
@@ -45,19 +47,21 @@ type listTicketsResponse struct {
 // patchTicketRequest is the body for PATCH /api/tickets/{id}.
 // All fields are optional; only present (non-nil) fields are applied.
 type patchTicketRequest struct {
-	Title    *string   `json:"title"`
-	Body     *string   `json:"body"`
-	Priority *string   `json:"priority"`
-	Size     *string   `json:"size"`
-	AddTags  []string  `json:"add_tags"`
-	RmTags   []string  `json:"rm_tags"`
-	AddRepos []string  `json:"add_repos"`
-	RmRepos  []string  `json:"rm_repos"`
-	Repos    *[]string `json:"repos"`
-	ColumnID *string   `json:"column_id"`
-	After    *string   `json:"after"`
-	Before   *string   `json:"before"`
-	OpID     *string   `json:"op_id"`
+	Title      *string   `json:"title"`
+	Body       *string   `json:"body"`
+	Priority   *string   `json:"priority"`
+	Size       *string   `json:"size"`
+	Risk       *string   `json:"risk"`
+	Complexity *string   `json:"complexity"`
+	AddTags    []string  `json:"add_tags"`
+	RmTags     []string  `json:"rm_tags"`
+	AddRepos   []string  `json:"add_repos"`
+	RmRepos    []string  `json:"rm_repos"`
+	Repos      *[]string `json:"repos"`
+	ColumnID   *string   `json:"column_id"`
+	After      *string   `json:"after"`
+	Before     *string   `json:"before"`
+	OpID       *string   `json:"op_id"`
 }
 
 // ticketEventInfo is the JSON view of a db.TicketEvent returned by
@@ -208,7 +212,7 @@ func (a *API) HandlePostTicket(w http.ResponseWriter, r *http.Request) {
 		ColumnID: req.ColumnID,
 		Tags:     req.Tags,
 		Priority: req.Priority,
-		Size:     req.Size,
+		Size:     req.Size, Risk: req.Risk, Complexity: req.Complexity,
 	}
 	if in.Title == "" {
 		writeError(w, http.StatusBadRequest, "title is required")
@@ -276,6 +280,12 @@ func (a *API) HandleListTickets(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
 	f := db.TicketFilter{}
+	if v := q.Get("risk"); v != "" {
+		f.Risk = &v
+	}
+	if v := q.Get("complexity"); v != "" {
+		f.Complexity = &v
+	}
 
 	if col := q.Get("column"); col != "" {
 		f.ColumnID = &col
@@ -417,7 +427,7 @@ func (a *API) HandlePatchTicket(w http.ResponseWriter, r *http.Request) {
 			Title:    req.Title,
 			Body:     req.Body,
 			Priority: req.Priority,
-			Size:     req.Size,
+			Size:     req.Size, Risk: req.Risk, Complexity: req.Complexity,
 			AddTags:  req.AddTags,
 			RmTags:   req.RmTags,
 			AddRepos: req.AddRepos,
@@ -641,6 +651,11 @@ func (a *API) HandleArchiveTicket(w http.ResponseWriter, r *http.Request) {
 
 	boardID, actor, ok := a.resolveTicketBoard(w, r, id, "card.write")
 	if !ok {
+		return
+	}
+
+	if actor.Board != nil || (actor.Core != nil && actor.Core.Kind != "human" && !actor.Core.PersonBehind) {
+		writeError(w, http.StatusForbidden, "archiving requires a person behind the board access")
 		return
 	}
 

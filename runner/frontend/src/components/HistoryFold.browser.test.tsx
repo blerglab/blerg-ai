@@ -52,7 +52,7 @@ afterEach(() => {
 async function openPanel(width: number): Promise<HTMLElement> {
   if (width < 1024) {
     await userEvent.click(screen.getByTestId('rail-toggle'))
-    const drawer = await screen.findByRole('dialog', { name: 'Session panel' })
+    const drawer = await screen.findByRole('dialog', { name: 'Workspace panel' })
     await waitFor(() => expect(drawer.getBoundingClientRect().right).toBe(width))
     return drawer
   }

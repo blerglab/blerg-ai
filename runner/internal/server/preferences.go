@@ -9,8 +9,12 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/blerglab/blerg-ai/runner/internal/persontime"
+
 	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/workbranch"
 )
 
 // Per-account preferences: GET/PUT /api/me/preferences. Only the signed-in person's browser may read
@@ -22,6 +26,9 @@ const (
 	preferencesBodyLimit = 16 << 10
 	prefCodeColours      = "code_colours"
 	prefCompactFolders   = "compact_folders"
+	prefBranchTemplate   = "branch_template"
+	prefVerbosity        = "verbosity"
+	prefPersonTime       = "person_time"
 )
 
 // codeThemeIDs and codeTokenKeys mirror packages/chat/src/theme/codeThemes.ts; a test reads that file
@@ -105,7 +112,7 @@ func (a *API) HandleGetMyPreferences(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) writePreferences(w http.ResponseWriter, r *http.Request, account string) {
 	out := map[string]json.RawMessage{}
-	for _, key := range []string{prefCodeColours, prefCompactFolders} {
+	for _, key := range []string{prefCodeColours, prefCompactFolders, prefBranchTemplate, prefVerbosity, prefPersonTime} {
 		v, err := db.GetAccountPreference(r.Context(), a.dbPool, account, key)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "could not read preferences")
@@ -173,10 +180,19 @@ func (a *API) HandlePutMyPreferences(w http.ResponseWriter, r *http.Request) {
 		stored[k] = norm
 	}
 	for k, v := range stored {
-		if err := db.PutAccountPreference(r.Context(), a.dbPool, account, k, v); err != nil {
+		var err error
+		if k == prefPersonTime && r.Header.Get("If-None-Match") == "*" {
+			_, err = a.dbPool.Exec(r.Context(), `INSERT INTO account_preferences(account_id,key,value) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, account, k, []byte(v))
+		} else {
+			err = db.PutAccountPreference(r.Context(), a.dbPool, account, k, v)
+		}
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, "could not save preferences")
 			return
 		}
+	}
+	if _, ok := stored[prefPersonTime]; ok && r.Header.Get("If-None-Match") != "*" {
+		a.releaseClockPushLeases(r.Context(), account)
 	}
 	writeJSON(w, http.StatusOK, stored)
 }
@@ -189,6 +205,29 @@ func preferencesRefused(p runnerPrincipal) bool {
 
 func validatePreference(key string, raw json.RawMessage) (json.RawMessage, error) {
 	switch key {
+	case prefPersonTime:
+		var value *persontime.Account
+		dec := json.NewDecoder(strings.NewReader(string(raw)))
+		dec.DisallowUnknownFields()
+		if dec.Decode(&value) != nil || value == nil || !value.Valid() {
+			return nil, errors.New("choose a valid IANA time zone and quiet-hours window")
+		}
+		return json.Marshal(value)
+	case prefVerbosity:
+		var value string
+		if json.Unmarshal(raw, &value) != nil || !protocol.ValidVerbosity(value) {
+			return nil, errors.New(verbosityMessage)
+		}
+		return json.Marshal(value)
+	case prefBranchTemplate:
+		var template string
+		if json.Unmarshal(raw, &template) != nil {
+			return nil, errors.New("branch_template must be a string")
+		}
+		if err := workbranch.ValidateTemplate(template); err != nil {
+			return nil, err
+		}
+		return json.Marshal(template)
 	case prefCodeColours:
 		return validateCodeColours(raw)
 	case prefCompactFolders:

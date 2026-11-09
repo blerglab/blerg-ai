@@ -34,7 +34,7 @@ func sessionResumeEligibility(ctx context.Context, pool *pgxpool.Pool, jobs *Job
 	if err != nil {
 		return false, "", "Recovery permissions could not be verified"
 	}
-	if len(grants) > 0 && (owner == "" || account != owner || proof.SessionID == "") {
+	if len(accountResumeGrants(grants)) > 0 && (owner == "" || account != owner || proof.SessionID == "") {
 		return false, "", "Sign in as the owner to restore this session's connections"
 	}
 	retained, err := db.GetSessionNativeHistory(ctx, pool, row.ID)

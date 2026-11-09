@@ -1,22 +1,39 @@
 package protocol
 
+import (
+	"strings"
+	"time"
+)
+
 // ReadCommit asks the session's daemon to read one commit from the session's own workspace (a
 // sandboxed session: from the repository its clone was made from, where its commits are brought
-// back). SHA is the only value from the request that reaches git, and only after
-// ValidCommitLookupSHA accepts it. Patch asks for the commit's diff instead of its summary. It never
-// starts an engine.
+// back). SHA is accepted only after ValidCommitLookupSHA. Patch asks for the diff;
+// FilePath selects a validated literal blob path instead, with Original selecting
+// the first parent. It never starts an engine.
 type ReadCommit struct {
+	BoardActivitySince string `json:"board_activity_since,omitempty"`
+	BoardHistory       bool   `json:"board_history,omitempty"`
+	DatasetMerges      bool   `json:"dataset_merges,omitempty"`
+	Release            string `json:"release,omitempty"`
+	ReleaseBase        string `json:"release_base,omitempty"`
+	FilePath           string `json:"file_path,omitempty"`
+	Original           bool   `json:"original,omitempty"`
+	Graph              bool   `json:"graph,omitempty"`
+	Depth              int    `json:"depth,omitempty"`
 	WorkspaceGitRef
 	Type      string `json:"type"`
 	RequestID string `json:"request_id"`
 	SessionID string `json:"session_id"`
 	SHA       string `json:"sha"`
+	Branch    string `json:"branch,omitempty"`
+	Base      string `json:"base,omitempty"`
 	Patch     bool   `json:"patch,omitempty"`
-	// MergedChild, instead of a sha, asks whether the branch wip/<MergedChild> (a child session's
-	// work, brought back into this session's repository) is merged into the branch the workspace
-	// has checked out (HEAD). It must be a session id (ValidChildBranchID), so the only ref that
-	// reaches git is refs/heads/wip/<uuid>. The answer is CommitResult.Merged and TipDate.
+	// MergedChild, instead of a sha, asks whether a child session's recorded branch
+	// is merged into the workspace branch. It must pass ValidChildBranchID.
+	// ChildBranch is supplied by the server from the persisted session; older
+	// peers omit it and use the legacy branch. The answer is Merged and TipDate.
 	MergedChild string `json:"merged_child,omitempty"`
+	ChildBranch string `json:"child_branch,omitempty"`
 	// The server supplies the persisted child's exact member launch and base.
 	ChildLaunchGeneration string `json:"child_launch_generation,omitempty"`
 	ChildBase             string `json:"child_base,omitempty"`
@@ -72,14 +89,26 @@ type CommitInfo struct {
 // CommitResult answers ReadCommit. It carries no workspace path and no git diagnostics. ErrorCode:
 // "invalid" (not a sha), "not_found" (no such commit in the workspace), "too_large" (the diff is
 // over CommitPatchMaxBytes), "busy", or "unavailable" (no live workspace, no repository, git
-// failed). PatchB64 is the diff's bytes, base64 (a diff need not be UTF-8).
+// failed). PatchB64 carries diff or file bytes as base64; File marks a blob response.
+type MergeHistory struct {
+	WorkspaceGitRef
+	ObservedAt time.Time     `json:"observed_at,omitempty"`
+	Tip        string        `json:"tip"`
+	Commits    []GraphCommit `json:"commits"`
+}
+
 type CommitResult struct {
+	CodeHistory *CodeHistory  `json:"code_history,omitempty"`
+	Merges      *MergeHistory `json:"merges,omitempty"`
+	File        bool          `json:"file,omitempty"`
+	Graph       *BranchGraph  `json:"graph,omitempty"`
 	WorkspaceGitRef
 	Type      string      `json:"type"`
 	RequestID string      `json:"request_id"`
 	SessionID string      `json:"session_id"`
 	OK        bool        `json:"ok"`
 	Commit    *CommitInfo `json:"commit,omitempty"`
+	Branch    *BranchInfo `json:"branch,omitempty"`
 	PatchB64  string      `json:"patch_b64,omitempty"`
 	ErrorCode string      `json:"error_code,omitempty"`
 	// Merged answers a MergedChild read: the child's branch tip is an ancestor of HEAD. TipDate is
@@ -113,4 +142,83 @@ func ValidCommitLookupSHA(value string) bool {
 		}
 	}
 	return true
+}
+
+// BranchInfo is a bounded local branch comparison. No provider API is involved.
+type BranchInfo struct {
+	Name    string         `json:"branch"`
+	Base    string         `json:"base"`
+	Commits []BranchCommit `json:"commits"`
+}
+type BranchCommit struct {
+	SHA     string `json:"sha"`
+	Message string `json:"message"`
+	Author  string `json:"author"`
+	Date    string `json:"date"`
+}
+
+// BranchGraph is a bounded snapshot of local branch history, with no checkout state.
+type BranchGraph struct {
+	WorkspaceGitRef
+	Commits       []GraphCommit `json:"commits"`
+	Refs          []GraphRef    `json:"refs"`
+	More          bool          `json:"more"`
+	DefaultBranch string        `json:"default_branch,omitempty"`
+	RefsLimited   bool          `json:"refs_limited,omitempty"`
+	Tags          []GraphTag    `json:"tags"`
+	TagsLimited   bool          `json:"tags_limited,omitempty"`
+}
+type GraphTag struct {
+	GraphRef
+	Contains []string `json:"contains"`
+	Previous string   `json:"previous,omitempty"`
+	Complete bool     `json:"complete"`
+}
+type GraphCommit struct {
+	Date    string   `json:"date,omitempty"`
+	SHA     string   `json:"sha"`
+	Parents []string `json:"parents"`
+	Subject string   `json:"subject"`
+}
+type GraphRef struct {
+	Name string `json:"name"`
+	SHA  string `json:"sha"`
+}
+
+// ValidCommitFilePath accepts a literal repository-relative blob path, never a revision.
+func ValidCommitFilePath(path string) bool {
+	if path == "" || len(path) > CommitPathMaxBytes || strings.HasPrefix(path, "/") || strings.ContainsAny(path, "\\\x00\r\n") {
+		return false
+	}
+	for _, part := range strings.Split(path, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// CodeHistory is a complete, bounded reachable-main snapshot for board reconciliation.
+// Commit prose remains data; explicit merge titles and Git revert trailers drive moves. Merge-body card
+// numbers only suppress unsupported historical-completion warnings.
+type CodeHistory struct {
+	Activity         []CodeActivity `json:"activity,omitempty"`
+	ActivityComplete bool           `json:"activity_complete,omitempty"`
+	Tip              string         `json:"tip"`
+	Commits          []CodeCommit   `json:"commits"`
+}
+type CodeCommit struct {
+	BodyCards []int    `json:"body_cards,omitempty"`
+	SHA       string   `json:"sha"`
+	Date      string   `json:"date"`
+	Subject   string   `json:"subject"`
+	Parents   []string `json:"parents"`
+	Reverts   string   `json:"reverts,omitempty"`
+	Deployed  bool     `json:"deployed,omitempty"`
+}
+
+// CodeActivity is an activity hint, never main-merge or deployment proof.
+type CodeActivity struct {
+	Subject string `json:"subject"`
+	Date    string `json:"date"`
 }

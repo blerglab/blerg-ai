@@ -50,6 +50,11 @@ type Server struct {
 	// RefreshRaw, when set, is answered to a refresh as a 200 with exactly this body (no token is
 	// spent): a non-bearer or unparseable success.
 	RefreshRaw string
+	// ExchangeStatus and ExchangeRaw inject a token exchange failure.
+	ExchangeStatus    int
+	ExchangeRaw       string
+	AfterCodeExchange func()
+	AfterRefresh      func()
 	// ExpiresInString sends expires_in as a JSON string ("120") instead of a number.
 	ExpiresInString bool
 	// PRMOmitResource leaves "resource" out of the protected-resource metadata.
@@ -91,12 +96,21 @@ type codeGrant struct {
 }
 
 // New starts the fake.
-func New() *Server {
+func New() *Server { return newServer(false) }
+
+// NewTLS starts a synthetic HTTPS provider with a test-only trusted client.
+func NewTLS() *Server { return newServer(true) }
+
+func newServer(tls bool) *Server {
 	s := &Server{
 		clients: map[string]client{}, codes: map[string]codeGrant{}, refresh: map[string]bool{},
 		access: map[string]bool{}, Hits: map[string]int{}, IssuerPath: "/as", AccessTTL: 3600,
 	}
-	s.Server = httptest.NewServer(http.HandlerFunc(s.serve))
+	if tls {
+		s.Server = httptest.NewTLSServer(http.HandlerFunc(s.serve))
+	} else {
+		s.Server = httptest.NewServer(http.HandlerFunc(s.serve))
+	}
 	return s
 }
 
@@ -334,7 +348,35 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	s.TokenForms = append(s.TokenForms, r.PostForm)
 	grant := r.PostForm.Get("grant_type")
 	delay, forced, forcedCode, raw := s.RefreshDelay, s.RefreshStatus, s.RefreshError, s.RefreshRaw
+	exchangeStatus, exchangeRaw := s.ExchangeStatus, s.ExchangeRaw
+	afterCode := s.AfterCodeExchange
+	afterRefresh := s.AfterRefresh
 	s.mu.Unlock()
+
+	if grant == "authorization_code" && exchangeStatus != 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(exchangeStatus)
+		_, _ = w.Write([]byte(exchangeRaw))
+		return
+	}
+
+	if grant == "authorization_code" && afterCode != nil || grant == "refresh_token" && afterRefresh != nil {
+		rec := httptest.NewRecorder()
+		s.mu.Lock()
+		s.tokenLocked(rec, r, grant, forced, forcedCode, raw)
+		s.mu.Unlock()
+		if grant == "authorization_code" {
+			afterCode()
+		} else {
+			afterRefresh()
+		}
+		for key, values := range rec.Header() {
+			w.Header()[key] = values
+		}
+		w.WriteHeader(rec.Code)
+		_, _ = w.Write(rec.Body.Bytes())
+		return
+	}
 
 	if grant == "refresh_token" && delay > 0 {
 		// The provider decides (and spends the token) when the request arrives, then takes its

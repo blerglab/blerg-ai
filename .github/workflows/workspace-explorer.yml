@@ -31,6 +31,15 @@ jobs:
       - name: Native macOS security gate
         if: runner.os == 'macOS'
         run: python3 scripts/test-workspace-macos.py
+      - name: Compare native and subprocess RSS sampling
+        if: always() && runner.os == 'macOS'
+        working-directory: runner
+        env:
+          GOWORK: 'off'
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -race ./internal/hostgit -run '^$' -bench '^BenchmarkDarwinGroupRSS$' -benchmem -count=3 | tee ../workspace-rss-benchmark.txt
       - name: Descriptor, cursor, cancellation and Git adversarial tests
         if: runner.os == 'Linux'
         working-directory: runner
@@ -49,6 +58,7 @@ jobs:
           path: |
             workspace-daemon.json
             workspace-hostgit.json
+            workspace-rss-benchmark.txt
             workspace-macos-evidence/
             !workspace-macos-evidence/**/private-*/tmp/**
       - name: Mount crossing gate in a private user and mount namespace

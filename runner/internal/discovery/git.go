@@ -82,65 +82,88 @@ func validHead(raw []byte) bool {
 	return err == nil
 }
 
-// inspectRepository reads descriptors and Git metadata only. No host Git
-// process parses a repository-controlled config, index, include or gitdir.
-func inspectRepository(root *os.File, rootName, rootTag, rel string, info os.FileInfo) (*repository, error) {
+// resolveGitDir resolves rel's real git directory — handling a linked worktree's ".git"
+// file ("gitdir: ...") indirection, with the same root-containment checks inspectRepository
+// has always applied — and nothing else: no config, HEAD, index or object is read or
+// opened. found is false (err nil) exactly when rel has no ".git" entry at all (not a
+// repository); resolveRepositoryIdentity (baseref.go, resolve_base's own identity-only
+// path) and inspectRepository (below, the general discovery path that also reads
+// config/HEAD/objects/index) both call this rather than duplicating it, so the one place
+// that parses a repository-controlled "gitdir:"/"commondir" file stays the one place.
+// gitDir is the worktree's own git directory (where HEAD lives — per-worktree even for a
+// linked worktree); commonPath is the common directory (where objects/config/refs live —
+// the same for every worktree sharing one repository). They are equal for an ordinary,
+// non-worktree repository.
+func resolveGitDir(root *os.File, rootName, rel string) (gitDir, commonPath string, found bool, err error) {
 	dotGit := path.Join(rel, ".git")
 	git, err := openBeneath(root, dotGit, directoryFlags)
-	commonPath := dotGit
+	commonPath = dotGit
 	linked := false
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
+			return "", "", false, nil
 		}
 		raw, e := readSmall(root, dotGit, 4096)
 		if e != nil {
-			return nil, errUnavailable
+			return "", "", false, errUnavailable
 		}
 		line := strings.TrimSpace(string(raw))
 		target, ok := strings.CutPrefix(line, "gitdir: ")
 		if !ok || strings.ContainsAny(target, "\x00\r\n") {
-			return nil, errUnavailable
+			return "", "", false, errUnavailable
 		}
 		gitPath, e := internalRelative(rootName, rel, target)
 		if e != nil {
-			return nil, e
+			return "", "", false, e
 		}
 		// A linked worktree is registered with its own back-reference. A .git
 		// file by itself is not submodule detection or repository authority.
 		if path.Base(path.Dir(gitPath)) != "worktrees" {
-			return nil, errUnavailable
+			return "", "", false, errUnavailable
 		}
 		back, e := readSmall(root, path.Join(gitPath, "gitdir"), 4096)
 		if e != nil {
-			return nil, errUnavailable
+			return "", "", false, errUnavailable
 		}
 		backRel, e := internalRelative(rootName, gitPath, strings.TrimSpace(string(back)))
 		if e != nil || backRel != dotGit {
-			return nil, errUnavailable
+			return "", "", false, errUnavailable
 		}
 		common, e := readSmall(root, path.Join(gitPath, "commondir"), 4096)
 		if e != nil {
-			return nil, errUnavailable
+			return "", "", false, errUnavailable
 		}
 		commonPath, e = internalRelative(rootName, gitPath, strings.TrimSpace(string(common)))
 		if e != nil || path.Clean(path.Join(commonPath, "worktrees", path.Base(gitPath))) != gitPath {
-			return nil, errUnavailable
+			return "", "", false, errUnavailable
 		}
 		git, e = openBeneath(root, gitPath, directoryFlags)
 		if e != nil {
-			return nil, errUnavailable
+			return "", "", false, errUnavailable
 		}
 		dotGit, linked = gitPath, true
 	}
-	defer func() { _ = git.Close() }()
+	_ = git.Close()
 	if !linked {
 		if f, e := openBeneath(root, path.Join(dotGit, "commondir"), regularFlags); e == nil {
 			_ = f.Close()
-			return nil, errUnavailable
+			return "", "", false, errUnavailable
 		} else if !errors.Is(e, os.ErrNotExist) {
-			return nil, errUnavailable
+			return "", "", false, errUnavailable
 		}
+	}
+	return dotGit, commonPath, true, nil
+}
+
+// inspectRepository reads descriptors and Git metadata only. No host Git
+// process parses a repository-controlled config, index, include or gitdir.
+func inspectRepository(root *os.File, rootName, rootTag, rel string, info os.FileInfo) (*repository, error) {
+	dotGit, commonPath, found, err := resolveGitDir(root, rootName, rel)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
 	}
 	head, e := readSmall(root, path.Join(dotGit, "HEAD"), 4096)
 	if e != nil || !validHead(head) {

@@ -94,6 +94,55 @@ describe('ws.ts', () => {
     vi.unstubAllGlobals()
   })
 
+  it('renews a cold load silently before connecting, without spending the bounce budget', async () => {
+    getAccessToken.mockReturnValue(null)
+    let finish!: (ok: boolean) => void
+    ensureFreshToken.mockReturnValue(new Promise(resolve => { finish = resolve }))
+    await import('./ws')
+    expect(ensureFreshToken).toHaveBeenCalledTimes(1)
+    expect(redirectToRefresh).not.toHaveBeenCalled()
+    expect(FakeWebSocket.instances).toHaveLength(0)
+    // Foreground events during startup must share the pending renewal.
+    window.dispatchEvent(new Event('online'))
+    expect(ensureFreshToken).toHaveBeenCalledTimes(1)
+    const token = UNEXPIRED_TOKEN()
+    getAccessToken.mockReturnValue(token)
+    finish(true)
+    await Promise.resolve()
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    expect(FakeWebSocket.instances[0].protocols).toEqual(['bearer', token])
+    expect(redirectToRefresh).not.toHaveBeenCalled()
+    expect(sessionStorage.getItem('blerg_refresh_attempts')).toBeNull()
+  })
+
+  it('still renews a cold load immediately when prior reloads spent the redirect budget', async () => {
+    getAccessToken.mockReturnValue(null)
+    sessionStorage.setItem('blerg_refresh_attempts', JSON.stringify({ n: 3, since: Date.now() }))
+    ensureFreshToken.mockImplementation(async () => {
+      getAccessToken.mockReturnValue(UNEXPIRED_TOKEN())
+      return true
+    })
+    await import('./ws')
+    expect(ensureFreshToken).toHaveBeenCalledTimes(1)
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    expect(redirectToRefresh).not.toHaveBeenCalled()
+  })
+
+  it('logs a safe cause and keeps the guarded redirect when cold-load renewal rejects', async () => {
+    getAccessToken.mockReturnValue(null)
+    ensureFreshToken.mockRejectedValue(new Error('private-renewal-canary'))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await import('./ws')
+      expect(redirectToRefresh).toHaveBeenCalledTimes(1)
+      expect(FakeWebSocket.instances).toHaveLength(0)
+      expect(warn).toHaveBeenCalledWith('blerg-auth: cold-load renewal failed', { cause: 'renewal-rejected' })
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('private-renewal-canary')
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('a never-opened 1006 close with an unexpired token schedules a reconnect, not a navigation', async () => {
     getAccessToken.mockReturnValue(UNEXPIRED_TOKEN())
     vi.useFakeTimers()

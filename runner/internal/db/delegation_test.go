@@ -312,6 +312,10 @@ func TestChildSessionsAndDigest(t *testing.T) {
 	if _, err := db.CreateMessage(ctx, pool, c1, "ask", "may I?"); err != nil {
 		t.Fatal(err)
 	}
+	// This count is person attention: a pending worker question stays quiet until escalated.
+	if _, err := pool.Exec(ctx, `UPDATE messages SET child_escalated=true WHERE session_id=$1 AND kind='ask'`, c1); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.CreateMessage(ctx, pool, c1, "update", "fyi"); err != nil {
 		t.Fatal(err)
 	}

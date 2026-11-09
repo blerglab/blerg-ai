@@ -109,7 +109,7 @@ export default function PluginBrowser({ model, onClose }: Props) {
       <div className="pb-fallback" data-testid="plugin-browser-fallback">
         <p className="pb-note">
           {result.code === 'sandboxed'
-            ? 'Browsing plugins is not available for sandboxed sessions yet. Add one by name:'
+            ? 'Browsing plugins is not available for sandboxed workspaces yet. Add one by name:'
             : 'This engine has no plugin catalog here. Add one by name:'}
         </p>
         <PluginAddForm model={model} onStart={onClose} />
@@ -144,6 +144,7 @@ export default function PluginBrowser({ model, onClose }: Props) {
   }
 
   return createPortal(
+    // button-guard-ignore: useBackdropClose supplies pointer handlers only; this overlay is not a button
     <div className="caps-overlay pb-overlay" data-testid="plugin-browser-overlay" {...backdrop}>
       <div ref={dialogRef} className="pb-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} data-testid="plugin-browser" onKeyDown={onKeyDown}>
         <header className="caps-header">
@@ -161,7 +162,7 @@ export default function PluginBrowser({ model, onClose }: Props) {
               </select>
             )}
             <select className="pb-select" aria-label="Install for" value={effectiveScope} onChange={e => setScope(e.target.value as PluginScope)}>
-              <option value="session" disabled={data?.session_apply !== true}>This session only</option>
+              <option value="session" disabled={data?.session_apply !== true}>This workspace only</option>
               <option value="always">Always on</option>
             </select>
             <span className="pb-count" data-testid="plugin-browser-count">{q || market ? `${filtered.length} of ${catalog.plugins.length}` : catalog.plugins.length}</span>
@@ -192,7 +193,7 @@ function PluginRow({ plugin, market, model, scope, onClose }: { plugin: CatalogP
   const always = alwaysOn(market, plugin.name, model.data)
   const already = scope === 'session' ? plugin.enabled === true : always
   const disallowed = market?.source && model.data && !model.data.any_marketplace && !model.data.allowed_marketplaces.some(s => s.toLowerCase() === market.source?.toLowerCase())
-  const state = plugin.enabled ? 'Enabled in this session' : plugin.installed ? 'Installed, not enabled here' : always ? 'Always on for new sessions' : ''
+  const state = plugin.enabled ? 'Enabled in this workspace' : plugin.installed ? 'Installed, not enabled here' : always ? 'Always on for new workspaces' : ''
   async function install() {
     if (busy || blocker || !market?.source) return
     setBusy(true)
@@ -213,7 +214,7 @@ function PluginRow({ plugin, market, model, scope, onClose }: { plugin: CatalogP
       setBusy(false)
     }
   }
-  const disabledReason = busy ? 'Saving the plugin change.' : blocker ?? (already && !removing ? scope === 'session' ? 'Already enabled in this session.' : 'Already always on for new sessions.' : null)
+  const disabledReason = busy ? 'Saving the plugin change.' : blocker ?? (already && !removing ? scope === 'session' ? 'Already enabled in this workspace.' : 'Already always on for new workspaces.' : null)
   const reasonId = useId()
   const meta = [plugin.version && `v${plugin.version.replace(/^v/, '')}`, plugin.author, plugin.category].filter(Boolean).join(' · ')
   return (
@@ -235,7 +236,7 @@ function PluginRow({ plugin, market, model, scope, onClose }: { plugin: CatalogP
       </div>
       <div className="pb-action">
         <button type="button" className="pb-install" disabled={!!disabledReason} aria-describedby={disabledReason ? reasonId : undefined}
-          title={disabledReason ?? (removing ? 'Remove from this session between turns; account settings stay unchanged' : undefined)}
+          title={disabledReason ?? (removing ? 'Remove from this workspace between turns; account settings stay unchanged' : undefined)}
           aria-label={`${removing ? 'Remove' : 'Install'} ${plugin.name}`} onClick={() => void install()}>
           {busy ? 'Saving…' : removing ? 'Remove' : already ? scope === 'session' ? 'Enabled' : 'Always on' : 'Install'}
         </button>
@@ -262,7 +263,7 @@ function AddMarketplace({ sessionId, onCatalog }: { sessionId: string; onCatalog
       setMsg({ text: 'Marketplace added.', failed: false })
       onCatalog(r)
     } else {
-      setMsg({ text: r.kind === 'error' ? r.message : 'Marketplaces cannot be added for this session.', failed: true })
+      setMsg({ text: r.kind === 'error' ? r.message : 'Marketplaces cannot be added for this workspace.', failed: true })
     }
   }
   return (

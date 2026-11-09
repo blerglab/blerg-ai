@@ -1,0 +1,12 @@
+.attention-list { list-style: none; margin: 0; padding: 0; }
+.attention-row { display: flex; align-items: center; min-width: 0; width: 100%; }
+.attention-row > .workspace-row { min-width: 0; flex: 1; }
+.attention-row > .artifact-close { flex: none; }
+.attention-row .question-card-summary .question-card-asker { display: none; }
+.attention-row .question-card-title { font-weight: 400; }
+.attention-row .workspace-chevron { display: none; }
+.attention-row .question-card-glyph { flex: 0 0 1em; inline-size: 1em; text-align: center; }
+
+/* A decision must include every option before the person opens its reply. */
+.question-full-text { display: block; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; text-align: left; }
+.attention-row:has(.question-full-text) { align-items: flex-start; }

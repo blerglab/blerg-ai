@@ -6,6 +6,7 @@ import './SidePane.css'
 
 type Props = { layout: PaneLayout; label: string; toggleLabel: string; icon: ReactNode; children: ReactNode; side?: 'left' | 'right' | 'bottom'; persistentRail?: boolean; hideRail?: boolean; railHost?: HTMLElement | null; keepMounted?: boolean; plain?: boolean; focusOnOpen?: boolean; hideCollapse?: boolean; as?: 'section' | 'aside'; testId?: string; hoverBoundary?: boolean; railLabel?: string; railActions?: ReactNode; className?: string; contentRef?: RefObject<HTMLElement | null> }
 export function PaneCollapse({ label, close, paneId, side = 'left' }: { label: string; close(): void; paneId: string; side?: 'left' | 'right' | 'bottom' }) {
+  // button-guard-ignore: side is left, right, or bottom; pane-collapse supplies the button surface
   return <button type="button" className={`pane-collapse pane-collapse-${side}`} aria-label={`Collapse ${label}`} aria-expanded={true} aria-controls={paneId} title={`Collapse ${label}`} onClick={close}><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true"><path d={side === 'bottom' ? 'm4 6 4 4 4-4' : side === 'left' ? 'm10 4-4 4 4 4' : 'm6 4 4 4-4 4'} /></svg></button>
 }
 export function PaneToggle({ layout: { triggerRef, open, id, toggle }, label, icon }: { layout: PaneLayout; label: string; icon: ReactNode }) {

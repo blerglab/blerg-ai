@@ -18,6 +18,7 @@ func TestHandleAgentEventSanitizesCapabilities(t *testing.T) {
 	h := NewHub()
 	dc := &DaemonConn{ID: "d1", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	h.Register(dc)
 	h.SetSessionOwner("s1", "d1")
 	sub := make(chan []byte, 8)

@@ -4,7 +4,7 @@
 
 An agent session may opt into automatic continuation after a provider usage limit.
 The runner server owns durable retry scheduling, for desktop and cluster sessions.
-Terminal sessions are excluded. Default is off. Existing sessions can enable it.
+Default is off. Existing sessions can enable it.
 
 Only an engine's actual usage-limit refusal schedules a continuation. Account usage
 percentages alone never do. Claude and Codex normalize a refusal to a provider and

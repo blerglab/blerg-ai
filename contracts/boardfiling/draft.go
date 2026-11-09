@@ -24,12 +24,15 @@ type Origin struct {
 // Draft is the exact approved payload. Verify its digest before applying Board
 // defaults or dropping component metadata under the target board's settings.
 type Draft struct {
-	Repos     []string `json:"repos,omitempty"`
-	Title     string   `json:"title"`
-	Body      string   `json:"body"`
-	Type      string   `json:"type,omitempty"`
-	Sensitive bool     `json:"sensitive"`
-	Origin    Origin   `json:"origin"`
+	Size       string   `json:"size,omitempty"`
+	Risk       string   `json:"risk,omitempty"`
+	Complexity string   `json:"complexity,omitempty"`
+	Repos      []string `json:"repos,omitempty"`
+	Title      string   `json:"title"`
+	Body       string   `json:"body"`
+	Type       string   `json:"type,omitempty"`
+	Sensitive  bool     `json:"sensitive"`
+	Origin     Origin   `json:"origin"`
 }
 
 // Digest binds every approved field and the target board. All callers marshal
@@ -43,4 +46,21 @@ func Digest(boardID string, draft Draft) string {
 	raw, _ := json.Marshal(payload) // Strings, booleans and structs cannot fail JSON encoding.
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
+}
+
+// ValidEstimates permits missing estimates while constraining any supplied value.
+func (d Draft) ValidEstimates() bool {
+	switch d.Size {
+	case "", "S", "M", "L", "XL":
+	default:
+		return false
+	}
+	for _, v := range []string{d.Risk, d.Complexity} {
+		switch v {
+		case "", "low", "medium", "high":
+		default:
+			return false
+		}
+	}
+	return true
 }

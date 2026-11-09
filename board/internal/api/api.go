@@ -100,16 +100,28 @@ func (a *API) Routes(mux *http.ServeMux) {
 	}
 
 	mux.HandleFunc("GET /api/me", authed(a.handleMe))
+	mux.HandleFunc("GET /api/me/theme", a.handleAccountTheme)
+	mux.HandleFunc("PUT /api/me/theme", a.handleAccountTheme)
 
 	mux.HandleFunc("GET /api/boards", authed(a.handleListBoards))
 	mux.HandleFunc("GET /api/board-key-suggestion", authed(a.handleBoardKeySuggestion))
 	mux.HandleFunc("GET /api/boards/{id}/cards/by-number/{number}", authed(a.handleCardByNumber))
 	mux.HandleFunc("POST /api/boards", authed(a.handleCreateBoard))
+	mux.HandleFunc("POST /api/boards/{id}/metadata-approved", authed(a.handleApprovedMetadata))
 	mux.HandleFunc("POST /api/boards/create-approved", authed(a.handleCreateApprovedBoard))
 	mux.HandleFunc("GET /api/repo-choices", authed(a.handleRepoChoices))
 	mux.HandleFunc("GET /api/boards/{id}", authed(a.handleGetBoard))
+	mux.HandleFunc("GET /api/boards/{id}/burn", authed(a.handleMilestoneBurn))
+	mux.HandleFunc("GET /api/boards/{id}/releases", authed(a.handleReleases))
+	mux.HandleFunc("POST /api/boards/{id}/releases", authed(a.handleReleases))
+	mux.HandleFunc("GET /api/boards/{id}/releases/{release}", authed(a.handleReleases))
+	mux.HandleFunc("PATCH /api/boards/{id}/releases/{release}", authed(a.handleReleases))
+	mux.HandleFunc("DELETE /api/boards/{id}/releases/{release}", authed(a.handleReleases))
+	mux.HandleFunc("POST /api/boards/{id}/releases/{release}/close", authed(a.handleReleases))
+
 	mux.HandleFunc("GET /api/boards/{id}/launch-options", authed(a.handleBoardLaunchOptions))
 	mux.HandleFunc("PATCH /api/boards/{id}", authed(a.handleUpdateBoard))
+	mux.HandleFunc("GET /api/boards/{id}/automation/identity", authed(a.handleAutomationIdentity))
 	mux.HandleFunc("POST /api/boards/{id}/automation/run-as-me", authed(a.handleRunAsMe))
 	mux.HandleFunc("DELETE /api/boards/{id}", authed(a.handleDeleteBoard))
 
@@ -119,6 +131,8 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/columns/{id}", authed(a.handleDeleteColumn))
 	mux.HandleFunc("POST /api/columns/{id}/move", authed(a.handleMoveColumn))
 
+	mux.HandleFunc("GET /api/boards/{id}/cards/view", authed(a.handleBoardCardView))
+	mux.HandleFunc("POST /api/boards/{id}/archive-preview", authed(a.handleArchivePreview))
 	mux.HandleFunc("GET /api/boards/{id}/cards", authed(a.handleListCards))
 	mux.HandleFunc("POST /api/boards/{id}/cards", authed(a.handleCreateCard))
 	mux.HandleFunc("POST /api/boards/{id}/file-card", authed(a.handleFileCard))
@@ -403,4 +417,13 @@ func (a *API) applyHeldNonCreate(ctx context.Context, rev db.Review) (cardID, no
 	}
 	_, _ = a.Pool.Exec(ctx, `UPDATE cards SET gate_flag = 'held_approved' WHERE id = $1`, card.ID)
 	return card.ID, note, nil
+}
+
+// Core validates the relayed human bearer; this route never trusts an account from the browser.
+func (a *API) handleAccountTheme(w http.ResponseWriter, r *http.Request) {
+	if a.Auth == nil {
+		writeError(w, http.StatusServiceUnavailable, "theme sync unavailable")
+		return
+	}
+	a.Auth.Core().ThemeProxy()(w, r)
 }

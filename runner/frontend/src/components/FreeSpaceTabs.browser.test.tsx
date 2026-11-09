@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 // #231: files queued in one tab, seen from another, in real Chromium (IndexedDB and Web Locks are
 // the browser's own). A second tab is a second instance of the attachments module, with its own
 // tab id, upload queue, remembered chips and liveness lock, sharing only what real tabs share.
@@ -56,7 +57,7 @@ const realInterval = window.setInterval.bind(window)
 afterEach(async () => {window.setInterval = realInterval as typeof window.setInterval; await tabOne.resetKeptAttachments(); await page.viewport(1280, 800)})
 
 describe('files queued in another tab', () => {
-  for (const width of [390, 3840]) it(`only the tab that chose a file uploads it; the other shows it read-only (rereview 2, finding 1) at ${width}px`, async () => {
+  for (const width of browserWidths([390, 3840])) it(`only the tab that chose a file uploads it; the other shows it read-only (rereview 2, finding 1) at ${width}px`, async () => {
     await page.viewport(width, 900)
     const tabTwo = await secondTab()
     const {tab, upload, makeRoom} = fixture()

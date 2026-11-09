@@ -138,16 +138,16 @@ export interface ChildOption {
   reason: string
 }
 
-const childLabel = (runtime: ChildRuntime) => runtime === 'cluster' ? 'Start children on the cluster without asking'
-  : runtime === 'docker' ? 'Start sandboxed children without asking' : 'Start unsandboxed children without asking'
+const childLabel = (runtime: ChildRuntime) => runtime === 'cluster' ? 'Start workers on the cluster without asking'
+  : runtime === 'docker' ? 'Start sandboxed workers without asking' : 'Start unsandboxed workers without asking'
 /** Where a row's children run, said on the row itself: a desktop session's rows can be on the desktop
  *  or on the cluster, so the dialog never says it for all of them at once. */
 export const childWhere = (runtime: ChildRuntime) => runtime === 'cluster' ? 'On the cluster.' : 'On this desktop.'
-const childNote = (runtime: ChildRuntime) => runtime === 'daemon' ? `${childWhere(runtime)} Unsandboxed children run as you with full filesystem access.`
-  : runtime === 'cluster' ? `${childWhere(runtime)} Each child is a pod with your engine credentials.` : childWhere(runtime)
+const childNote = (runtime: ChildRuntime) => runtime === 'daemon' ? `${childWhere(runtime)} Unsandboxed workers run as you with full filesystem access.`
+  : runtime === 'cluster' ? `${childWhere(runtime)} Each worker is a pod with your engine credentials.` : childWhere(runtime)
 /** The dialog's one note on child approvals; where each row's children run is on the row. */
-export const CHILD_APPROVAL_NOTE = 'Children of this session, in any repository, with the engines listed; a newly available engine asks again. Turning one off stops new automatic starts; running children keep running. This does not change your standing rules.'
-export const LAUNCH_CHILD_NOTE = 'Children of this session, in any repository, with the engines listed. This does not change your standing rules.'
+export const CHILD_APPROVAL_NOTE = 'Workers started by this workspace, in any repository, with the engines listed; a newly available engine asks again. Turning one off stops new automatic starts; running workers keep running. This does not change your standing rules.'
+export const LAUNCH_CHILD_NOTE = 'Workers started by this workspace, in any repository, with the engines listed. This does not change your standing rules.'
 
 
 /** A running session's runtime row, from the server's snapshot. */
@@ -162,9 +162,9 @@ export function sessionChildOption(r: ApprovalRuntime): ChildOption {
   }
 }
 
-export const SANDBOXED_PARENT_REASON = "A sandboxed session can't pre-approve unsandboxed children."
+export const SANDBOXED_PARENT_REASON = "A sandboxed workspace can't pre-approve unsandboxed workers."
 /** The cluster row's reason for a sandboxed desktop session (the runner's default, "once"). */
-export const SANDBOXED_CLUSTER_REASON = 'A sandboxed session asks you for each cluster child, because the pod gets your credentials.'
+export const SANDBOXED_CLUSTER_REASON = 'A sandboxed workspace asks you for each cluster worker, because the pod gets your credentials.'
 
 /** The launch sheet's runtime rows: a cluster session starts cluster children; a sandboxed one is
  *  shown the unsandboxed row disabled, with the reason; a desktop one also gets the cluster row where

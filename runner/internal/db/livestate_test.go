@@ -25,7 +25,7 @@ func TestLiveIndexMatchesTheKinds(t *testing.T) {
 	for _, k := range strings.Split(strings.Trim(db.LiveKindsSQL, "()"), ",") {
 		kinds = append(kinds, strings.Trim(strings.TrimSpace(k), "'"))
 	}
-	kinds = append(kinds, "mcp_status")
+	kinds = append(kinds, "mcp_status", "bound_ask_note")
 	if !reflect.DeepEqual(kinds, livestate.Kinds) {
 		t.Errorf("LiveKindsSQL %v != livestate.Kinds %v", kinds, livestate.Kinds)
 	}

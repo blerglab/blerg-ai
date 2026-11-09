@@ -28,6 +28,11 @@ var runnerOpenAPIDoc []byte
 // an atomic package value because /agents may be served concurrently with (and
 // before) the registration goroutine that also publishes it.
 var componentVersion atomic.Value
+var componentCommit atomic.Value
+
+// SetComponentCommit records the build commit for local upgrade verification.
+func SetComponentCommit(v string)   { componentCommit.Store(v) }
+func componentCommitString() string { v, _ := componentCommit.Load().(string); return v }
 
 // SetComponentVersion records the runner's build version for its manifest entry.
 func SetComponentVersion(v string) {
@@ -55,9 +60,9 @@ func componentVersionString() string {
 // Every operation is behind authRunner, which requires coreAuthRunnerCap on a
 // core-issued token, so they all carry the same Cap.
 var runnerOperations = []agentsmanifest.Operation{
-	{Name: "discover_launch_options", Method: "GET", Path: "/api/runner/launch-options", Cap: coreAuthRunnerCap, Idempotent: true, Summary: "Discover target-scoped engines, model catalogs and reasoning efforts for the launch principal."},
+	{Name: "discover_launch_options", Method: "GET", Path: "/api/runner/launch-options", Cap: coreAuthRunnerCap, Idempotent: true, Summary: "Discover named runtime targets and target-scoped engines, model catalogs and reasoning efforts for the launch principal."},
 	{Name: "start", Method: "POST", Path: "/api/runner/start", Cap: coreAuthRunnerCap, Idempotent: true,
-		Summary: "Start a coding-agent session on a repository; repeat safely with the Idempotency-Key header."},
+		Summary: "Start a coding-agent session on a repository and optional runtime_target_id (omitted selects the default cluster target); repeat safely with the Idempotency-Key header."},
 	{Name: "status", Method: "GET", Path: "/api/runner/sessions/{id}", Cap: coreAuthRunnerCap, Idempotent: true,
 		Summary: "Session status: lifecycle, runtime, whether it can be resumed."},
 	{Name: "send_message", Method: "POST", Path: "/api/runner/sessions/{id}/message", Cap: coreAuthRunnerCap,
@@ -105,6 +110,7 @@ func RunnerManifest(baseURL string) agentsmanifest.ComponentEntry {
 		Name:            "blerg-runner",
 		BaseURL:         base,
 		Version:         componentVersionString(),
+		Commit:          componentCommitString(),
 		ContractVersion: agentsmanifest.ContractVersion,
 		Capabilities:    []string{"runner", "sessions", "mcp"},
 		Description:     "Starts and drives coding-agent sessions (cluster pods or workstation daemons)",
@@ -186,6 +192,8 @@ func (a *API) HandleRunnerMe(w http.ResponseWriter, r *http.Request) {
 func RegisterRunnerContractRoutes(mux *http.ServeMux, a *API) {
 	// Documented browser integration primitive; its own handler refuses every non-human credential.
 	a.RegisterWorkspaceFileRoutes(mux)
+	a.RegisterWorkspaceMembershipRoutes(mux)
+	a.RegisterWorkspaceStorageRoutes(mux)
 	a.RegisterDesktopRoutes(mux)
 	// Discovery: public, no auth (see HandleAgents).
 	mux.HandleFunc("GET /agents", a.HandleAgents)
@@ -206,6 +214,7 @@ func RegisterRunnerContractRoutes(mux *http.ServeMux, a *API) {
 	mux.HandleFunc("GET /api/runner/preferences", a.HandleRunnerGetPreferences)
 	mux.HandleFunc("POST /api/runner/sessions/{id}/message", a.HandleRunnerMessage)
 	mux.HandleFunc("POST /api/runner/sessions/{id}/model", a.HandleRunnerModel)
+	mux.HandleFunc("POST /api/sessions/{id}/verbosity", a.HandleSessionVerbosity)
 	mux.HandleFunc("POST /api/runner/sessions/{id}/interrupt", a.HandleRunnerInterrupt)
 	mux.HandleFunc("POST /api/runner/sessions/{id}/stop", a.HandleRunnerStop)
 	mux.HandleFunc("GET /api/runner/sessions/{id}/events", a.HandleRunnerEvents)

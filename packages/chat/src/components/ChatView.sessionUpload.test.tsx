@@ -1,5 +1,5 @@
 import { beforeEach, expect, it } from 'vitest'
-import { act, render, screen, within, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, within, waitFor } from '@testing-library/react'
 import ChatView from './ChatView'
 import { createFakeTransport } from '../test/fakeTransport'
 import { SESSION, ev, meta, resetChatState, seed } from '../test/chat'
@@ -17,7 +17,8 @@ it('shows a parent-upload note without answering an ask or removing live reply t
   expect(note).toHaveTextContent('input.md')
   expect(note.querySelector('svg')).toHaveAttribute('data-file-icon', 'markdown')
   expect(screen.getByTestId('streaming')).toHaveTextContent('Unfinished root reply')
-  expect(within(screen.getByTestId('ask-card')).getByLabelText('Your answer')).toBeInTheDocument()
+  fireEvent.click(within(screen.getByTestId('ask-card')).getByRole('button', { name: /Approve/ }))
+  expect(within(screen.getByRole('dialog')).getByLabelText('Your answer')).toBeInTheDocument()
   expect(t.sentWith).toHaveLength(0)
 })
 it('renders untrusted origin and file names as text without executable markup or links', () => {

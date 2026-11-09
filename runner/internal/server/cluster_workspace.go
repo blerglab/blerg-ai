@@ -22,6 +22,11 @@ import (
 
 var errClusterWorkspace = errors.New("cluster workspace storage, credentials or launch binding is unavailable; retained work was not replaced")
 
+// errWorkerWriteCredential is BLG-460's fail-closed backstop: a cluster worker's own spec
+// carried something a worker must never have (PushAuthorized, or a git credential other
+// than its one read-only token). Refused outright rather than silently downgraded.
+var errWorkerWriteCredential = errors.New("a cluster worker's launch carried a write-capable credential; refused")
+
 // withClusterWorkspace is the server-side writer fence. Selection resolution is
 // P1's responsibility; callers supply authorized per-member destinations only.
 // The retained claim uses the storage mode bound at the first launch.
@@ -32,22 +37,60 @@ func (j *JobManager) withClusterWorkspace(spec SessionJobSpec) (launchErr error)
 	progress := &clusterLaunchProgress{j: j, session: spec.SessionID}
 	progress.next(ctx, "authorization", "Checking immutable selection, owner and live authority")
 	defer progress.finish(ctx, &launchErr)
-	if !historyID.MatchString(spec.SessionID) || j.historyPool == nil || spec.Workspace == nil || spec.NoRepo || spec.NewRepo || spec.Repo != "" || spec.GitURL != "" {
-		return errClusterWorkspace
+	defer func() {
+		if launchErr != nil && clusterRefusal(launchErr) == nil && progress.current == "authorization" {
+			launchErr = clusterWorkspaceRefused("workspace_authorization_lock_failed")
+		}
+		if refusal := clusterRefusal(launchErr); refusal != nil {
+			launchErr = refusal
+		}
+		logClusterRefusal(launchErr)
+	}()
+	for _, check := range []struct {
+		refused bool
+		code    string
+	}{
+		{!historyID.MatchString(spec.SessionID), "invalid_session_id"},
+		{j.historyPool == nil, "workspace_database_unavailable"},
+		{spec.Workspace == nil, "workspace_manifest_missing"},
+		{spec.NoRepo || spec.NewRepo, "workspace_repo_mode_conflict"},
+		{spec.Repo != "", "workspace_legacy_repo_conflict"},
+		{spec.GitURL != "", "workspace_legacy_url_conflict"},
+	} {
+		if check.refused {
+			return clusterWorkspaceRefused(check.code)
+		}
 	}
 	if _, exists := spec.ExtraEnv[gitTokenKey]; exists {
-		return errClusterWorkspace
+		return clusterWorkspaceRefused("workspace_git_token_override")
 	}
 	if _, exists := spec.ExtraEnv[clusterworkspace.Env]; exists {
-		return errClusterWorkspace
+		return clusterWorkspaceRefused("workspace_plan_override")
 	}
+
 	return db.WithSessionNativeHistoryLock(ctx, j.historyPool, spec.SessionID, func() error {
 		w, e := db.GetSessionWorkspace(ctx, j.historyPool, spec.SessionID)
-		if e != nil || w == nil || w.Manifest == nil || !reflect.DeepEqual(*w.Manifest, *spec.Workspace) || spec.SpawningAccountID != w.Manifest.OwnerID || !j.nativeHistorySessionCurrent(ctx, spec) {
-			return errClusterWorkspace
+		if e != nil {
+			return clusterWorkspaceRefused("workspace_manifest_read_failed")
 		}
-		if err := verifyCorePrincipal(ctx, j.CredentialClient, j.CoreURL, j.CoreInternalKey, spec.SpawningAccountID, spec.proof()); err != nil {
+		if w == nil || w.Manifest == nil {
+			return clusterWorkspaceRefused("workspace_manifest_not_saved")
+		}
+		if !reflect.DeepEqual(*w.Manifest, *spec.Workspace) {
+			return clusterWorkspaceRefused("workspace_manifest_mismatch")
+		}
+		if spec.SpawningAccountID != w.Manifest.OwnerID {
+			return clusterWorkspaceRefused("workspace_owner_mismatch")
+		}
+		if err := j.clusterWorkspaceSessionRefusal(ctx, spec); err != nil {
 			return err
+		}
+
+		if err := verifyCorePrincipal(ctx, j.CredentialClient, j.CoreURL, j.CoreInternalKey, spec.SpawningAccountID, spec.proof()); err != nil {
+			if refusal := clusterRefusal(err); refusal != nil {
+				return refusal
+			}
+			return clusterWorkspaceRefused("owner_authorization_service_unavailable")
 		}
 
 		name := "blerg-workspace-" + spec.SessionID
@@ -56,7 +99,7 @@ func (j *JobManager) withClusterWorkspace(spec SessionJobSpec) (launchErr error)
 		e = j.historyPool.QueryRow(ctx, `SELECT claim_uid,launch_generation,contexts,member_identities,owner_id,claim_name,storage_mode FROM cluster_workspace_storage WHERE session_id=$1`, spec.SessionID).Scan(&expectedUID, &launch, &raw, &identities, &owner, &expectedName, &mode)
 		fresh := errors.Is(e, pgx.ErrNoRows)
 		if e != nil && !fresh {
-			return errClusterWorkspace
+			return clusterWorkspaceRefused("workspace_storage_read_failed")
 		}
 		var class string
 		if fresh {
@@ -67,24 +110,45 @@ func (j *JobManager) withClusterWorkspace(spec SessionJobSpec) (launchErr error)
 				class = j.WorkspaceDefaultClass
 			}
 		} else if mode != "bounded" && mode != "standard" {
-			return errClusterWorkspace
+			return clusterWorkspaceRefused("workspace_storage_mode_invalid")
 		}
 		members := append([]clusterworkspace.Member(nil), spec.WorkspaceMembers...)
 		if !fresh {
-			if expectedName != name || owner != spec.SpawningAccountID || launch != w.Manifest.LaunchGeneration || json.Unmarshal(raw, &members) != nil {
-				return errClusterWorkspace
+			if expectedName != name {
+				return clusterWorkspaceRefused("workspace_claim_name_mismatch")
+			}
+			if owner != spec.SpawningAccountID {
+				return clusterWorkspaceRefused("workspace_storage_owner_mismatch")
+			}
+			if launch != w.Manifest.LaunchGeneration {
+				return clusterWorkspaceRefused("workspace_storage_launch_mismatch")
+			}
+			if json.Unmarshal(raw, &members) != nil {
+				return clusterWorkspaceRefused("workspace_storage_contexts_invalid")
 			}
 		} else if spec.Resume {
-			return errClusterWorkspace
+			return clusterWorkspaceRefused("workspace_resume_storage_missing")
 		}
-		plan := clusterworkspace.Plan{UnboundedStorage: mode == "standard", PrepareDeadlineMillis: deadline.UnixMilli(), SessionID: spec.SessionID, Manifest: *w.Manifest, Runtime: protocol.WorkspaceRuntimeRef{LaunchGeneration: w.Manifest.LaunchGeneration, Generation: 1}, Members: members}
+
+		plan := clusterworkspace.Plan{UnboundedStorage: mode == "standard", PrepareDeadlineMillis: deadline.UnixMilli(), SessionID: spec.SessionID, WorkBranch: spec.WorkBranch, Manifest: *w.Manifest, Runtime: protocol.WorkspaceRuntimeRef{LaunchGeneration: w.Manifest.LaunchGeneration, Generation: 1}, Members: members}
+		// BLG-460: refuse outright, before anything else runs, if a worker's own incoming
+		// member set already carries PushAuthorized — whatever produced that spec (a bug in
+		// ClusterWorkspaceChild, a future caller that builds members by hand) is wrong, and
+		// this must not silently correct it by proceeding read-only anyway.
+		if spec.ReadOnlyGitWorker {
+			for _, m := range plan.Members {
+				if m.PushAuthorized {
+					return &clusterAuthorizationRefusal{code: "workspace_worker_write_credential", cause: errWorkerWriteCredential}
+				}
+			}
+		}
 		plan.LayoutSources, e = clusterLayoutSources(ctx, j.historyPool, spec.SessionID, *w.Manifest)
 		if e != nil {
 			return e
 		}
 		if !fresh {
 			if json.Unmarshal(identities, &plan.Identities) != nil || len(plan.Identities) != len(plan.Members) {
-				return errClusterWorkspace
+				return clusterWorkspaceRefused("workspace_identities_invalid")
 			}
 		}
 		// Bind contexts durably without persisting plaintext credentials. A caller's
@@ -96,7 +160,7 @@ func (j *JobManager) withClusterWorkspace(spec SessionJobSpec) (launchErr error)
 			}
 		}
 		if e := plan.Validate(); e != nil {
-			return e
+			return clusterWorkspaceRefused("workspace_plan_invalid")
 		}
 		for i := range plan.Members {
 			plan.Members[i].Token = ""
@@ -106,29 +170,54 @@ func (j *JobManager) withClusterWorkspace(spec SessionJobSpec) (launchErr error)
 		// Resolve and precheck EVERY member; never use the operator Git token.
 		for i := range plan.Members {
 			m := &plan.Members[i]
-			kind, _ := j.gitCredentialFor(m.CloneURL)
-			if kind != "" && kind == m.Provider {
-				token, found, e := j.fetchPersonalCredential(ctx, spec.SpawningAccountID, kind, spec.proof())
+			if spec.ReadOnlyGitWorker {
+				// BLG-460 option B: a cluster worker never reaches fetchPersonalCredential
+				// (the launcher's own write-capable token) and never stores
+				// PushAuthorized: true — only a read-only, per-owner token, found or not.
+				m.PushAuthorized = false
+				token, found, e := j.fetchReadOnlyGitToken(ctx, spec.SpawningAccountID, m.Provider, gitOwnerFromCloneURL(m.CloneURL), spec.proof())
 				if e != nil {
-					return e
+					if refusal := clusterRefusal(e); refusal != nil {
+						return refusal
+					}
+					return &clusterAuthorizationRefusal{code: "worker_token_lookup_failed", cause: e}
 				}
 				if found {
-					m.Token = string(token)
-					m.PushAuthorized = true
+					m.Token = token
+				} else {
+					m.Token = ""
 				}
-			}
-			if m.PushAuthorized && m.Token == "" {
-				return ErrNoPersonalCredential
+			} else {
+				kind, _ := j.gitCredentialFor(m.CloneURL)
+				if kind != "" && kind == m.Provider {
+					token, found, e := j.fetchPersonalCredential(ctx, spec.SpawningAccountID, kind, spec.proof())
+					if e != nil {
+						if refusal := clusterRefusal(e); refusal != nil {
+							return refusal
+						}
+						return &clusterAuthorizationRefusal{code: "personal_token_lookup_failed", cause: e}
+					}
+					if found {
+						m.Token = string(token)
+						m.PushAuthorized = true
+					}
+				}
+				if m.PushAuthorized && m.Token == "" {
+					return &clusterAuthorizationRefusal{code: "owner_token_missing", cause: ErrNoPersonalCredential}
+				}
 			}
 			checkSpec := spec
 			checkSpec.ExtraEnv = map[string]string{gitTokenKey: m.Token}
 			checkSpec.NoOperatorFallback = true
 			if e := j.precheckRepositoryContext(ctx, checkSpec, m.CloneURL, nil, map[string]bool{gitTokenKey: true}, false); e != nil {
-				return e
+				if refusal := clusterRefusal(e); refusal != nil {
+					return refusal
+				}
+				return &clusterAuthorizationRefusal{code: "repository_read_refused", cause: e}
 			}
 		}
 		if e := plan.Validate(); e != nil {
-			return e
+			return clusterWorkspaceRefused("workspace_credential_plan_invalid")
 		}
 		progress.next(ctx, "storage", "Allocating and verifying retained claim identity; binding is deferred to the consumer pod")
 		claim, e := j.historyClaim(ctx, name)
@@ -136,7 +225,7 @@ func (j *JobManager) withClusterWorkspace(spec SessionJobSpec) (launchErr error)
 			return e
 		}
 		if fresh && claim != nil {
-			return errClusterWorkspace
+			return clusterWorkspaceRefused("workspace_unexpected_claim")
 		}
 		if claim == nil && fresh {
 			storage := map[string]any{"accessModes": []string{"ReadWriteOnce"}, "resources": map[string]any{"requests": map[string]string{"storage": "11520Mi"}}}
@@ -156,11 +245,11 @@ func (j *JobManager) withClusterWorkspace(spec SessionJobSpec) (launchErr error)
 			_ = resp.Body.Close()
 			claim, e = j.historyClaim(ctx, name)
 			if e != nil {
-				return errClusterWorkspace
+				return clusterWorkspaceRefused("workspace_claim_read_failed")
 			}
 		}
 		if claim == nil || claim.Metadata.Name != name || claim.Metadata.UID == "" || claim.Metadata.Deleted != nil || len(claim.Metadata.Owners) != 0 || claim.Metadata.Labels["app"] != "blerg-workspace" || claim.Metadata.Labels["session"] != spec.SessionID || claim.Metadata.Labels["account"] != spec.SpawningAccountID || (!fresh && claim.Metadata.UID != expectedUID) {
-			return errClusterWorkspace
+			return clusterWorkspaceRefused("workspace_claim_identity_mismatch")
 		}
 
 		if fresh {
@@ -170,14 +259,14 @@ func (j *JobManager) withClusterWorkspace(spec SessionJobSpec) (launchErr error)
 			}
 			raw, e = json.Marshal(stored)
 			if e != nil {
-				return errClusterWorkspace
+				return clusterWorkspaceRefused("workspace_contexts_encode_failed")
 			}
 			if _, e = j.historyPool.Exec(ctx, `INSERT INTO cluster_workspace_storage(session_id,launch_generation,claim_name,claim_uid,contexts,owner_id,storage_mode) VALUES($1,$2,$3,$4,$5,$6,$7)`, spec.SessionID, w.Manifest.LaunchGeneration, name, claim.Metadata.UID, raw, spec.SpawningAccountID, mode); e != nil {
-				return errClusterWorkspace
+				return clusterWorkspaceRefused("workspace_storage_save_failed")
 			}
 		}
 		if !j.nativeHistorySessionCurrent(ctx, spec) {
-			return errClusterWorkspace
+			return clusterWorkspaceRefused("workspace_session_changed")
 		}
 		if err := verifyCorePrincipal(ctx, j.CredentialClient, j.CoreURL, j.CoreInternalKey, spec.SpawningAccountID, spec.proof()); err != nil {
 			return err
@@ -197,7 +286,7 @@ func (j *JobManager) withClusterWorkspace(spec SessionJobSpec) (launchErr error)
 			}
 			current, err := db.GetSessionWorkspace(fenced, j.historyPool, spec.SessionID)
 			if err != nil || current == nil || current.Manifest == nil || !reflect.DeepEqual(*current.Manifest, *spec.Workspace) || current.Manifest.ValidateResults(current.Results) != nil || !j.nativeHistorySessionCurrent(fenced, spec) {
-				return errClusterWorkspace
+				return clusterWorkspaceRefused("workspace_runtime_manifest_changed")
 			}
 			var storedContexts, currentIdentities []byte
 			var currentUID, currentOwner, currentLaunch, currentName, currentMode string
@@ -210,14 +299,14 @@ func (j *JobManager) withClusterWorkspace(spec SessionJobSpec) (launchErr error)
 			}
 			var contexts []clusterworkspace.Member
 			if currentMode != mode || json.Unmarshal(storedContexts, &contexts) != nil || !reflect.DeepEqual(contexts, stripped) || currentName != name || currentUID != claim.Metadata.UID || currentOwner != spec.SpawningAccountID || currentLaunch != current.Manifest.LaunchGeneration {
-				return errClusterWorkspace
+				return clusterWorkspaceRefused("workspace_runtime_binding_changed")
 			}
 			verifiedClaim, err := j.historyClaim(fenced, name)
 			if err != nil || verifiedClaim == nil || verifiedClaim.Metadata.UID != currentUID || verifiedClaim.Metadata.Deleted != nil || len(verifiedClaim.Metadata.Owners) != 0 || verifiedClaim.Metadata.Labels["app"] != "blerg-workspace" || verifiedClaim.Metadata.Labels["session"] != spec.SessionID || verifiedClaim.Metadata.Labels["account"] != spec.SpawningAccountID {
-				return errClusterWorkspace
+				return clusterWorkspaceRefused("workspace_runtime_claim_changed")
 			}
 			if !fresh && (json.Unmarshal(currentIdentities, &plan.Identities) != nil || len(plan.Identities) != len(plan.Members)) {
-				return errClusterWorkspace
+				return clusterWorkspaceRefused("workspace_runtime_identities_invalid")
 			}
 			plan.PreviousResults = current.Results
 			if err := plan.Validate(); err != nil {
@@ -280,16 +369,13 @@ func clusterWorkspacePod(spec SessionJobSpec, pod map[string]any) error {
 	if err != nil {
 		return err
 	}
-	maximum := protocol.DefaultWorkspaceBudget().GitMemoryBytes
-	if limit > maximum {
-		limit = maximum
-	}
 	if request > limit {
 		request = limit
 	}
-	// One enforced cgroup bounds all Git descendants together. The whole runner
-	// container shares this conservative ceiling until a dedicated Git cgroup
-	// is integrated; a per-process ulimit alone is not an aggregate limit.
+	// BLG-558 stopgap (owner decision 2026-11-05): the configured pod limit
+	// bounds Git together with the agent and its builds. Clamping the whole
+	// container to Git's budget OOM-killed every cluster worker; Git gets its
+	// own memory group in 0.7.0.
 	limits["memory"] = strconv.FormatInt(limit, 10)
 	requests["memory"] = strconv.FormatInt(request, 10)
 	containers[0]["volumeMounts"] = mounts
@@ -462,6 +548,11 @@ func ClusterWorkspaceChild(parent protocol.WorkspaceManifest, child protocol.Wor
 		for _, c := range contexts {
 			if c.ID == member.ID {
 				c.Token = ""
+				// BLG-460: a cluster worker never inherits its parent Main's push
+				// authority, even transiently in the projected member context — the
+				// child's own credential stage (withClusterWorkspace, ReadOnlyGitWorker)
+				// decides push authority fresh, and for a worker that is always false.
+				c.PushAuthorized = false
 				out = append(out, c)
 				found = true
 				break
@@ -552,14 +643,14 @@ func (d *DaemonConn) deliverClusterWorkspaceReply(ctx context.Context, pool *pgx
 // context from server-owned ancestry rather than renaming a child.
 func clusterLayoutSources(ctx context.Context, pool *pgxpool.Pool, id string, manifest protocol.WorkspaceManifest) ([]protocol.DiscoverySource, error) {
 	if manifest.Validate() != nil || manifest.Layout == protocol.WorkspaceLayoutStructure {
-		return nil, errClusterWorkspace
+		return nil, clusterWorkspaceRefused("workspace_layout_invalid")
 	}
 	seen := map[string]bool{}
 	for !seen[id] && ctx.Err() == nil {
 		seen[id] = true
 		row, err := db.GetSession(ctx, pool, id)
 		if err != nil || row == nil {
-			return nil, errClusterWorkspace
+			return nil, clusterWorkspaceRefused("workspace_layout_session_missing")
 		}
 		if row.ParentSessionID == nil {
 			sources := make([]protocol.DiscoverySource, len(manifest.Members))
@@ -573,16 +664,62 @@ func clusterLayoutSources(ctx context.Context, pool *pgxpool.Pool, id string, ma
 					expectedPath = member.ID
 				}
 				if member.Path != expectedPath {
-					return nil, errClusterWorkspace
+					return nil, clusterWorkspaceRefused("workspace_layout_path_mismatch")
 				}
 			}
 			return sources, nil
 		}
 		parent, err := db.GetSessionWorkspace(ctx, pool, *row.ParentSessionID)
-		if err != nil || parent == nil || parent.Manifest == nil || protocol.ValidateWorkspaceChild(*parent.Manifest, manifest) != nil {
-			return nil, errClusterWorkspace
+		if err != nil || parent == nil || parent.Manifest == nil {
+			return nil, clusterWorkspaceRefused("workspace_layout_parent_missing")
+		}
+		if parent.Manifest.Runtime == "host" && manifest.Runtime == "cluster" {
+			if err := validateHostClusterLayoutChild(*parent.Manifest, manifest); err != nil {
+				return nil, err
+			}
+			sources := make([]protocol.DiscoverySource, len(parent.Manifest.Members))
+			for i, member := range parent.Manifest.Members {
+				sources[i] = protocol.DiscoverySource{ID: member.ID, Name: member.Name}
+			}
+			return sources, nil
+		}
+		if protocol.ValidateWorkspaceChild(*parent.Manifest, manifest) != nil {
+			return nil, clusterWorkspaceRefused("workspace_layout_parent_binding_refused")
 		}
 		id, manifest = *row.ParentSessionID, *parent.Manifest
 	}
-	return nil, errClusterWorkspace
+	return nil, clusterWorkspaceRefused("workspace_layout_ancestry_cycle")
+}
+
+// A desktop Main's cluster child intentionally changes only runtime and the
+// destination representation. All selected source identities, paths, providers,
+// projects, owner and launch-generation separation remain independently checked.
+func validateHostClusterLayoutChild(parent, child protocol.WorkspaceManifest) error {
+	if parent.Runtime != "host" || child.Runtime != "cluster" || parent.Validate() != nil {
+		return clusterWorkspaceRefused("workspace_layout_parent_binding_refused")
+	}
+	projected := parent
+	projected.Runtime = "cluster"
+	paths, err := projectHostClusterMemberPaths(parent, workspaceselection.MemberPaths)
+	if err != nil {
+		return err
+	}
+	projected.Members = append([]protocol.WorkspaceMember(nil), parent.Members...)
+	for _, member := range child.Members {
+		if validateRepoName(member.Project) != nil {
+			return clusterWorkspaceRefused("workspace_layout_parent_binding_refused")
+		}
+	}
+	for i := range projected.Members {
+		if projected.Members[i].Path == "." {
+			projected.Members[i].Path = paths[i]
+		}
+		if projected.Members[i].Project != "" {
+			projected.Members[i].Destination = projected.Members[i].Project
+		}
+	}
+	if protocol.ValidateWorkspaceChild(projected, child) != nil {
+		return clusterWorkspaceRefused("workspace_layout_parent_binding_refused")
+	}
+	return nil
 }

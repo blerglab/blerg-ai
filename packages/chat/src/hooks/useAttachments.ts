@@ -40,7 +40,7 @@ const EMPTY: AttachmentItem[] = []
 /** How often waiting files check for room (and another tab's files for their owner). */
 export const WAITING_RETRY_MS = 5000
 /** The message on a waiting file when its session ends. */
-export const SESSION_ENDED_TEXT = 'This session has ended, so the file can’t be attached.'
+export const SESSION_ENDED_TEXT = 'This workspace has ended, so the file can’t be attached.'
 
 function remember(sessionId: string, items: AttachmentItem[]) {
   kept.delete(sessionId)

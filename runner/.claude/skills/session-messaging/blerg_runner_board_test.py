@@ -242,6 +242,8 @@ class BoardStubHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
 
+# Server threads below poll shutdown every 10 ms instead of the 500 ms default.
+# Requests and their timeouts are unchanged; cleanup need not wait half a second.
 def make_stub(board_response=None):
     server = http.server.HTTPServer(("127.0.0.1", 0), BoardStubHandler)
     server.recorded = []
@@ -395,6 +397,8 @@ class TestTicketCreate:
                 "--body", "Details here",
                 "--priority", "medium",
                 "--size", "M",
+                "--risk", "high",
+                "--complexity", "low",
                 "--tag", "backend",
                 "--tag", "api",
             ],
@@ -411,6 +415,8 @@ class TestTicketCreate:
         assert req["body"]["body"] == "Details here"
         assert req["body"]["priority"] == "medium"
         assert req["body"]["size"] == "M"
+        assert req["body"]["risk"] == "high"
+        assert req["body"]["complexity"] == "low"
         assert "backend" in req["body"].get("tags", [])
         assert "api" in req["body"].get("tags", [])
 
@@ -501,7 +507,7 @@ class TestAmbiguousName:
         stub = make_stub(board_response=AMBIGUOUS_BOARD)
         port = stub.server_address[1]
         # Serve forever in background; CLI will GET board then bail.
-        t = threading.Thread(target=stub.serve_forever)
+        t = threading.Thread(target=stub.serve_forever, kwargs={"poll_interval": 0.01})
         t.daemon = True
         t.start()
 
@@ -522,7 +528,7 @@ class TestAmbiguousName:
     def test_not_found_column_name(self):
         stub = make_stub()  # board has only "In Progress", not "Backlog"
         port = stub.server_address[1]
-        t = threading.Thread(target=stub.serve_forever)
+        t = threading.Thread(target=stub.serve_forever, kwargs={"poll_interval": 0.01})
         t.daemon = True
         t.start()
 
@@ -684,7 +690,7 @@ class TestColumnMoveAnchorResolution:
         stub = make_stub()
         port = stub.server_address[1]
         # GET board (anchor resolution) + PATCH; serve_forever to be safe.
-        t = threading.Thread(target=stub.serve_forever)
+        t = threading.Thread(target=stub.serve_forever, kwargs={"poll_interval": 0.01})
         t.daemon = True
         t.start()
 
@@ -946,7 +952,7 @@ def gateway():
     server.malformed = False
     server.redirect = None
     server.redirect_code = 302
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     env = {'BLERG_RUNNER_BOARD_GATEWAY_URL': f'http://127.0.0.1:{server.server_port}/mcp-gw/board',
            'BLERG_RUNNER_BOARD_ID': TEST_BOARD_ID, 'BLERG_RUNNER_BOARD_TOKEN': TEST_BOARD_TOKEN}
@@ -981,12 +987,19 @@ def test_selected_board_gateway_create_and_update(gateway):
     assert server.calls[-1][2]['params']['arguments']['if_match'] == 1
 
 
-@pytest.mark.parametrize('args', [['board', 'show', OTHER_UUID], ['ticket', 'archive', TICKET_UUID], ['column', 'add', OTHER_UUID, '--name', 'Oops']])
+@pytest.mark.parametrize('args', [['board', 'show', OTHER_UUID], ['column', 'add', OTHER_UUID, '--name', 'Oops']])
 def test_selected_board_gateway_rejects_cross_board_or_unsupported(gateway, args):
     server, env = gateway
     result = run_cli(args, env)
     assert result.returncode != 0
     assert not server.calls
+
+
+def test_selected_board_gateway_archives_selected_card(gateway):
+    server, env = gateway
+    result = run_cli(['ticket', 'archive', TICKET_UUID], env)
+    assert result.returncode == 0, result.stderr
+    assert server.calls[-1][2]['params'] == {'name': 'blerg_card_archive', 'arguments': {'card_id': TICKET_UUID}}
 
 
 def test_selected_board_gateway_manages_columns(gateway):
@@ -1067,7 +1080,7 @@ def test_selected_board_gateway_never_forwards_token_on_redirect(gateway, code):
     receiver.received = []
     receiver.authorizations = []
     receiver.redirect_path = '/steal/' + uuid.uuid4().hex
-    thread = threading.Thread(target=receiver.serve_forever, daemon=True)
+    thread = threading.Thread(target=receiver.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     try:
         # Concurrent suites may retry an old ephemeral port after it is reused.
@@ -1171,7 +1184,7 @@ def session_board():
     server.boards = [{'id': TEST_BOARD_ID, 'name': 'Test Board', 'level': 'read'}]
     server.card_number = None
     server.cards = None
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     env = {'BLERG_RUNNER_SERVER_HTTP': f'http://127.0.0.1:{server.server_port}', 'BLERG_RUNNER_SESSION_ID': SESSION_ID,
            'BLERG_RUNNER_SESSION_TOKEN': SESSION_TOKEN, 'BLERG_RUNNER_DAEMON_STATE_DIR': '/nonexistent-state-dir'}
@@ -1247,12 +1260,14 @@ def test_session_board_several_boards_need_a_name(session_board):
     assert f'Other  ({OTHER_UUID})  full' in result.stdout and f'Test Board  ({TEST_BOARD_ID})  read' in result.stdout
 
 
-def test_session_board_never_archives(session_board):
+def test_session_board_archives_through_gateway(session_board):
     server, env = session_board
     server.boards = [{'id': TEST_BOARD_ID, 'name': 'Test Board', 'level': 'full'}]
     result = run_cli(['ticket', 'archive', TICKET_UUID], env)
-    assert result.returncode != 0
-    assert not [c for c in server.calls if c[0] == 'POST']
+    assert result.returncode == 0, result.stderr
+    calls = [c for c in server.calls if c[0] == 'POST']
+    assert calls[-1][3]['tool'] == 'blerg_card_archive'
+    assert calls[-1][3]['arguments']['card_id'] == TICKET_UUID
 
 
 COLUMN_COMMANDS = [
@@ -1347,7 +1362,7 @@ def test_card_commands_print_the_canonical_chip_reference(command, reference, mo
     assert 'https://' not in output
 
 
-@pytest.mark.parametrize('reference', ['BLG-7', 'OLD-7', '#7', f'board:{TEST_BOARD_ID}#7'])
+@pytest.mark.parametrize('reference', ['7', 'BLG-7', 'OLD-7', '#7', f'board:{TEST_BOARD_ID}#7'])
 def test_resolve_key_and_legacy_references(reference, monkeypatch):
     import importlib.machinery
     import importlib.util
@@ -1365,7 +1380,10 @@ def test_resolve_key_and_legacy_references(reference, monkeypatch):
     monkeypatch.setattr(cli, '_gateway_tool', tool)
     assert cli._resolve_ticket(reference) == TICKET_UUID
     expected = [('blerg_board_get', {'board_id': TEST_BOARD_ID})] if reference.startswith(('BLG-', 'OLD-')) else []
-    assert calls == expected + [('blerg_card_get', {'board_id': TEST_BOARD_ID, 'number': 7})]
+    arguments = {'board_id': TEST_BOARD_ID, 'number': 7}
+    if reference == '7':
+        arguments['title_fallback'] = True
+    assert calls == expected + [('blerg_card_get', arguments)]
 
 
 @pytest.mark.parametrize('text', ['555-1234', '2026-10', '1AB-7'])
@@ -1510,3 +1528,52 @@ def test_ticket_limit_must_be_positive(session_board, command, limit):
     args = ['ticket', 'list'] if command == 'list' else ['ticket', 'search', '--board', TEST_BOARD_ID, '--query', 'Work']
     result = run_cli(args + ['--limit', limit], env)
     assert result.returncode != 0 and 'positive integer' in result.stderr
+
+
+def test_legacy_numeric_title_when_number_missing():
+    card = {**CLEAR_BOARD['tickets'][0], 'title': '2024', 'number': 7}
+    stub = make_stub({**CLEAR_BOARD, 'tickets': [card]})
+    thread = threading.Thread(target=stub.serve_forever, kwargs={'poll_interval': 0.01}, daemon=True)
+    thread.start()
+    try:
+        result = run_cli(['ticket', 'get', '2024'], _board_env(stub.server_port))
+        assert result.returncode == 0, result.stderr
+        assert TICKET_UUID in result.stdout
+    finally:
+        stub.shutdown()
+        thread.join()
+        stub.server_close()
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+def test_legacy_numeric_title_ambiguity_lists_candidates(reverse):
+    cards = [{**CLEAR_BOARD['tickets'][0], 'id': tid, 'title': '2024', 'number': n}
+             for tid, n in [(TICKET_UUID, 7), (OTHER_UUID, 8)]]
+    stub = make_stub({**CLEAR_BOARD, 'tickets': cards[::-1] if reverse else cards})
+    thread = threading.Thread(target=stub.serve_forever, kwargs={'poll_interval': 0.01}, daemon=True)
+    thread.start()
+    try:
+        result = run_cli(['ticket', 'get', '2024'], _board_env(stub.server_port))
+        assert result.returncode != 0
+        assert 'ambiguous' in result.stderr
+        assert TICKET_UUID in result.stderr
+        assert OTHER_UUID in result.stderr
+    finally:
+        stub.shutdown()
+        thread.join()
+        stub.server_close()
+
+@pytest.mark.parametrize('method,path,payload,tool,args', [
+ ('GET', '/api/boards/{board}/releases', None, 'blerg_release_list', {}),
+ ('GET', '/api/boards/{board}/releases/r1', None, 'blerg_release_get', {'release_id':'r1'}),
+ ('POST', '/api/boards/{board}/releases', {'name':'Next','status':'planned'}, 'blerg_release_save', {'name':'Next','status':'planned'}),
+ ('POST', '/api/boards/{board}/releases/r1/close', {'next_release_id':'r2'}, 'blerg_release_close', {'release_id':'r1','next_release_id':'r2'}),
+ ('DELETE', '/api/boards/{board}/releases/r1', None, 'blerg_release_delete', {'release_id':'r1'}),
+])
+def test_release_gateway_translation(ticket_cli, monkeypatch, method, path, payload, tool, args):
+ cli=ticket_cli
+ monkeypatch.setattr(cli,'BOARD_ID',TEST_BOARD_ID)
+ calls=[]
+ monkeypatch.setattr(cli,'_gateway_tool',lambda name, arguments, timeout: calls.append((name,arguments)) or {'ok':True})
+ cli._gateway_board_request(method,path.format(board=TEST_BOARD_ID),payload,30)
+ assert calls==[(tool,{'board_id':TEST_BOARD_ID,**args})]

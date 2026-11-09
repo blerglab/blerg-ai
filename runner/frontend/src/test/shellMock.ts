@@ -1,3 +1,4 @@
+import { apiFetch } from '../apiFetch'
 import type { ShellInfo, ShellState, ShellTransport } from '../shellTransport'
 export class FakeShell implements ShellTransport {
   readonly info: ShellInfo
@@ -26,6 +27,11 @@ export class FakeShell implements ShellTransport {
   resize(cols: number, rows: number) { this.resizes.push([cols, rows]) }
   async reconnect(_takeover?: boolean) { this.state?.('running') }
   disconnect() { this.disconnected = true; this.state?.('disconnected') }
+  async rename(name: string) {
+    const response = await apiFetch(`/api/shells/${encodeURIComponent(this.info.handle)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) })
+    if (!response.ok) throw new Error('Shell could not be renamed.')
+    this.info.name = (await response.json()).name
+  }
   async end() { this.ended = true; this.state?.('closed') }
   emit(text: string) { this.output?.(new TextEncoder().encode(text)) }
   /** Server scrollback replay, as WebSocketShell delivers it: a terminal reset, then the kept bytes. */

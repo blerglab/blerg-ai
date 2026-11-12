@@ -1,5 +1,8 @@
 # @blerglab/chat
 
+Version 1.40.3 labels questions withdrawn by session discard without implying an answer.
+
+
 The chat surface for apps built on Blerg sessions: transcript, composer, files, cards, highlighted code, diagrams, charts, diffs and a
 token theme, over a pluggable transport. The runner's own web app renders it; your app can too,
 against your own backend, with the runner's agent token never leaving your server.
@@ -62,7 +65,10 @@ runner's operator.
 The tarball route is immutable (`Cache-Control: public, max-age=31536000, immutable`) and
 unauthenticated, as `/agents` is; a new version is a new file name. The package needs `react` and
 `react-dom` 19 as peers and brings `react-markdown`, `remark-gfm`, `zustand` and `lowlight` (the
-code highlighter), Mermaid and Vega-Lite/Vega with it. Renderers are loaded on demand. Closed
+code highlighter), Mermaid and Vega-Lite/Vega with it. Renderers are loaded on demand. Charts compile, parse and lay out in disposable inline workers;
+consumers must allow blob workers in their Content Security Policy. The page enforces a five-second
+termination deadline and runtime row, scene, facet and output budgets
+(see [artifact limits](../../docs/artifacts.md)). Closed
 `mermaid` and `vega-lite` fences render in messages and Markdown views; charts accept inline data
 only (`data.values`, or top-level `datasets` named by `data.name`). Charts may compose (`layer`,
 `concat`, `hconcat`, `vconcat`, `facet`, `repeat`; at most 16 charts per list, 64 panels in all
@@ -83,6 +89,18 @@ exposes the same source/copy/zoom surface independently of a session or transpor
 the surrounding `--chat-*` tokens for colors and fonts, remain transparent, fit the message width
 and redraw when those tokens change. Explicit chart mark and encoding colors, and the chart's own
 `config`, override the theme defaults; external resources remain disabled.
+
+A `.dash.json` document uses `format: "blerg-dashboard"`, `version: 1`, a title, and up to 32
+cards with stable IDs and spans of 1–4. Inline-only stat, gauge, text, and chart cards share
+the active theme and a pane-responsive 4/2/1-column grid. Embedded chart specs cannot set
+colors, backgrounds, schemes, or ranges. Invalid replacements retain the last valid mounted
+dashboard and offer Source. Dashboard source download is supported; image export and live
+bindings belong to later chunks. See `runner/skills/visualizing/examples.md` in the repository.
+
+Published `.dash.json`, `.vl.json`, and `.mmd` files show a lazy, fixed-height rendered preview on their
+chat card using the same renderer and policy. Live previews refresh on republish. Refusals show
+their reason, with source behind the source toggle. Live file viewers show a quiet relative
+timestamp at the toolbar's right edge, with the exact time in its tooltip.
 
 ## Mount the proxy
 
@@ -343,6 +361,14 @@ dropped (the optional `onReset`) and loaded from its end as a reload does, the o
 in behind it. Both handlers are optional: a transport without them, `createProxyTransport`
 among them, hands events over one by one as before.
 
+The transcript follows while it is at the end (within 8 px). Only a move away associated
+with reader input (wheel, touch, keyboard, scrollbar or selection drag) stops following.
+Content growth, hydration and viewport clamps cannot stop following on their own.
+A selection press holds the text still until release.
+Jumps through `jumpToElement` explicitly stop following and cancel saved-place restoration;
+returning to a retained Activity view restores its previous follow choice. Keyboard focus
+scrolling after Tab also counts as reader input.
+
 A long transcript is drawn a window at a time. The transcript draws its newest 300 rows (a row
 is a message, a card or a folded run of tool calls); scrolling near the top of what is drawn
 reveals 300 more, and once everything held is drawn, fetches the next older page. Older pages
@@ -550,6 +576,10 @@ canonical key, including when the text used `#N` or `board:<id>#N`. Parentheses 
 lists work; code blocks and URLs stay text. Hosts can use `ReferenceScope` and `ReferenceText`
 for the same chips in History and plans. Commit subjects and message bodies use the same resolver.
 
+Repository-qualified issues (`owner/repo#19`, `owner/repo issue #19`, or
+`owner/repo issues #19, #20 and #23`) link to GitHub instead of the session board.
+Only the adjacent issue list inherits that repository; a standalone `#19` still names a card.
+
 Write references directly in message prose or a table, without code spans or Markdown links.
 The legacy `board:<board-id>#<number>` form still names a card without ambiguity and is the CLI
 fallback for a board awaiting key confirmation. References in fenced code, inline code and links
@@ -562,6 +592,11 @@ and `refs.openCard(target)` to open the host's in-app card dialog. Resolvers mus
 check access and return only existing cards. Missing or inaccessible cards remain
 text. Wrap the chat in `HovercardProvider` with the host's card preview source to
 provide hover previews, as the runner does. Resolutions batch by board and number.
+Misses and failed lookups retry after 5 seconds while a reference surface is subscribed,
+backing off exponentially for up to five total attempts. Exhausted misses and failures stay
+unlinked until the resolver changes or the page reloads. Failed lookups remain unknown until
+that cap; confirmed links stay cached.
+
 When a reader changes, its references are resolved again and outstanding answers
 from the old reader are discarded. Hosts must call `clearRefStores()` synchronously
 when the authenticated viewer changes, before remounting chat or checklists. This
@@ -969,3 +1004,105 @@ Custom `TransportFiles` implementations opt in to persistence with `queueScope()
 stable account/server namespace containing no credentials. An empty or absent scope keeps bytes
 in memory. Proxy transports accept `attachmentScope` for the same purpose. Change the scope when
 the signed-in account changes; server authorization remains responsible for file access/deletion.
+
+Board metadata proposals use kind `board_metadata`: the card offers Approve and Reject,
+passes the reviewed arguments with approval, and never offers Allow for this session.
+Workspace file viewers offer Review when mounted inside a chat context. Saved
+requests share a session batch across tabs and split panes, sent through
+`submitFeedback` as `Workspace files.review.json`. The exported
+`createWorkspaceAnchor` and `projectWorkspaceAnchor` helpers use inclusive lines,
+SHA-256 source hashes, and unique exact passage matching. See
+[workspace reviews](../../docs/artifacts.md#review-workspace-files).
+
+The Blerg adapter also accepts the five account preset IDs on the document root: `dark`,
+`light`, `colorblind-dark`, `colorblind-light`, and `high-contrast`. It ships the shared
+brand palette. `buttonBg` (`--chat-button-bg`) controls filled composer buttons independently
+of border ink, so high-contrast borders do not become text backgrounds.
+
+A host's `recoveryPaused` overrides stale running/waiting activity and reports no busy turn.
+Mount the pause explanation in `slots.aboveComposer`; a recovery pause does not imply an
+unanswered question. Runner recovery refusals retain this state while a message queues input
+and retries adoption. Only successful runtime recovery clears that refusal; an unfinished
+workspace stop can refuse again without losing work. End waits for workspace cleanup or
+reports that cleanup is incomplete and the workspace and its work remain retained.
+
+Chart surfaces retain their complete drawing while a source or theme replacement is prepared.
+Native SVG charts resize the mounted scene, axes and legend before paint; exports serialize the
+current scene. Static Vega drawings retain a uniformly fitted snapshot until the measured replacement
+commits. Hidden surfaces defer preparation, and tab transfers use a bounded in-memory snapshot.
+A failed replacement keeps the last complete drawing and reports that the update is unavailable.
+
+Native continuous line charts support local-calendar temporal x axes (including authored time
+formats), numeric position scales with `zero`, two-endpoint `domain` and boolean `nice`, and
+categorical series legends at the top or right (`legend: null` hides them). Top legends wrap
+before the plot is measured. Axis and channel titles and formatted tooltips are preserved.
+These options also work with datum reference rules and labels; a two-field rule layer shares
+position and color domains while retaining its own inline data. The original published NVDA
+snapshot is covered directly by `TemporalChart.browser.test.tsx`, including data-only updates, default and
+color-blind themes, and 390/3840 px screenshots. The unmodified snapshot remains in
+`nvdaOriginalSpec.json`: its authored rule layer produces
+two vertical endpoint segments, matching Vega. The visible demo in `nvdaSpec.json` instead
+authors one horizontal y-only rule at $200.13 with a label. `NvdaReference.browser.test.tsx`
+compares both geometries directly against Vega scenegraph items, including the corrected
+reference’s full plot width and exact shared-scale y position. Calendar time units, other legend
+options and scale types,
+and these new options on other mark families continue to use the Vega fallback.
+
+The representative lifecycle proof lives in the runner's `ChartLifecycle.browser.test.tsx`. It
+uses the real session page at 390, 520, 1024 and 3840 px pane widths, including a color-blind theme,
+and records pre-paint scene measurements plus compositor frames under `.cache/blg513`.
+Run without `VITE_LIVE_FILE_SHOTS_DIR` for uninterrupted compositor sampling, then rerun with
+that variable set to `.cache/blg513` for separate stage screenshots. PNG capture can change the
+browser compositor’s recording scale, so the harness keeps these passes separate. These lifecycle fixtures
+are simulated; the original NVDA fixture above separately proves native layered data revisions.
+
+Transfer snapshots are captured lazily on transfer, hide or unmount, with an eight-entry/16 MiB
+budget; validated models have an eight-entry/8 MiB budget. Hash-indexed entries check the source
+on lookup. Native text metrics share a 256 KiB font/weight/text cache. Only a matching font-family
+load after the first exact chart invalidates layout, once per surface. A worker without text
+measurement support reports a capability refusal instead of accessing a nonexistent document.
+The frame harness checks exact committed dimensions, retained aspect/fit and monotonic generations,
+and decodes recorded JPEGs for empty chart regions. Compositor/DOM timing is correlated within a
+bounded 250 ms history at grid breakpoints; raw images remain available for review. Cross-tab
+chat frames are excluded from chart-region pixel analysis; unchanged chart generations and root
+identity are asserted through both round trips. Initial unpainted shells are not blank failures.
+
+The message composer grows with input up to 420px or half the chat pane's height,
+whichever is smaller, then scrolls internally. Drag its top separator to resize up to
+85% of the pane. The dragged height is stored on this device per signed-in account
+(using the transport's account queue scope), shared across sessions and restored on load.
+Double-click the separator or press Home to reset; Arrow Up/Down resize it.
+
+Question dialogs and retained question tabs share the transcript message rows and chat composer.
+Answer closes an ordinary question; Ctrl/Cmd+Enter answers and Enter adds a line. Ask Main sends
+clarification while leaving it open. Decisions retain Approve/Decline; command approvals take no
+reply. Dismiss sits in the header. Main's turn uses the chat working indicator; the person's turn
+is quiet. Waiting and waiter-release details remain in the first message author's tooltip.
+
+Question reply controls name the asker: `Ask Main` for Main, or the worker's card
+key (for example, `Ask BLG-514`). The tooltip retains the full worker title.
+`QuestionCard` and `QuestionPanel` accept that title through `worker` and share it
+with nested `AskReply` controls in dialogs, tabs, and question queues.
+
+Question dialog and tab headers wrap to show the complete title, with their
+utility actions aligned at the top. The first question line appears in the header
+once; later lines remain in the conversation body, including repeated text.
+
+Charts drawn by Blerg's own renderer emphasize the hovered or keyboard-focused mark and
+dim the rest, using theme tokens. On first render only, bars grow from the baseline,
+lines and areas draw left to right, points and diagrams fade in. Cached opens, resize,
+theme repaint and data-only updates never replay it, prefers-reduced-motion turns it
+off, and SVG/PNG exports capture the final state.
+
+`QuestionCard` also supports opt-in `asCard` for embedding that same conversation in a
+content surface, with `statusAction` in its header. `AskReply compact` starts with a
+one-line, unfocused composer and expands on focus; ordinary dialogs and chat keep
+their existing layout.
+
+A chart that fills its pane (`hostedTab` or `stretch`) reserves room for its collapsed
+"Data table" control, so the drawing never scrolls inside its own surface.
+
+Commit-bearing diffs open **Open original** and **Open changed** file revisions in
+the supplied viewer host. The serialized workspace view carries its commit, side,
+session and repository identity; hosts must keep these distinct from working-tree
+files and other revisions. Without a viewer host, the existing dialog remains.

@@ -7,6 +7,7 @@ import { HTML_ARTIFACT_CSP } from '../model/artifacts'
 import { testing as hl } from '../model/highlight'
 import { createFakeFiles, type FakeFiles } from '../test/fakeTransport'
 import { FileRequestError } from '../transport/files'
+import type { ReviewFile } from '../model/review'
 import type { ArtifactInfo } from '../transport/types'
 
 let blobs: Blob[]
@@ -198,7 +199,7 @@ describe('ArtifactViewer: images', () => {
     const img = await screen.findByRole('img', { name: 'logo.svg' })
     expect(img.getAttribute('src')).toMatch(/^data:image\/svg\+xml;base64,/)
     expect(blobs.some(b => b.type === 'image/svg+xml')).toBe(false)
-    expect(container.ownerDocument.querySelector('svg')).toBeNull()
+    expect(container.ownerDocument.querySelector('.artifact-body svg')).toBeNull()
     expect(container.ownerDocument.querySelector('script')).toBeNull()
     expect(container.ownerDocument.querySelector('iframe')).toBeNull()
   })
@@ -312,10 +313,9 @@ describe('ArtifactViewer: no preview', () => {
 })
 
 describe('ArtifactViewer: actions', () => {
-  it('Download goes through the transport (which carries the credentials and saves the blob)', async () => {
+  it('Download uses transport for a file without a browser preview', async () => {
     serve('shown')
-    show(art({}))
-    await screen.findByTestId('artifact-text')
+    show(art({ view: 'none' }))
     fireEvent.click(screen.getByRole('button', { name: 'Download' }))
     await waitFor(() => expect(files.downloads).toEqual(['a1']))
     expect(screen.queryByRole('alert')).toBeNull()
@@ -324,8 +324,7 @@ describe('ArtifactViewer: actions', () => {
   it('reports a download that fails', async () => {
     serve('shown')
     files.downloadError = new Error('This file is no longer available.')
-    show(art({}))
-    await screen.findByTestId('artifact-text')
+    show(art({ view: 'none' }))
     fireEvent.click(screen.getByRole('button', { name: 'Download' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('no longer available')
   })
@@ -333,8 +332,7 @@ describe('ArtifactViewer: actions', () => {
   it('a download the server refused shows its sentence and error id', async () => {
     serve('shown')
     files.downloadError = new FileRequestError('The runner could not read the file because of an unexpected storage error; try again.', 500, 'c0ffee01')
-    show(art({}))
-    await screen.findByTestId('artifact-text')
+    show(art({ view: 'none' }))
     fireEvent.click(screen.getByRole('button', { name: 'Download' }))
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('unexpected storage error; try again. (error id c0ffee01)')
@@ -354,8 +352,7 @@ describe('ArtifactViewer: actions', () => {
     serve('x')
     show(art({ name: 'notes.txt', size: 1536 }))
     const dialog = screen.getByRole('dialog', { name: /notes\.txt/ })
-    expect(dialog).toHaveTextContent('1.5 KB')
-    expect(dialog).toHaveTextContent('Text')
+    expect(within(dialog).getByRole('button', { name: 'Copy notes.txt path' })).toHaveAttribute('title', 'notes.txt · From Files · Text · 1.5 KB')
   })
 })
 
@@ -470,12 +467,14 @@ describe('ArtifactViewer: versions', () => {
     expect(screen.queryByRole('button', { name: 'View latest' })).toBeNull()
   })
 
-  it('downloads an older version by its own id (the transport names the file)', async () => {
+  it('downloads the displayed older version from memory', async () => {
     serve('# old')
     render(<ArtifactViewer sessionId="s1" files={files} artifact={v2} onClose={vi.fn()} />)
-    await screen.findByRole('heading', { name: 'report.md · v2 of 3' })
+    await screen.findByRole('heading', { name: 'old' })
     fireEvent.click(screen.getByRole('button', { name: 'Download' }))
-    await waitFor(() => expect(files.downloads).toEqual(['b2']))
+    await waitFor(() => expect(blobs).toHaveLength(1))
+    expect(await blobs[0].text()).toBe('# old')
+    expect(files.downloads).toEqual([])
   })
 })
 
@@ -505,7 +504,7 @@ describe('ArtifactViewer: highlighted code and json', () => {
     expect(pre.querySelector('[class*="hljs"]')).toBeNull()
     expect(pre.textContent).toBe('just words')
     expect(pre.closest('[data-wrap]')).toHaveAttribute('data-wrap', 'on')
-    expect(await screen.findByRole('button', { name: 'Wrap' })).toHaveAttribute('aria-pressed', 'true')
+    expect(await screen.findByRole('button', { name: 'Wrap lines' })).toHaveAttribute('aria-pressed', 'true')
   })
 
   it('colors only the head of a big file and keeps every character', async () => {
@@ -555,14 +554,14 @@ describe('ArtifactViewer: maximize', () => {
     const dialog = screen.getByRole('dialog')
     const button = screen.getByRole('button', { name: 'Maximize' })
     expect(button).toHaveAttribute('aria-pressed', 'false')
-    expect(button).toHaveTextContent('⤢')
+    expect(button.querySelector('svg')).toBeTruthy()
     expect(dialog).not.toHaveClass('is-maximized')
     fireEvent.click(button)
     expect(dialog).toHaveClass('is-maximized')
     expect(screen.getByTestId('artifact-viewer-overlay')).toHaveClass('is-maximized')
     const restore = screen.getByRole('button', { name: 'Restore size' })
     expect(restore).toHaveAttribute('aria-pressed', 'true')
-    expect(restore).toHaveTextContent('⤡')
+    expect(restore.querySelector('svg')).toBeTruthy()
     fireEvent.click(restore)
     expect(dialog).not.toHaveClass('is-maximized')
   })
@@ -610,4 +609,123 @@ describe('ArtifactViewer: maximize', () => {
     await screen.findByTestId('review-mode')
     expect(screen.getByRole('dialog')).toHaveClass('is-maximized')
   })
+})
+
+describe('ArtifactViewer: compare versions', () => {
+  it('renders the document when the host cannot list versions', async () => {
+    Reflect.deleteProperty(files, 'list')
+    serve('# Current')
+    show(art({ name: 'notes.md', view: 'markdown', version: 2 }))
+    expect(await screen.findByRole('heading', { name: 'Current' })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Version comparison' })).toBeNull()
+  })
+
+  it('defaults to the document, compares arbitrary versions, and returns to rendered Markdown', async () => {
+    const v1 = art({ id: 'v1', name: 'roadmap.md', view: 'markdown', version: 1, origin: 'agent' })
+    const v2 = { ...v1, id: 'v2', version: 2 }
+    const v3 = { ...v1, id: 'v3', version: 3, origin: undefined }
+    files.list = vi.fn(async () => [v3, v1, v2, art({ id: 'other', name: 'roadmap.md', origin: 'user', version: 1 })])
+    files.raw = vi.fn(async (_s, id) => new Blob([id === 'v1' ? '# First\n' : id === 'v2' ? '# Second\n' : '# Current\n']))
+    show(v3)
+    expect(await screen.findByRole('heading', { name: 'Current' })).toBeInTheDocument()
+    fireEvent.click(await screen.findByRole('button', { name: 'Changes since v2' }))
+    expect(await screen.findByText('# Second')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Current' })).toBeNull()
+    fireEvent.change(screen.getByLabelText('Compare from'), { target: { value: 'v1' } })
+    expect(await screen.findByText('# First')).toBeInTheDocument()
+    expect(screen.getAllByRole('option')).toHaveLength(6)
+    fireEvent.click(screen.getByRole('button', { name: 'Document' }))
+    expect(await screen.findByRole('heading', { name: 'Current' })).toBeInTheDocument()
+  })
+})
+
+it('offers requested-item comparison while keeping comments on the current version', async () => {
+  const previous = art({ id: 'old', name: 'notes.md', version: 1, view: 'markdown' })
+  const current = { ...previous, id: 'current', version: 2 }
+  files.list = vi.fn(async () => [previous, current])
+  files.raw = vi.fn(async (_s, id) => new Blob([id === 'old' ? '# Earlier\nFix this passage\n' : '# Current\nFixed passage\n']))
+  const chat = chatValue()
+  chat.reviewFor = vi.fn(async (): Promise<ReviewFile> => ({ version: 1, file: { name: 'notes.md', artifactId: 'current' }, requests: [{ id: 'R1', text: 'Clarify this', anchor: { kind: 'text', diff: { artifactId: 'old', file: 'notes.md', side: 'new', start: 1, end: 1, hunk: 1, fileIndex: 1 }, quote: 'Fix this passage' }, status: 'done', reply: 'Clarified', createdAt: '' }] }))
+  render(<ChatContext.Provider value={chat}><ArtifactViewer sessionId="s1" files={files} artifact={current} review onClose={vi.fn()} /></ChatContext.Provider>)
+  fireEvent.click(await screen.findByRole('button', { name: 'What changed for requested items' }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Clarify this' }))
+  expect(await screen.findByText('Showing the requested passage and nearby lines.')).toBeInTheDocument()
+  expect(screen.getByText(/Return to Document to comment on v2/)).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Comment' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Document' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Changes since v1' }))
+  expect(screen.queryByLabelText('Requested items')).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Show all changes' })).toBeNull()
+})
+
+it('keeps unavailable versions out of comparison without replacing the document', async () => {
+  const current = art({ id: 'current', version: 2 })
+  files.list = vi.fn(async () => [{ ...current, id: 'gone', version: 1, missing: true }, current])
+  serve('Current text')
+  show(current)
+  await screen.findByText('Current text')
+  await waitFor(() => expect(files.list).toHaveBeenCalled())
+  expect(screen.queryByRole('button', { name: 'Changes since v1' })).toBeNull()
+})
+
+it('offers what changed for an earlier request-changes decision note', async () => {
+  const { ReviewRequestContext } = await import('./reviewRequestContext')
+  const older = art({ id: 'older', version: 1 })
+  const current = art({ id: 'newer', version: 2 })
+  files.list = vi.fn(async () => [older, current])
+  files.raw = vi.fn(async (_s, id) => new Blob([id]))
+  render(<ReviewRequestContext.Provider value={{ forArtifact: id => id === older.id ? { request_id: 'review1', artifact_id: id, artifact_name: older.name, artifact_version: 1, artifact_view: 'text', ask: 'Review', state: 'changes_requested', note: 'Explain the rollout' } : null }}><ArtifactViewer sessionId="s1" files={files} artifact={current} onClose={vi.fn()} /></ReviewRequestContext.Provider>)
+  fireEvent.click(await screen.findByRole('button', { name: 'What changed for requested items' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Explain the rollout' }))
+  expect(screen.getByLabelText('Compare from')).toHaveValue('older')
+  expect(screen.getByLabelText('Compare to')).toHaveValue('newer')
+})
+
+it('does not offer a comparison on the first version', async () => {
+  const oldest = art({ id: 'v1', version: 1 })
+  files.list = vi.fn(async () => [oldest, { ...oldest, id: 'v2', version: 2 }])
+  serve('text')
+  show(oldest)
+  await screen.findByText('text')
+  await waitFor(() => expect(files.list).toHaveBeenCalled())
+  expect(screen.queryByRole('button', { name: 'Compare versions' })).toBeNull()
+})
+
+it('keeps identical versions and unavailable earlier bytes out of the utility bar', async () => {
+  const current = art({ id: 'current', name: 'notes.md', view: 'markdown', version: 3 })
+  files.list = vi.fn(async () => [{ ...current, id: 'gone', version: 1, missing: true }, { ...current, id: 'same', version: 2 }, current])
+  files.raw = vi.fn(async () => new Blob(['# Current']))
+  show(current)
+  await screen.findByRole('heading', { name: 'Current' })
+  await waitFor(() => expect(files.raw).toHaveBeenCalledWith('s1', 'same'))
+  expect(screen.queryByRole('button', { name: /Changes since|Compare versions/ })).toBeNull()
+  expect(document.querySelector('.artifact-comparison-controls')).toBeNull()
+})
+
+it('places a verified earlier difference in the single utility bar', async () => {
+  const current = art({ id: 'current', name: 'notes.md', view: 'markdown', version: 3 })
+  files.list = vi.fn(async () => [{ ...current, id: 'different', version: 1 }, { ...current, id: 'same', version: 2 }, current])
+  files.raw = vi.fn(async (_s, id) => new Blob([id === 'different' ? '# Earlier' : '# Current']))
+  show(current)
+  const changes = await screen.findByRole('button', { name: 'Changes since v1' })
+  expect(changes.closest('[role="toolbar"]')).toBeTruthy()
+  expect(changes).toHaveAttribute('title', 'Compare v1 with v3')
+  expect(changes).toHaveTextContent('')
+  const raw = screen.getByRole('button', { name: 'Raw' })
+  fireEvent.click(raw)
+  expect(raw).toHaveAttribute('aria-pressed', 'true')
+})
+
+it('pins the displayed version before starting a review so live publication cannot replace comments', async () => {
+  const first = art({ id: 'review-first', name: 'review.md', view: 'markdown', version: 1 })
+  const next = { ...first, id: 'review-next', version: 2 }
+  localStorageChatStorage.set('blerg.viewer.follow.s1.agent.review.md', null)
+  files.raw = vi.fn(async (_s, id) => new Blob([id === first.id ? '# Reviewed version' : '# New version']))
+  const draw = (latest: ArtifactInfo) => <ChatContext.Provider value={chatValue()}><ArtifactViewer sessionId="s1" files={files} artifact={first} latest={latest} embedded onClose={vi.fn()} /></ChatContext.Provider>
+  const view = render(draw(first))
+  fireEvent.click(await screen.findByRole('button', { name: 'Review' }))
+  expect(screen.getByRole('button', { name: 'Follow latest' })).toHaveAttribute('aria-pressed', 'false')
+  view.rerender(draw(next))
+  expect(await screen.findByRole('button', { name: 'v2 is available' })).toBeTruthy()
+  expect(screen.getByRole('region', { name: 'review.md' })).toBeTruthy()
 })

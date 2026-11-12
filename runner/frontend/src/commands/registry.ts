@@ -1,8 +1,10 @@
 import type { ReactNode } from 'react'
+export const shortcutGroups = ['Everywhere', 'In a session', 'Panes', 'Shell', 'Explorer'] as const
+export type ShortcutGroup = typeof shortcutGroups[number]
 export type PaletteMode = 'commands' | 'files'
 export type PaletteGroup = 'sessions' | 'cards' | 'files' | 'commands'
 export const paletteGroups: PaletteGroup[] = ['sessions', 'cards', 'files', 'commands']
-export const groupLabels: Record<PaletteGroup, string> = { sessions: 'Sessions', cards: 'Cards', files: 'Files', commands: 'Commands' }
+export const groupLabels: Record<PaletteGroup, string> = { sessions: 'Workspaces', cards: 'Cards', files: 'Files', commands: 'Commands' }
 export function parseScope(value: string): { scope: PaletteGroup | null; query: string } {
   const match = value.match(/^(session:|s |#|\/|>)\s*/i)
   if (!match) return { scope: null, query: value }
@@ -28,6 +30,7 @@ export interface PaletteItem {
   icon?: ReactNode
   detail?: string
   keywords?: string
+  shortcutGroup?: ShortcutGroup
   shortcut?: string
   run(): void
 }
@@ -94,7 +97,7 @@ export class CommandRegistry {
 
 function sameArray<T>(a: T[], b: T[]) { return a.length === b.length && a.every((value, i) => value === b[i]) }
 function sameResult(a: PaletteItem, b: PaletteItem) {
-  return a.icon === b.icon && a.title === b.title && a.detail === b.detail && a.keywords === b.keywords && a.shortcut === b.shortcut && a.group === b.group && a.repo === b.repo && a.destructive === b.destructive && a.empty === b.empty && a.recentAt === b.recentAt && a.searchMatched === b.searchMatched && a.here === b.here && a.recentRank === b.recentRank && a.refine === b.refine
+  return a.icon === b.icon && a.title === b.title && a.detail === b.detail && a.keywords === b.keywords && a.shortcut === b.shortcut && a.shortcutGroup === b.shortcutGroup && a.group === b.group && a.repo === b.repo && a.destructive === b.destructive && a.empty === b.empty && a.recentAt === b.recentAt && a.searchMatched === b.searchMatched && a.here === b.here && a.recentRank === b.recentRank && a.refine === b.refine
 }
 
 /** Separate fields prevent incidental detail/keyword text from outranking a name. */

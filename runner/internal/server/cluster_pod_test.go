@@ -14,7 +14,7 @@ func TestClusterPodControllerIsolationAndBootstrap(t *testing.T) {
 	isolatedClusterPod(pod, container)
 	raw, _ := json.Marshal(map[string]any{"pod": pod, "container": container})
 	text := string(raw)
-	for _, required := range []string{`"mountPath":"/run/blerg-workspace-private"`, `"mountPath":"/runtime-private"`, `chmod 0700 /runtime-private`, `--reuid=1001`, `--regid=1000`, `--ambient-caps=+chown,+dac_override,+setuid,+setgid,+kill,+sys_ptrace`, `"readOnlyRootFilesystem":true`, `"KILL"`, `"SYS_PTRACE"`, `"name":"workspace-storage"`} {
+	for _, required := range []string{`"mountPath":"/run/blerg-workspace-private"`, `"mountPath":"/runtime-private"`, `chmod 0700 /runtime-private`, `chmod 1777 /runtime-tmp`, `"mountPath":"/runtime-tmp"`, `--reuid=1001`, `--regid=1000`, `--ambient-caps=+chown,+dac_override,+setuid,+setgid,+kill,+sys_ptrace`, `"readOnlyRootFilesystem":true`, `"KILL"`, `"SYS_PTRACE"`, `"name":"workspace-storage"`} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("production pod missing %s", required)
 		}

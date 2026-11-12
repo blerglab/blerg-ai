@@ -244,31 +244,6 @@ func TestBrowserStartDefaultsToInteractive(t *testing.T) {
 	}
 }
 
-// The browser websocket's spawn is a browser's start too.
-func TestForwardBrowserSpawnInteraction(t *testing.T) {
-	_, hub, dc, pool := spawnTokenFixture(t)
-	ctx := context.Background()
-	for asked, want := range map[string]string{"": protocol.InteractionInteractive, "unattended": protocol.InteractionUnattended} {
-		sid, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1", AccountID: "user-1"}, protocol.BrowserSpawnSession{
-			Kind: "agent", Type: "spawn_session", DaemonID: dc.ID, Repo: "app", Title: "t", Interaction: asked,
-		}, pool)
-		if err != nil {
-			t.Fatalf("forwardBrowserSpawn: %v", err)
-		}
-		if msg := recvSpawn(t, dc); msg.SessionID != sid || msg.Interaction != want {
-			t.Errorf("asked %q: spawn interaction = %q, want %q", asked, msg.Interaction, want)
-		}
-		if row, err := db.GetSession(ctx, pool, sid); err != nil || row == nil || row.Interaction != want {
-			t.Errorf("asked %q: row = %+v, %v", asked, row, err)
-		}
-	}
-	if _, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1", AccountID: "user-1"}, protocol.BrowserSpawnSession{
-		Kind: "agent", Type: "spawn_session", DaemonID: dc.ID, Repo: "app", Interaction: "maybe",
-	}, pool); err == nil || len(dc.send) != 0 {
-		t.Errorf("an unknown interaction was forwarded (err %v)", err)
-	}
-}
-
 // A cluster Job carries the mode as a plain variable, and a resume rebuilds it from the row: the
 // stored mode when there is one, and the legacy rule for a row from before the column.
 func TestClusterJobCarriesInteractionAndResumeKeepsIt(t *testing.T) {

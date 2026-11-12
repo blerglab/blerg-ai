@@ -4,7 +4,7 @@ import { useLaunchOptions } from './launchOptions'
 
 const fetcher = vi.fn()
 vi.mock('../apiFetch', () => ({ apiFetch: (...args: unknown[]) => fetcher(...args) }))
-const descriptor = (id: string) => ({ id, name: id.toUpperCase(), runtimes: ['daemon'], terminal: true, restricted: true, plugins: false, credential_import: false, models: { models: [], source: 'none' } })
+const descriptor = (id: string) => ({ id, name: id.toUpperCase(), runtimes: ['daemon'], restricted: true, plugins: false, credential_import: false, models: { models: [], source: 'none' } })
 const reply = (ids: string[], state = 'known') => ({ runtime: 'daemon', state, engines: ids.map(descriptor) })
 const ok = (value: unknown) => Promise.resolve({ ok: true, json: async () => value })
 beforeEach(() => { fetcher.mockReset() })

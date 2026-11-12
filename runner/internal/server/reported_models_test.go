@@ -28,6 +28,7 @@ func mdl(id string, efforts ...string) models.Model {
 func reportingDaemon(hub *Hub, id string, reports map[string]models.Report) *DaemonConn {
 	dc := &DaemonConn{ID: id, Name: "host-" + id, send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	dc.SetCheckedOutRepos([]string{"app"})
 	dc.SetEngineModels(reports)
 	hub.Register(dc)
@@ -38,6 +39,7 @@ func reportingDaemon(hub *Hub, id string, reports map[string]models.Report) *Dae
 func TestDaemonConnSanitizesReportedModels(t *testing.T) {
 	dc := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006b"}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	dc.SetEngineModels(map[string]models.Report{
 		"codex": {Models: []models.Model{
 			{ID: "--dangerously-bypass-approvals-and-sandbox", Efforts: []string{"high"}},

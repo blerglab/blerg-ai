@@ -82,8 +82,9 @@ kubectl --context "$KUBE_CONTEXT" --namespace "$NS" get storageclass -o yaml
 Set exclusions to the actual control-node hostname **label**, not a guessed node
 name. At least one eligible worker must remain. Exactly one default StorageClass
 with Delete reclaim is required. The script discovers and journals its UID/name/
-provisioner and uses it for all claims. The lab's `microk8s-hostpath` and
-`local-path` classes **do not enforce quotas**. Results say `quota_enforced:false`;
+provisioner and uses it for all claims. Capacity-safety acceptance requires a
+StorageClass that enforces both byte and inode quotas; unbounded host-directory
+provisioners do not establish those limits. Results say `quota_enforced:false`;
 there are no byte/inode exhaustion cases. No claim of storage-limit acceptance.
 
 ## 3. Render without any cluster contact

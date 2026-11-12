@@ -73,6 +73,14 @@ Inside a session you are the agent. The session's own tools are on your path:
 - The repository is four Go modules (`contracts`, `core`, `board`, `runner`) and three web apps;
   `make test` and `make lint` run what CI runs. `runner/CLAUDE.md` has rules specific to the
   runner, including how to handle session-state bugs.
+- Testing costs more than anything else here, so spend it well. While you work, run only the
+  tests in the region your change touches, plus lint, type checks and the build for that region.
+  A frontend-only change runs no backend tests; a Go change in one module runs no frontend tests
+  and no other module's tests, unless a shared package or contract it uses changed. Don't run the full browser or
+  performance suites from a child session unless you were asked: the coordinator runs one full gate
+  on the merged tree ([`docs/pre-merge.md`](docs/pre-merge.md)). If your change is broad, say so in
+  your report. Don't pass `-count=1` unless a test needs it (race, timing): it discards Go's test
+  cache.
 - Never commit a real terminal capture, hostname, address or credential. `scripts/scrub.sh` is
   the check CI runs; run it before you finish.
 

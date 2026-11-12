@@ -18,7 +18,7 @@ export function startedByLabel(s: Pick<SessionInfo, 'started_by' | 'cron_id'>, p
   const by = s.started_by
   if (by?.kind === 'session') {
     const who = parent ? `${ENGINE_NAMES[parent.engine ?? ''] ?? parent.engine} agent` : 'an agent'
-    return `${who} from ${by.name || 'another session'}`
+    return `${who} from ${by.name || 'another workspace'}`
   }
   if (by?.name) return by.name
   const kind = by?.kind ?? (s.cron_id ? 'cron' : '')

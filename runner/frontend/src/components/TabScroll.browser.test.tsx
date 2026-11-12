@@ -197,10 +197,17 @@ async function expectFileListScrolls(group: HTMLElement) {
   // A list that fits shows every file; a longer one scrolls.
   if (list.scrollHeight <= list.clientHeight + 1) { for (const item of items) expect(within(item.getBoundingClientRect(), box)).toBe(true); return }
   expect(scrollsY(list), 'the file list scrolls').toBe(true)
-  // The list follows the file in view: settle the hunks at the top first, then scroll the list.
-  main.scrollTop = 0
-  await waitFor(() => expect(list.querySelector('button')).toHaveAttribute('aria-current', 'location'))
-  await frame()
+  // The preceding proof scrolled the hunks to their last file. Await its
+  // observer/React update before reversing direction: aria-current can still
+  // name the first file while that update is queued on a hosted runner.
+  await act(async () => { main.scrollTop = main.scrollHeight; await frame() })
+  await waitFor(() => expect(items.at(-1)!.querySelector('button')).toHaveAttribute('aria-current', 'location'))
+  await act(async () => { main.scrollTop = 0; await frame() })
+  await waitFor(() => {
+    expect(list.querySelector('button')).toHaveAttribute('aria-current', 'location')
+    // The passive follow effect must also finish before manual list scrolling.
+    expect(within(list.querySelector('button')!.getBoundingClientRect(), list.getBoundingClientRect()), JSON.stringify({scrollTop: list.scrollTop, button: list.querySelector('button')!.getBoundingClientRect().toJSON(), viewport: list.getBoundingClientRect().toJSON()})).toBe(true)
+  })
   list.scrollTop = list.scrollHeight; await frame()
   const lastFile = items.at(-1)!.getBoundingClientRect()
   expect(lastFile.bottom).toBeLessThanOrEqual(list.getBoundingClientRect().bottom + 1)

@@ -100,7 +100,10 @@ func TestNativeRecoveryAskAnswerWaitsOffTransport(t *testing.T) {
 	go func() { answer, _ := (askTool{l}).Execute(ctx, mustJSON(`{"question":"fixture?"}`)); result <- answer }()
 	waitFor(t, rec, "ask")
 	delivered := make(chan struct{})
-	go func() { l.EnqueueInput(Input{Text: "answer", ClientID: "fixture"}); close(delivered) }()
+	go func() {
+		l.AnswerAsk(AskAnswer{QuestionID: "msg-1", Text: "answer", ClientID: "fixture"})
+		close(delivered)
+	}()
 	select {
 	case <-delivered:
 	case <-time.After(15 * time.Second):

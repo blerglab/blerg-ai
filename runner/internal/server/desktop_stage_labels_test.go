@@ -6,7 +6,7 @@ import "testing"
 // stage's own label, detail or hint, which can carry the desktop's or a repository's name.
 func TestSanitizedStartStagesKeepFixedNames(t *testing.T) {
 	payload := map[string]any{"stages": []any{
-		map[string]any{"id": "queued", "label": "Preparing session on raven-desktop", "detail": "/home/x", "hint": "h", "state": "done"},
+		map[string]any{"id": "queued", "label": "Preparing session on work-laptop", "detail": "/home/x", "hint": "h", "state": "done"},
 		map[string]any{"id": "plugins", "label": "Installing 3 plugins for repo-x", "state": "active"},
 		map[string]any{"id": "engine", "label": "Starting claude in /home/x", "state": "pending"},
 		map[string]any{"id": "something_new", "label": "Secret thing", "state": "pending"},

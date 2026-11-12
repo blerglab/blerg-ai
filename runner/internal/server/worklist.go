@@ -3,8 +3,8 @@ package server
 // What a session works through, for the session panel and the chat (docs/talking-to-an-agent.md):
 //
 //   POST /api/sessions/{id}/checklist — `blerg-runner checklist`: set, add, tick, untick, remove or clear the
-//     session's checklist. Each write records a checklist event holding the FULL list after the change
-//     and the item it touched (checklist.Payload), so a reload replays it from the event alone.
+//     session's checklist. Writes store compact changes; live state and checkpoint replay
+//     reconstruct full lists for reloads and transcript page baselines.
 //   POST /api/sessions/{id}/tickets — `blerg-runner pin` / `unpin`: pin a tracker's ticket (any
 //     tracker, one source-neutral shape: ticket.Clean) into the session, or unpin one. Each records a
 //     ticket event with the whole ticket and what it did (pin, update: a re-pin, with the status and
@@ -44,6 +44,7 @@ const (
 
 // RegisterWorklistRoutes registers the checklist's and the pinned tickets' routes on mux.
 func (a *API) RegisterWorklistRoutes(mux *http.ServeMux) {
+	a.registerInboxRoutes(mux)
 	mux.HandleFunc("GET /api/sessions/{id}/board-options", a.HandleFilingBoards)
 	mux.HandleFunc("GET /api/sessions/{id}/board-search", a.HandleFilingSearch)
 	mux.HandleFunc("POST /api/sessions/{id}/file-ticket", a.HandleFileTicket)
@@ -55,8 +56,12 @@ func (a *API) RegisterWorklistRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/sessions/{id}/plugin-requests", a.HandleSessionPluginRequest)
 	mux.HandleFunc("POST /api/sessions/{id}/checklist", a.HandlePostChecklist)
 	mux.HandleFunc("POST /api/sessions/{id}/title", a.HandleRenameOwnSession)
+	mux.HandleFunc("POST /api/sessions/{id}/tasks/{task}/clear", a.HandleClearTask)
 	mux.HandleFunc("GET /api/sessions/{id}/checklist/workers", a.HandleChecklistWorkers)
 	mux.HandleFunc("POST /api/sessions/{id}/progress", a.HandlePostProgress)
+	mux.HandleFunc("POST /api/sessions/{id}/gate-reports", a.HandleGateReport)
+	mux.HandleFunc("POST /api/sessions/{id}/test-runs/import", a.HandleImportTestRun)
+	mux.HandleFunc("GET /api/test-performance", a.HandleTestPerformance)
 	mux.HandleFunc("POST /api/sessions/{id}/tickets", a.HandlePostTickets)
 }
 
@@ -112,6 +117,11 @@ func (a *API) appendWorkEvent(ctx context.Context, tx pgx.Tx, sid, kind string, 
 	eventID = newUUID()
 	if seq, _, err = db.AppendAgentEventTx(ctx, tx, sid, eventID, kind, string(raw), at); err != nil {
 		return 0, "", at, err
+	}
+	if kind == "checklist" {
+		if err = tx.QueryRow(ctx, `SELECT payload FROM agent_events WHERE session_id=$1 AND seq=$2`, sid, seq).Scan(&raw); err != nil {
+			return 0, "", at, err
+		}
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return 0, "", at, err
@@ -285,9 +295,14 @@ func (a *API) HandlePostTickets(w http.ResponseWriter, r *http.Request) {
 	pinned := ticket.Pinned(rows)
 	var p ticket.Payload
 	if req.Action == "pin" {
-		// The cap refuses a pin only: an unpin is always allowed, so nothing stays pinned for good.
-		if len(rows) >= ticket.MaxEvents {
-			writeError(w, http.StatusTooManyRequests, fmt.Sprintf("This session has pinned tickets %d times, its most; unpin still works.", ticket.MaxEvents))
+		n, err := db.CountRecentWork(ctx, tx, sid, "ticket")
+		if err != nil {
+			writeDatabaseFailure(w, "record the ticket", "ticket rate", err)
+			return
+		}
+		if n >= ticket.MaxEventsPerMinute {
+			w.Header().Set("Retry-After", "60")
+			writeError(w, http.StatusTooManyRequests, "Pins changed too often; wait a minute and try again.")
 			return
 		}
 		p = ticket.Payload{Ticket: t, Action: "pin"}
@@ -319,6 +334,11 @@ func (a *API) HandlePostTickets(w http.ResponseWriter, r *http.Request) {
 	}
 	after := ticket.Pinned(append(rows, ticket.Row{Seq: seq, EventID: eventID, Ts: at, Action: p.Action,
 		Source: p.Ticket.Source, Key: p.Ticket.Key, BoardID: p.Ticket.BoardID, Title: p.Ticket.Title, Status: p.Ticket.Status, URL: p.Ticket.URL}))
+	if req.Action == "pin" {
+		// Best-effort and after the commit (BLG-454): a pin that crosses the complexity threshold
+		// never fails or slows down because of this check.
+		a.maybeRecommendBlackboardForSession(context.WithoutCancel(ctx), sid)
+	}
 	writeJSON(w, http.StatusCreated, ticketReply{Payload: p, Pinned: after})
 }
 

@@ -1,4 +1,7 @@
+import { IconButton } from '@blerglab/chat'
+import { pulse, useChangePulses } from '../lib/changePulse'
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import * as ws from '../ws'
 import { useViewerHost, WorkspaceFileViewer, FileIcon } from '@blerglab/chat'
 import { workspaceStatusReason } from '../lib/workspaceStatusReason'
 import { apiFetch } from '../apiFetch'
@@ -6,6 +9,9 @@ import { blergTransport } from '../lib/chatTransport'
 import { signedInAccount } from '../lib/liveBoardCard'
 import { capPages, dropView, readView, viewEpoch, writeView } from '../lib/sessionViewCache'
 import { RefreshScheduler, watchTurnEnds, type Readiness } from '../lib/explorerAutoRefresh'
+import { usePaletteCommands } from '../commands/context'
+import ExplorerTreeRow from './ExplorerTreeRow'
+import { explorerTreeKey } from '../lib/explorerTreeKey'
 import InitialLoader from './InitialLoader'
 import './WorkspaceTree.css'
 import { inputClock } from '../../../../packages/chat/src/model/clock'
@@ -79,6 +85,11 @@ function scroller(element: HTMLElement | null): HTMLElement | null {
   return null
 }
 
+/** A refusal that can clear by itself (the runtime not ready, reconnecting or slow): the pane keeps
+ *  trying while it's on screen instead of waiting for Refresh. */
+class Healable extends Error {}
+/** Refusals that clear by themselves: retried quietly before the person sees them. */
+const TRANSIENT_CODES = new Set(['busy', 'daemon_timeout', 'not_running', 'unavailable'])
 /** Backoff for busy explorer reads: about 8 seconds in all before the refusal is shown. */
 const BUSY_RETRY_MS = [150, 300, 600, 1000, 1500, 2000, 2500]
 /** A keystroke in the search this recent holds a refresh the explorer started by itself. */
@@ -118,6 +129,8 @@ function WorkspaceTreeBody({ sessionId, onFileOpen }: { sessionId: string; onFil
   const [hits, setHits] = useState<Page | null>(() => cached?.hits ?? null)
   const [focusRoot, setFocusRoot] = useState(() => cached?.focusRoot ?? '')
   const [message, setMessage] = useState('')
+  // Counts failed root reads, so each failure schedules the next recovery attempt.
+  const [rootFailures, setRootFailures] = useState(0)
   const [busy, setBusy] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [viewing, setViewing] = useState<string | null>(null)
@@ -153,6 +166,22 @@ function WorkspaceTreeBody({ sessionId, onFileOpen }: { sessionId: string; onFil
   const autoRefresh = useRef<RefreshScheduler | null>(null)
   const operations = blergTransport().files
 
+  function collapseFolders() {
+    controller.current?.abort()
+    setBusy(false); setRefreshing(false)
+    setExpanded(new Set())
+    setFocusRoot(''); setHits(null); setFilter(''); setSearchExpanded(false)
+    setMessage('Folders collapsed.')
+  }
+  async function copyRelativePath() {
+    try { await navigator.clipboard.writeText(selectedPath); setMessage('Relative path copied.') }
+    catch { setMessage('Could not copy the relative path.') }
+  }
+  usePaletteCommands([
+    { id: `explorer-collapse:${sessionId}`, title: 'Collapse folders', keywords: 'explorer collapse all', group: 'commands', empty: true, destructive: false, run: collapseFolders },
+    ...(selectedPath ? [{ id: `explorer-copy-path:${sessionId}`, title: 'Copy relative path', group: 'commands' as const, destructive: false, run: () => void copyRelativePath() }] : []),
+  ])
+
   async function request(op: string, path: string, signal: AbortSignal, cursor?: string) {
     const query = new URLSearchParams({ op, path })
     if (op === 'search') query.set('filter', filter)
@@ -164,7 +193,9 @@ function WorkspaceTreeBody({ sessionId, onFileOpen }: { sessionId: string; onFil
     for (const wait of BUSY_RETRY_MS) {
       if (response.status !== 409) break
       const problem = await response.clone().json().catch(() => null) as { code?: string } | null
-      if (problem?.code !== 'busy') break
+      // Also the brief gaps around a daemon reconnect or a deploy (BLG-517's typed causes): the
+      // runtime didn't reply, isn't connected yet, or is rebinding. A lasting one still shows.
+      if (!TRANSIENT_CODES.has(problem?.code ?? '')) break
       await new Promise<void>((resolve, reject) => {
         const timer = window.setTimeout(resolve, wait)
         signal.addEventListener('abort', () => { window.clearTimeout(timer); reject(new DOMException('Cancelled', 'AbortError')) }, { once: true })
@@ -173,7 +204,7 @@ function WorkspaceTreeBody({ sessionId, onFileOpen }: { sessionId: string; onFil
     }
     if (!response.ok) {
       const problem = await response.json().catch(() => null) as { error?: string } | null
-      throw new Error(problem?.error || (response.status === 403 ? 'Only the session owner or an authorized administrator can browse this workspace.' : response.status === 409 ? 'The workspace is not ready. Check that the session is running and its daemon is connected, then Refresh.' : 'Could not read the workspace.'))
+      throw new (response.status === 409 ? Healable : Error)(problem?.error || (response.status === 403 ? 'Only the workspace owner or an authorized administrator can browse this workspace.' : response.status === 409 ? 'The workspace is not ready. Check that the workspace is running and its daemon is connected, then Refresh.' : 'Could not read the workspace.'))
     }
     const reply = await response.json() as Reply
     if (signedInAccount() !== account.current) { setPages({}); setMembers([]); setStatuses({}); setHits(null); setViewing(null); throw new Error('Your sign-in changed. Refresh the workspace.') }
@@ -190,8 +221,8 @@ function WorkspaceTreeBody({ sessionId, onFileOpen }: { sessionId: string; onFil
       const reasons: Record<string, string> = {
         stale: 'The directory changed. Refresh to load it again.',
         busy: 'Another workspace read is in progress. Try Refresh when it finishes.',
-        unavailable: 'The workspace reader lost its session or directory binding. Refresh to reconnect it.',
-        forbidden: 'This file or directory cannot be opened from the session workspace.',
+        unavailable: 'The workspace reader lost its workspace or directory binding. Refresh to reconnect it.',
+        forbidden: 'This file or directory cannot be opened from the workspace.',
       }
       throw new Error((op === 'status' ? workspaceStatusReason(reply.result.status_reason) : undefined) || reasons[reply.result.error_code ?? ''] || 'The workspace could not be safely read.')
     }
@@ -245,7 +276,8 @@ function WorkspaceTreeBody({ sessionId, onFileOpen }: { sessionId: string; onFil
       }
     } catch (error) {
       if (!ac.signal.aborted && op === 'status') { setStatusErrors(old => ({ ...old, [path]: error instanceof Error ? error.message : 'Could not read Git status.' })); setStatuses(old => ({ ...old, [path]: null })); statusTimes.current[path] = inputClock.now() }
-      if (!ac.signal.aborted) setMessage(error instanceof Error ? error.message : 'Could not read the workspace.')
+      if (!ac.signal.aborted && op !== 'status') setMessage(error instanceof Error ? error.message : 'Could not read the workspace.')
+      if (!ac.signal.aborted && op !== 'status' && !path && error instanceof Healable) setRootFailures(n => n + 1)
     } finally {
       explicitReads.current--
       if (!ac.signal.aborted) { setBusy(false); setRefreshing(false) }
@@ -385,6 +417,24 @@ function WorkspaceTreeBody({ sessionId, onFileOpen }: { sessionId: string; onFil
     }
   }, [sessionId])
 
+  // A failed root read heals by itself (owner: never make the person press Refresh): while the pane
+  // is on screen it tries again with backoff (5 s doubling to a minute), at once when the socket
+  // reconnects (a daemon or server restart) or the page comes back. Success clears the message.
+  useEffect(() => {
+    if (!rootFailures || pages['']) return
+    const retry = () => { if (document.visibilityState === 'visible' && explicitReads.current === 0) void load('') }
+    const timer = window.setTimeout(retry, Math.min(60_000, 5_000 * 2 ** (rootFailures - 1)))
+    // Only a real reconnect: onOpen also fires at once when the socket is already open.
+    let armed = false
+    const offOpen = ws.onOpen(() => { if (armed) retry() })
+    armed = true
+    const back = () => { if (document.visibilityState === 'visible') retry() }
+    document.addEventListener('visibilitychange', back)
+    return () => { window.clearTimeout(timer); offOpen(); document.removeEventListener('visibilitychange', back) }
+    // load is recreated each render; the failure count is what schedules the next attempt.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rootFailures, pages[''] === undefined])
+
   // Keep what is on screen for the next visit (only once the root has been read from a runtime).
   useEffect(() => {
     if (signedInAccount() !== account.current) return
@@ -433,7 +483,7 @@ function WorkspaceTreeBody({ sessionId, onFileOpen }: { sessionId: string; onFil
   const badge = (key: string) => {
     const status = statuses[key]
     if (status === undefined) return null
-    if (status === null) return <span className="workspace-status">status unavailable<span> · {statusErrors[key] || 'The daemon returned no Git status details. Update the daemon, then Refresh.'}</span></span>
+    if (status === null) return <span className="workspace-status" title={statusErrors[key] || 'The daemon returned no Git status details. Update the daemon, then retry.'}><span>Git status unavailable</span> <IconButton label="Retry Git status" disabled={busy} onClick={() => load(key, undefined, 'status')} /></span>
     const detached = !status.branch || status.branch === '(detached)' || status.branch === 'HEAD'
     const name = detached ? status.head?.slice(0, 7) || 'detached' : status.branch
     const tooltip = detached ? status.head ? `Detached at ${name}` : 'Detached HEAD' : `Branch ${name}`
@@ -444,30 +494,9 @@ function WorkspaceTreeBody({ sessionId, onFileOpen }: { sessionId: string; onFil
     const member = members.reduce<Member | undefined>((nearest, m) => m.path !== '.' && (path === m.path || path.startsWith(`${m.path}/`)) && (!nearest || m.path.length > nearest.path.length) ? m : nearest, undefined)
     return member ? member.name + path.slice(member.path.length) : path
   }
-  function treeKey(event: KeyboardEvent<HTMLUListElement>) {
-    const item = (event.target as HTMLElement).closest<HTMLButtonElement>('[role="treeitem"]')
-    if (!item) return
-    const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="treeitem"]')]
-    const index = items.indexOf(item)
-    let next: HTMLButtonElement | undefined
-    if (event.key === 'ArrowDown') next = items[Math.min(items.length - 1, index + 1)]
-    else if (event.key === 'ArrowUp') next = items[Math.max(0, index - 1)]
-    else if (event.key === 'Home') next = items[0]
-    else if (event.key === 'End') next = items.at(-1)
-    else if (event.key === 'ArrowRight') {
-      if (item.getAttribute('aria-expanded') === 'false') item.click()
-      else if (item.getAttribute('aria-expanded') === 'true') next = item.parentElement?.querySelector<HTMLButtonElement>(':scope > [role="group"] > li > [role="treeitem"]') ?? undefined
-    } else if (event.key === 'ArrowLeft') {
-      if (item.getAttribute('aria-expanded') === 'true') item.click()
-      else next = item.parentElement?.parentElement?.closest('li')?.querySelector<HTMLButtonElement>('[role="treeitem"]') ?? undefined
-    } else return
-    event.preventDefault()
-    if (next) {
-      items.forEach(row => { row.tabIndex = row === next ? 0 : -1 })
-      next.focus()
-    }
-  }
   const changes = useMemo(() => workspaceChanges(statuses), [statuses])
+  const pulseSignatures = useMemo(() => new Map(changes.map(change => [change.path, change.code])), [changes])
+  useChangePulses(section, pulseSignatures, 'data-workspace-path', Object.keys(statuses).length > 0 && members.every(member => Object.hasOwn(statuses, member.path)))
   const chainPages = useMemo(() => Object.fromEntries(Object.entries(pages).map(([path, page]) => [path, { ...page, entries: withDeletedEntries(page.entries, path, changes) }])), [pages, changes])
   const entriesAt = (directory: string) => chainPages[directory]?.entries ?? []
   const memberRoots = useMemo(() => new Set(members.map(m => m.path)), [members])
@@ -570,7 +599,7 @@ function WorkspaceTreeBody({ sessionId, onFileOpen }: { sessionId: string; onFil
     const path = scrollReveal.current
     if (!path) return
     const row = rowElements.current.get(path)
-    if (row?.isConnected) { row.scrollIntoView?.({ block: 'nearest' }); scrollReveal.current = '' }
+    if (row?.isConnected) { row.scrollIntoView?.({ block: 'nearest' }); pulse(row); scrollReveal.current = '' }
   }, [completedReveal, expanded, pages])
 
   const searchEntries = (hits?.entries ?? allLoaded).filter(entry => label(entry).toLocaleLowerCase().includes(filter.toLocaleLowerCase()))
@@ -616,21 +645,18 @@ function WorkspaceTreeBody({ sessionId, onFileOpen }: { sessionId: string; onFil
         toggle(entry, chain)
       }
       return <li role="none" key={head.path}>
-        <button ref={node => {
+        <ExplorerTreeRow ref={node => {
           if (!node) return
           chain.forEach(segment => rowElements.current.set(segment.path, node))
           return () => chain.forEach(segment => { if (rowElements.current.get(segment.path) === node) rowElements.current.delete(segment.path) })
-        }} type="button" role="treeitem" aria-label={announcedLabel(entry, compact ? displayPath(entry.path) : label(entry))} aria-level={depth + 1} aria-selected={selected} data-selected-path={selected ? selectedPath : undefined} tabIndex={chain.some(segment => segment.path === tabPath) ? 0 : -1} onFocus={() => { ownsTreeFocus.current = true; setFocusedPath(chain.some(segment => segment.path === focusedPath) ? focusedPath : selected ? selectedPath : entry.path) }} aria-owns={open ? `${treeId}-${encodeURIComponent(entry.path)}` : undefined} className="workspace-row" style={{ paddingInlineStart: '6px' }} onClick={activate} onDoubleClick={() => { if (!entry.directory) host?.open({ kind: 'workspace', path: entry.path }, true) }} aria-expanded={entry.directory ? open : undefined}>
-          <span className="workspace-chevron" aria-hidden="true">{entry.directory ? open ? '▾' : '▸' : ''}</span>
-          <FileIcon name={entry.name} directory={entry.directory} expanded={open} />
+        }} data-workspace-path={entry.path} type="button" role="treeitem" aria-label={announcedLabel(entry, compact ? displayPath(entry.path) : label(entry))} aria-level={depth + 1} aria-selected={selected} data-selected-path={selected ? selectedPath : undefined} tabIndex={chain.some(segment => segment.path === tabPath) ? 0 : -1} onFocus={() => { ownsTreeFocus.current = true; setFocusedPath(chain.some(segment => segment.path === focusedPath) ? focusedPath : selected ? selectedPath : entry.path) }} aria-owns={open ? `${treeId}-${encodeURIComponent(entry.path)}` : undefined} style={{ paddingInlineStart: '6px' }} onClick={activate} onDoubleClick={() => { if (!entry.directory) host?.open({ kind: 'workspace', path: entry.path }, true) }} expanded={entry.directory ? open : undefined} onToggle={entry.directory ? activate : undefined} icon={<FileIcon name={entry.name} directory={entry.directory} expanded={open} />} status={pathCodes(entry, changes).map(code => <span key={code} className={`workspace-code workspace-code-${code}`} title={`${statusLabels[code]}${entry.directory ? ' in this folder' : ''}`} aria-label={statusLabels[code]}>{code}</span>)}>
           {compact ? <span className="workspace-name workspace-compact-name" title={entry.path}><span className="workspace-segments">{chain.map((segment, index) => <span key={segment.path}>
             {index > 0 && <span className="workspace-separator" aria-hidden="true"> / </span>}
             <span className="workspace-segment" title={segment.path} data-path={segment.path} onClick={event => {
               event.stopPropagation(); setSelectedPath(segment.path); setFocusedPath(segment.path)
             }}>{label(segment)}</span>
           </span>)}</span></span> : <span className="workspace-name" title={label(entry)}>{label(entry)}</span>}
-          <span className="workspace-codes">{pathCodes(entry, changes).map(code => <span key={code} className={`workspace-code workspace-code-${code}`} title={`${statusLabels[code]}${entry.directory ? ' in this folder' : ''}`} aria-label={statusLabels[code]}>{code}</span>)}</span>
-        </button>
+        </ExplorerTreeRow>
         {badge(entry.path)}
         {open && <ul role="group" style={{ borderInlineStart: depth < 4 ? '1px solid var(--stone)' : '0', marginInlineStart: depth < 4 ? 16 : 0 }} id={`${treeId}-${encodeURIComponent(entry.path)}`}>{pages[entry.path] ? rows(row.children, depth + 1) : <li className="workspace-note">{busy ? 'Loading…' : 'Expand again to retry.'}</li>}{pageEnd(entry.path)}</ul>}
       </li>
@@ -643,13 +669,15 @@ function WorkspaceTreeBody({ sessionId, onFileOpen }: { sessionId: string; onFil
   }
   return <section ref={section} className="workspace-tree" aria-label="Workspace">
     <div className="workspace-tools">
+      <button type="button" aria-label="Collapse folders" title="Collapse folders (Ctrl+K)" onClick={collapseFolders}><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" aria-hidden="true"><path d="M5 2h9v9M2 5h9v9H2zM4 9h5" /></svg></button>
+      <button type="button" aria-label="Copy relative path" title="Copy selected relative path" disabled={!selectedPath} onClick={() => void copyRelativePath()}><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" aria-hidden="true"><path d="M6 2h8v9M2 5h9v9H2z" /></svg></button>
       <input ref={searchInput} role="combobox" aria-label="Search workspace files" aria-autocomplete="list" aria-haspopup="listbox" aria-controls={listboxId} aria-expanded={searchExpanded} aria-activedescendant={activeId} placeholder="Search files…" value={filter} onChange={e => { lastKey.current = inputClock.now(); setFilter(e.target.value); setHits(null); setSearchActive(null); setSearchExpanded(!!e.target.value.trim()) }} onBlur={() => { setSearchExpanded(false); setSearchActive(null) }} onKeyDown={searchKey} maxLength={256} />
-      <button type="button" aria-disabled={busy} onClick={() => {
+      <IconButton label="Refresh workspace" busy={busy} preserveFocus onClick={() => {
         if (busy) return
         autoRefresh.current?.satisfied()
         setPages({}); setStatuses({}); setStatusErrors({}); setSearchExpanded(false); setSearchActive(null); setExpanded(new Set([''])); setHits(null); setFocusRoot(''); setFocusedPath(''); revealAttempt.current = ''; statusTimes.current = {}; stale.current.clear(); binding.current = ''
-        void load('', undefined, 'list', true)
-      }} aria-label="Refresh workspace" title="Refresh workspace"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true"><path d="M13 6a5 5 0 1 0 .1 4M13 2v4H9" /></svg></button>
+        return load('', undefined, 'list', true)
+      }} />
     </div>
     {filter.trim() && <button type="button" className="workspace-search-all" disabled={busy} onClick={searchAll}>Search all files <span aria-hidden="true">↵</span></button>}
     {runtime === 'sandbox' && <p className="workspace-note">Only selected repositories were copied.</p>}
@@ -667,7 +695,7 @@ function WorkspaceTreeBody({ sessionId, onFileOpen }: { sessionId: string; onFil
         </button>
       </li>)}
     </ul>
-    {!searchExpanded && <ul role="tree" aria-label="Workspace files" onKeyDown={treeKey}>{rows(treeRows, 0)}{!hits && pageEnd(focusRoot)}</ul>}
+    {!searchExpanded && <ul role="tree" aria-label="Workspace files" onKeyDown={explorerTreeKey}>{rows(treeRows, 0)}{!hits && pageEnd(focusRoot)}</ul>}
     {searchExpanded && !busy && searchEntries.length === 0 && <p className="workspace-note">No loaded matches. Search all files to look across the workspace.</p>}
     {busy && !pages[''] && <InitialLoader loading label="workspace" />}
     {busy && (pages[''] || refreshing) && <p className="workspace-note" role="status">{refreshing ? 'Refreshing workspace…' : 'Loading…'}</p>}

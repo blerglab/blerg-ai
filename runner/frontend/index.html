@@ -7,7 +7,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Blerg Runner</title>
     <link rel="manifest" href="/manifest.json" />
-    <meta name="theme-color" content="#0d1117" />
+    <!-- Browser chrome tint: --basalt, dark default then the light OS preference (no JS reads a
+         pin before paint, so an explicit data-theme pin isn't reflected here — brand/tokens.css's
+         --basalt dark/light values, review finding 9). -->
+    <meta name="theme-color" content="#0d1117" /> <!-- themecheck:allow BLG-473: an HTML meta content attribute cannot use a CSS var() -->
+    <meta name="theme-color" content="#eef1f6" media="(prefers-color-scheme: light)" /> <!-- themecheck:allow BLG-473: same HTML limitation as above -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <script>
@@ -16,7 +20,7 @@
       (function () {
         try {
           var t = localStorage.getItem('blerg-theme');
-          if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+          if (['dark', 'light', 'colorblind-dark', 'colorblind-light', 'high-contrast', 'catppuccin-mocha', 'catppuccin-latte', 'dracula', 'nord', 'tokyo-night'].includes(t || '')) document.documentElement.setAttribute('data-theme', t); // themecheck:allow BLG-473: the theme vocabulary (packages/settings/theme.ts), necessarily duplicated here so this bootstrap script can run before any module loads
         } catch (e) {}
       })();
     </script>

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/blerglab/blerg-ai/contracts/identity"
+	"github.com/blerglab/blerg-ai/runner/internal/activity"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 )
 
@@ -63,31 +64,35 @@ type sessionMCPCalls struct {
 }
 
 type sessionInsightsResponse struct {
-	StartedSessions    *startedSessions `json:"started_sessions,omitempty"`
-	SessionID          string           `json:"session_id"`
-	Title              string           `json:"title"`
-	Kind               string           `json:"kind"`
-	Status             string           `json:"status"`
-	Runtime            string           `json:"runtime"`
-	Engine             string           `json:"engine"`
-	Model              string           `json:"model"`
-	StartedAt          time.Time        `json:"started_at"`
-	EndedAt            *time.Time       `json:"ended_at"`
-	GeneratedAt        time.Time        `json:"generated_at"`
-	LifetimeSeconds    float64          `json:"lifetime_seconds"`
-	RunningSeconds     float64          `json:"running_seconds"`
-	WaitingSeconds     float64          `json:"waiting_seconds"`
-	IdleSeconds        float64          `json:"idle_seconds"`
-	Turns              int64            `json:"turns"`
-	ToolCalls          int              `json:"tool_calls"`
-	ToolCallsByTool    []countRow       `json:"tool_calls_by_tool"`
-	MessagesFromPerson int              `json:"messages_from_person"`
-	Subagents          sessionSubagents `json:"subagents"`
-	Tokens             *sessionTokens   `json:"tokens"`
-	TokensHidden       bool             `json:"tokens_hidden,omitempty"`
-	Artifacts          int              `json:"artifacts"`
-	Proposals          sessionProposals `json:"proposals"`
-	MCPCalls           sessionMCPCalls  `json:"mcp_calls"`
+	TurnMetrics          []activity.Turn  `json:"turn_metrics"`
+	TurnMetricsCount     int              `json:"turn_metrics_count"`
+	TurnMetricsTruncated bool             `json:"turn_metrics_truncated"`
+	StartedSessions      *startedSessions `json:"started_sessions,omitempty"`
+	SessionID            string           `json:"session_id"`
+	Title                string           `json:"title"`
+	Kind                 string           `json:"kind"`
+	Status               string           `json:"status"`
+	RuntimeTargetID      string           `json:"runtime_target_id,omitempty"`
+	Runtime              string           `json:"runtime"`
+	Engine               string           `json:"engine"`
+	Model                string           `json:"model"`
+	StartedAt            time.Time        `json:"started_at"`
+	EndedAt              *time.Time       `json:"ended_at"`
+	GeneratedAt          time.Time        `json:"generated_at"`
+	LifetimeSeconds      float64          `json:"lifetime_seconds"`
+	RunningSeconds       float64          `json:"running_seconds"`
+	WaitingSeconds       float64          `json:"waiting_seconds"`
+	IdleSeconds          float64          `json:"idle_seconds"`
+	Turns                int64            `json:"turns"`
+	ToolCalls            int              `json:"tool_calls"`
+	ToolCallsByTool      []countRow       `json:"tool_calls_by_tool"`
+	MessagesFromPerson   int              `json:"messages_from_person"`
+	Subagents            sessionSubagents `json:"subagents"`
+	Tokens               *sessionTokens   `json:"tokens"`
+	TokensHidden         bool             `json:"tokens_hidden,omitempty"`
+	Artifacts            int              `json:"artifacts"`
+	Proposals            sessionProposals `json:"proposals"`
+	MCPCalls             sessionMCPCalls  `json:"mcp_calls"`
 }
 
 // HandleGetSessionInsights is GET /api/sessions/{id}/insights.
@@ -157,10 +162,25 @@ func (a *API) buildSessionInsights(ctx context.Context, row *db.SessionRow, now 
 
 	out := &sessionInsightsResponse{
 		SessionID: row.ID, Title: derefOrEmpty(row.Title), Kind: row.Kind, Status: row.Status,
-		Runtime: derefOrEmpty(row.Runtime), Engine: derefOrEmpty(row.Engine), Model: derefOrEmpty(row.Model),
+		Runtime: derefOrEmpty(row.Runtime), RuntimeTargetID: derefOrEmpty(row.RuntimeTargetID), Engine: derefOrEmpty(row.Engine), Model: derefOrEmpty(row.Model),
 		StartedAt: row.StartedAt, EndedAt: row.EndedAt, GeneratedAt: now,
 		ToolCallsByTool: []countRow{},
 	}
+	turnMetrics, err := db.SessionTurns(ctx, a.dbPool, row.ID, now)
+	if err != nil {
+		return nil, err
+	}
+	if !showTokens {
+		for i := range turnMetrics {
+			turnMetrics[i].Tokens = nil
+		}
+	}
+	out.TurnMetricsCount = len(turnMetrics)
+	out.TurnMetricsTruncated = len(turnMetrics) > 100
+	if len(turnMetrics) > 100 {
+		turnMetrics = turnMetrics[len(turnMetrics)-100:]
+	}
+	out.TurnMetrics = turnMetrics
 	end := now
 	if row.EndedAt != nil {
 		end = *row.EndedAt

@@ -1,3 +1,8 @@
+import { sessionColorStyle } from '../lib/sessionColors'
+import { sessionRepos } from '../lib/sessionRepos'
+import WorkerAttention from './WorkerAttention'
+import { descendantSummary, hasUnreadChannels, suppressWorkerUnread, sessionNoun } from '../lib/sessionPresentation'
+import { useDescendants, useAttentionItems } from '../hooks/useSessionAttention'
 import RuntimeIcon from './RuntimeIcon'
 import { modelDisplayName } from '@blerglab/chat'
 import { memo, useContext } from 'react'
@@ -6,7 +11,7 @@ import { useNavigate } from 'react-router-dom'
 import { OpenSessionContext } from '../lib/openSession'
 import type { SessionInfo, DaemonInfo } from '../types'
 import { send } from '../ws'
-import { isNoRepo, repoLabel } from '../lib/noRepo'
+import { isNoRepo } from '../lib/noRepo'
 import { startedByLabel } from '../lib/startedBy'
 import { BACKGROUND_COLOR } from '../lib/displayState'
 import { useSessionStore } from '../hooks/useSessionStore'
@@ -15,7 +20,8 @@ import { useSessionAggregate } from '../lib/sessionAggregate'
 export interface SessionCardProps {
   /** The card's started sessions: how many (the plain "↳ N" chip), whether they are shown, and the
    *  show/hide handler (the round chevron in the card's second line, over the nested indent line). */
-  childrenControl?: { total: number; shown: boolean; toggle: () => void } | null
+  matchReason?: string
+  childrenControl?: { total: number; shown: boolean; toggle: () => void; countOnly?: boolean } | null
   session: SessionInfo
   daemon: DaemonInfo | undefined
   active?: boolean
@@ -24,7 +30,7 @@ export interface SessionCardProps {
 }
 
 const STATUS_STYLES: Record<string, { bg: string; border: string; color: string; text: string }> = {
-  'waiting-parent': { bg: 'var(--scree-2)', border: 'var(--stone)', color: 'var(--fog-dim)', text: 'Waiting for its parent session' },
+  'waiting-parent': { bg: 'var(--scree-2)', border: 'var(--stone)', color: 'var(--fog-dim)', text: 'Waiting for parent' },
   waiting:  { bg: 'color-mix(in srgb, var(--amber) 16%, var(--scree-2))', border: 'color-mix(in srgb, var(--amber) 40%, var(--stone))', color: 'var(--amber)', text: 'waiting' },
   running:  { bg: 'color-mix(in srgb, var(--lichen) 16%, var(--scree-2))', border: 'color-mix(in srgb, var(--lichen) 40%, var(--stone))', color: 'var(--lichen)', text: 'running' },
   idle:     { bg: 'var(--scree-2)', border: 'var(--stone)', color: 'var(--fog-dim)', text: 'idle' },
@@ -52,8 +58,8 @@ function kindChipLabel(kind: string | undefined): string | null {
   if (kind === undefined) return null
   // An agent session is the default kind: a chip on every card would say nothing.
   if (kind === 'agent') return null
-  // Only an existing Terminal (tmux) session says so; they were removed in 0.5.0.
-  if (kind === 'tmux') return 'Terminal'
+  // Legacy Terminal rows remain available as read-only history.
+  if (kind === 'tmux') return 'Terminal history'
   return null
 }
 
@@ -177,7 +183,9 @@ function StatusGlyph({ status, color, text, count = 0 }: { status: string; color
           fontSize: '0.72rem',
           letterSpacing: '-0.5px',
           lineHeight: 1,
-          width: 10,
+          width: 16,
+          height: 12,
+          whiteSpace: 'nowrap',
           textAlign: 'center',
           flexShrink: 0,
           display: 'inline-block',
@@ -222,7 +230,7 @@ export const LiveSessionCard = memo(function LiveSessionCard(props: SessionCardP
 
 export default memo(SessionCard)
 
-function SessionCard({ session, daemon, active, childrenControl = null, nested = false }: SessionCardProps) {
+function SessionCard({ session, daemon, active, matchReason, childrenControl = null, nested = false }: SessionCardProps) {
   const navigate = useNavigate()
   const openSession = useContext(OpenSessionContext)
   const status = session.status
@@ -236,8 +244,11 @@ function SessionCard({ session, daemon, active, childrenControl = null, nested =
   const statusStyle = STATUS_STYLES[glyph] ?? STATUS_STYLES.stopped
   const isWaiting = glyph === 'waiting'
 
-  // Flash and unread dot driven by server-persisted session.unread.
-  const unread = !!session.unread
+  // Person-started chats keep unread indicators; worker attention goes through Main and Needs you.
+  const descendants = useDescendants(session.id)
+  const attention = useAttentionItems(session.id, session)
+  const unread = useSessionStore(s => !suppressWorkerUnread(session, s.sessions) && (!!session.unread || hasUnreadChannels(session.id, s.sessions)))
+  const countWords = descendantSummary(descendants) || (childrenControl?.total ? `${childrenControl.total} channels` : '')
   const flashing = isWaiting && unread
   // Background tasks its agent left running (the server's count, so it is right for a session
   // nobody has open).
@@ -246,24 +257,27 @@ function SessionCard({ session, daemon, active, childrenControl = null, nested =
   const bgChip = shown !== 'background' && bgTasks > 0
   // Nested cards omit only the repo they share with their parent. An untitled card already
   // names its repo, and a no-repo session has no repository to show.
-  const parentRepo = useSessionStore(s => nested ? s.sessions.find(parent => parent.id === session.parent_session_id)?.repo : undefined)
-  const repoLine = (!nested || session.repo !== parentRepo) && session.title && !isNoRepo(session.repo) ? session.repo : ''
+  const repositories = sessionRepos(session)
+  const parentSession = useSessionStore(s => nested ? s.sessions.find(parent => parent.id === session.parent_session_id) : undefined)
+  const repoLine = matchReason || ((!nested || repositories.full !== (parentSession ? sessionRepos(parentSession).full : undefined)) && session.title && (session.workspace?.members.length || !isNoRepo(session.repo)) ? repositories.label : '')
   // A session with background tasks keeps its second line when the count moves into the status slot,
   // so the card does not change height as its turn ends.
-  const hasChildren = (childrenControl?.total ?? 0) > 0
+  const hasChildren = descendants.length > 0 || (childrenControl?.total ?? 0) > 0
   const leftBorder = active || isWaiting || paused ? 3 : 1
-  const hasDetails = hasChildren || !!repoLine || bgTasks > 0 || (status === 'error' && !!session.error_reason)
+  const hasDetails = hasChildren || !!repoLine || bgTasks > 0 || attention.length > 0 || (status === 'error' && !!session.error_reason)
     || !!(session.runtime && RUNTIME_CHIP[session.runtime]) || !!kindChipLabel(session.kind) || !!session.model || !!session.cron_id || !!session.started_by
 
   return (
     <div
       data-active={active ? 'true' : undefined}
-      className={flashing ? 'blerg-runner-waiting-flash' : undefined}
+      className={`workspace-color-bar session-card${flashing ? ' blerg-runner-waiting-flash' : ''}`}
       onClick={() => {
         if (openSession) openSession(session.id)
         else navigate(`/sessions/${session.id}`)
       }}
       style={{
+        ...sessionColorStyle(session.color),
+        ...{ '--workspace-left-border': `${leftBorder}px` },
         // backgroundColor (longhand) so the flash class's background-image survives.
         backgroundColor: active ? 'var(--selected-bg)' : 'var(--scree)',
         borderRadius: 8,
@@ -274,14 +288,13 @@ function SessionCard({ session, daemon, active, childrenControl = null, nested =
         display: 'flex',
         flexDirection: 'column',
         gap: 3,
-        // Selection reads as a blue (--selected) left bar + a soft lift —
-        // distinct from amber ("waiting") and from the accent (brand, actions).
-        // The status dot still shows what state the session is in.
-        borderLeft: active ? '3px solid var(--selected-border)' : isWaiting || paused ? `3px solid ${statusStyle.border}` : `1px solid ${statusStyle.border}`,
-        borderTop: `1px solid ${statusStyle.border}`,
-        borderRight: `1px solid ${statusStyle.border}`,
-        borderBottom: `1px solid ${statusStyle.border}`,
-        boxShadow: active ? '0 0 0 1px var(--selected-border), 0 2px 10px rgba(0,0,0,0.45)' : undefined,
+        // Selection occupies three sides; the identity bar owns the left edge.
+        // Status remains visible through its glyph and waiting tint.
+        borderLeft: `${leftBorder}px solid ${statusStyle.border}`,
+        borderTop: `1px solid ${active ? 'var(--selected-border)' : statusStyle.border}`,
+        borderRight: `1px solid ${active ? 'var(--selected-border)' : statusStyle.border}`,
+        borderBottom: `1px solid ${active ? 'var(--selected-border)' : statusStyle.border}`,
+        boxShadow: active ? '0 2px 10px var(--shadow-5)' : undefined,
       }}
     >
       {/* Row 1: status indicator + name (+ unread dot, star). The name gets
@@ -291,7 +304,7 @@ function SessionCard({ session, daemon, active, childrenControl = null, nested =
       <StatusIndicator status={glyph} color={statusStyle.color} text={aggregate.label} count={aggregate.tasks} />
 
       {/* Session name */}
-      <span style={{
+      <span title={session.title || repositories.full} style={{
         color: 'var(--chalk)',
         fontWeight: 600,
         fontSize: '0.9rem',
@@ -301,18 +314,18 @@ function SessionCard({ session, daemon, active, childrenControl = null, nested =
         textOverflow: 'ellipsis',
         whiteSpace: 'nowrap',
       }}>
-        {session.title || repoLabel(session.repo)}
+        {session.title || repositories.label}
       </span>
 
       {/* Descendant work is in the main glyph; the child count never asks the person. */}
-      {childrenControl && childrenControl.total > 0 && (() => {
-        const { total, shown } = childrenControl
-        const words = `${total} started ${total === 1 ? 'session' : 'sessions'}${shown ? '' : ' hidden'}`
+      {hasChildren && (() => {
+        const total = descendants.length || childrenControl?.total || 0
+        const words = `${countWords}${childrenControl && !childrenControl.countOnly && !childrenControl.shown ? ' hidden' : ''}`
         return <span data-testid="hidden-children" role="img" aria-label={words} title={words} style={{ ...chipStyle, color: 'var(--fog-dim)' }}>
           ↳ {total}
         </span>
       })()}
-      {/* Unread dot — shown whenever session.unread is true, regardless of status */}
+      {/* Unread dot for person-started chats, independent of status. */}
       {unread && (
         <span
           data-testid="unread-dot"
@@ -328,7 +341,7 @@ function SessionCard({ session, daemon, active, childrenControl = null, nested =
         />
       )}
 
-      {!session.archived_at && (session.parent_session_id ? <ChildSessionActions parentId={session.parent_session_id} childId={session.id} title={session.title || 'Untitled session'} running={WORKING.has(status)}/> : <ParentSessionActions sessionId={session.id} title={session.title || 'Untitled session'} running={WORKING.has(status)}/>)}
+      {!session.archived_at && (session.parent_session_id ? <ChildSessionActions noun={sessionNoun(session)} parentId={session.parent_session_id} childId={session.id} title={session.title || 'Untitled chat'} running={WORKING.has(status)}/> : <ParentSessionActions noun={sessionNoun(session)} sessionId={session.id} title={session.title || 'Untitled chat'} running={WORKING.has(status)}/>)}
       {/* Star toggle — always visible, outline when unstarred, filled orange when starred */}
       <button
         data-testid="star-toggle"
@@ -360,10 +373,12 @@ function SessionCard({ session, daemon, active, childrenControl = null, nested =
           <RuntimeIcon runtime={session.runtime} machine={daemon?.name ?? session.daemon_id} />
         </span>
       )}
+      <WorkerAttention items={attention} />
       {repoLine && (
         <span
           data-testid="session-repo"
-          title={repoLine}
+          title={matchReason || repositories.full}
+          aria-label={matchReason || repositories.full}
           style={{
             color: 'var(--fog-dim)',
             fontSize: '0.7rem',
@@ -419,7 +434,7 @@ function SessionCard({ session, daemon, active, childrenControl = null, nested =
       {/* Launch source and terminal metadata follow the stable type/repo/model prefix. */}
       {session.cron_id && (
         <span data-testid="cron-badge" title="Started by a cron" style={{ ...chipStyle, color: 'var(--amber)', borderColor: 'var(--amber)' }}>
-          cron
+          Run
         </span>
       )}
       {session.started_by && session.started_by.kind !== 'cron' && !session.cron_id && !(nested && session.started_by.kind === 'session') && (
@@ -446,9 +461,8 @@ function SessionCard({ session, daemon, active, childrenControl = null, nested =
         </span>
       )}
       </div>}
-      {hasChildren && (() => {
-        const n = childrenControl!.total
-        const label = `${childrenControl!.shown ? 'Hide' : 'Show'} ${n} started ${n === 1 ? 'session' : 'sessions'}`
+      {hasChildren && childrenControl && !childrenControl.countOnly && (() => {
+        const label = `${childrenControl!.shown ? 'Hide' : 'Show'} ${countWords}`
         // Centered on the nested list's indent line (21.5 px in from the branch's left edge), whatever
         // the card's left border is (SessionList: marginLeft 21 + a 1 px line).
         return (
@@ -467,7 +481,11 @@ function SessionCard({ session, daemon, active, childrenControl = null, nested =
 
 export function SessionStatusGlyph({ session }: { session: SessionInfo }) {
   const aggregate = useSessionAggregate(session)
-  const shown = aggregate.state
-  const style = STATUS_STYLES[shown] ?? STATUS_STYLES.stopped
-  return <StatusGlyph status={shown} color={style.color} text={aggregate.label} count={aggregate.tasks} />
+  return <SessionStateGlyph status={aggregate.state} label={aggregate.label} count={aggregate.tasks} />
+}
+
+/** Recorded worker metrics use the same glyphs without aggregating descendant state. */
+export function SessionStateGlyph({ status, label, count=0 }: { status:string; label:string; count?:number }) {
+  const style = STATUS_STYLES[status] ?? STATUS_STYLES.stopped
+  return <StatusGlyph status={status} color={style.color} text={label} count={count} />
 }

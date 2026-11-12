@@ -287,9 +287,9 @@ func TestSandboxSweepOnlyRemovesThisDaemonsContainers(t *testing.T) {
 		sandboxContainerPrefix + mine + "\t" + sandboxOwner(),
 	}
 	var removed []string
-	origOut, origRun, origProbe := dockerOutput, dockerRun, dockerProbe
+	origOut, origRun := dockerOutput, dockerRun
 	dockerOutput = func(args ...string) ([]byte, error) {
-		if args[0] == "ps" && args[1] == "-a" {
+		if args[0] == "ps" && args[1] == "-a" && args[len(args)-1] == "{{.Names}}" {
 			return nil, nil // gone after its removal
 		}
 		return []byte(strings.Join(lines, "\n") + "\n"), nil
@@ -300,15 +300,8 @@ func TestSandboxSweepOnlyRemovesThisDaemonsContainers(t *testing.T) {
 		}
 		return nil
 	}
-	tmux := false
-	dockerProbe = func(time.Duration, ...string) (bool, error) {
-		if tmux {
-			return false, nil
-		}
-		return false, errNotInImage
-	}
 	t.Cleanup(func() {
-		dockerOutput, dockerRun, dockerProbe = origOut, origRun, origProbe
+		dockerOutput, dockerRun = origOut, origRun
 		for _, id := range []string{unrelated, foreign, legacy, mine} {
 			unregisterSandbox(id)
 		}
@@ -320,24 +313,6 @@ func TestSandboxSweepOnlyRemovesThisDaemonsContainers(t *testing.T) {
 		t.Fatalf("removed %v, want only this daemon's %v", removed, want)
 	}
 
-	// The reattach listing (terminal sandboxes, with tmux) is held to the same rule; a record the
-	// manager has (tied) also counts.
-	removed = nil
-	tmux = true
-	if err := os.MkdirAll(sb, 0o700); err != nil { // the sweep released the legacy home
-		t.Fatal(err)
-	}
-	got := listSandboxedTmuxSessions(func(id string) bool { return false })
-	slices.Sort(got)
-	if want := []string{legacy, mine}; !slices.Equal(got, want) {
-		t.Fatalf("reattach listed %v, want %v", got, want)
-	}
-	if _, ok := sandboxContainer(unrelated); ok {
-		t.Fatal("an unrelated container was registered as this daemon's")
-	}
-	if got := listSandboxedTmuxSessions(func(id string) bool { return id == unrelated }); !slices.Contains(got, unrelated) || slices.Contains(got, foreign) {
-		t.Fatalf("with a record of %s: listed %v", unrelated, got)
-	}
 }
 
 // The owner label goes on every sandbox container the daemon starts, and differs between daemons

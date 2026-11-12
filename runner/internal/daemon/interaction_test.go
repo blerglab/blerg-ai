@@ -45,13 +45,19 @@ func TestCCSystemPromptFor(t *testing.T) {
 
 // The words are the product: what each paragraph must say.
 func TestInteractionParagraphs(t *testing.T) {
+	for _, narration := range []string{"Before a run of tool calls", "Do not go quiet"} {
+		if strings.Contains(interactiveParagraph, narration) {
+			t.Errorf("interaction mode dictates verbosity: %s", narration)
+		}
+	}
+	if !strings.Contains(verbosityParagraph("narrated"), "Explain your approach before acting") {
+		t.Fatal("Narrated must retain progress explanations")
+	}
 	for _, s := range []string{
 		"a person is reading this chat as you work, and answers here",
 		"including what you say between tool calls",
 		"answer it and talk it through first",
 		"ask and end your turn: their reply arrives as your next message",
-		"Before a run of tool calls, say in a sentence what you are about to do",
-		"Do not go quiet for a long stretch of work.",
 		"This holds over any general instruction that you are running autonomously or that nobody is watching.",
 	} {
 		if !strings.Contains(interactiveParagraph, s) {
@@ -84,12 +90,12 @@ func TestCCArgsCarryTheInteractionMode(t *testing.T) {
 	for _, mode := range []string{protocol.InteractionInteractive, protocol.InteractionUnattended, ""} {
 		for name, args := range lists(withSessionGuide(), withInteraction(mode)) {
 			got, ok := appendedPrompt(args)
-			if !ok || got != ccSystemPromptFor(mode) {
+			if !ok || got != ccSystemPromptForPolicy(mode, effectiveSkillPolicy(nil)) {
 				t.Errorf("%s args, mode %q: appended prompt = %q (present %v)", name, mode, got, ok)
 			}
 		}
 		// With a grant the session still has a shell and a reader (or not): same prompt.
-		if got, ok := appendedPrompt(ccCommonArgs("", "", "", withSessionGuide(), withInteraction(mode), withMCPConfigPath("/tmp/x/mcp.json"))); !ok || got != ccSystemPromptFor(mode) {
+		if got, ok := appendedPrompt(ccCommonArgs("", "", "", withSessionGuide(), withInteraction(mode), withMCPConfigPath("/tmp/x/mcp.json"))); !ok || got != ccSystemPromptForPolicy(mode, effectiveSkillPolicy(nil)) {
 			t.Errorf("granted args, mode %q: appended prompt = %q (present %v)", mode, got, ok)
 		}
 		for name, args := range lists(withSessionGuide(), withInteraction(mode), withRestrictTools()) {
@@ -140,10 +146,13 @@ func TestAgentSpawnStatesInteractionInTheSystemPrompt(t *testing.T) {
 		host := NewAgentHost(sender, AgentHostConfig{ReposRoot: reposRoot, HomeDir: t.TempDir(), ClaudeCode: true})
 		host.Spawn(protocol.SpawnSession{
 			Type: "spawn_session", SessionID: c.id, Repo: "proj", Kind: "agent",
-			InitialPrompt: "hello", Interaction: c.mode, RestrictTools: c.restrict,
+			InitialPrompt: "hello", Interaction: c.mode, RestrictTools: c.restrict, Verbosity: "terse",
 		})
 		sender.waitForKind(t, "turn_done")
 		raw, _ := os.ReadFile(claudeLog)
+		if !strings.Contains(string(raw), "Verbosity: Terse") {
+			t.Errorf("%s lacks verbosity guidance", c.id)
+		}
 		if c.has != "" && !strings.Contains(string(raw), c.has) {
 			t.Errorf("%s: argv lacks %q: %s", c.id, c.has, raw)
 		}
@@ -195,5 +204,16 @@ func TestManagedBlockDefersToTheInteractionMode(t *testing.T) {
 func TestInteractiveSessionPutsDecisionsInAsQuestions(t *testing.T) {
 	if !strings.Contains(interactionParagraph(protocol.InteractionInteractive), "blerg-runner ask --no-wait") {
 		t.Fatal("the interactive paragraph does not mention blerg-runner ask --no-wait")
+	}
+}
+
+func TestThinkingVoice(t *testing.T) {
+	for _, mode := range []string{"interactive", "unattended"} {
+		prompt := ccSystemPromptFor(mode)
+		for _, phrase := range []string{"first person", "your own words", "present tense", "No third-person meta summary", "the narration", "Claude will"} {
+			if !strings.Contains(prompt, phrase) {
+				t.Errorf("%s prompt lacks %q", mode, phrase)
+			}
+		}
 	}
 }

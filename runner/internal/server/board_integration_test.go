@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/gorilla/websocket"
@@ -76,6 +79,12 @@ func TestBoardCLIIntegration(t *testing.T) {
 
 	hub := NewHub()
 	api := NewAPI(hub, pool, "daemon-tok", nil, "")
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.coreAuth = newTestCoreAuthClient(t, pub, "core-1")
+	humanToken := mintRunnerToken(t, priv, "core-1", identity.Claims{Kind: "human", Sub: "cli-owner", Sid: testSID, Aud: coreAuthAudience, Caps: []string{"card.read", "card.write"}, ExpiresAt: time.Now().Add(time.Hour).Unix()})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws/browser", hub.ServeBrowser(pool, allowWSForTest))
@@ -199,6 +208,31 @@ func TestBoardCLIIntegration(t *testing.T) {
 
 	// ── 4. ticket archive ─────────────────────────────────────────────────────
 
+	// Ordinary Board and Core agent credentials must fail through the actual CLI path.
+	agentToken := mintRunnerToken(t, priv, "core-1", identity.Claims{Kind: "agent", Sub: "cli-agent", OnBehalfOf: "cli-owner", Aud: coreAuthAudience, Caps: []string{"card.read", "card.write"}, ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	for _, token := range []string{rawToken, agentToken} {
+		for i, value := range cliEnv {
+			if strings.HasPrefix(value, "BLERG_RUNNER_BOARD_TOKEN=") {
+				cliEnv[i] = "BLERG_RUNNER_BOARD_TOKEN=" + token
+			}
+		}
+		denied := exec.Command("python3", scriptPath, "ticket", "archive", ticketID)
+		denied.Env = cliEnv
+		output, err := denied.CombinedOutput()
+		if err == nil || !strings.Contains(string(output), "person behind") {
+			t.Fatalf("agent archive error=%v output=%s", err, output)
+		}
+		kept, err := db.GetTicket(ctx, pool, ticketID)
+		if err != nil || kept.ArchivedAt != nil {
+			t.Fatalf("denied archive changed card: %+v err=%v", kept, err)
+		}
+	}
+	// Preserve the successful CLI, DB and WebSocket assertions with a verified human.
+	for i, value := range cliEnv {
+		if strings.HasPrefix(value, "BLERG_RUNNER_BOARD_TOKEN=") {
+			cliEnv[i] = "BLERG_RUNNER_BOARD_TOKEN=" + humanToken
+		}
+	}
 	runCLI("ticket", "archive", ticketID)
 
 	// Allow lagging WS frames to arrive before closing the connection.

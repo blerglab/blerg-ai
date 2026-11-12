@@ -58,17 +58,21 @@ describe('composer attachment previews in Chromium',()=>{
   await userEvent.click(getByRole('button',{name:'Clear attachments'}));expect(container.querySelectorAll('[data-testid="attach-chip"]')).toHaveLength(0)
  },20000)
  it('keeps ten phone previews in a small scrollable strip with every remove control reachable',async()=>{
-  await page.viewport(390,844);const{files}=transport();const{getByRole,container}=render(<Harness files={files}/>)
+  await page.viewport(390,844);const{files,completions}=transport(true);const{getByRole,container}=render(<Harness files={files}/>)
   const image=await imageFile();const list=Array.from({length:10},(_,n)=>n%2?new File(['# Attachment '+n],'notes-'+n+'.md',{type:'text/markdown'}):new File([image],'shot-'+n+'.png',{type:'image/png'}))
   fireEvent.change(container.querySelector('input')!,{target:{files:list}})
   await waitFor(()=>expect(container.querySelectorAll('.has-preview')).toHaveLength(10))
+  // Preview generation and the serial upload queue finish independently. Hold the
+  // uploads until all previews exist, then measure the completed chips: uploading
+  // metadata wraps and adds a progress row (185 px versus the completed strip).
+  await waitFor(()=>{completions.splice(0).forEach(done=>done());expect(container.querySelectorAll('.attach-chip.done')).toHaveLength(10)})
   const strip=getByRole('list',{name:'Attached files'})
   expect(strip.getBoundingClientRect().height).toBeLessThanOrEqual(180)
   expect(strip.getBoundingClientRect().right).toBeLessThanOrEqual(innerWidth)
   expect(strip.scrollWidth).toBeGreaterThan(strip.clientWidth*3)
   const first=within(strip).getByRole('button',{name:'Remove shot-0.png'})
   const last=within(strip).getByRole('button',{name:'Remove notes-9.md'})
-  await userEvent.click(last);expect(strip.scrollLeft).toBeGreaterThan(0)
-  await userEvent.click(first);expect(container.querySelectorAll('[data-testid="attach-chip"]')).toHaveLength(8)
+  await userEvent.click(last);await waitFor(()=>expect(strip.scrollLeft).toBeGreaterThan(0))
+  await userEvent.click(first);await waitFor(()=>expect(container.querySelectorAll('[data-testid="attach-chip"]')).toHaveLength(8))
  })
 })

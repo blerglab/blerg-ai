@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { afterEach, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { page, userEvent } from 'vitest/browser'
@@ -24,7 +25,7 @@ const artifact = { id: 'landscape', name: 'landscape.svg', view: 'image', size: 
 const shots = import.meta.env.VITE_IMAGE_ZOOM_SHOTS_DIR
 
 afterEach(() => { invalidateChatTransport(); vi.unstubAllGlobals() })
-it.each([390, 1024, 3840])('zooms file and artifact tabs within real split groups and focus mode at %i px', async width => {
+it.each(browserWidths([390, 1024, 3840]))('zooms file and artifact tabs within real split groups and focus mode at %i px', async width => {
   await page.viewport(width, width === 3840 ? 2160 : 844)
   localStorage.setItem(RAIL_PREF_KEY, '0')
   useSessionStore.setState({ daemons: [makeDaemon()], sessions: [makeSession({ kind: 'agent', status: 'idle', title: 'Inspect image details' })] })

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/blerglab/blerg-ai/runner/internal/activity"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +25,7 @@ type hostWriterGroup interface {
 	Freeze(context.Context) error
 	Thaw(context.Context) error
 	Stop(context.Context) error
+	OnLimit(func(message string))
 }
 
 type hostWorkspace struct {
@@ -43,7 +45,7 @@ func (s *LocalWorkspaceService) prepareHostLifecycle(ctx context.Context, msg pr
 	if err != nil {
 		return nil, err
 	}
-	w := &LocalWorkspace{mu: workspaceLock(msg.SessionID), record: record, state: workspacePrivateManifest{Version: privateWorkspaceVersion, Host: true, HostWorkDir: cwd, HostDriverStopped: true, Session: msg.SessionID, Launch: *msg.Workspace, Root: pins.AnchorPath, RootIdentity: b.Root, RuntimeRoot: b.Root, Binding: &b, SupervisorLaunch: l, RuntimeToken: token, RuntimeIdentity: "host:" + token, ShellEligible: !msg.RestrictTools}}
+	w := &LocalWorkspace{mu: workspaceLock(msg.SessionID), record: record, state: workspacePrivateManifest{Version: privateWorkspaceVersion, Host: true, HostWorkDir: cwd, HostDriverStopped: true, Session: msg.SessionID, WorkBranch: sandboxBranch(msg.SessionID), Launch: *msg.Workspace, Root: pins.AnchorPath, RootIdentity: b.Root, RuntimeRoot: b.Root, Binding: &b, SupervisorLaunch: l, RuntimeToken: token, RuntimeIdentity: "host:" + token, ShellEligible: !msg.RestrictTools}}
 	for _, src := range pins.Sources {
 		st, e := src.Directory.Stat()
 		if e != nil {
@@ -54,15 +56,25 @@ func (s *LocalWorkspaceService) prepareHostLifecycle(ctx context.Context, msg pr
 			return nil, e
 		}
 		source := WorkspaceSource{Member: src.Member, Path: src.CanonicalPath, CommonPath: src.CommonDirectoryPath, RootIdentity: workspaceRootIdentity(st), CommonIdentity: workspaceRootIdentity(common)}
+		base := ""
+		if pin, ok := pinGitDir(src.CanonicalPath, st); ok {
+			if pin.vet(ctx, true) {
+				base, _ = resolveRef(ctx, pin, "HEAD")
+			}
+			pin.close()
+		}
+		source.Base = base
 		w.state.Sources = append(w.state.Sources, source)
-		w.state.Members = append(w.state.Members, workspacePrivateMember{Member: src.Member, Clone: src.CanonicalPath, CloneIdentity: source.RootIdentity, Result: protocol.WorkspaceMemberResult{WorkspaceMemberRef: protocol.WorkspaceMemberRef{LaunchGeneration: msg.Workspace.LaunchGeneration, MemberID: src.Member.ID}, Pending: true}})
+		w.state.Members = append(w.state.Members, workspacePrivateMember{Member: src.Member, Clone: src.CanonicalPath, CloneIdentity: source.RootIdentity, Result: protocol.WorkspaceMemberResult{WorkspaceMemberRef: protocol.WorkspaceMemberRef{LaunchGeneration: msg.Workspace.LaunchGeneration, MemberID: src.Member.ID}, Base: base, Pending: true}})
 	}
 	saved, err := readPrivateWorkspace(record)
 	if err != nil {
 		return nil, err
 	}
 	w.state.HostChild, w.state.HostChildren = saved.HostChild, saved.HostChildren
-	hw := &hostWorkspace{w: w, service: s, reader: r, helpers: &LocalWorkspace{mu: new(sync.Mutex), record: record + ".helpers", state: workspacePrivateManifest{Session: msg.SessionID, Launch: *msg.Workspace, RuntimeToken: token}}}
+	w.state.WorkBranch = saved.WorkBranch
+	w.state.HostKeeperNeverOpened = saved.HostKeeperNeverOpened
+	hw := &hostWorkspace{w: w, service: s, reader: r, helpers: &LocalWorkspace{mu: new(sync.Mutex), record: record + ".helpers", state: workspacePrivateManifest{Session: msg.SessionID, WorkBranch: sandboxBranch(msg.SessionID), Launch: *msg.Workspace, RuntimeToken: token}}}
 	w.host = hw
 	controller, err := hostHelperIdentityFor(os.Getpid())
 	if err != nil {
@@ -133,6 +145,7 @@ func (h *hostWorkspace) collect(ctx context.Context) {
 						result.Head = strings.TrimSpace(head.buf.String())
 						result.Pending = false
 						result.SyncError = ""
+						result.Summary = deliveredSummary(ctx, pinned, result.Base, result.Head)
 					}
 				}
 				pinned.close()
@@ -161,13 +174,26 @@ func (h *hostWorkspace) sync(ctx context.Context) ([]protocol.WorkspaceMemberRes
 	if err := h.service.Supervisor.Notify(ctx, w.state.SupervisorLaunch, "syncing"); err != nil {
 		return w.results(), err
 	}
-	if err := h.writers.Freeze(ctx); err != nil {
+	if err := activity.Measure(ctx, "freeze", func() error { return h.writers.Freeze(ctx) }); err != nil {
 		// No proof that writers stopped: this turn's sync is skipped (fail closed), but the session
 		// must not stay frozen and fenced. Thaw (which also cancels a freeze still in progress) and
 		// reopen; only if that fails too does the session stay closed until a restart.
 		return w.results(), h.reopenSkipped(ctx, fmt.Errorf("host workspace writer freeze: %w", err), "a failed freeze")
 	}
+	note := ""
+	if source, ok := h.service.Supervisor.(interface{ PrivilegedShellOpen(string) (bool, bool) }); ok {
+		open, known := source.PrivilegedShellOpen(w.state.Session)
+		if !known {
+			note = "Shell writer state is unknown while the keeper is unavailable. This copy may include in-flight writes."
+		} else if open {
+			note = "A privileged shell is open and is not frozen at turn end. This copy may include in-flight writes."
+		}
+	}
+	// Latch before collecting: cleanup can complete while a copy is in progress.
 	h.collect(ctx)
+	for i := range w.state.Members {
+		w.state.Members[i].Result.SyncNote = note
+	}
 	if err := w.authorize(ctx); err != nil {
 		var refused *WorkspaceRefusedError
 		if errors.As(err, &refused) {
@@ -179,7 +205,7 @@ func (h *hostWorkspace) sync(ctx context.Context) ([]protocol.WorkspaceMemberRes
 		err = fmt.Errorf("this turn's sync was skipped and will be retried at the next turn end: workspace authority could not be confirmed: %w", err)
 		return w.results(), h.reopenSkipped(ctx, err, "an unconfirmed authority")
 	}
-	if err := h.writers.Thaw(ctx); err != nil {
+	if err := activity.Measure(ctx, "thaw", func() error { return h.writers.Thaw(ctx) }); err != nil {
 		return w.results(), fmt.Errorf("host workspace writer thaw: %w", err)
 	}
 	if err := h.service.Supervisor.Notify(ctx, w.state.SupervisorLaunch, "running"); err != nil {
@@ -197,7 +223,7 @@ func (h *hostWorkspace) sync(ctx context.Context) ([]protocol.WorkspaceMemberRes
 // caller holds the lock), and returns cause joined with anything that kept the session closed.
 func (h *hostWorkspace) reopenSkipped(ctx context.Context, cause error, after string) error {
 	w := h.w
-	if err := h.writers.Thaw(ctx); err != nil {
+	if err := activity.Measure(ctx, "thaw", func() error { return h.writers.Thaw(ctx) }); err != nil {
 		return errors.Join(cause, fmt.Errorf("host workspace writer thaw after %s: %w", after, err))
 	}
 	if err := h.service.Supervisor.Notify(ctx, w.state.SupervisorLaunch, "running"); err != nil {
@@ -214,6 +240,9 @@ func (h *hostWorkspace) stop(ctx context.Context) ([]protocol.WorkspaceMemberRes
 	w := h.w
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if err := h.beginRetirement(); err != nil {
+		return w.results(), err
+	}
 	if err := w.validateHostJournal(); err != nil {
 		return w.results(), err
 	}
@@ -244,6 +273,9 @@ func (h *hostWorkspace) stop(ctx context.Context) ([]protocol.WorkspaceMemberRes
 	if err != nil || proof.ValidateFor(w.state.SupervisorLaunch, "") != nil {
 		return w.results(), errors.Join(err, errors.New("host shells remain unproven"))
 	}
+	for i := range w.state.Members {
+		w.state.Members[i].Result.SyncNote = ""
+	}
 	registry, ok := h.service.Supervisor.(*workspaceSupervisors)
 	if !ok {
 		return w.results(), errors.New("host registration unavailable")
@@ -258,11 +290,26 @@ func (h *hostWorkspace) stop(ctx context.Context) ([]protocol.WorkspaceMemberRes
 	w.state.Stopped = true
 	return w.results(), w.save()
 }
+
+func (h *hostWorkspace) beginRetirement() error {
+	if registry, ok := h.service.Supervisor.(*workspaceSupervisors); ok && registry.service.HasHostBridge() {
+		return registry.service.BeginWorkspaceRetirement(h.w.state.Session)
+	}
+	return nil
+}
 func (h *hostWorkspace) driverStarting() error {
 	h.w.mu.Lock()
 	defer h.w.mu.Unlock()
 	h.w.state.HostDriverStopped = false
 	return h.w.save()
+}
+func hostDriverStartRefusal(err error) string {
+	for _, cause := range []error{shellruntime.ErrAdoptionPending, shellruntime.ErrKeeperUnavailable} {
+		if errors.Is(err, cause) {
+			return cause.Error()
+		}
+	}
+	return "host lifecycle journal unavailable"
 }
 func (h *hostWorkspace) driverStopped() error {
 	h.w.mu.Lock()
@@ -307,10 +354,11 @@ func (s *workspaceSupervisors) registerHost(ctx context.Context, h *hostWorkspac
 	}
 	command.Root = workspaceRootIdentity(st)
 	command.OwnedStarted = h.recordHelper
+	command.BeforeHostShell = h.beforeHostShell
 	b := workspaceShellBinding(state)
 	b.Runtime = "host"
 	b.Audience = ownershell.RuntimeAudience(b.Connection, b.RuntimeGeneration)
-	if err = s.service.Register(ctx, new(sync.Mutex), b, command, func(context.Context) error { return s.service.ProveRecordedShellsEmpty(state.Session) }); err != nil {
+	if err = s.service.RegisterWithAdmission(ctx, new(sync.Mutex), b, command, func(context.Context) error { return s.service.ProveRecordedShellsEmpty(state.Session) }, h.admitHostShell); err != nil {
 		return err
 	}
 	c := &workspaceCoordinator{host: true, service: s.service, launch: state.SupervisorLaunch, binding: *state.Binding}
@@ -333,11 +381,7 @@ func (s *workspaceSupervisors) retireHost(ctx context.Context, l protocol.Superv
 	if err != nil {
 		return err
 	}
-	proof, err := c.service.Retire(ctx, local)
-	if err != nil {
-		return err
-	}
-	if err = proof.ValidateFor(local, ""); err != nil {
+	if err = c.service.RetireWorkspace(ctx, local); err != nil {
 		return err
 	}
 	c.retired = true
@@ -371,7 +415,11 @@ func (h *hostWorkspace) reconnect(ctx context.Context, send func(protocol.Sessio
 	}
 	c, err := registry.peer(old.SessionID)
 	if err == nil {
-		err = c.rebind(ctx, launch)
+		if w.state.StopRequested {
+			err = c.rebindStopping(ctx, launch)
+		} else {
+			err = c.rebind(ctx, launch)
+		}
 	}
 	if err != nil {
 		w.mu.Unlock()
@@ -394,8 +442,11 @@ func (h *hostWorkspace) reconnect(ctx context.Context, send func(protocol.Sessio
 }
 func (s *LocalWorkspaceService) recoverHost(ctx context.Context, state workspacePrivateManifest, record string, send func(protocol.SessionEnded) error) error {
 	launch, err := s.TrustedLaunch(ctx, state.Session)
-	if err != nil || !reflect.DeepEqual(launch, state.Launch) {
-		return errors.Join(err, errors.New("host recovery launch changed"))
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(launch, state.Launch) {
+		return &WorkspaceRefusedError{Reason: "host recovery launch changed"}
 	}
 	w := &LocalWorkspace{mu: workspaceLock(state.Session), state: state, record: record}
 	if state.RuntimePreparing {
@@ -488,9 +539,9 @@ func workspaceGuideForRuntime(m *protocol.WorkspaceManifest, w *LocalWorkspace) 
 		fmt.Fprintf(&b, "- %s: %s\n", source.Member.ID, filepath.Clean(source.Path))
 	}
 	if w.state.HostChild {
-		fmt.Fprintf(&b, "Commit in each affected member repository on wip/%s. These are your own worktrees; commits land directly in the shared repository. Shell grants are never inherited.\n", w.state.Session)
+		fmt.Fprintf(&b, "Work in the affected member path. This selection grants no shell permission. Commit in each affected member repository on %s and report every commit ID. These are your own worktrees; commits land directly in the shared repository. Newly discovered repositories are not launch members. Shell grants are never inherited.\n", w.branch())
 	} else {
-		b.WriteString("Commit in each affected member repository; preserve each member's existing branch. Shell grants are never inherited.\n")
+		b.WriteString("Work in the affected member path. This selection grants no shell permission. Commit in each affected member repository; preserve each member's existing branch and report every commit ID. Newly discovered repositories are not launch members. Shell grants are never inherited.\n")
 	}
 	return b.String()
 }
@@ -510,7 +561,8 @@ func (s *LocalWorkspaceService) beginHostIntent(msg protocol.SpawnSession, pins 
 	if err != nil {
 		return nil, err
 	}
-	w := &LocalWorkspace{mu: workspaceLock(msg.SessionID), record: record, state: workspacePrivateManifest{Version: privateWorkspaceVersion, Host: true, HostDriverStopped: true, Session: msg.SessionID, Launch: *msg.Workspace, Root: pins.AnchorPath, RootIdentity: workspaceRootIdentity(anchor), RuntimeRoot: workspaceRootIdentity(anchor), RuntimeToken: token, RuntimePreparing: true}}
+	w := &LocalWorkspace{mu: workspaceLock(msg.SessionID), record: record, state: workspacePrivateManifest{Version: privateWorkspaceVersion, Host: true, HostDriverStopped: true, Session: msg.SessionID, WorkBranch: sandboxBranch(msg.SessionID), Launch: *msg.Workspace, Root: pins.AnchorPath, RootIdentity: workspaceRootIdentity(anchor), RuntimeRoot: workspaceRootIdentity(anchor), RuntimeToken: token, RuntimePreparing: true}}
+	w.state.HostKeeperNeverOpened = true // only this newly created, exclusive private record can assert never opened
 	for _, source := range pins.Sources {
 		st, e := source.Directory.Stat()
 		if e != nil {
@@ -559,7 +611,7 @@ func (s *LocalWorkspaceService) recoverHostPreparation(ctx context.Context, w *L
 	w.state.RuntimePreparing = false
 	w.state.RuntimeIdentity = "host:" + w.state.RuntimeToken
 	for _, source := range w.state.Sources {
-		w.state.Members = append(w.state.Members, workspacePrivateMember{Member: source.Member, Clone: source.Path, CloneIdentity: source.RootIdentity, Result: protocol.WorkspaceMemberResult{WorkspaceMemberRef: protocol.WorkspaceMemberRef{LaunchGeneration: l.LaunchGeneration, MemberID: source.Member.ID}, Pending: true}})
+		w.state.Members = append(w.state.Members, workspacePrivateMember{Member: source.Member, Clone: source.Path, CloneIdentity: source.RootIdentity, Result: protocol.WorkspaceMemberResult{WorkspaceMemberRef: protocol.WorkspaceMemberRef{LaunchGeneration: l.LaunchGeneration, MemberID: source.Member.ID}, Base: source.Base, Pending: true}})
 	}
 	if w.state.HostChild {
 		w.state.Members = nil
@@ -596,8 +648,11 @@ func (s *LocalWorkspaceService) resumeHostIntent(ctx context.Context, msg protoc
 		return nil, errors.New("host workspace cannot resume from this journal")
 	}
 	trusted, err := s.TrustedLaunch(ctx, state.Session)
-	if err != nil || !reflect.DeepEqual(trusted, state.Launch) {
-		return nil, errors.New("host recovery launch changed")
+	if err != nil {
+		return nil, err
+	}
+	if !reflect.DeepEqual(trusted, state.Launch) {
+		return nil, &WorkspaceRefusedError{Reason: "host recovery launch changed"}
 	}
 	anchor, err := pins.Anchor.Stat()
 	if err != nil || workspaceRootIdentity(anchor) != state.Binding.Root || len(pins.Sources) != len(state.Sources) {
@@ -645,12 +700,19 @@ func (s *LocalWorkspaceService) reopenHostPins(ctx context.Context, msg protocol
 	if err != nil {
 		return nil, err
 	}
+	// A restart may have left a commit's reply unread. Settle it before comparing.
+	if state, err = s.reconcileMembershipJournal(ctx, state, record); err != nil {
+		return nil, err
+	}
 	if !state.Host || state.Session != msg.SessionID || !reflect.DeepEqual(state.Launch, *msg.Workspace) {
 		return nil, errors.New("host recovery journal changed")
 	}
 	trusted, err := s.TrustedLaunch(ctx, msg.SessionID)
-	if err != nil || !reflect.DeepEqual(trusted, state.Launch) {
-		return nil, errors.New("host recovery launch changed")
+	if err != nil {
+		return nil, err
+	}
+	if !reflect.DeepEqual(trusted, state.Launch) {
+		return nil, &WorkspaceRefusedError{Reason: "host recovery launch changed"}
 	}
 	pins := &discovery.BoundPins{Manifest: state.Launch, AnchorPath: state.Root}
 	success := false

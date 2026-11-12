@@ -6,6 +6,9 @@ resources:
   - configmap.yaml
   - postgres-init-configmap.yaml
   - postgres-statefulset.yaml
+  - live-data-issuer-rbac.yaml
+  - live-data-renewal.yaml
+  - live-data.yaml
   - core-deployment.yaml
   - board-deployment.yaml
   - runner-deployment.yaml

@@ -24,6 +24,9 @@ func hostMatchesSelection(dc *DaemonConn, requirements []HostSelection) bool {
 }
 
 func hostEngineState(dc *DaemonConn, selection HostSelection) string {
+	if selection.Kind != "" && selection.Kind != "agent" {
+		return "unavailable"
+	}
 	descriptor, supported := engines.Lookup(selection.Engine)
 	if !supported {
 		return "unavailable"
@@ -36,9 +39,6 @@ func hostEngineState(dc *DaemonConn, selection HostSelection) string {
 		return "unavailable"
 	}
 	if selection.Restricted {
-		if selection.Kind == "tmux" {
-			return "unavailable"
-		}
 		if !descriptor.Restricted || runtime != "docker" || !dc.CanRestrictTools() {
 			return "unavailable"
 		}
@@ -50,11 +50,6 @@ func hostEngineState(dc *DaemonConn, selection HostSelection) string {
 	}
 	reported := dc.AvailableEngines()
 	if descriptor.ID == "claude" {
-		if selection.Kind == "tmux" && runtime == "daemon" {
-			if cli, key := dc.HostClaude(); !cli && (key || reported != nil) {
-				return "unavailable"
-			}
-		}
 		if runtime == "docker" {
 			if credential := dc.SandboxClaudeCredential(); credential != nil {
 				if *credential {

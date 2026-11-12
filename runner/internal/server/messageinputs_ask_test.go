@@ -14,6 +14,9 @@ import (
 
 func TestAcceptedAskAnswerCommitsTranscriptAndReceiptTogether(t *testing.T) {
 	f := newIngestFixture(t)
+	if _, err := f.pool.Exec(f.ctx, `UPDATE sessions SET spawning_account_id='owner-1' WHERE id=$1`, f.sessionID); err != nil {
+		t.Fatal(err)
+	}
 	askID, err := db.CreateMessage(f.ctx, f.pool, f.sessionID, "ask", "Which option?")
 	if err != nil {
 		t.Fatal(err)
@@ -28,7 +31,7 @@ func TestAcceptedAskAnswerCommitsTranscriptAndReceiptTogether(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !answerAskFromChat(f.ctx, f.hub, f.pool, f.sessionID, msg.Text, msg.ClientID, askID) {
+	if !answerAskFromChatAs(f.ctx, f.hub, f.pool, f.sessionID, msg.Text, msg.ClientID, askID, "owner-1") {
 		t.Fatal("failed ask transaction must not fall through to engine")
 	}
 	ask, err := db.GetMessage(f.ctx, f.pool, askID)
@@ -42,7 +45,7 @@ func TestAcceptedAskAnswerCommitsTranscriptAndReceiptTogether(t *testing.T) {
 	if _, err := f.pool.Exec(f.ctx, `DROP TRIGGER refuse_answer_event ON agent_events; DROP FUNCTION refuse_answer_event()`); err != nil {
 		t.Fatal(err)
 	}
-	if !answerAskFromChat(f.ctx, f.hub, f.pool, f.sessionID, msg.Text, msg.ClientID, askID) {
+	if !answerAskFromChatAs(f.ctx, f.hub, f.pool, f.sessionID, msg.Text, msg.ClientID, askID, "owner-1") {
 		t.Fatal("retry did not answer")
 	}
 	ask, err = db.GetMessage(f.ctx, f.pool, askID)
@@ -55,10 +58,12 @@ func TestAcceptedAskAnswerCommitsTranscriptAndReceiptTogether(t *testing.T) {
 	}
 }
 
-// Shared IDs opt daemon Codex questions into server answer routing. Native
-// Claude-loop asks retain their own IDs and answer handling.
+// Committed answers replay once through the poll, including after a disconnect.
 func TestCodexTypedNativeQuestionRoutesOneAnswerToPoll(t *testing.T) {
 	f := newIngestFixture(t)
+	if _, err := f.pool.Exec(f.ctx, `UPDATE sessions SET spawning_account_id='owner-1' WHERE id=$1`, f.sessionID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := f.pool.Exec(f.ctx, `UPDATE sessions SET kind='agent',engine='codex' WHERE id=$1`, f.sessionID); err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +86,9 @@ func TestCodexTypedNativeQuestionRoutesOneAnswerToPoll(t *testing.T) {
 	if _, err := acceptSessionInput(f.ctx, f.hub, f.pool, input); err != nil {
 		t.Fatal(err)
 	}
-	replayPendingSessionInputs(f.ctx, f.hub, f.pool, f.dc, []string{f.sessionID})
+	if !answerAskFromChatAs(f.ctx, f.hub, f.pool, f.sessionID, input.Text, input.ClientID, askID, "owner-1") {
+		t.Fatal("typed reply did not answer the open question")
+	}
 	pending, err := db.PendingSessionInputs(f.ctx, f.pool, f.sessionID)
 	if err != nil || len(pending) != 0 {
 		t.Fatalf("typed answer not settled: %v", err)

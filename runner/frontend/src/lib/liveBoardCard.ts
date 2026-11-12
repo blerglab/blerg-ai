@@ -3,19 +3,21 @@ import { clearHovercardCache, clearPreviewCache, clearRefStores, type CardPrevie
 import { apiFetch } from '../apiFetch'
 import { getAccessToken } from '../authClient'
 import { tokenSubject } from '../claims'
+import { announceBoardMove } from '../../../../packages/board/columnVisibility'
 
 // A pinned Blerg Board card, read live from the board with the signed-in person's own permissions
 // (the runner's GET /api/board-cards/{board}/{number}, board_cards_live.go): what the panel's chip
 // and the ticket dialog show in place of the agent's copy, which goes stale as soon as the card
 // moves. Reads are shared between the chip and the dialog, and kept briefly.
 
-export interface LiveBoardColumn { id: string; name: string; is_terminal?: boolean }
+export interface LiveBoardColumn { id: string; name: string; rank?: string; is_terminal?: boolean }
 export interface LiveBoardTrailEvent { type: string; actor: string; to_column?: string; text?: string; created_at: string }
 export interface LiveBoardOrigin { session_url?: string; repo?: string; commit?: string; engine?: string }
 export interface LiveBoardCard {
-  reference?: string; id: string; board_id: string; number: number; title: string; body?: string | null; type?: string; priority?: string
-  size?: string | null; column_id?: string | null; column_name?: string; tags?: string[] | null; repos?: string[] | null
-  archived_at?: string | null; sensitive?: boolean; origin?: LiveBoardOrigin | null; version?: number; updated_at?: string
+  rank?: string; reference?: string; id: string; board_id: string; number: number; title: string; body?: string | null; type?: string; priority?: string
+  size?: string | null; risk?: string | null; complexity?: string | null; stale_at?: string | null; stuck_at?: string | null
+  column_id?: string | null; column_name?: string; tags?: string[] | null; repos?: string[] | null
+  archived_at?: string | null; sensitive?: boolean; origin?: LiveBoardOrigin | null; version?: number; created_at?: string; updated_at?: string
   columns?: LiveBoardColumn[] | null; trail?: LiveBoardTrailEvent[] | null
 }
 export interface LiveBoardRead { card: LiveBoardCard; url: string }
@@ -39,6 +41,8 @@ export function cardNumber(key: string): number {
 /** How long a read stands for the chip before it is read again. */
 const FRESH_MS = 30_000
 const reads = new Map<string, { at: number; read: LiveBoardRead }>()
+/** Conflicts block another move until a successful read. */
+const needsFreshRead = new Set<string>()
 /** Cards whose last read failed (the agent's copy then stands; nothing is waited for). */
 const failedReads = new Set<string>()
 const inflight = new Map<string, Promise<LiveBoardRead>>()
@@ -52,6 +56,7 @@ function account(): string {
   if (who !== heldFor) {
     clearRefStores()
     reads.clear()
+    needsFreshRead.clear()
     inflight.clear()
     // What hovercards and file previews read was read under the other sign-in too.
     if (heldFor) {
@@ -83,7 +88,7 @@ export function signedInAccount(): string {
 const keyOf = (board: string, number: number) => `${account()}|${board}#${number}`
 
 /** Test hook: forget every read. */
-export function resetLiveBoardCardsForTest(): void { reads.clear(); inflight.clear(); failedReads.clear(); heldFor = '' }
+export function resetLiveBoardCardsForTest(): void { reads.clear(); inflight.clear(); needsFreshRead.clear(); failedReads.clear(); heldFor = '' }
 
 /** Whether the card's read has settled: read, or failed. */
 export function boardReadSettled(board: string, number: number): boolean {
@@ -110,16 +115,17 @@ async function reply(res: Response): Promise<LiveBoardRead> {
 
 function remember(key: string, read: LiveBoardRead) {
   if (!key.startsWith(`${account()}|`)) return // read under an account the tab no longer holds
+  needsFreshRead.delete(key)
   reads.set(key, { at: Date.now(), read })
   for (const l of listeners) l()
 }
 
 /** Reads the card now (a read in flight is shared). sessionId names the session for the audit line. */
-export function readLiveBoardCard(board: string, number: number, sessionId?: string): Promise<LiveBoardRead> {
-  const key = keyOf(board, number)
+export function readLiveBoardCard(board: string, number: number, sessionId?: string, tabScoped = false): Promise<LiveBoardRead> {
+  const key = keyOf(board, number) + (tabScoped ? `|tab:${sessionId}` : '')
   const running = inflight.get(key)
   if (running) return running
-  const q = sessionId ? `?session=${encodeURIComponent(sessionId)}` : ''
+  const q = sessionId ? `?session=${encodeURIComponent(sessionId)}${tabScoped ? '&tab=1' : ''}` : ''
   const p = apiFetch(`/api/board-cards/${encodeURIComponent(board)}/${number}${q}`).then(reply).then(read => {
     remember(key, read)
     return read
@@ -130,22 +136,30 @@ export function readLiveBoardCard(board: string, number: number, sessionId?: str
 
 /** Moves the card to column (as the person's own role allows): one credential exchange, no read
  *  after. The card held is moved in place (its column; the trail comes with the next read). */
-export async function moveLiveBoardCard(board: string, number: number, column: string, sessionId?: string): Promise<void> {
-  const key = keyOf(board, number)
-  const q = sessionId ? `?session=${encodeURIComponent(sessionId)}` : ''
+export async function moveLiveBoardCard(board: string, number: number, column: string, sessionId?: string, version?: number, tabScoped = false): Promise<void> {
+  const key = keyOf(board, number) + (tabScoped ? `|tab:${sessionId}` : '')
+  if (needsFreshRead.has(key)) throw new LiveBoardCardError('Read the current card before trying again.', 409)
+  const q = sessionId ? `?session=${encodeURIComponent(sessionId)}${tabScoped ? '&tab=1' : ''}` : ''
   const res = await apiFetch(`/api/board-cards/${encodeURIComponent(board)}/${number}/move${q}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ column_id: column }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ column_id: column, if_match: version ?? reads.get(key)?.read.card.version }),
   })
   let body: unknown = null
   try { body = await res.json() } catch { /* not JSON */ }
   if (!res.ok) {
+    if (res.status === 409) {
+      needsFreshRead.add(key)
+      reads.delete(key)
+      try { await readLiveBoardCard(board, number, sessionId, tabScoped) } catch { /* Keep the conflict; a fresh read is required before retrying. */ }
+      throw new LiveBoardCardError('The card changed. Review its current status and try again.', 409)
+    }
     const msg = body && typeof body === 'object' && 'error' in body && typeof body.error === 'string' ? body.error : 'The card was not moved.'
     throw new LiveBoardCardError(msg, res.status)
   }
   const held = reads.get(key)
+  announceBoardMove(board, column, held?.read.card.reference || `#${number}`)
   if (held) {
     const name = held.read.card.columns?.find(c => c.id === column)?.name ?? held.read.card.column_name
-    remember(key, { ...held.read, card: { ...held.read.card, column_id: column, column_name: name } })
+    remember(key, { ...held.read, card: { ...held.read.card, column_id: column, column_name: name, version: (held.read.card.version ?? 0) + 1 } })
   }
 }
 
@@ -155,10 +169,10 @@ export type LiveBoardState =
   | { state: 'failed'; read: LiveBoardRead | null; error: string; status: number }
 
 /** The live card for a pin (null ref: none, nothing is read). refresh reads it again now. */
-export function useLiveBoardCard(ref: { board: string; number: number } | null, sessionId?: string, enabled = true): LiveBoardState & { refresh: () => void } {
+export function useLiveBoardCard(ref: { board: string; number: number } | null, sessionId?: string, enabled = true, tabScoped = false): LiveBoardState & { refresh: () => void } {
   const board = ref?.board ?? ''
   const number = ref?.number ?? 0
-  const key = board ? keyOf(board, number) : ''
+  const key = board ? keyOf(board, number) + (tabScoped ? `|tab:${sessionId}` : '') : ''
   // What was read for which card: a state of another card (the pin changed) is never shown.
   const [held, setHeld] = useState<{ key: string; state: LiveBoardState } | null>(null)
   const [attempt, setAttempt] = useState(0)
@@ -173,7 +187,7 @@ export function useLiveBoardCard(ref: { board: string; number: number } | null, 
     let active = true
     const c = reads.get(key)
     if (c && attempt === 0 && Date.now() - c.at < FRESH_MS) return
-    readLiveBoardCard(board, number, sessionId).then(
+    readLiveBoardCard(board, number, sessionId, tabScoped).then(
       read => { if (active) setHeld({ key, state: { state: 'ready', read } }) },
       (e: unknown) => {
         if (!active) return
@@ -182,7 +196,7 @@ export function useLiveBoardCard(ref: { board: string; number: number } | null, 
       },
     )
     return () => { active = false }
-  }, [key, board, number, sessionId, enabled, attempt])
+  }, [key, board, number, sessionId, enabled, attempt, tabScoped])
   const refresh = useCallback(() => setAttempt(a => a + 1), [])
   const cachedRead = key ? reads.get(key)?.read ?? null : null
   const state: LiveBoardState = held?.key === key ? held.state : cachedRead ? { state: 'ready', read: cachedRead } : { state: 'loading', read: null }

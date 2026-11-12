@@ -3,7 +3,6 @@ package daemon
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -327,6 +326,10 @@ func TestSetReposRootMovesNewWorkAndKeepsRunningSessions(t *testing.T) {
 	mustMkdir(t, filepath.Join(oldRoot, "alpha"))
 	file := filepath.Join(t.TempDir(), daemonSettingsFile)
 
+	engineDir := fakeClaude(t)
+	t.Setenv("PATH", engineDir+":"+os.Getenv("PATH"))
+	logPath := filepath.Join(t.TempDir(), "calls.log")
+	t.Setenv("FAKE_CLAUDE_LOG", logPath)
 	sender := newRecordingSender(256)
 	mgr := newManagerWithSender(sender, ManagerConfig{
 		ReposRoot:        oldRoot,
@@ -335,13 +338,16 @@ func TestSetReposRootMovesNewWorkAndKeepsRunningSessions(t *testing.T) {
 		Command: []string{"head", "-n", "1"},
 	})
 
+	mgr.agents = NewAgentHost(sender, AgentHostConfig{ReposRootFn: mgr.reposRoot, ClaudeCode: true})
+	t.Cleanup(func() { mgr.agents.Kill("s-old"); mgr.agents.Kill("s-new") })
+
 	// A recovery record for a session started under the old root.
 	if err := writeSessionRecord(oldRoot, SessionRecord{Version: recordSchemaVersion, SessionID: "rec-1", Repo: "alpha", ProjectPath: filepath.Join(oldRoot, "alpha")}); err != nil {
 		t.Fatal(err)
 	}
 
 	spawn := func(id, repo string, newRepo bool) protocol.SessionStarted {
-		raw, _ := json.Marshal(protocol.SpawnSession{Type: "spawn_session", SessionID: id, Repo: repo, NewRepo: newRepo, Cols: 80, Rows: 24})
+		raw, _ := json.Marshal(protocol.SpawnSession{Type: "spawn_session", Kind: "agent", SessionID: id, Repo: repo, NewRepo: newRepo, Cols: 80, Rows: 24})
 		mgr.handleSpawnSession(raw)
 		deadline := time.After(15 * time.Second)
 		for {
@@ -387,11 +393,14 @@ wait:
 		t.Errorf("live root %q, want %q", mgr.reposRoot(), newRoot)
 	}
 
-	// The running session still works: input still echoes back.
-	in, _ := json.Marshal(protocol.SendInput{Type: "send_input", SessionID: "s-old", Data: base64.StdEncoding.EncodeToString([]byte("still-alive\n"))})
-	mgr.handleSendInput(in)
-	if !waitForOutput(sender, "s-old", "still-alive", 5*time.Second) {
-		t.Error("the session started before the change stopped working")
+	// The existing agent keeps its resolved workspace and can still run a turn.
+	mgr.agents.UserMessage("s-old", "still-alive", "chat")
+	waitUntil(t, "agent turn after root change", func() bool {
+		body, _ := os.ReadFile(logPath)
+		return strings.Contains(string(body), "still-alive")
+	})
+	if got := mgr.agents.get("s-old").workspace; got != filepath.Join(oldRoot, "alpha") {
+		t.Fatalf("existing agent moved to %q", got)
 	}
 
 	// A new spawn lands under the new root.
@@ -413,11 +422,6 @@ wait:
 		t.Errorf("record still under the old root (err=%v)", err)
 	}
 
-	// Let the new session's `head -n 1` exit on its own too. (Not a kill: a
-	// killed process's exit code is written in pty.go after OutputCh closes,
-	// racing streamSession's read of it — a separate, pre-existing issue.)
-	end, _ := json.Marshal(protocol.SendInput{Type: "send_input", SessionID: "s-new", Data: base64.StdEncoding.EncodeToString([]byte("bye\n"))})
-	mgr.handleSendInput(end)
 }
 
 func TestSetReposRootRefusalReportsReasonAndChangesNothing(t *testing.T) {
@@ -490,26 +494,6 @@ func TestSetReposRootRequestsHeartbeatAfterSuccess(t *testing.T) {
 	case e := <-k.events:
 		t.Errorf("unexpected %q after a refusal", e)
 	case <-time.After(100 * time.Millisecond):
-	}
-}
-
-// waitForOutput reports whether session id produced output containing want.
-func waitForOutput(sender *recordingSender, id, want string, d time.Duration) bool {
-	var got strings.Builder
-	deadline := time.After(d)
-	for {
-		select {
-		case m := <-sender.ch:
-			if o, ok := m.(protocol.SessionOutput); ok && o.SessionID == id {
-				b, _ := base64.StdEncoding.DecodeString(o.Data)
-				got.Write(b)
-				if strings.Contains(got.String(), want) {
-					return true
-				}
-			}
-		case <-deadline:
-			return false
-		}
 	}
 }
 

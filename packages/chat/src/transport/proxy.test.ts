@@ -37,8 +37,8 @@ function router() {
   }
 }
 
-// The members every subscriber gives (onEvents, onReset and onAskClosed are optional).
-type MockHandlers = { [K in keyof Omit<SubscribeHandlers, 'onEvents' | 'onReset' | 'onAskClosed'>]: Mock<SubscribeHandlers[K]> }
+// The members every subscriber gives (onEvents, onReset, onAskClosed and onArtifactUpdated are optional).
+type MockHandlers = { [K in keyof Omit<SubscribeHandlers, 'onEvents' | 'onReset' | 'onAskClosed' | 'onArtifactUpdated' | 'onArtifactsStale'>]: Mock<SubscribeHandlers[K]> }
 function handlers(): MockHandlers {
   return {
     onEvent: vi.fn<SubscribeHandlers['onEvent']>(),
@@ -279,6 +279,13 @@ describe('createProxyTransport requests', () => {
     await expect(t.interrupt!('s1')).resolves.toBeUndefined()
     status = 500
     await expect(t.interrupt!('s1')).rejects.toThrow('HTTP 500')
+  })
+
+  it('interrupt preserves an optional displayed-turn target', async () => {
+    const { r, t } = make()
+    r.on(/\/interrupt$/, () => new Response(null, { status: 204 }))
+    await t.interrupt!('s1', 'turn-event')
+    expect(JSON.parse(r.calls[0].body!)).toEqual({ target_event_id: 'turn-event' })
   })
 
   it('setModel posts model and effort and reports unsupported controls', async () => {

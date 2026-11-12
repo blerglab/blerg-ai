@@ -29,6 +29,37 @@ func processStat(pid int) (int, string) {
 	return parent, fields[19]
 }
 func ProcessStart(pid int) string { _, start := processStat(pid); return start }
+
+// systemd places timer-launched installers outside the engine's ancestry. Use
+// kernel cgroup membership, never a caller-supplied session or unit identity.
+func processUnit(pid int) string {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
+	if err != nil {
+		return ""
+	}
+	return cgroupUnit(string(b))
+}
+func cgroupUnit(data string) string {
+	unit := ""
+	for _, line := range strings.Split(data, "\n") {
+		fields := strings.SplitN(line, ":", 3)
+		if len(fields) != 3 || (fields[0] != "0" || fields[1] != "") && fields[1] != "name=systemd" {
+			continue
+		}
+		if !strings.HasPrefix(fields[2], "/") {
+			return ""
+		}
+		parts := strings.Split(fields[2], "/")
+		if len(parts) > 0 && strings.HasSuffix(parts[len(parts)-1], ".service") {
+			candidate := parts[len(parts)-1]
+			if unit != "" && candidate != unit {
+				return ""
+			}
+			unit = candidate
+		}
+	}
+	return unit
+}
 func ancestors(pid int) map[int]string {
 	out := make(map[int]string)
 	for n := 0; pid > 1 && n < 128; n++ {

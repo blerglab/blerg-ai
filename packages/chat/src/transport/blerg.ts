@@ -1,3 +1,5 @@
+import {subscribeDataset} from './datasets'
+import type {DatasetReference} from '../visual/datasets'
 // BlergTransport: the runner's own websocket and routes, for the runner's web app. It sends the
 // very messages AgentChatView sent before the package existed (subscribe_agent_events with
 // after_seq / tail / before_seq, agent_user_message, set_session_model, unsubscribe_session) and
@@ -9,7 +11,7 @@
 // It works from the runner's origin with a core-issued browser token, the only place such a token
 // exists; an outside app never uses it (that app's chat goes through proxy.ts).
 import type {
-  AgentEvent, AgentEventsGap, AgentEventsReplayDone, DelegationDecidedPayload, AgentUserMessage, AssistantTextPayload, InterruptSession, SessionInfo,
+  AgentEvent, AgentEventsGap, AgentEventsReplayDone, ArtifactPayload, DelegationDecidedPayload, AgentUserMessage, AssistantTextPayload, InterruptSession, SessionInfo,
   SessionStatus, SetSessionModel, SubscribeAgentEvents, UnsubscribeSession,
 } from '../types'
 import { readProposalView } from '../model/proposals'
@@ -23,7 +25,7 @@ import type { OlderPage, SessionMeta, SubscribeHandlers, SubscribeOptions, Trans
 interface MessageInfo { id: string; session_id: string; kind: string; status: string; answer?: string | null; dismissed?: boolean; dismissed_by?: string }
 
 /** The messages a chat sends the runner over its socket (a subset of the runner's BrowserMessage). */
-export type ChatBrowserMessage = SubscribeAgentEvents | UnsubscribeSession | AgentUserMessage | SetSessionModel | InterruptSession
+export type ChatBrowserMessage = {type: 'subscribe_dataset' | 'unsubscribe_dataset' | 'dataset_heartbeat' | 'dataset_diagnostic'; cause?: string; session_id: string; subscription_id: string; data: DatasetReference} | SubscribeAgentEvents | UnsubscribeSession | AgentUserMessage | SetSessionModel | InterruptSession
 
 /** What the adapter needs of a socket: the runner's ws.ts module as it is (send, onMessage,
  *  onOpen), plus two optional members a host can add so the composer locks the moment the link
@@ -220,6 +222,7 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
       }
       // Not connected: the next connection resumes from contig anyway.
       if (!connected()) return
+      h.onArtifactsStale?.()
       askForward(afterSeq)
     }
     const armGap = () => {
@@ -240,6 +243,14 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
         if (page) page.push(ev)
         else if ((ev.payload as AssistantTextPayload).parent_call_id) h.onEvent(ev)
         else h.onStreaming((ev.payload as AssistantTextPayload).text)
+        return
+      }
+      if (ev.transient && ev.kind === 'artifact') {
+        // A live file's republish (BLG-470): never persisted, so it never grows the transcript
+        // or storage. Applied straight to the one artifact id named; a dropped one (a full
+        // buffer, same as any live event) costs only a stale card until the next republish or an
+        // explicit list refresh, never a gap to fill in.
+        if (!page) h.onArtifactUpdated?.(ev.payload as ArtifactPayload)
         return
       }
       const older = pendingOlder.get(sessionId)
@@ -320,19 +331,24 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
       if (m.session_id === sessionId) h.onStatus(m.status)
     }))
 
+    const reportClosedAsk = (m: MessageInfo) => {
+      if (m.status === 'withdrawn') h.onAskClosed?.(m.id, '', false, undefined, true)
+      else h.onAskClosed?.(m.id, m.answer ?? '', m.dismissed === true, dismissedBy(m))
+    }
+
     offs.push(socket.onMessage('initial_state', (msg: never) => {
       const state = msg as { sessions: SessionInfo[]; messages?: MessageInfo[] | null }
       const s = state.sessions.find(x => x.id === sessionId)
       if (s) h.onStatus(s.status)
       // The session's asks that are no longer open (answered elsewhere, expired while away).
       for (const m of state.messages ?? []) {
-        if (m && m.session_id === sessionId && m.kind === 'ask' && m.status !== 'open') h.onAskClosed?.(m.id, m.answer ?? '', m.dismissed === true, dismissedBy(m))
+        if (m && m.session_id === sessionId && m.kind === 'ask' && m.status !== 'open') reportClosedAsk(m)
       }
     }))
 
     offs.push(socket.onMessage('message_answered', (msg: never) => {
       const m = (msg as { message?: MessageInfo }).message
-      if (m && m.session_id === sessionId && typeof m.id === 'string') h.onAskClosed?.(m.id, m.answer ?? '', m.dismissed === true, dismissedBy(m))
+      if (m && m.session_id === sessionId && typeof m.id === 'string') reportClosedAsk(m)
     }))
 
     // Subscribe on every (re)connection, resuming from lastSeq (or, mid-replay, from where the
@@ -443,7 +459,7 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
       if (!r.ok) throw new Error(`HTTP ${r.status}`)
       const list = (await r.json()) as SessionInfo[]
       const s = Array.isArray(list) ? list.find(x => x.id === sessionId) : undefined
-      if (!s) throw new Error('Session not found.')
+      if (!s) throw new Error('Workspace not found.')
       return toMeta(s)
     },
 
@@ -466,8 +482,8 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
     },
 
     // The toolbar's Stop while a turn runs: the turn is cut short, the session goes on.
-    async interrupt(sessionId) {
-      if (!socket.send({ type: 'interrupt_session', session_id: sessionId })) throw new Error('Not connected.')
+    async interrupt(sessionId, targetEventId) {
+      if (!socket.send({ type: 'interrupt_session', session_id: sessionId, ...(targetEventId ? { target_event_id: targetEventId } : {}) })) throw new Error('Not connected.')
     },
 
     async setModel(sessionId, model, effort) {
@@ -499,6 +515,34 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
     },
 
     // A proposal the session made: owner only (404 for anyone else).
+    async channelRecommendation(sessionId, id) {
+      const r = await request(`/api/sessions/${enc(sessionId)}/channel-recommendations/${enc(id)}`)
+      if (!r.ok) throw new Error('Could not read the recommendation.')
+      return r.json()
+    },
+    async decideChannelRecommendation(sessionId, id, action) {
+      const r = await request(`/api/sessions/${enc(sessionId)}/channel-recommendations/${enc(id)}/decide`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }),
+      })
+      const body = await r.json()
+      if (!r.ok) throw new Error(body.error || 'Could not save the decision.')
+      return body
+    },
+
+    async blackboardRecommendation(sessionId, id) {
+      const r = await request(`/api/sessions/${enc(sessionId)}/blackboard-recommendation/${enc(id)}`)
+      if (!r.ok) throw new Error('Could not read the recommendation.')
+      return r.json()
+    },
+    async decideBlackboardRecommendation(sessionId, id, action) {
+      const r = await request(`/api/sessions/${enc(sessionId)}/blackboard-recommendation/${enc(id)}/decide`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }),
+      })
+      const body = await r.json()
+      if (!r.ok) throw new Error(body.error || 'Could not save the decision.')
+      return body
+    },
+
     async proposal(proposalId) {
       const r = await request(`/api/proposals/${enc(proposalId)}`)
       if (!r.ok) throw Object.assign(new Error(await errorText(r)), { status: r.status })
@@ -548,7 +592,7 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
     connected,
     answersAsks: true,
 
-    files: createFiles({
+    files: {reportVisualFailure: (sessionId, cause) => {socket.send({type: 'dataset_diagnostic', session_id: sessionId, subscription_id: crypto.randomUUID(), data: {kind: 'dataset', name: 'blerg.workers', parameters: {}}, cause})}, subscribeDataset: (sessionId, data, receive) => subscribeDataset(socket, sessionId, data, receive), ...createFiles({
       queueScope: opts.viewerId ? () => {const viewer = opts.viewerId!(); return viewer ? `${baseUrl}\0${viewer}` : ''} : undefined,
       base: (sessionId) => `${baseUrl}/api/sessions/${enc(sessionId)}`,
       fetch: fetchImpl,
@@ -556,6 +600,6 @@ export function createBlergTransport(opts: BlergTransportOptions): Transport {
       check,
       workspace: true,
       commits: true,
-    }),
+    })},
   }
 }

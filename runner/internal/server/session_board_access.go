@@ -576,10 +576,10 @@ func (a *API) runSessionBoardTool(ctx context.Context, row *db.SessionRow, req b
 	if !ok || proof.AccountID == "" || row.SpawningAccountID == nil || *row.SpawningAccountID != proof.AccountID {
 		return fail(http.StatusForbidden, "this board access has no sign-in to act with; ask the person to set it again in Permissions")
 	}
-	if mcpgw.IsBoardColumnTool(req.Tool) && !mcpgw.PersonBehind(proof) {
-		// Column management acts for a person: a launch made with an agent token has none behind it.
+	if mcpgw.BoardToolNeedsPerson(req.Tool) && !mcpgw.PersonBehind(proof) {
+		// Archiving and column management act for a person: a launch made with an agent token has none behind it.
 		log.Printf("board tools: session=%s board=%s tool=%s level=%s outcome=refused (no person)", row.ID, boardID, req.Tool, lv.Level)
-		return fail(http.StatusForbidden, "managing this board's columns needs Full access the person gave in the session's Permissions (Boards); "+
+		return fail(http.StatusForbidden, "this board action needs Full access the person gave in the session's Permissions (Boards); "+
 			"ask them to set this board to Full there")
 	}
 	argsRaw, _ := json.Marshal(args)
@@ -697,11 +697,11 @@ func (a *API) HandleSessionBoardTool(w http.ResponseWriter, r *http.Request) {
 // always listed, so a level given while the engine runs is usable at once; each call is checked.
 func boardSessionToolDefinition() any {
 	str := map[string]string{"type": "string"}
-	tools := append([]string{"access"}, mcpgw.BoardToolNames()...)
+	tools := append([]string{"access", "propose_metadata"}, mcpgw.BoardToolNames()...)
 	return map[string]any{"name": "blerg_board", "description": "Read or change cards on a board your person gave this session access to in its Permissions. " +
-		"Call {\"tool\":\"access\"} first: it lists the boards and their level. Level read: blerg_board_get, blerg_board_list, blerg_board_schema, " +
+		"Use tool propose_metadata with board and arguments {name, description, key, repos, require_repo, field_schema, columns, tags, deploy_url, include_component_version} to queue metadata changes (columns: [{id?, name?, is_terminal?, before_id?, delete?}]; tags: [{from, to? OR delete:true}]) for human approval (Read access or higher, even Full always asks). Call {\"tool\":\"access\"} first: it lists the boards and their level. Level read: blerg_board_get, blerg_board_list, blerg_board_schema, " +
 		"blerg_column_list, blerg_card_search, blerg_card_get. Level full adds blerg_card_create, blerg_card_update, blerg_card_move, blerg_card_comment, " +
-		"blerg_card_link, and manages columns: blerg_column_create, blerg_column_update (rename, is_terminal), blerg_column_move, blerg_column_delete " +
+		"blerg_card_link, blerg_card_archive (a person-backed Full session only), and manages columns: blerg_column_create, blerg_column_update (rename, is_terminal), blerg_column_move, blerg_column_delete " +
 		"(an empty column, or with move_cards_to for its cards). arguments are that board tool's own arguments. The person can change levels while you work: if a board tool you need is not " +
 		"listed or a call is refused, call this tool with {\"tool\":\"access\"} before telling the person you lack permission, and use it for anything the " +
 		"level allows. Without access, use blerg_ticket_file to propose a card; it asks the person.",
@@ -711,9 +711,12 @@ func boardSessionToolDefinition() any {
 
 // RegisterSessionBoardRoutes mounts the board access routes.
 func (a *API) RegisterSessionBoardRoutes(mux *http.ServeMux) {
+	a.RegisterBlackboardRoutes(mux)
+	mux.HandleFunc("POST /api/sessions/{id}/board-metadata", a.HandleProposeBoardMetadata)
 	mux.HandleFunc("PUT /api/sessions/{id}/board-access", a.HandleSetBoardAccess)
 	mux.HandleFunc("GET /api/sessions/{id}/board-access", a.HandleSessionBoardAccess)
 	mux.HandleFunc("POST /api/sessions/{id}/board-tools", a.HandleSessionBoardTool)
+	mux.HandleFunc("GET /api/board-cards/{board}/view", a.HandleLiveBoardView)
 	mux.HandleFunc("GET /api/board-cards/{board}/search", a.HandlePaletteCards)
 	mux.HandleFunc("GET /api/board-cards/{board}/{number}", a.HandleGetLiveBoardCard)
 	mux.HandleFunc("POST /api/board-cards/{board}/{number}/move", a.HandleMoveLiveBoardCard)

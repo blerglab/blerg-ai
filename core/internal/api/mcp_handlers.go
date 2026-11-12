@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"github.com/blerglab/blerg-ai/core/internal/mcpconn"
 )
 
@@ -97,6 +99,16 @@ func decodeMCPBody(w http.ResponseWriter, r *http.Request, limit int64, v any) b
 
 func writeMCPError(w http.ResponseWriter, err error) {
 	var ve *mcpconn.ValidationError
+	level := slog.LevelError
+	if errors.As(err, &ve) || errors.Is(err, mcpconn.ErrNameTaken) || errors.Is(err, mcpconn.ErrLimit) || errors.Is(err, mcpconn.ErrNotFound) || errors.Is(err, mcpconn.ErrRateLimited) {
+		level = slog.LevelInfo
+	}
+	cause := mcpconn.FailureCause(err)
+	if level == slog.LevelInfo {
+		slog.Info("mcp connections", "cause", cause)
+	} else {
+		failurelog.Default.Event("mcp_http:"+cause, level, "component", "core", "operation", "mcp_connections", "cause", cause)
+	}
 	switch {
 	case errors.As(err, &ve):
 		http.Error(w, ve.Msg, http.StatusBadRequest)
@@ -110,7 +122,6 @@ func writeMCPError(w http.ResponseWriter, err error) {
 		w.Header().Set("Retry-After", "60")
 		http.Error(w, "too many connection attempts: try again in a minute", http.StatusTooManyRequests)
 	default:
-		log.Printf("mcp connections: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
 }
@@ -357,7 +368,7 @@ func (d Deps) handleInternalListMCPConnections(w http.ResponseWriter, r *http.Re
 	}
 	list, err := d.MCPConnections.List(r.Context(), body.AccountID)
 	if err != nil {
-		log.Printf("internal mcp list: %v", err)
+		log.Printf("internal mcp list: cause=%s", mcpconn.FailureCause(err))
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -385,6 +396,7 @@ func (d Deps) handleInternalMCPToken(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := d.MCPConnections.FetchSecret(r.Context(), body.AccountID, body.ConnectionID, proof)
 	if err != nil {
+		log.Printf("internal mcp token: cause=%s", mcpconn.FailureCause(err))
 		if errors.Is(err, mcpconn.ErrNotFound) {
 			// Also what an OAuth connection in needs_auth (or whose refresh was rejected) answers:
 			// the runner treats it as "connection unavailable, sign in again".
@@ -397,7 +409,6 @@ func (d Deps) handleInternalMCPToken(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		log.Printf("internal mcp token: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

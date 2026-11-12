@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"github.com/blerglab/blerg-ai/runner/skills"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,59 +13,13 @@ import (
 
 func assertSessionWorkGuide(t *testing.T, text string) {
 	t.Helper()
-	for _, line := range []string{childSessionGuideLine, workGuideLine, topicGuideLine, checklistWorkMapGuideLine, planAutoGuideLine, boardAccessGuideLine} {
+	for _, line := range []string{childSessionGuideLine, workGuideLine, topicGuideLine, checklistWorkMapGuideLine, planAutoGuideLine, boardAccessGuideLine, ticketEstimateGuideLine} {
 		if !strings.Contains(text, line) {
 			t.Fatalf("missing shared guidance: %s", line)
 		}
 	}
 }
-func TestCodexTerminalManagedGuide(t *testing.T) {
-	source := t.TempDir()
-	original := []byte("Personal override instructions.\n")
-	if err := os.WriteFile(filepath.Join(source, "AGENTS.override.md"), original, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(source, "AGENTS.md"), []byte("Shadowed instructions."), 0600); err != nil {
-		t.Fatal(err)
-	}
-	config := []byte("developer_instructions = 'Personal developer instructions'\n")
-	if err := os.WriteFile(filepath.Join(source, "config.toml"), config, 0600); err != nil {
-		t.Fatal(err)
-	}
-	state := filepath.Join(t.TempDir(), "state")
-	home, err := prepareCodexTerminalHome(state, "session", source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, err := os.ReadFile(filepath.Join(home, "AGENTS.override.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertSessionWorkGuide(t, string(body))
-	if !strings.Contains(string(body), string(original)) || strings.Contains(string(body), "Shadowed instructions") {
-		t.Fatal("effective user instructions changed")
-	}
-	info, err := os.Lstat(filepath.Join(home, "AGENTS.override.md"))
-	if err != nil || !info.Mode().IsRegular() {
-		t.Fatal("private guide must be an owned regular file")
-	}
-	after, err := os.ReadFile(filepath.Join(source, "AGENTS.override.md"))
-	if err != nil || string(after) != string(original) {
-		t.Fatal("source global instructions were changed")
-	}
-	after, err = os.ReadFile(filepath.Join(home, "config.toml"))
-	if err != nil || string(after) != string(config) {
-		t.Fatal("existing developer config was changed")
-	}
-	again, err := prepareCodexTerminalHome(state, "session", source)
-	if err != nil || again != home {
-		t.Fatal("idempotent terminal preparation failed")
-	}
-	after, err = os.ReadFile(filepath.Join(home, "AGENTS.override.md"))
-	if err != nil || string(after) != string(body) {
-		t.Fatal("repeated preparation duplicated managed guide")
-	}
-}
+
 func TestCodexSharedGuideBundle(t *testing.T) {
 	assertSessionWorkGuide(t, ccSystemPromptFor(""))
 	assertSessionWorkGuide(t, managedBlock)
@@ -129,64 +84,13 @@ func TestCodexNativeGuideScope(t *testing.T) {
 		})
 	}
 }
-func TestCodexRecoveryRefreshesPrivateGuide(t *testing.T) {
-	for _, retained := range []bool{false, true} {
-		t.Run(map[bool]string{false: "legacy custom CODEX_HOME", true: "retained source"}[retained], func(t *testing.T) {
-			home := t.TempDir()
-			t.Setenv("HOME", home)
-			source := t.TempDir()
-			t.Setenv("CODEX_HOME", source)
-			if retained {
-				source = t.TempDir()
-			}
-			if err := os.WriteFile(filepath.Join(source, "AGENTS.md"), []byte("Retained owner instructions."), 0600); err != nil {
-				t.Fatal(err)
-			}
-			private := t.TempDir()
-			if err := os.Chmod(private, 0700); err != nil {
-				t.Fatal(err)
-			}
-			sessionDir := filepath.Join(private, "sessions")
-			if err := os.Mkdir(sessionDir, 0700); err != nil {
-				t.Fatal(err)
-			}
-			id := "00000000-0000-4000-8000-000000000001"
-			record := `{"type":"session_meta","payload":{"id":"` + id + `","timestamp":"2026-01-01T00:00:00Z","source":"cli"}}` + "\n"
-			if err := os.WriteFile(filepath.Join(sessionDir, "rollout-"+id+".jsonl"), []byte(record), 0600); err != nil {
-				t.Fatal(err)
-			}
-			bin := t.TempDir()
-			if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
-			rec := SessionRecord{SessionID: "guide-recovery", Engine: "codex", CodexHome: private, ProjectPath: t.TempDir()}
-			if retained {
-				rec.CodexSourceHome = source
-			}
-			m := &Manager{client: newRecordingSender(4)}
-			m.recoverSession(rec)
-			raw, err := os.ReadFile(filepath.Join(private, "AGENTS.override.md"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertSessionWorkGuide(t, string(raw))
-			if !strings.Contains(string(raw), "Retained owner instructions.") {
-				t.Fatal("recovery did not preserve effective source instructions")
-			}
-			if _, err := os.Stat(filepath.Join(home, ".codex", "AGENTS.override.md")); !os.IsNotExist(err) {
-				t.Fatal("recovery touched owner default instructions home")
-			}
-		})
-	}
-}
 
 // Agents learn blerg-runner from the text the daemon injects, not from SKILL.md: the injected text
 // must name the commands and carry the rule about destructive questions, and it must be the
 // CLI's own first paragraph.
 func TestChildSessionGuideIsInjected(t *testing.T) {
 	for name, text := range map[string]string{"claude prompt": ccSystemPromptFor(""), "managed block": managedBlock, "codex/shared prompt": sessionWorkGuidePrompt()} {
-		for _, want := range []string{"`blerg-runner session start", "`blerg-runner budget`", "`blerg-runner session --help`", "destructive or irreversible", "`blerg-runner ask`", "`--timeout` (seconds)", "Bash tool timeout higher (milliseconds)"} {
+		for _, want := range []string{"`blerg-runner session start", "`blerg-runner budget`", "`blerg-runner session --help`", "destructive or irreversible", "`blerg-runner ask`", "`blerg-runner session answer", "`blerg-runner session escalate", "wait for Main without a time limit", "`--timeout` (seconds)", "Bash tool timeout higher (milliseconds)"} {
 			if !strings.Contains(text, want) {
 				t.Errorf("%s does not say %q", name, want)
 			}
@@ -197,6 +101,19 @@ func TestChildSessionGuideIsInjected(t *testing.T) {
 	}
 }
 
+func TestWorkerQuestionsGuideRoutesThroughMain(t *testing.T) {
+	for _, text := range []string{ccSystemPromptFor(""), managedBlock, sessionWorkGuidePrompt()} {
+		for _, want := range []string{"All worker questions go to Main", "Workers send work for review with `blerg-runner ask`", "Main requests the person's approval only when needed", "--summary", "--recommendation", "only the person can approve"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("missing parent-first guidance: %s", want)
+			}
+		}
+		if strings.Contains(text, "A child can require the person with") {
+			t.Error("guide still tells workers to bypass Main")
+		}
+	}
+}
+
 func TestUsageNoticeGuidanceIsInEverySessionGuide(t *testing.T) {
 	for _, text := range []string{sessionWorkGuidePrompt(), sessionWorkGuideManaged()} {
 		for _, want := range []string{"usage_limit", "80% prefer other engines", "90% start nothing new", "95% finish the current step and save state"} {
@@ -204,5 +121,67 @@ func TestUsageNoticeGuidanceIsInEverySessionGuide(t *testing.T) {
 				t.Fatalf("guide omits %q", want)
 			}
 		}
+	}
+}
+
+func TestSessionSkillPolicyGuide(t *testing.T) {
+	off := false
+	for _, main := range []bool{false, true} {
+		for _, disabled := range []bool{false, true} {
+			override := skills.Overrides{}
+			if disabled {
+				override.TDD, override.UX = &off, &off
+			}
+			policy := skills.Resolve(main, override)
+			text := ccSystemPromptForPolicy("", policy)
+			for marker, want := range map[string]bool{"coordinating": main, "test-driven-development": !disabled, "ux-design": !disabled, "planning": true} {
+				if strings.Contains(text, strings.TrimPrefix(marker, "# ")) != want {
+					t.Errorf("main=%v disabled=%v marker=%s", main, disabled, marker)
+				}
+			}
+		}
+	}
+}
+
+func TestSkillPolicyGuideAndProvisioningPrecedence(t *testing.T) {
+	on, off := true, false
+	for _, main := range []bool{false, true} {
+		policy := skills.Resolve(main, skills.Overrides{TDD: &off}, skills.Overrides{TDD: &on}, skills.Overrides{TDD: &on, UX: &off})
+		for _, restricted := range []bool{false, true} {
+			options := []ccOption{withSessionGuide(), func(o *ccOptions) { o.SkillPolicy = &policy }}
+			if restricted {
+				options = append(options, withRestrictTools())
+			}
+			text, ok := appendedPrompt(ccCommonArgs("", "", "", options...))
+			if !ok || strings.Contains(text, "Test-driven development") || strings.Contains(text, "UX design") || strings.Contains(text, "Coordinate as Main") != main {
+				t.Fatalf("guide policy main=%v restricted=%v was not applied", main, restricted)
+			}
+		}
+		home, repo, _ := setupSkillDirs(t)
+		if _, err := ensureSkillSymlink(repo, home, policy); err != nil {
+			t.Fatal(err)
+		}
+		for _, engine := range []string{".claude", ".codex", ".agents", ".hermes"} {
+			for _, name := range []string{"test-driven-development", "ux-design", "coordinating"} {
+				_, err := os.Stat(filepath.Join(home, engine, "skills", name, "SKILL.md"))
+				want := name == "coordinating" && main
+				if (err == nil) != want {
+					t.Fatalf("%s/%s main=%v: %v", engine, name, main, err)
+				}
+			}
+		}
+	}
+}
+
+func TestSkillPolicyRecoveryRecord(t *testing.T) {
+	off := false
+	policy := skills.Resolve(true, skills.Overrides{UX: &off})
+	dir := filepath.Join(t.TempDir(), "records")
+	if err := writeAgentRecord(dir, AgentRecord{SessionID: "skill-record", Repo: "project", WorkDir: "/workspace", SkillPolicy: &policy}); err != nil {
+		t.Fatal(err)
+	}
+	records := listAgentRecords(dir)
+	if len(records) != 1 || records[0].SkillPolicy == nil || *records[0].SkillPolicy != policy {
+		t.Fatal("host recovery lost the applied inventory")
 	}
 }

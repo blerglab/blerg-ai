@@ -43,9 +43,11 @@ function timelineOf(c: HTMLElement) {
   Object.defineProperty(el, 'clientHeight', { configurable: true, value: 100 })
   return el
 }
-function scrollTo(el: HTMLElement, top: number) {
+function scrollTo(el: HTMLElement, top: number, reader = top < el.scrollTop) {
+  if (reader) fireEvent.pointerDown(el, { button: 0 })
   el.scrollTop = top
   act(() => { el.dispatchEvent(new Event('scroll', { bubbles: true })) })
+  if (reader) fireEvent.pointerUp(window)
 }
 
 let into: ReturnType<typeof vi.fn>
@@ -109,7 +111,7 @@ describe('Transcript follows new output', () => {
     scrollTo(tl, 900)
     // The content under the view got 50 px shorter and the browser moved the view up with it.
     Object.defineProperty(tl, 'scrollHeight', { configurable: true, value: 950 })
-    scrollTo(tl, 850)
+    scrollTo(tl, 850, false)
     into.mockClear()
     rerender(<Transcript {...props({ events: range(1, 4) })} />)
     expect(into).toHaveBeenCalledTimes(1)
@@ -132,10 +134,11 @@ describe('Transcript follows new output', () => {
     const { container, rerender } = render(<Transcript {...props({ events: range(1, 3) })} />)
     const tl = timelineOf(container)
     scrollTo(tl, 900)
-    // We follow a new row; the scroll event that move causes lands higher than the last one read
-    // (the content under it was trimmed): it is ours, so following goes on.
+    // Trimming content reduces the maximum by the whole upward movement.
+    // The browser is still at the end, so following goes on.
     rerender(<Transcript {...props({ events: range(1, 4) })} />)
-    scrollTo(tl, 700)
+    Object.defineProperty(tl, 'scrollHeight', { configurable: true, value: 800 })
+    scrollTo(tl, 700, false)
     into.mockClear()
     rerender(<Transcript {...props({ events: range(1, 5) })} />)
     expect(into).toHaveBeenCalledTimes(1)
@@ -174,7 +177,7 @@ function key(el: Element, k: string, shiftKey = false) {
   act(() => { el.dispatchEvent(new KeyboardEvent('keydown', { key: k, shiftKey, bubbles: true })) })
 }
 
-describe('Transcript reads the reader going up from their input', () => {
+describe('Transcript observes movement independently of input order', () => {
   let now = 1000
   beforeEach(() => {
     now = 1000
@@ -209,7 +212,7 @@ describe('Transcript reads the reader going up from their input', () => {
     expect(into).toHaveBeenCalledTimes(1)
   })
 
-  it('the first step up landing within 8 px of the end does not resume following', () => {
+  it('a view within 8 px of the end follows regardless of input', () => {
     const { container, rerender } = render(<Transcript {...props({ events: range(1, 3) })} />)
     const tl = timelineOf(container)
     scrollTo(tl, 900)
@@ -217,7 +220,8 @@ describe('Transcript reads the reader going up from their input', () => {
     scrollTo(tl, 897)
     into.mockClear()
     rerender(<Transcript {...props({ events: range(1, 4) })} />)
-    expect(into).not.toHaveBeenCalled()
+    expect(into).toHaveBeenCalledTimes(1)
+    into.mockClear()
     // Back down to the end afterwards: following again.
     now += 500
     scrollTo(tl, 900)
@@ -235,6 +239,7 @@ describe('Transcript reads the reader going up from their input', () => {
     into.mockClear()
     rerender(<Transcript {...props({ events: range(1, 3), working: true })} />)
     touch(tl, 'touchmove', 315)
+    scrollTo(tl, 870, false)
     touch(tl, 'touchend', 315)
     act(() => { vi.advanceTimersByTime(1000) })
     // The follow missed during the touch is not made up: the reader went up.
@@ -253,6 +258,7 @@ describe('Transcript reads the reader going up from their input', () => {
     touch(tl, 'touchmove', 250)
     touch(tl, 'touchmove', 200)
     touch(tl, 'touchmove', 215) // 15 px down from the turn, still 85 px above the start
+    scrollTo(tl, 870, false)
     touch(tl, 'touchend', 215)
     act(() => { vi.advanceTimersByTime(1000) })
     into.mockClear()
@@ -299,6 +305,7 @@ describe('Transcript reads the reader going up from their input', () => {
     // At its own top, the box has nowhere to go: the timeline scrolls, so following stops.
     box.scrollTop = 0
     wheel(line, -120)
+    scrollTo(tl, 780, false)
     into.mockClear()
     rerender(<Transcript {...props({ events: range(1, 5) })} />)
     expect(into).not.toHaveBeenCalled()
@@ -393,6 +400,7 @@ describe('Transcript reads the reader going up from their input', () => {
       const tl = timelineOf(container)
       scrollTo(tl, 900)
       key(tl, k, shift)
+      scrollTo(tl, 780, false)
       into.mockClear()
       rerender(<Transcript {...props({ events: range(1, 4) })} />)
       expect(into, k).not.toHaveBeenCalled()
@@ -410,7 +418,7 @@ describe('Transcript reads the reader going up from their input', () => {
     expect(into).toHaveBeenCalledTimes(1)
   })
 
-  it('with no input seen, an upward scroll (a scrollbar drag) still stops following', () => {
+  it('an upward scrollbar drag still stops following', () => {
     const { container, rerender } = render(<Transcript {...props({ events: range(1, 3) })} />)
     const tl = timelineOf(container)
     scrollTo(tl, 900)
@@ -426,6 +434,8 @@ describe('Transcript reads the reader going up from their input', () => {
     const remove = vi.spyOn(HTMLElement.prototype, 'removeEventListener')
     const addWin = vi.spyOn(window, 'addEventListener')
     const removeWin = vi.spyOn(window, 'removeEventListener')
+    const addDoc = vi.spyOn(document, 'addEventListener')
+    const removeDoc = vi.spyOn(document, 'removeEventListener')
     const { container, rerender, unmount } = render(<Transcript {...props({ events: range(1, 3) })} />)
     const tl = container.querySelector('.agent-timeline')
     const kinds = ['keydown', 'touchcancel', 'touchend', 'touchmove', 'touchstart', 'wheel']
@@ -446,6 +456,8 @@ describe('Transcript reads the reader going up from their input', () => {
     expect(removeAll()).toEqual([])
     unmount()
     expect(removeAll()).toEqual(ours)
+    expect(addDoc.mock.calls.filter(c => c[0] === 'keydown')).toHaveLength(1)
+    expect(removeDoc.mock.calls.filter(c => c[0] === 'keydown')).toHaveLength(1)
   })
 })
 
@@ -471,22 +483,22 @@ describe('the New output pill', () => {
     expect(screen.queryByTestId('new-output')).not.toBeInTheDocument()
   })
 
-  it('names why following stopped (BLG-327): a wheel, or a scroll no input explains', () => {
+  it('names why following stopped (BLG-327): a wheel or scrollbar drag', () => {
     const first = render(<Transcript {...props({ events: range(1, 3) })} />)
     let tl = timelineOf(first.container)
     scrollTo(tl, 900)
     wheel(tl, -120)
     scrollTo(tl, 860)
     first.rerender(<Transcript {...props({ events: range(1, 4) })} />)
-    expect(screen.getByTestId('new-output')).toHaveAttribute('data-unfollow', 'a wheel or trackpad scroll up (-120)')
-    expect(screen.getByTestId('new-output').title).toMatch(/^Stopped following: a wheel or trackpad scroll up \(-120\), at /)
+    expect(screen.getByTestId('new-output')).toHaveAttribute('data-unfollow', 'a scroll away from the end')
+    expect(screen.getByTestId('new-output').title).toMatch(/^Stopped following: a scroll away from the end, at /)
     first.unmount()
     const second = render(<Transcript {...props({ events: range(1, 3) })} />)
     tl = timelineOf(second.container)
     scrollTo(tl, 900)
     scrollTo(tl, 400)
     second.rerender(<Transcript {...props({ events: range(1, 4) })} />)
-    expect(screen.getByTestId('new-output').getAttribute('data-unfollow')).toMatch(/^an upward scroll with no wheel, finger or key \(900 → 400 px of /)
+    expect(screen.getByTestId('new-output').getAttribute('data-unfollow')).toMatch(/^a scroll away from the end$/)
   })
 
   it('comes up for a streaming reply too, and a tap goes to the end and follows again', () => {
@@ -547,4 +559,68 @@ describe('the New output pill', () => {
     rerender(<Transcript {...props({ events: range(1, 8) })} />)
     expect(screen.queryByTestId('new-output')).not.toBeInTheDocument()
   })
+})
+
+it('saves the reader position after an upward scroll with unchanged geometry', () => {
+  const onScrollLeave = vi.fn()
+  const { container, unmount } = render(<Transcript {...props({ events: range(1, 3), onScrollLeave })} />)
+  const tl = timelineOf(container)
+  tl.scrollTop = 900
+  act(() => { tl.dispatchEvent(new Event('scroll', { bubbles: true })) })
+  scrollTo(tl, 0)
+  unmount()
+  expect(onScrollLeave).toHaveBeenLastCalledWith(expect.objectContaining({ follow: false, top: 0 }))
+})
+
+it('lets a scrollbar drag stop following during busy programmatic scrolling', () => {
+  const { container, rerender } = render(<Transcript {...props({ events: range(1, 3) })} />)
+  const tl = timelineOf(container)
+  rerender(<Transcript {...props({ events: range(1, 3), streaming: 'Working' })} />)
+  fireEvent.pointerDown(tl, { button: 0 })
+  tl.scrollTop = 700
+  act(() => { tl.dispatchEvent(new Event('scroll', { bubbles: true })) })
+  into.mockClear()
+  rerender(<Transcript {...props({ events: range(1, 3), streaming: 'Still working' })} />)
+  expect(into).not.toHaveBeenCalled()
+})
+
+it('keeps following after movement without a reader gesture', () => {
+  const onScrollLeave = vi.fn()
+  const { container, rerender, unmount } = render(<Transcript {...props({ events: range(1, 3), onScrollLeave })} />)
+  const tl = timelineOf(container)
+  scrollTo(tl, 900, false)
+  scrollTo(tl, 0, false)
+  into.mockClear()
+  rerender(<Transcript {...props({ events: range(1, 4), onScrollLeave })} />)
+  expect(into).toHaveBeenCalledTimes(1)
+  unmount()
+  expect(onScrollLeave).toHaveBeenLastCalledWith({ follow: true })
+})
+
+it('preserves subpixel anchor corrections across repeated late row resizes', () => {
+ const observers: {nodes: Set<Element>; notify: () => void}[] = []
+ vi.stubGlobal('ResizeObserver', class {
+  nodes = new Set<Element>()
+  constructor(callback: ResizeObserverCallback) { observers.push({nodes: this.nodes, notify: () => callback([], this as unknown as ResizeObserver)}) }
+  observe(node: Element) { this.nodes.add(node) } unobserve(node: Element) { this.nodes.delete(node) } disconnect() { this.nodes.clear() }
+ })
+ const view = render(<Transcript {...props({events: range(1, 10)})} />)
+ try {
+  const tl = timelineOf(view.container)
+  let top = 0, growth = 0
+  Object.defineProperty(tl, 'scrollTop', {configurable: true, get: () => top, set: value => { top = Math.round(value) }})
+  const rect = (y: number, height: number) => ({x: 0, y, top: y, bottom: y + height, left: 0, right: 100, width: 100, height, toJSON() {}})
+  vi.spyOn(tl, 'getBoundingClientRect').mockImplementation(() => rect(0, 100))
+  const rows = [...tl.children]
+  rows.forEach((row, i) => { vi.spyOn(row, 'getBoundingClientRect').mockImplementation(() => rect(i * 100 + growth - top, 100)) })
+  scrollTo(tl, 900); scrollTo(tl, 400)
+  const anchor = rows[4], before = anchor.getBoundingClientRect().top
+  const observer = observers.find(item => item.nodes.has(tl))!
+  expect(observer).toBeTruthy()
+  for (let i = 0; i < 8; i++) {
+   act(() => { growth += 0.25; observer.notify() })
+   expect(Math.abs(anchor.getBoundingClientRect().top - before)).toBeLessThan(1)
+  }
+  expect(tl.scrollTop).toBe(402)
+ } finally { view.unmount(); vi.unstubAllGlobals() }
 })

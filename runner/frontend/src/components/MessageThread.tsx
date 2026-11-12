@@ -28,7 +28,7 @@ function MessageBubble({ message, hideSessionLabel }: MessageBubbleProps) {
   const replyAnchor = useRef<HTMLButtonElement | null>(null)
   const [replyError, setReplyError] = useState('')
 
-  const isOpen = !session?.archived_at && message.status === 'open'
+  const isOpen = session?.kind !== 'tmux' && !session?.archived_at && message.status === 'open'
   const kindColor = KIND_COLORS[message.kind] ?? 'var(--fog-dim)'
   // A real reply: answered + non-empty string (not null, not '')
   const hasReply = typeof message.answer === 'string' && message.answer.length > 0
@@ -127,6 +127,8 @@ function MessageBubble({ message, hideSessionLabel }: MessageBubbleProps) {
         >
           <Markdown text={message.body} />
         </div>
+
+        {message.status === 'withdrawn' && <div style={{ color: 'var(--fog-dim)', fontSize: '0.8rem', marginTop: 6 }}>Withdrawn · workspace discarded without an answer</div>}
 
         {/* Inline reply box — only for open ask/note */}
         {isOpen && (

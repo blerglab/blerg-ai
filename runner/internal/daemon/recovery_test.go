@@ -256,21 +256,3 @@ func TestSessionRecordAssistRoundTrip(t *testing.T) {
 		}
 	}
 }
-
-func TestRecoverableRecords(t *testing.T) {
-	records := []SessionRecord{
-		{SessionID: "a"},
-		{SessionID: "b"},
-		{SessionID: "c"},
-	}
-	liveIDs := []string{"b"}
-	managedIDs := []string{"c"}
-
-	got := recoverableRecords(records, liveIDs, managedIDs)
-	if len(got) != 1 {
-		t.Fatalf("expected 1 recoverable record, got %d: %v", len(got), got)
-	}
-	if got[0].SessionID != "a" {
-		t.Errorf("expected sessionID a, got %q", got[0].SessionID)
-	}
-}

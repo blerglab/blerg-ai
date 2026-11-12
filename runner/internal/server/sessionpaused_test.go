@@ -15,7 +15,7 @@ import (
 // asks (nobody waits for their answers any more) and tells the browsers; the sessions list carries
 // the reason while the session waits; the session's next run clears it, and so do an end and a
 // revive. A row still "running" from before the restart (what the report usually meets) is
-// paused too, shown once it is idle. A report for another daemon's session changes nothing.
+// paused immediately, including in its persisted status. A report for another daemon's session changes nothing.
 // The open asks of a daemon's sessions are sent to it after its hello. Requires TEST_DATABASE_URL.
 func TestSessionPausedByARestart(t *testing.T) {
 	pool := connectSrvTestDB(t)
@@ -48,8 +48,10 @@ func TestSessionPausedByARestart(t *testing.T) {
 	hub.RegisterBrowser(browser)
 	dc := &DaemonConn{ID: daemonID, send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	other := &DaemonConn{ID: otherID, send: make(chan []byte, 8)}
 	other.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	other.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	told := func(kind string) []string {
 		var out []string
 		for {
@@ -72,7 +74,13 @@ func TestSessionPausedByARestart(t *testing.T) {
 		return row.PausedReason
 	}
 	report := func(c *DaemonConn, id string) {
-		handleSessionPaused(ctx, hub, pool, c, protocol.SessionPaused{Type: "session_paused", SessionID: id, Reason: protocol.PausedByRestart})
+		raw, err := json.Marshal(protocol.SessionPaused{Type: "session_paused", SessionID: id, Reason: protocol.PausedByRestart, Detail: "Workspace stop interrupted; work retained."})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !handleDaemonFrame(ctx, hub, c, pool, raw, envelope{Type: "session_paused", SessionID: id}) {
+			t.Fatal("pause frame refused")
+		}
 	}
 
 	// After the hello: the daemon hears which of its sessions have a question open.
@@ -86,18 +94,18 @@ func TestSessionPausedByARestart(t *testing.T) {
 	if paused(sessionID) != "" {
 		t.Fatal("a report from another daemon paused it")
 	}
-	// The row still reads "running" from before the restart: paused all the same, shown once idle.
+	// The restart report replaces stale running state immediately.
 	report(dc, runningID)
 	if got := paused(runningID); got != protocol.PausedByRestart {
 		t.Fatalf("a running row was not paused: %q", got)
 	}
-	if row, _ := db.GetSession(ctx, pool, runningID); sessionRowToInfo(*row, "").PausedReason != "" {
-		t.Error("a running session is shown paused")
+	if row, _ := db.GetSession(ctx, pool, runningID); row.Status != "waiting" || sessionRowToInfo(*row, "").PausedReason != protocol.PausedByRestart || sessionRowToInfo(*row, "").PausedDetail != "Workspace stop interrupted; work retained." {
+		t.Error("restart pause did not replace stale running state")
 	}
 	if err := db.UpdateSessionStatus(ctx, pool, runningID, "idle", nil); err != nil {
 		t.Fatal(err)
 	}
-	if row, _ := db.GetSession(ctx, pool, runningID); sessionRowToInfo(*row, "").PausedReason != protocol.PausedByRestart {
+	if row, _ := db.GetSession(ctx, pool, runningID); sessionRowToInfo(*row, "").PausedReason != protocol.PausedByRestart || sessionRowToInfo(*row, "").PausedDetail != "Workspace stop interrupted; work retained." {
 		t.Error("idle after the report, it is not shown paused")
 	}
 	_ = told("session_paused_changed")
@@ -207,6 +215,7 @@ func TestMessageForAPausedSessionIsHeldAndEndsThePause(t *testing.T) {
 	}
 	dc2 := &DaemonConn{ID: dc.ID, Name: dc.Name, ReposRoot: dc.ReposRoot, send: make(chan []byte, 8)}
 	dc2.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc2.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	hub.Register(dc2)
 	hub.deliverHeld(t.Context(), dc2)
 	select {
@@ -258,6 +267,7 @@ func TestMessageForAPausedSessionIsHeldAndEndsThePause(t *testing.T) {
 	// A message the daemon's full queue refuses was not sent: the session stays paused.
 	full := &DaemonConn{ID: dc.ID, Name: dc.Name, ReposRoot: dc.ReposRoot, send: make(chan []byte)}
 	full.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	full.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	hub.Register(full)
 	if _, err := db.SetSessionPaused(ctx, pool, sessionID, protocol.PausedByRestart); err != nil {
 		t.Fatal(err)
@@ -265,5 +275,65 @@ func TestMessageForAPausedSessionIsHeldAndEndsThePause(t *testing.T) {
 	handleBrowserAgentMessage(ctx, hub, browser, pool, protocol.AgentUserMessage{Type: "agent_user_message", SessionID: sessionID, Text: "Continue the task you were working on.", Source: "chat"})
 	if row, _ := db.GetSession(ctx, pool, sessionID); row.PausedReason != protocol.PausedByRestart || unpaused() != 0 {
 		t.Errorf("a message that never left ended the pause: %q", row.PausedReason)
+	}
+}
+
+// Accepting input retries adoption; it does not establish that recovery succeeded.
+func TestUnrecoveredMessageKeepsFailureAlertOpen(t *testing.T) {
+	f := newEndFixture(t, "running", 8)
+	f.own()
+	ctx := t.Context()
+	if _, err := db.SetSessionPausedWithDetail(ctx, f.pool, f.sessionID, protocol.PausedByRestart, "Recovery paused: Workspace stop is unfinished. Send a message to retry."); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordSessionFailure(ctx, f.hub, f.pool, f.sessionID); err != nil {
+		t.Fatal(err)
+	}
+	clearPausedOnMessage(ctx, f.hub, f.pool, f.sessionID)
+	if err := resolveSessionFailureAlerts(ctx, f.hub, f.pool, f.sessionID); err != nil {
+		t.Fatal(err)
+	}
+	if row := f.row(t); row.PausedReason != protocol.PausedByRestart {
+		t.Fatalf("accepted input falsely cleared recovery pause: %+v", row)
+	}
+	var resolved int
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM agent_events WHERE session_id=$1 AND kind='mark' AND payload->>'text'='Session recovered; its failure alert was resolved.'`, f.sessionID).Scan(&resolved); err != nil {
+		t.Fatal(err)
+	}
+	if resolved != 0 {
+		t.Fatalf("unrecovered session produced %d recovery marks", resolved)
+	}
+	// Only a runtime acknowledgement can turn the retry into a recovery.
+	if err := HandleSessionStateChanged(ctx, f.hub, f.pool, protocol.SessionStateChanged{SessionID: f.sessionID, Status: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	if row := f.row(t); row.PausedReason != "" {
+		t.Fatal("confirmed recovery stayed paused")
+	}
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM agent_events WHERE session_id=$1 AND kind='mark' AND payload->>'text'='Session recovered; its failure alert was resolved.'`, f.sessionID).Scan(&resolved); err != nil {
+		t.Fatal(err)
+	}
+	if resolved != 1 {
+		t.Fatalf("confirmed recovery produced %d recovery marks, want one", resolved)
+	}
+
+}
+
+func TestPausedEndWithoutWorkspaceKeepsWorkRetained(t *testing.T) {
+	f := newEndFixture(t, "running", 8)
+	f.own()
+	if _, err := db.SetSessionPausedWithDetail(t.Context(), f.pool, f.sessionID, protocol.PausedByRestart, "Recovery paused: Workspace stop is unfinished."); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.delete(t); code != 409 {
+		t.Fatalf("End claimed success without cleanup evidence: %d", code)
+	}
+	if row := f.row(t); row.PausedReason == "" || row.EndedAt != nil {
+		t.Fatalf("End lost the paused workspace: %+v", row)
+	}
+	select {
+	case <-f.dc.send:
+		t.Fatal("End dispatched an unverified kill")
+	default:
 	}
 }

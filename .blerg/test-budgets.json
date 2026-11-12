@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "suites": {
+    "contracts-go": {
+      "layer": "3a",
+      "budget_seconds": 30
+    },
+    "core-tests": {
+      "layer": "3a",
+      "budget_seconds": 30
+    },
+    "board-tests": {
+      "layer": "3a",
+      "budget_seconds": 30
+    },
+    "chat-tests": {
+      "layer": "3a",
+      "budget_seconds": 30
+    },
+    "runner-unit": {
+      "layer": "3a",
+      "budget_seconds": 30
+    },
+    "runner-browser": {
+      "layer": "3a",
+      "budget_seconds": 30
+    },
+    "runner-performance": {
+      "layer": "3a",
+      "budget_seconds": 30
+    },
+    "cli-unittest": {
+      "layer": "3a",
+      "budget_seconds": 30
+    },
+    "cli-pytest": {
+      "layer": "3a",
+      "budget_seconds": 30
+    },
+    "desktop-scripts": {
+      "layer": "3a",
+      "budget_seconds": 30
+    },
+    "scripts": {
+      "layer": "3a",
+      "budget_seconds": 30
+    },
+    "core-go": {
+      "layer": "3b",
+      "budget_seconds": 120
+    },
+    "board-go": {
+      "layer": "3b",
+      "budget_seconds": 120
+    },
+    "runner-go": {
+      "layer": "3b",
+      "budget_seconds": 120
+    },
+    "daemon-race": {
+      "layer": "3b",
+      "budget_seconds": 120
+    },
+    "runtime-smoke-local": {
+      "layer": "3b",
+      "budget_seconds": 120
+    },
+    "persistent-shell-wire-go": {
+      "layer": "3b",
+      "budget_seconds": 120
+    },
+    "persistent-shell-wire-race": {
+      "layer": "3b",
+      "budget_seconds": 120
+    },
+    "session-regressions": {
+      "layer": "3b",
+      "budget_seconds": 120
+    },
+    "runtime-race": {
+      "layer": "2",
+      "budget_seconds": 10
+    }
+  }
+}

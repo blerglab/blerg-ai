@@ -1,3 +1,4 @@
+import { IconButton } from '../IconButton'
 // A proposal the session made, in the chat: a board card it wants to file, a new board it wants
 // created (approved by the owner only, never for the session), or a call to an MCP tool the person
 // set to approval mode. Pending, its owner approves, edits (board cards: in the host's
@@ -7,6 +8,7 @@
 // that it waits for the owner.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AgentEvent, FiledCard, ProposalDetail, ProposalRequestPayload, ProposalState } from '../../types'
+import { proposalNeedsConfirmation } from '../../model/proposalApproval'
 import { outcomeLine } from '../../model/proposals'
 import { useProposals } from '../proposalContext'
 import { TicketChips } from '../TicketView'
@@ -18,7 +20,7 @@ export default function ProposalCard({ ev }: { ev: AgentEvent }) {
   const ctx = useProposals()
   const raw = ev.payload as Partial<ProposalRequestPayload> | null
   const id = typeof raw?.proposal_id === 'string' ? raw.proposal_id : ''
-  const kind = raw?.kind === 'board_file' || raw?.kind === 'board_create' ? raw.kind : 'mcp'
+  const eventKind = raw?.kind === 'board_file' || raw?.kind === 'board_create' || raw?.kind === 'board_metadata' ? raw.kind : 'mcp'
   // Why a session permission that covers it did not approve it (its hourly limit).
   const note = typeof raw?.note === 'string' ? raw.note.slice(0, 400) : ''
   const decided = id ? ctx?.states.get(id) : undefined
@@ -27,6 +29,7 @@ export default function ProposalCard({ ev }: { ev: AgentEvent }) {
   const [busy, setBusy] = useState(false)
   const inFlight = useRef(false)
   const [error, setError] = useState('')
+  const [confirmation, setConfirmation] = useState<{ raw: string; allow: boolean } | null>(null)
   const [kept, setKept] = useState(false)
   const load = ctx?.load
 
@@ -50,6 +53,7 @@ export default function ProposalCard({ ev }: { ev: AgentEvent }) {
   const card: FiledCard | null = decided?.card ?? detail?.card ?? null
   const auto = decided?.auto === true || !!detail?.approvedByGrant
   const decide = ctx?.decide
+  const kind = detail?.kind === 'plugin_request' ? 'mcp' : detail?.kind ?? eventKind
   const tool = detail?.tool || ''
 
   async function act(action: 'approve' | 'reject', allowForSession = false) {
@@ -60,7 +64,7 @@ export default function ProposalCard({ ev }: { ev: AgentEvent }) {
     setKept(false)
     try {
       setDetail(await decide(id, action, {
-        ...(kind === 'board_file' || kind === 'board_create' ? { expected: detail.argumentsRaw } : {}),
+        ...(kind === 'board_file' || kind === 'board_create' || kind === 'board_metadata' ? { expected: detail.argumentsRaw } : {}),
         ...(allowForSession ? { allowForSession: true } : {}),
       }))
     } catch (e) {
@@ -74,12 +78,20 @@ export default function ProposalCard({ ev }: { ev: AgentEvent }) {
     }
   }
 
+  function askApprove(allow = false) {
+    if (!detail) return
+    if (proposalNeedsConfirmation(detail)) setConfirmation({ raw: detail.argumentsRaw, allow })
+    else void act('approve', allow)
+  }
+
   const createdBoard = decided?.board ?? detail?.board ?? null
   const heading = kind === 'board_file'
-    ? <>This session wants to file a card{detail?.target ? <> on <b>{detail.target}</b></> : null}</>
+    ? <>This workspace wants to file a card{detail?.target ? <> on <b>{detail.target}</b></> : null}</>
+    : kind === 'board_metadata'
+      ? <>This workspace wants to change board settings</>
     : kind === 'board_create'
-      ? <>This session wants to create a board{detail?.target ? <> named <b>{detail.target}</b></> : null}</>
-      : <>This session wants to run <b>{tool || 'an MCP tool'}</b>{detail?.target ? <> on {detail.target}</> : null}</>
+      ? <>This workspace wants to create a board{detail?.target ? <> named <b>{detail.target}</b></> : null}</>
+      : <>This workspace wants to run <b>{tool || 'an MCP tool'}</b>{detail?.target ? <> on {detail.target}</> : null}</>
   const line = outcomeLine(kind, state, auto, createdBoard)
 
   return (
@@ -94,25 +106,39 @@ export default function ProposalCard({ ev }: { ev: AgentEvent }) {
           {detail.summary && <div className="delegation-prompt proposal-summary">{detail.summary}</div>}
         </div>
       )}
+      {kind === 'board_metadata' && detail && (
+        <details className="proposal-metadata-request">
+          <summary>Show exact request</summary>
+          <pre data-testid="proposal-metadata-arguments">{detail.argumentsRaw}</pre>
+        </details>
+      )}
       {pending && note && <div className="delegation-readonly proposal-note" data-testid="proposal-note">{note}</div>}
-      {pending && access === 'denied' && <div className="delegation-readonly">Waiting for the session owner's decision.</div>}
+      {pending && access === 'denied' && <div className="delegation-readonly">Waiting for the workspace owner's decision.</div>}
       {pending && access === 'error' && (
-        <div className="delegation-readonly">Could not load this proposal. <button type="button" className="delegation-link" onClick={() => void reload()}>Retry</button></div>
+        <div className="delegation-readonly">Could not load this proposal. <IconButton label="Retry" onClick={() => reload()} /></div>
       )}
       {pending && decide && detail && access === 'ok' && (
         <div className="delegation-actions" data-testid="proposal-actions">
-          <button type="button" className="delegation-btn primary" disabled={busy} onClick={() => void act('approve')}>Approve</button>
+          <button type="button" className="delegation-btn primary" disabled={busy} onClick={() => askApprove()}>Approve</button>
           {kind === 'board_file' && ctx?.onEdit && <button type="button" className="delegation-btn" disabled={busy} onClick={() => ctx.onEdit?.(id)}>Edit</button>}
           <button type="button" className="delegation-btn" disabled={busy} onClick={() => void act('reject')}>Reject</button>
-          {kind !== 'board_create' && <button
+          {kind !== 'board_create' && kind !== 'board_metadata' && <button
             type="button"
             className="delegation-btn"
             disabled={busy}
-            title={kind === 'board_file' ? `Approve this, and file later cards on ${detail.target || 'this board'} without asking, in this session only` : `Approve this, and run ${tool || 'this tool'} without asking, in this session only`}
-            onClick={() => void act('approve', true)}
+            title={kind === 'board_file' ? `Approve this, and file later cards on ${detail.target || 'this board'} without asking, in this workspace only` : `Approve this, and run ${tool || 'this tool'} without asking, in this workspace only`}
+            onClick={() => askApprove(true)}
           >
-            Allow for this session
+            Allow for this workspace
           </button>}
+        </div>
+      )}
+      {pending && detail && confirmation?.raw === detail.argumentsRaw && (
+        <div className="delegation-actions">
+          <p>Approve this exact request{confirmation.allow ? ' and allow later requests in this workspace' : ''}?</p>
+          <details open className="proposal-metadata-request"><summary>Show exact request</summary><pre>{detail.argumentsRaw}</pre></details>
+          <button type="button" className="delegation-btn primary" disabled={busy} onClick={() => { setConfirmation(null); void act('approve', confirmation.allow) }}>Confirm approve</button>
+          <button type="button" className="delegation-btn" disabled={busy} onClick={() => setConfirmation(null)}>Cancel</button>
         </div>
       )}
       {error && (

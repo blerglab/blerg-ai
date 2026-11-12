@@ -1,10 +1,13 @@
 package daemon
 
 import (
+	"crypto/sha1"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/hostgit"
 )
@@ -64,5 +67,67 @@ func TestWorkspaceStatusDarwinSnapshot(t *testing.T) {
 				t.Fatalf("Darwin snapshot result: %+v %v", status, err)
 			}
 		})
+	}
+}
+
+// Model a racy index without relying on filesystem clock resolution or retries:
+// retain the old blob but give its entry the edited file's exact cached stat.
+func TestWorkspaceExplorerStatusRacyIndex(t *testing.T) {
+	e, root, req := explorerFixture(t)
+	member := filepath.Join(root, "member")
+	initChildRepo(t, member)
+	tracked := filepath.Join(member, "initial.txt")
+	index := filepath.Join(member, ".git", "index")
+	original, err := os.ReadFile(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(original[:4]) != "DIRC" || binary.BigEndian.Uint32(original[4:8]) != 2 || binary.BigEndian.Uint32(original[8:12]) != 1 {
+		t.Fatal("fixture requires one SHA-1 index v2 entry")
+	}
+	if err := os.WriteFile(tracked, []byte("changed\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Unix(1700000000, 123456789)
+	if err := os.Chtimes(tracked, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	// Ask Git to encode platform-specific stat fields; keep only those fields,
+	// never the new blob. This avoids platform-specific struct stat assumptions.
+	childRepoGit(t, member, "add", "initial.txt")
+	edited, err := os.ReadFile(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy(original[12:52], edited[12:52])
+	checksum := sha1.Sum(original[:len(original)-sha1.Size])
+	copy(original[len(original)-sha1.Size:], checksum[:])
+	if err := os.WriteFile(index, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(tracked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(index, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	e.pinMembers()
+	req.Operation, req.Path, req.MemberID = "status", "member", "one"
+	result := e.Explore(t.Context(), req)
+	if !result.OK || result.Status == nil || result.Status.Changed != 1 {
+		t.Fatalf("racy same-size edit must be changed: %+v", result)
+	}
+	snapshot, err := e.statusSnapshot(t.Context(), "member", hostWorktreePin{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snapshot.close()
+	copied, err := os.Stat(filepath.Join(snapshot.directory, "index"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !copied.ModTime().Equal(info.ModTime()) {
+		t.Fatalf("index timestamp lost precision: got %v, want %v", copied.ModTime(), info.ModTime())
 	}
 }

@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 // Real layout for the Running now cards (two lines each): at a phone's width and at 4K every card is
 // the state glyph, title and clock, then the step and small glyphs; nothing names a raw id; a click on
 // a card (and Enter on its title) brings its place in the conversation into view.
@@ -29,7 +30,7 @@ beforeEach(() => {
 })
 afterEach(() => { vi.unstubAllGlobals(); localStorage.clear() })
 
-it.each([390, 3840])('draws every Running now card in two lines at %ipx, names no id, and a click jumps', async width => {
+it.each(browserWidths([390, 3840]))('draws every Running now card in two lines at %ipx, names no id, and a click jumps', async width => {
   await page.viewport(width, width === 3840 ? 2160 : 900)
   render(<div style={{ height: '100vh' }}><MemoryRouter initialEntries={['/sessions/sess-a']}>
     <Routes><Route path="/sessions/:id" element={<SessionDetail />} /></Routes>

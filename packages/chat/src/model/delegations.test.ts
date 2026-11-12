@@ -46,7 +46,7 @@ describe('delegation states', () => {
     const t = clock(at)
     const line = (d: Parameters<typeof decidedLine>[0]['decided']) => decidedLine({ decided: d, decidedAt: at }, false)
     expect(line({ request_id: 'r', status: 'allowed', choice: 'once' })).toBe(`Allowed once · ${t}`)
-    expect(line({ request_id: 'r', status: 'allowed', choice: 'session' })).toBe(`Allowed for this session · ${t}`)
+    expect(line({ request_id: 'r', status: 'allowed', choice: 'session' })).toBe(`Allowed for this workspace · ${t}`)
     expect(line({ request_id: 'r', status: 'allowed', choice: 'always' })).toBe(`Always allowed · ${t}`)
     expect(line({ request_id: 'r', status: 'denied' })).toBe(`Denied · ${t}`)
     expect(decidedLine({ decided: null, decidedAt: null }, false)).toBe('')

@@ -8,11 +8,17 @@ import (
 	"strings"
 
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/workbranch"
 	"github.com/blerglab/blerg-ai/runner/internal/workspaceselection"
 )
 
 const Env = "BLERG_RUNNER_CLUSTER_WORKSPACE"
 const PublicRoot = "/workspace/projects"
+
+var ErrCredentialScope = errors.New("repository credential scope refused")
+
+var ErrClone = errors.New("repository clone failed")
+var ErrRetainedStorage = errors.New("retained repository storage is missing")
 
 var ErrPlan = errors.New("cluster workspace launch is invalid or unavailable")
 var stableID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
@@ -32,9 +38,22 @@ type Member struct {
 	CredentialHost      string `json:"credential_host"`
 	Token               string `json:"token,omitempty"`
 	PushAuthorized      bool   `json:"push_authorized"`
+	// BaseRef is BLG-501's required --base <branch> for a host Main's read-only cluster
+	// worker (design §3.3): Prepare clones this branch instead of the remote's default.
+	// Empty for every other member shape (an ordinary cluster workspace's own members,
+	// which have no such concept and keep cloning the default branch unchanged).
+	BaseRef string `json:"base_ref,omitempty"`
+	// BaseSHA is the provider's advertised BaseRef tip at launch. Main's local tip
+	// is separately checked for unpushed history and may lag this commit. The launch
+	// pins an object ID, never BaseRef's mutable name alone (Codex review of
+	// 1524a5d8). Prepare checks this out right after cloning, before creating the pod's own
+	// work branch, so the pod is pinned to the exact commit the launch actually verified,
+	// not whatever BaseRef happens to point at by the time the clone runs.
+	BaseSHA string `json:"base_sha,omitempty"`
 }
 
 type Plan struct {
+	WorkBranch string `json:"work_branch,omitempty"`
 	// Zero retains bounded enforcement for plans issued before standard storage.
 	UnboundedStorage bool `json:"unbounded_storage,omitempty"`
 	// LayoutSources preserves the ordered naming context of an immutable ancestor
@@ -50,6 +69,9 @@ type Plan struct {
 }
 
 func (p Plan) Validate() error {
+	if p.WorkBranch != "" && !workbranch.Valid(p.WorkBranch) {
+		return ErrPlan
+	}
 	if p.Manifest.Layout == protocol.WorkspaceLayoutStructure || !stableID.MatchString(p.SessionID) || p.Manifest.Validate() != nil || p.Manifest.Runtime != "cluster" || p.Runtime.LaunchGeneration != p.Manifest.LaunchGeneration || p.Runtime.Generation <= 0 || len(p.Members) != len(p.Manifest.Members) || p.Manifest.ValidateResults(p.PreviousResults) != nil {
 		return ErrPlan
 	}
@@ -104,13 +126,13 @@ func (p Plan) Validate() error {
 			return ErrPlan
 		}
 		if clone.Scheme != push.Scheme || clone.Host != push.Host || clone.Host != c.CredentialHost {
-			return ErrPlan
+			return ErrCredentialScope
 		}
 		if c.Token != "" && clone.Scheme != "https" {
 			return ErrPlan
 		}
 		if c.PushAuthorized && c.Token == "" {
-			return ErrPlan
+			return ErrCredentialScope
 		}
 	}
 	if len(p.Identities) > 0 {

@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -79,6 +81,39 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 			ackAgentEvent(dc, msg, 0)
 			return
 		}
+	}
+	// Only Runner-authored bound asks may select the live approval transport.
+	if msg.Kind == "ask" {
+		var payload map[string]json.RawMessage
+		if json.Unmarshal(msg.Payload, &payload) == nil {
+			if _, present := payload["live_binding"]; present || payload["decision"] != nil {
+				delete(payload, "live_binding")
+				delete(payload, "decision")
+				msg.Payload, _ = json.Marshal(payload)
+				failurelog.Default.Event("ask_marker_strip", slog.LevelWarn, "component", "runner", "cause", "untrusted_live_binding_marker")
+			}
+		}
+	}
+	if msg.Kind == "skill_load" || msg.Kind == "skill_reporting" {
+		valid, err := canonicalSkillEvent(ctx, pool, &msg)
+		if err != nil {
+			return
+		}
+		if !valid {
+			failurelog.Default.Event("skill_event_drop", slog.LevelWarn, "cause", "invalid_skill_load")
+			ackAgentEvent(dc, msg, 0)
+			return
+		}
+	}
+	if msg.Kind == "skill_applicability" && !canonicalSkillApplicability(&msg) {
+		failurelog.Default.Event("skill_applicability_drop", slog.LevelWarn, "cause", "invalid_skill_applicability")
+		ackAgentEvent(dc, msg, 0)
+		return
+	}
+	if msg.Kind == "skill_evidence" && !canonicalDaemonSkillEvidence(&msg) {
+		failurelog.Default.Event("skill_evidence_drop", slog.LevelWarn, "cause", "invalid_skill_evidence")
+		ackAgentEvent(dc, msg, 0)
+		return
 	}
 	progressChild := ""
 	if msg.Kind == protocol.UsageUpdatedKind {
@@ -207,6 +242,8 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 		var fresh bool
 		var err error
 		switch {
+		case msg.Kind == "skill_evidence":
+			s, fresh, err = db.AppendSkillEvidenceEvent(ctx, pool, msg.SessionID, msg.ClientEventID, string(msg.Payload), at)
 		case progressChild != "":
 			s, fresh, err = db.AppendChildProgressAt(ctx, pool, msg.SessionID, msg.ClientEventID, msg.Kind, string(msg.Payload), progressChild, dc.ID, at)
 		case isBackground:
@@ -215,6 +252,16 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 			s, fresh, err = db.AppendSubagentEventAt(ctx, pool, msg.SessionID, msg.ClientEventID, msg.Kind, string(msg.Payload), at, dc.ID)
 		default:
 			s, fresh, err = appendAgentEvent(ctx, pool, msg.SessionID, msg.ClientEventID, msg.Kind, string(msg.Payload), at)
+		}
+		if errors.Is(err, db.ErrSkillEvidenceVersion) || errors.Is(err, db.ErrSkillEvidenceRate) {
+			cause := "unloaded_version"
+			if errors.Is(err, db.ErrSkillEvidenceRate) {
+				cause = "rate_limit"
+			}
+			failurelog.Default.Event("skill_evidence_rejected", slog.LevelWarn, "cause", cause)
+			h.ingest.stored(msg.SessionID, msg.ClientEventID)
+			ackAgentEvent(dc, msg, 0)
+			return
 		}
 		if errors.Is(err, db.ErrBackgroundTaskAuthority) {
 			h.ingest.stored(msg.SessionID, msg.ClientEventID) // This event is permanently refused, not retryable.
@@ -267,6 +314,9 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 	if raw, err := json.Marshal(msg); err == nil {
 		h.FanOutAgentEvent(msg.SessionID, seq, raw)
 	}
+	if msg.Kind == "turn_done" {
+		db.QueueInsightTiming(pool, msg.SessionID)
+	}
 
 	// An engine input begins a turn even if the coarse status remained running.
 	if msg.Kind == "user_message" {
@@ -304,6 +354,12 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 			}); err != nil {
 				log.Printf("agent status %s → %s: %v", msg.SessionID, p.Status, err)
 			}
+			if p.Status == "running" {
+				// A next turn starting may be the resume a held 'finished' notice (BLG-447's
+				// childTurnFinishedReadiness) is waiting to see; re-check it now rather than only
+				// on the next turn_done or the periodic sweep.
+				h.ChildTurnEnded(msg.SessionID, "durable_turn", "")
+			}
 		}
 	case protocol.StartStageKind:
 		// The pod's own report of a start stage (connect/clone/engine):
@@ -320,6 +376,11 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 				Type: "session_background_changed", SessionID: msg.SessionID, BackgroundTasks: backgroundCount,
 			})
 		}
+		if msg.Kind == backgroundDoneKind && backgroundCount == 0 {
+			// The background work a held 'finished' notice (BLG-447) was waiting out may have just
+			// ended; re-check it now rather than only on the next turn_done or the periodic sweep.
+			h.ChildTurnEnded(msg.SessionID, "durable_turn", "")
+		}
 	case turnDoneKind:
 		// A one-shot session (start with auto_stop) is over as soon as its
 		// first turn is recorded; every other session is untouched by this.
@@ -335,9 +396,9 @@ func HandleAgentEvent(ctx context.Context, h *Hub, pool *pgxpool.Pool, dc *Daemo
 		switch p.StopReason {
 		case "interrupted":
 		case "error":
-			h.ChildTurnEnded(msg.SessionID, childTurnFailed, "")
+			h.ChildTurnEnded(msg.SessionID, "durable_turn", "")
 		default:
-			h.ChildTurnEnded(msg.SessionID, childTurnFinished, "")
+			h.ChildTurnEnded(msg.SessionID, "durable_turn", "")
 		}
 		// The session's own plan is checked against what the turn did (plansync.go).
 		h.PlanTurnEnded(msg.SessionID, seq, at, p.StopReason)
@@ -597,7 +658,8 @@ func replayAgentEventsPage(ctx context.Context, pool *pgxpool.Pool, msg protocol
 // replayedAgentEvent is a persisted row as the browser receives it.
 func replayedAgentEvent(r db.AgentEventRow) protocol.AgentEvent {
 	return protocol.AgentEvent{
-		Type: "agent_event", SessionID: r.SessionID, ClientEventID: r.ClientEventID,
+		Replayed: true,
+		Type:     "agent_event", SessionID: r.SessionID, ClientEventID: r.ClientEventID,
 		Seq: r.Seq, Ts: r.Ts.UTC().Format(time.RFC3339Nano),
 		Kind: r.Kind, Payload: json.RawMessage(r.Payload),
 	}

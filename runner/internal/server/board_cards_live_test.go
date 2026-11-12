@@ -16,9 +16,11 @@ import (
 // liveCardBoard is a board that holds card #7 of board-a, in "Inbox", and answers a move.
 type liveCardBoard struct {
 	fakeSessionBoard
-	mu     sync.Mutex
-	column string
-	refuse bool
+	mu       sync.Mutex
+	column   string
+	refuse   bool
+	version  int
+	archived bool
 }
 
 func (b *liveCardBoard) CallBoard(ctx context.Context, c mcpgw.BoardCall) (json.RawMessage, error) {
@@ -33,8 +35,11 @@ func (b *liveCardBoard) CallBoard(ctx context.Context, c mcpgw.BoardCall) (json.
 	text := ""
 	switch c.Tool {
 	case "blerg_board_get":
-		text = `{"key":"BLG","key_aliases":["BLG","OLD"]}`
+		text = `{"key":"BLG","key_aliases":["BLG","OLD"],"events":[],"insight_cards":[{"board_id":"board-a","number":7}]}`
 	case "blerg_card_move":
+		if b.version > 0 && args["if_match"] != float64(b.version) {
+			return json.RawMessage(`{"isError":true,"content":[{"type":"text","text":"stale version"}]}`), nil
+		}
 		b.column = args["column_id"].(string)
 		text = `{"ok":true}`
 	case "blerg_card_get":

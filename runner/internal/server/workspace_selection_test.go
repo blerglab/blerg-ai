@@ -293,8 +293,29 @@ func TestWorkspaceLaunchBuildsAndPersistsTrustedManifestWithFakeRuntime(t *testi
 	if err != nil || stored == nil || stored.Manifest.Digest != msg.Workspace.Digest {
 		t.Fatal("manifest was not persisted before dispatch")
 	}
-	if !strings.Contains(msg.InitialPrompt, "commit each changed repository") && !strings.Contains(msg.InitialPrompt, "Commit each changed repository") {
-		t.Fatal("member commit guidance missing")
+	if msg.InitialPrompt != "Review the selected repositories" {
+		t.Fatalf("person prompt contains internal guidance: %q", msg.InitialPrompt)
+	}
+	for _, engine := range []string{"codex", "hermes"} {
+		if w := post(map[string]any{"selection": selection, "runtime": "daemon", "kind": "agent", "engine": engine, "initial_prompt": "Review selected"}); w.Code != 202 {
+			t.Fatalf("%s launch: %d %s", engine, w.Code, w.Body.String())
+		}
+		select {
+		case launch := <-spawned:
+			if launch.Engine != engine || launch.InitialPrompt != "Review selected" || launch.Workspace == nil {
+				t.Fatalf("%s lost prompt or separate membership: %+v", engine, launch)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s launch not dispatched", engine)
+		}
+	}
+	legacy, _ := json.Marshal(map[string]any{"text": workspacePrompt("Original task", msg.Workspace), "source": "chat"})
+	repaired := f.hub.desktopEventPayload(t.Context(), privAcctA, msg.SessionID, "user_message", string(legacy))
+	var person struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(repaired, &person) != nil || person.Text != "Original task" {
+		t.Fatalf("saved membership did not repair replay: %s", repaired)
 	}
 	if w := post(map[string]any{"selection": selection, "runtime": "daemon", "kind": "agent", "workspace": msg.Workspace}); w.Code != 400 {
 		t.Fatal("caller manifest was accepted")
@@ -372,6 +393,7 @@ func TestWorkspaceConfidentialMetadataIsFilteredFromEveryReplayAndResult(t *test
 type workspaceClusterFake struct {
 	manifest *protocol.WorkspaceManifest
 	prepared bool
+	prompt   string
 }
 
 func (*workspaceClusterFake) Capabilities() protocol.WorkspaceCapabilities {
@@ -381,8 +403,9 @@ func (f *workspaceClusterFake) Prepare(_ context.Context, m protocol.WorkspaceMa
 	f.prepared = true
 	return protocol.WorkspaceRoot{Device: 7, Inode: 8}, nil
 }
-func (f *workspaceClusterFake) Start(_ context.Context, m protocol.WorkspaceManifest, _ WorkspaceLaunchRequest) (string, error) {
+func (f *workspaceClusterFake) Start(_ context.Context, m protocol.WorkspaceManifest, req WorkspaceLaunchRequest) (string, error) {
 	f.manifest = &m
+	f.prompt = req.Prompt
 	return newUUID(), nil
 }
 func TestWorkspaceHostedSelectionUsesAuthorizedSourcesAndFakeClusterConsumer(t *testing.T) {
@@ -396,7 +419,7 @@ func TestWorkspaceHostedSelectionUsesAuthorizedSourcesAndFakeClusterConsumer(t *
 	token := f.tok(t, "human", privAcctA, "session.start")
 	selection := protocol.WorkspaceSelectionRequest{Members: []protocol.SelectionRef{}, Hosted: []protocol.HostedSelectionRef{{Provider: "github", FullName: "org/api"}, {Provider: "gitlab", FullName: "org/web"}}}
 	post := func(s protocol.WorkspaceSelectionRequest) *httptest.ResponseRecorder {
-		body, _ := json.Marshal(map[string]any{"runtime": "cluster", "kind": "agent", "selection": s})
+		body, _ := json.Marshal(map[string]any{"runtime": "cluster", "kind": "agent", "selection": s, "initial_prompt": "Review selected"})
 		req := httptest.NewRequest("POST", "/api/sessions", bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+token)
 		w := httptest.NewRecorder()
@@ -405,6 +428,9 @@ func TestWorkspaceHostedSelectionUsesAuthorizedSourcesAndFakeClusterConsumer(t *
 	}
 	if w := post(selection); w.Code != 202 {
 		t.Fatalf("hosted selection: %d %s", w.Code, w.Body.String())
+	}
+	if consumer.prompt != "Review selected" {
+		t.Fatalf("cluster prompt includes internal instructions: %q", consumer.prompt)
 	}
 	m := consumer.manifest
 	if !consumer.prepared || m == nil || m.Validate() != nil || m.OwnerID != privAcctA || m.Runtime != "cluster" || len(m.Members) != 2 {
@@ -518,6 +544,7 @@ func TestWorkspaceHTTPCollectionCannotAdoptUnfencedNewConnection(t *testing.T) {
 func (f *workspaceClusterFake) StartChild(_ context.Context, _ protocol.WorkspaceManifest, m protocol.WorkspaceManifest, spec SessionJobSpec) error {
 	f.prepared = true
 	f.manifest = &m
+	f.prompt = spec.InitialPrompt
 	if spec.SessionID == "" || spec.ExtraEnv[sessionTokenEnv] == "" || !spec.RequireRecoveryReady || !spec.PluginsResolved {
 		return fmt.Errorf("missing normal child policy")
 	}

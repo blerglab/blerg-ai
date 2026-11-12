@@ -158,7 +158,7 @@ func TestCronWithBoardGetsTheBuiltinBoardGrant(t *testing.T) {
 		}
 	}
 	for _, n := range mcpgw.BoardToolNames() {
-		if mcpgw.IsBoardColumnTool(n) {
+		if mcpgw.BoardToolNeedsPerson(n) {
 			if _, ok := board.Tools[n]; ok {
 				t.Errorf("a cron's board grant carries column tool %s", n)
 			}

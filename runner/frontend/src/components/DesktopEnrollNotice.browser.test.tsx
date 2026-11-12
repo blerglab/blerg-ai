@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { beforeEach, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { page } from 'vitest/browser'
@@ -16,11 +17,12 @@ const shots = (import.meta.env as Record<string, string | undefined>).VITE_SETTI
 
 // #193: desktops are managed in core (Settings → Account → Your desktops). Runner keeps a small,
 // styled link where people look today, and a one-line notice on sessions, never the old banner.
-it.each([390, 3840])('links Runner Settings to core Your desktops at %i px', async width => {
+it.each(browserWidths([390, 3840]))('links Runner Settings to core Your desktops at %i px', async width => {
   await page.viewport(width, width === 390 ? 844 : 2160)
   render(<SettingsDialog onClose={() => {}} />)
-  const link = await screen.findByRole('link', { name: 'Manage your desktops' })
-  expect(link.getAttribute('href')).toMatch(/\/settings#desktops$/)
+  // BLG-481: desktops are reached through core's Account section ("Sign-in, desktops and agent tokens").
+  const link = await screen.findByRole('link', { name: 'Account' })
+  expect(link.getAttribute('href')).toMatch(/\/settings\?section=account$/)
   expect(link).toHaveClass('settings-action')
   const css = getComputedStyle(link)
   expect(css.borderTopLeftRadius).toBe('8px')
@@ -34,7 +36,7 @@ it.each([390, 3840])('links Runner Settings to core Your desktops at %i px', asy
   if (shots) await page.screenshot({ path: `${shots}/runner-settings-desktops-${width}.png` })
 })
 
-it.each([390, 3840])('shows a compact enroll notice on a session at %i px', async width => {
+it.each(browserWidths([390, 3840]))('shows a compact enroll notice on a session at %i px', async width => {
   await page.viewport(width, 900)
   render(<div><DesktopEnrollNotice /><DesktopEnrollNotice refused reason="The server refused this desktop’s credential." /></div>)
   const notices = screen.getAllByTestId('desktop-enroll-notice')

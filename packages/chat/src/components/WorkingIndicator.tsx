@@ -22,7 +22,7 @@ interface Props {
   activity?: string | null
   /** Background tasks running: unless the line names a call, it names them instead of a bare
    *  "Working…". */
-  background?: { count: number; description: string; command?: string } | null
+  background?: { count: number; description: string; command?: string; stopped?: boolean } | null
 }
 
 export default function WorkingIndicator({ since, now, compact, waitingOn, background, activity, reasoning }: Props) {
@@ -38,7 +38,7 @@ export default function WorkingIndicator({ since, now, compact, waitingOn, backg
   const details = command || (description && description !== backgroundSummary(description) ? description : '')
   return (
     <div
-      className={`agent-working${compact ? ' compact' : ''}${reduced ? ' static' : ''}`}
+      className={`agent-working${compact ? ' compact' : ''}${reduced || background?.stopped ? ' static' : ''}`}
       data-testid={compact ? 'working-compact' : 'working'}
       data-reduced-motion={reduced ? 'true' : 'false'}
       data-background={background && !shownOn && !activity ? 'true' : undefined}
@@ -48,7 +48,7 @@ export default function WorkingIndicator({ since, now, compact, waitingOn, backg
       <div className="agent-working-content">
         <span className="agent-working-text" role="status" aria-live="polite">
           <span data-testid="working-words">
-            {activity || (background && !shownOn ? backgroundLabel(background.count, background.description) : 'Working…')}
+            {activity || (background && !shownOn ? backgroundLabel(background.count, background.description, background.stopped) : 'Working…')}
           </span>{' '}
           {/* The clock is visible but not re-announced every second. */}
           <span className="agent-working-time" aria-hidden="true">{reasoning?.tokens != null ? `${reasoning.tokens.toLocaleString('en-US')} tokens` : elapsed}</span>

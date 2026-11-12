@@ -45,18 +45,25 @@ export interface Ticket {
 // ─── Domain types ─────────────────────────────────────────────────────────────
 
 export interface MessageInfo {
+  question_revision?: number
+  question_turn?: 'person' | 'main'
+  decision?: boolean
   id: string;
   session_id: string;
   kind: 'update' | 'ask' | 'note';
   body: string;
-  status: 'open' | 'answered';
+  status: 'open' | 'answered' | 'withdrawn';
   answer?: string | null;
   created_at: string;
   answered_at?: string | null;
   // A question the agent does not wait on (`blerg-runner ask --no-wait`): listed in the bell
   // and the session's Needs you until answered there or closed by the agent.
   no_wait?: boolean;
-  // Set by the server per viewer on a no_wait question: true for the session's owner, who alone
+  // The child stopped waiting (interrupted or timed out); only the person can still resolve it.
+  waiter_ended?: boolean;
+  // Without no_wait, an owner-only ask is a command approval and cannot be dismissed.
+  owner_only?: boolean;
+  // Set by the server per viewer on child and no_wait questions: true for the session's owner, who alone
   // answers it and is notified of it.
   answerable?: boolean;
 }
@@ -95,6 +102,7 @@ export interface UsageLimits {
 }
 
 export interface SessionInfo {
+  worker_kind?: 'card' | 'role' | 'review' | 'research'
  desktop_compatibility?: boolean;
  desktop_status?: string;
  desktop_status_reason?: string;
@@ -106,6 +114,9 @@ export interface SessionInfo {
   message?: string | null;
   project_path: string;
   repo: string;
+  workspace?: { members: { id?: string; name: string; path: string; source_identity?: string; project?: string }[] };
+  repository_request?: { id: string; kind: "add" | "remove"; member_name: string; proposed_digest: string; refusal?: string };
+  workspace_results?: { member_id: string; head: string; branch: string; pending?: boolean; sync_error?: string; sync_note?: string; push_error?: string }[];
   title: string;
   model?: string;
   effort?: string;
@@ -114,9 +125,12 @@ export interface SessionInfo {
   ended_at?: string | null;
   unread?: boolean;
   starred?: boolean;
+  color?: string;
+  emoji?: string;
   kind?: string; // "" | "tmux" | "agent"
   parent_session_id?: string | null;
   archived_at?: string | null;
+  runtime_target_id?: string
   runtime?: 'daemon' | 'docker' | 'cluster';
   skip_permissions?: boolean;
   error_reason?: string;
@@ -135,6 +149,7 @@ export interface SessionInfo {
   // watching: it decides, notes its assumptions, finishes and summarises). Absent from a runner
   // or daemon older than the field.
   interaction?: 'interactive' | 'unattended';
+  verbosity?: 'narrated' | 'standard' | 'terse';
   // How many background tasks (a background shell, a monitor, a background subagent) the session's
   // agent has running; absent when none, and from a runner older than the field.
   background_tasks?: number;
@@ -142,6 +157,7 @@ export interface SessionInfo {
   // was doing and it was not continued by itself (it was waiting for the person, or had been
   // continued once already). Absent when it is not paused, and from a runner older than the field.
   paused_reason?: 'restart' | string;
+  paused_detail?: string;
 }
 
 export interface StartedBy {
@@ -182,12 +198,14 @@ export interface ModelList {
 // ─── Agent sessions ───────────────────────────────────────────────────────────
 
 export type AgentEventKind =
+  | 'inbox_item'
   | 'user_message'
   | 'input_accepted'
   | 'session_upload'
   | 'delegation_request'
   | 'delegation_decided'
   | 'assistant_text'
+  | 'question_thread'
   | 'assistant_thinking'
   | 'thinking_started'
   | 'thinking_progress'
@@ -197,8 +215,11 @@ export type AgentEventKind =
   | 'provider_blocks'
   | 'status_changed'
   | 'check_in'
+  | 'bound_ask_note'
   | 'ask'
   | 'update'
+  | 'cron_command_result'
+  | 'ui_reveal'
   | 'note'
   | 'model_changed'
   | 'subagent_started'
@@ -206,6 +227,9 @@ export type AgentEventKind =
   | 'subagent_done'
   | 'background_task_started'
   | 'background_task_done'
+  | 'background_task_cleared'
+  | 'background_wait_stopped'
+  | 'stop_result'
   | 'turn_done'
   | 'usage_updated'
   | 'error'
@@ -220,12 +244,18 @@ export type AgentEventKind =
   | 'mcp_status'
   | 'delegation_request'
   | 'delegation_decided'
+  | 'channel_recommendation'
+  | 'blackboard_recommendation'
   | 'proposal_request'
   | 'proposal_decided'
+  | 'answer_requested'
+  | 'answer_submitted'
+  | 'answer_closed'
   | 'review_requested'
   | 'review_decided';
 
 export interface AgentEvent {
+  replayed?: boolean
   type: 'agent_event';
   session_id: string;
   client_event_id: string;
@@ -383,6 +413,7 @@ export interface SessionPausedChanged {
   type: "session_paused_changed";
   session_id: string;
   paused_reason: string;
+  paused_detail?: string;
 }
 
 export interface SessionMetaChanged {
@@ -390,6 +421,24 @@ export interface SessionMetaChanged {
   session_id: string;
   model?: string;
   effort?: string;
+}
+
+export interface SessionVerbosityChanged {
+  type: 'session_verbosity_changed';
+  session_id: string;
+  verbosity: 'narrated' | 'standard' | 'terse';
+}
+
+export interface SessionEmojiChanged {
+ type: "session_emoji_changed";
+ session_id: string;
+ emoji: string;
+}
+
+export interface SessionColorChanged {
+  type: "session_color_changed";
+  session_id: string;
+  color: string;
 }
 
 export interface SessionTitleChanged {
@@ -598,7 +647,11 @@ export interface DesktopSourcesChanged { type: "desktop_sources_changed"; deskto
 export interface DesktopOwnershipChanged { type: "desktop_ownership_changed"; desktop_id: string; ownership_revision: number }
 export interface DesktopInventoryInvalidated { type: "desktop_inventory_invalidated" }
 
+export interface BlackboardDraftChanged { type: 'blackboard_draft_changed'; session_id: string; draft_readable?: boolean; origin_id?: string }
+
 export type ServerMessage =
+  | { type: 'inbox_changed' }
+  | BlackboardDraftChanged
   | DesktopOwnershipChanged
   | DesktopInventoryInvalidated
   | DesktopSourcesChanged
@@ -616,6 +669,9 @@ export type ServerMessage =
   | SessionBackgroundChanged
   | SessionPausedChanged
   | SessionNotice
+  | SessionVerbosityChanged
+  | SessionEmojiChanged
+  | SessionColorChanged
   | SessionTitleChanged
   | SessionEnded
   | SessionArchived
@@ -653,16 +709,6 @@ export interface SendInput {
   type: "send_input";
   session_id: string;
   data: string;
-}
-
-export interface SpawnSession {
-  type: "spawn_session";
-  daemon_id: string;
-  repo: string;
-  title: string;
-  initial_prompt: string;
-  kind?: string; // "" (tmux) | "agent"
-  model?: string;
 }
 
 export interface SubscribeAgentEvents {
@@ -769,10 +815,11 @@ export interface UnsubscribeBoard {
 
 // Discriminated union of all browser→server messages.
 export type BrowserMessage =
+ | {type: "subscribe_dataset" | "unsubscribe_dataset" | "dataset_heartbeat" | "dataset_diagnostic"; cause?: string; session_id: string; subscription_id: string; data: {kind: "dataset"; name: string; parameters: Record<string,string>}}
+
   | SubscribeSession
   | UnsubscribeSession
   | SendInput
-  | SpawnSession
   | ResizeSession
   | RequestScrollback
   | Activity
@@ -806,7 +853,9 @@ export interface CronRunInfo {
 }
 
 // A cron as the server sends it. There is no token id: only when its access token expires.
+export interface CronCommandStep { argv: string[]; timeout_seconds: number; max_output_bytes: number }
 export interface CronInfo {
+  command_steps?: { steps: CronCommandStep[]; hash: string; defined_by: string; defined_at: string } | null
   id: string
   name: string
   status: CronStatus
@@ -842,7 +891,7 @@ export type ProposalResult = { state: string; message?: string } | null | { cont
 export interface ProposalExtensionInfo { extended_at: string; previous_expires_at: string; expires_at: string; by_you?: boolean }
 
 export interface ProposalInfo {
-  kind?: 'board_file' | 'board_create' | 'mcp' | 'plugin_request'
+  kind?: 'board_file' | 'board_create' | 'board_metadata' | 'mcp' | 'plugin_request'
   plugin_session_apply?: boolean
   id: string
   state: ProposalState

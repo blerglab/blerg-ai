@@ -1,6 +1,6 @@
 package server
 
-// The five spawn sites, the Job spec, the end paths and resume, for sessions that carry MCP
+// The spawn sites, the Job spec, the end paths and resume, for sessions that carry MCP
 // grants (mcpstart.go). Every test here runs against a real database.
 
 import (
@@ -308,14 +308,14 @@ func TestSpawnSitesAreEnumerated(t *testing.T) {
 		"postSessions":                    {"resolveLaunchGrant", "attachGrant"},
 		"startClusterNoRepo":              {"resolveLaunchGrant", "attachGrant"},
 		"startRunnerSession":              {"checkGrant", "attachGrant"},
+		"startClusterChild":               {"checkGrant", "attachGrant"},
 		"startBoardSessionOnDaemon":       {"checkGrant", "attachGrant"},
 		"resumeClusterSessionModeGuarded": {"grantResumeProblem", "reissueGrants"},
 	}
 	// Paths that never carry a grant, by construction: nothing they decode names one.
 	// reclaimNativeHistory and settleClusterStop build label/fencing specs solely
 	// to remove an old writer; neither starts an engine.
-	// startClusterChild starts a delegate's child, whose allowlisted start never names a grant (startChild).
-	grantless := map[string]bool{"HandlePostAssist": true, "forwardOwnedBrowserSpawn": true, "CreateSessionJob": true, "reclaimNativeHistory": true, "settleClusterStop": true, "startClusterChild": true}
+	grantless := map[string]bool{"CreateSessionJob": true, "reclaimNativeHistory": true, "settleClusterStop": true}
 
 	if cleanup := funcs["settleClusterStop"]; cleanup == nil || cleanup.calls["fenceNativeHistoryWriter"] != 1 || cleanup.calls["CreateSessionJob"] != 0 || cleanup.literals["SpawnSession"] {
 		t.Error("workspace stop must only fence an existing writer, never spawn one")
@@ -766,6 +766,7 @@ func TestResumeWithoutGrantsIsUnchanged(t *testing.T) {
 func TestDaemonConnRecordsTheMCPGatewayCapability(t *testing.T) {
 	dc := &DaemonConn{ID: "d"}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	if dc.CanMCPGateway() {
 		t.Error("a daemon that has not said so must not be assumed to deliver grants")
 	}

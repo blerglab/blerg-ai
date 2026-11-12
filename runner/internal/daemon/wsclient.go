@@ -99,6 +99,10 @@ func (c *Config) unconfirmedAfter() time.Duration {
 	return defaultUnconfirmedAfter
 }
 
+// helloWriteTimeout bounds daemon_hello, the one frame written before the
+// connection's writer exists. A variable so a test can stall it briefly.
+var helloWriteTimeout = 10 * time.Second
+
 // WSClient is a WebSocket client that maintains a persistent connection to the
 // blerg-runner server, reconnecting automatically with exponential backoff.
 type WSClient struct {
@@ -108,7 +112,9 @@ type WSClient struct {
 	serverWorkspaceVersion atomic.Int32
 	workspaceNegotiated    atomic.Bool
 	negotiatedWorkspace    atomic.Value // protocol.WorkspaceCapabilities
+	shellServerCaps        atomic.Value // raw server offer; re-probe shell support after keeper recovery
 	discoveryVersion       int
+	repositoryCloneVersion int
 	discoveryCtx           context.Context
 	shellRuntime           *shellruntime.Service
 	fair                   *shellruntime.FairWriter
@@ -118,8 +124,8 @@ type WSClient struct {
 	recoveryHandler        func(RecoveryState)
 	serverPlanNudges       atomic.Bool
 	config                 Config
-	mu                     sync.Mutex // guards conn and handlers
-	writeMu                sync.Mutex // guards WriteMessage calls (at most one concurrent writer)
+	fileChunks             atomic.Bool // this link's server reassembles workspace_file_chunk frames
+	mu                     sync.Mutex  // guards conn and handlers
 	conn                   *websocket.Conn
 	background             *backgroundTaskTracker // guarded by mu; process lifetime and replay-safe live IDs
 	handlers               map[string]func([]byte)
@@ -332,7 +338,8 @@ func (c *WSClient) Run(ctx context.Context, activeSessions func() []string) {
 			if refused {
 				log.Print(c.refusedLine(backoff))
 			} else {
-				log.Printf("daemon: disconnected (%v); reconnecting in %s", err, backoff)
+				logDaemonSocketFailure("connection ended", err)
+				log.Printf("daemon: reconnecting in %s", backoff)
 			}
 			lastErr, lastLog = err.Error(), time.Now()
 		}
@@ -448,6 +455,8 @@ func (c *WSClient) queued() []string {
 // the link was up (linkResult) and the error from the read loop (nil error if
 // shutdown was due to ctx cancellation).
 func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) (linkResult, error) {
+	c.shellServerCaps.Store(protocol.WorkspaceCapabilities{})
+	c.fileChunks.Store(false)
 	c.workspaceNegotiated.Store(false)
 	c.negotiatedWorkspace.Store(protocol.WorkspaceCapabilities{})
 	c.serverWorkspaceVersion.Store(0)
@@ -477,9 +486,7 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 
 	linkCtx, linkCancel := context.WithCancel(ctx)
 	defer linkCancel()
-	c.mu.Lock()
-	shellService := c.shellRuntime
-	c.mu.Unlock()
+	shellService := c.OwnerShellRuntimeContext(linkCtx)
 	if shellService != nil {
 		shellService.SetCapabilities(protocol.WorkspaceCapabilities{}, protocol.WorkspaceCapabilities{})
 		defer shellService.SetCapabilities(protocol.WorkspaceCapabilities{}, protocol.WorkspaceCapabilities{})
@@ -487,8 +494,7 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 		err := shellService.Rebind(rebind)
 		cancel()
 		if err != nil {
-			_ = conn.Close()
-			return linkResult{}, err
+			logDaemonFailure("host shells unavailable during server reconnect", err)
 		}
 	}
 	generation := c.beginRecoveryLink()
@@ -512,35 +518,39 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 	}
 	hello := protocol.DaemonHello{
 		Hostname: hostname, OSUser: osUser,
-		Type:                  "daemon_hello",
-		WorkspaceCapabilities: capabilities,
-		Name:                  c.config.DaemonName,
-		Mode:                  c.config.DaemonMode,
-		ReposRoot:             root,
-		Token:                 token,
-		DesktopID:             desktopID,
-		DesktopEnrollment:     c.config.CredentialStateDir != "" && c.config.DaemonMode != "runner",
-		DiscoveryVersion:      c.discoveryVersion,
-		ProtocolVersion:       c.config.ProtocolVersion,
-		Version:               c.config.Version,
-		ActiveSessions:        sessions,
-		CheckedOutRepos:       checkedOut,
-		SandboxAvailable:      sandboxImageAvailable(),
-		AvailableEngines:      availableEngines(),
-		EngineStatuses:        engineStatuses(linkCtx),
-		LocalEngines:          localEngines(),
-		ClaudeCLIAvailable:    claudeOnPath(),
-		AnthropicKeySet:       os.Getenv("ANTHROPIC_API_KEY") != "",
+		Type:                   "daemon_hello",
+		WorkspaceCapabilities:  capabilities,
+		Name:                   c.config.DaemonName,
+		Mode:                   c.config.DaemonMode,
+		ReposRoot:              root,
+		Token:                  token,
+		DesktopID:              desktopID,
+		DesktopEnrollment:      c.config.CredentialStateDir != "" && c.config.DaemonMode != "runner",
+		DiscoveryVersion:       c.discoveryVersion,
+		RepositoryCloneVersion: c.repositoryCloneVersion,
+		ProtocolVersion:        c.config.ProtocolVersion,
+		Version:                c.config.Version,
+		ActiveSessions:         sessions,
+		CheckedOutRepos:        checkedOut,
+		SandboxAvailable:       sandboxImageAvailable(),
+		AvailableEngines:       availableEngines(),
+		EngineStatuses:         engineStatuses(linkCtx),
+		LocalEngines:           localEngines(),
+		ClaudeCLIAvailable:     claudeOnPath(),
+		AnthropicKeySet:        os.Getenv("ANTHROPIC_API_KEY") != "",
 
 		SandboxClaudeCredential: sandboxClaudeCredentialReport(),
 	}
+	shellHello := shellService.ShellHello()
+	hello.ShellLink = &shellHello
 	hello.RepoOrigins, hello.RepoRemotes = origins, remotes
 	hello.RepoInventoryLimited = limited
 	hello.GitProviders = gitprovider.Default.CredentialKinds()
 	hello.CloneFrom = true // SpawnSession.CloneFrom (EnsureClonedTarget)
 	hello.AllowHostCredentialClone = c.config.AllowHostCredentialClone
-	hello.MCPGateway = true                         // SpawnSession.MCPGateway (mcpgateway.go)
-	hello.MCPGatewayViaServer = true                // MCPGatewayConfig.ViaServer, host board grants (mcpgateway.go)
+	hello.MCPGateway = true          // SpawnSession.MCPGateway (mcpgateway.go)
+	hello.MCPGatewayViaServer = true // MCPGatewayConfig.ViaServer, host board grants (mcpgateway.go)
+	hello.FixedCommandSteps = runtime.GOOS == "linux"
 	hello.CodexRestricted = runtime.GOOS == "linux" // Spawn rechecks the actual CLI version before exposing only rooted dynamic tools.
 	hello.PlanNudges = true
 	hello.UsageNotices = true
@@ -554,6 +564,8 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 	hello.PluginCatalogEngines = extensionEngines() // ReadPluginCatalog (engineextensions.go)
 	hello.MCPSignInEngines = extensionEngines()     // MCPSignIn (engineextensions.go)
 	hello.InputReceipts = true
+	hello.AuthoritativeAnswers = true
+	hello.WorkBranches = true
 	hello.SandboxClones = true    // every Sandbox spawn works in its own clone (sandboxclone.go)
 	hello.SessionTokenFile = true // SessionToken → SessionTokenResult (sessiontoken.go)
 	hello.RecoveryReady = true
@@ -573,28 +585,54 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 	}
 	raw, err := json.Marshal(hello)
 	if err != nil {
-		_ = conn.Close()
+		closeDaemonSocket(conn, "hello_encode", err)
 		return linkResult{}, err
 	}
-	c.writeMu.Lock()
-	err = conn.WriteMessage(websocket.TextMessage, raw)
-	if err == nil {
-		c.mu.Lock()
-		c.conn = conn
-		c.discoveryCtx = linkCtx
-		c.mu.Unlock()
+	// Nothing else can write yet: conn is published only after the hello.
+	if err = conn.SetWriteDeadline(time.Now().Add(helloWriteTimeout)); err == nil {
+		err = conn.WriteMessage(websocket.TextMessage, raw)
 	}
-	c.writeMu.Unlock()
 	if err != nil {
-		_ = conn.Close()
+		closeDaemonSocket(conn, "hello_write", err)
 		return linkResult{}, err
 	}
+	c.mu.Lock()
+	c.conn = conn
+	c.discoveryCtx = linkCtx
+	c.mu.Unlock()
 
 	// Written is not accepted: the server answers a wrong token only by closing with 4401.
 	// "connected" waits for its daemon_welcome, or for the link to stay open for the window.
 	watch := &linkWatch{c: c}
-	window := time.AfterFunc(c.config.unconfirmedAfter(), watch.windowPassed)
+	welcomeObserved := make(chan struct{})
+	var welcomeOnce sync.Once
+	var welcomeMu sync.Mutex
+	window := time.AfterFunc(c.config.unconfirmedAfter(), func() {
+		watch.windowPassed()
+		welcomeMu.Lock()
+		defer welcomeMu.Unlock()
+		select {
+		case <-welcomeObserved:
+			return
+		default:
+		}
+		call, cancel := context.WithTimeout(context.WithoutCancel(linkCtx), 3*time.Second)
+		defer cancel()
+		_ = shellService.AcceptShellLink(call, shellHello, nil)
+	})
 	defer window.Stop()
+	defer func() {
+		welcomeMu.Lock()
+		defer welcomeMu.Unlock()
+		select {
+		case <-welcomeObserved:
+			return
+		default:
+		}
+		call, cancel := context.WithTimeout(context.WithoutCancel(linkCtx), 3*time.Second)
+		defer cancel()
+		_ = shellService.AcceptShellLink(call, shellHello, nil)
+	}()
 
 	// Fire the connect callback (e.g. reattach persistent sessions) without
 	// blocking the read loop. The hello above already reported persistent
@@ -678,7 +716,7 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 	// Force-close connection when context is cancelled so readLoop unblocks.
 	go func() {
 		<-ctx.Done()
-		_ = conn.Close()
+		closeDaemonSocket(conn, "context_canceled", ctx.Err())
 	}()
 
 	c.serverPlanNudges.Store(false)
@@ -693,18 +731,30 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 		if json.Unmarshal(raw, &msg) != nil || welcomed {
 			return
 		}
+		c.shellServerCaps.Store(msg.WorkspaceCapabilities)
 		if strings.HasPrefix(token, "bdt_") && c.config.CredentialStateDir != "" {
 			if c.confirmDesktopEnrollment(token, desktopID) != nil {
-				_ = conn.Close()
+				closeDaemonSocket(conn, "enrollment_confirmation", nil)
 				return
 			}
 		}
+		welcomeMu.Lock()
+		defer welcomeMu.Unlock()
+		welcomeOnce.Do(func() { close(welcomeObserved) })
+		go func() {
+			call, cancel := context.WithTimeout(context.WithoutCancel(linkCtx), 2*time.Second)
+			defer cancel()
+			if shellService.AcceptShellLink(call, shellHello, msg.ShellLink) != nil {
+				logDaemonFailure("host shells unavailable during welcome", shellruntime.ErrKeeperUnavailable)
+			}
+		}()
 		welcomed = true
+		c.fileChunks.Store(msg.WorkspaceFileChunks)
 		c.serverPlanNudges.Store(msg.PlanNudges)
 		negotiated := protocol.NegotiateWorkspaceCapabilities(capabilities, msg.WorkspaceCapabilities)
 		c.negotiatedWorkspace.Store(negotiated)
 		if shellService != nil {
-			shellService.SetCapabilities(negotiated, capabilities)
+			shellService.SetCapabilities(msg.WorkspaceCapabilities, capabilities)
 		}
 		if negotiated.ManifestVersion == protocol.WorkspaceVersion {
 			c.serverWorkspaceVersion.Store(protocol.WorkspaceVersion)
@@ -716,7 +766,7 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 			if c.config.OnUnsupportedWorkspace != nil {
 				c.config.OnUnsupportedWorkspace()
 			}
-			_ = conn.Close()
+			closeDaemonSocket(conn, "workspace_negotiation", nil)
 			return
 		}
 		if c.config.RequiredWorkspace != nil {
@@ -742,7 +792,7 @@ func (c *WSClient) connect(ctx context.Context, activeSessions func() []string) 
 
 	// Stop the heartbeat, then close the conn to unblock any in-progress write.
 	close(hbStop)
-	_ = conn.Close()
+	closeDaemonSocket(conn, "read_loop_ended", readErr)
 	<-hbDone
 
 	c.mu.Lock()
@@ -769,6 +819,7 @@ func (c *WSClient) readLoop(ctx context.Context, conn *websocket.Conn, onWelcome
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
+			logDaemonSocketFailure("socket read closed connection", err)
 			return err
 		}
 		var env envelope

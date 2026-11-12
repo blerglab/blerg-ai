@@ -1,8 +1,10 @@
 package db_test
 
 import (
+	"fmt"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"strings"
 	"testing"
 	"time"
 )
@@ -99,5 +101,129 @@ func TestShellConsentIdentityReturnDoesNotReviveAcceptanceOrChallenge(t *testing
 	}
 	if _, err := db.AcceptShellChallenge(ctx, pool, a, pending.ChallengeID); err == nil {
 		t.Error("A pending challenge survived identity transition")
+	}
+}
+
+func TestPersistentShellConsentRequiresExactLoginAndWithdrawalIsTerminal(t *testing.T) {
+	pool := connect(t)
+	ctx := t.Context()
+	const session = "00000000-0000-4000-8000-000000000269"
+	const daemon = "00000000-0000-4000-8000-000000000001"
+	if err := db.UpsertDaemon(ctx, pool, daemon, "desktop", "local", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertSession(ctx, pool, session, daemon, "running", "/project", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	c := protocol.NewShellConsentV2(protocol.HostShellConsent{ID: "acceptance", ChallengeID: "fresh"}, protocol.ShellCustody{Owner: "owner", Login: "login", Session: session, Runtime: "host"}, time.Now().Add(time.Minute).Unix())
+	if err := db.CreatePersistentShellChallenge(ctx, pool, c); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AcceptPersistentShellChallenge(ctx, pool, "owner", "other", session, "fresh"); err == nil {
+		t.Fatal("another login accepted")
+	}
+	got, err := db.AcceptPersistentShellChallenge(ctx, pool, "owner", "login", session, "fresh")
+	if err != nil || got != c {
+		t.Fatal("exact acceptance failed", err)
+	}
+	if _, err = db.AcceptPersistentShellChallenge(ctx, pool, "owner", "login", session, "fresh"); err == nil {
+		t.Fatal("challenge accepted twice")
+	}
+	if err = db.WithdrawPersistentShellConsent(ctx, pool, "owner", "login", session, "acceptance"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.ReadPersistentShellConsent(ctx, pool, "owner", "login", session, "acceptance"); err == nil {
+		t.Fatal("withdrawal revived")
+	}
+}
+
+func TestPersistentChallengeOwnerCapAndPruning(t *testing.T) {
+	pool := connect(t)
+	ctx := t.Context()
+	const daemon = "00000000-0000-0000-0000-000000000101"
+	const session = "00000000-0000-0000-0000-000000000102"
+	if err := db.UpsertDaemon(ctx, pool, daemon, "test", "local", "/repos"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertSession(ctx, pool, session, daemon, "running", "/repos/one", "org/one", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	c := protocol.NewShellConsentV2(protocol.HostShellConsent{ID: "acceptance", ChallengeID: "challenge"}, protocol.ShellCustody{Owner: "owner", Login: "login", Session: session}, time.Now().Add(time.Minute).Unix())
+	for n := range 32 {
+		c.Host.ID = fmt.Sprintf("acceptance-%d", n)
+		c.Host.ChallengeID = fmt.Sprintf("challenge-%d", n)
+		if err := db.CreatePersistentShellChallenge(ctx, pool, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.Host.ID = "overflow"
+	c.Host.ChallengeID = "overflow"
+	if db.CreatePersistentShellChallenge(ctx, pool, c) == nil {
+		t.Fatal("owner challenge cap missing")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE shell_host_consents_v2 SET expires_at=clock_timestamp()-interval '1 second'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreatePersistentShellChallenge(ctx, pool, c); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM shell_host_consents_v2`).Scan(&count); err != nil || count != 1 {
+		t.Fatal("expired unaccepted challenges retained", count, err)
+	}
+}
+
+// Simulate a runner stopping immediately after the database call: no API log
+// callback runs, but the committed denial must already contain its audit event.
+func TestPersistentWithdrawalAuditSurvivesBeforeAPILog(t *testing.T) {
+	pool := connect(t)
+	ctx := t.Context()
+	const session = "00000000-0000-4000-8000-000000000270"
+	const daemon = "00000000-0000-4000-8000-000000000001"
+	if err := db.UpsertDaemon(ctx, pool, daemon, "desktop", "local", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertSession(ctx, pool, session, daemon, "running", "/project", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	c := protocol.NewShellConsentV2(protocol.HostShellConsent{ID: "audit-acceptance", ChallengeID: "audit-challenge"}, protocol.ShellCustody{Owner: "owner", Login: "login", Session: session, Runtime: "host"}, time.Now().Add(time.Minute).Unix())
+	if err := db.CreatePersistentShellChallenge(ctx, pool, c); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AcceptPersistentShellChallenge(ctx, pool, "owner", "login", session, c.Host.ChallengeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, changed, err := db.WithdrawPersistentShellConsentOnce(ctx, pool, "owner", "login", session, c.Host.ID); err != nil || !changed {
+		t.Fatal("withdrawal failed", err)
+	}
+	var audit []byte
+	if err := pool.QueryRow(ctx, `SELECT withdrawal_audit FROM shell_host_consents_v2 WHERE acceptance_id=$1`, c.Host.ID).Scan(&audit); err != nil {
+		t.Fatal("committed withdrawal has no durable audit", err)
+	}
+	if !strings.Contains(string(audit), `"consent_withdraw"`) || !strings.Contains(string(audit), c.PinsDigest()) {
+		t.Fatal("durable audit lacks withdrawal context")
+	}
+	if _, changed, err := db.WithdrawPersistentShellConsentOnce(ctx, pool, "owner", "login", session, c.Host.ID); err != nil || changed {
+		t.Fatal("repeat changed withdrawal", err)
+	}
+	var repeat []byte
+	if err := pool.QueryRow(ctx, `SELECT withdrawal_audit FROM shell_host_consents_v2 WHERE acceptance_id=$1`, c.Host.ID).Scan(&repeat); err != nil || string(repeat) != string(audit) {
+		t.Fatal("repeat replaced original audit", err)
+	}
+	// If audit creation fails, neither the denial nor its timestamp may commit.
+	c.Host.ID = "rollback-acceptance"
+	c.Host.ChallengeID = "rollback-challenge"
+	c = protocol.NewShellConsentV2(c.Host, c.Pins, c.ExpiresAt)
+	if err := db.CreatePersistentShellChallenge(ctx, pool, c); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AcceptPersistentShellChallenge(ctx, pool, "owner", "login", session, c.Host.ChallengeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := db.WithdrawPersistentShellConsentAudited(ctx, pool, "owner", "login", session, c.Host.ID, func(protocol.ShellConsentV2) ([]byte, error) { return nil, fmt.Errorf("audit unavailable") }); err == nil {
+		t.Fatal("withdrawal committed without audit")
+	}
+	if _, err := db.ReadPersistentShellConsent(ctx, pool, "owner", "login", session, c.Host.ID); err != nil {
+		t.Fatal("failed audit committed a denial", err)
 	}
 }

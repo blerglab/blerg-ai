@@ -29,14 +29,15 @@ Component-specific notes live next to the code, for example
   fails with confusing errors. Install a current Go from <https://go.dev/dl/> and put it
   first on your `PATH`.
 - **Node.js 22.12 or newer** with npm, for the three frontends.
-- `git`, and `tmux` (some daemon tests drive a real tmux and skip without it).
+- `git`.
 - **golangci-lint v2.13.1**, the version CI pins (named in the `Makefile` too, and `make lint` refuses any other), for `make lint`
   ([install](https://golangci-lint.run/docs/welcome/install/)). It must be built with Go 1.26 or newer to load this repository's modules (v2.13.1 is).
 - **Docker with Compose v2 is optional.** It is only for `make db-up` (a throwaway
   Postgres), for running the full stack with the desktop installer, and for the
   Compose check in `make check-scripts`, which skips without it.
 
-**Module layout.** `contracts/` and `core/` are in the Go workspace (`go.work`) and build
+**Module layout.** `contracts/`, `core/`, and the Go verification tools in
+`scripts/verification/` are in the Go workspace (`go.work`) and build
 from the repository root. `runner/` and `board/` are standalone modules that are not in
 the workspace: run their Go commands from inside the module directory with `GOWORK=off`,
 or Go reports `directory prefix . does not contain modules listed in go.work`.
@@ -56,8 +57,9 @@ skip unless it is configured.
 
 | Target | Runs | Needs |
 |---|---|---|
-| `make test` | `go vet`, then `go test` on contracts, core, runner and board | nothing; database tests run only if the variables below are set |
-| `make test-daemon-race` | three uncached runner daemon race-detector passes (required before a release; also run in CI) | Go race-detector support; tmux for terminal cases |
+| `make test` | `go vet` and `go test` on contracts, core, runner and board, plus `test-verification` | nothing; database tests run only if the variables below are set |
+| `make test-verification` | vet, tests, and builds for `scripts/verification`; also run by `make test`, `make check-scripts`, and CI | Go 1.26+ |
+| `make test-daemon-race` | three uncached runner daemon race-detector passes (required before a release; also run in CI) | Go race-detector support |
 | `make test-web` | `tsc --noEmit`, tests and production build in each frontend | `npm ci` in each first; Chromium and Firefox for `runner/frontend` |
 | `make lint` | gofmt and golangci-lint on all four Go modules, then ESLint in each frontend (`make lint-go` and `make lint-web` run the halves) | golangci-lint; `npm ci` in each frontend |
 | `make check-scripts` | installer, messaging-CLI, scrub and link checks | `pwsh` (Linux PowerShell, with Windows APIs mocked), `python3` with `pytest` (`pip install pytest`); the `docker compose` CLI makes the Compose check run instead of skip |
@@ -66,6 +68,19 @@ skip unless it is configured.
 Lint failures block a merge. A `//nolint` or `eslint-disable` must name the rule and give
 a reason. `make test` is not a full CI run: also run `make lint`, `make test-web` and
 `make check-scripts`.
+
+For the local gate with per-suite logs and timings, use
+`scripts/pre-merge.sh --changed BASE` to run complete suites for affected regions.
+Inspect the selection first with `--changed BASE --list`. Frontend changes run
+that region's full unit and browser suites; Go modules stay separate from their
+web apps. Shared inputs widen selection, and unknown paths, manifests, lockfiles,
+gate tooling and CI configuration select everything. Documentation alone runs
+scrub and links. Every skipped suite is named with a reason and never counted
+as passing. The older `--changed-since` mode is focused development verification.
+
+`make pre-merge` without a base runs everything; `--release` always runs the full
+matrix, even with selection flags. See [the pre-merge guide](docs/pre-merge.md)
+for the path table, report semantics, database settings and resource limits.
 
 **Running one test.**
 
@@ -138,6 +153,34 @@ cd runner/frontend && npm ci && npx playwright install chromium firefox && npm r
 `npm test` fails with "Executable doesn't exist". `npx playwright install chromium firefox` downloads them once
 (add `--with-deps` on Linux to install the system libraries; that needs sudo).
 
+Runner browser files share outer browser pages even though Vitest recreates their test
+iframes. Chromium's CDP touch emulation clears the page's desktop hover and fine-pointer
+capabilities when disabled; clearing media overrides or detaching CDP does not restore
+them. Files that use `Emulation.setTouchEmulationEnabled` belong in
+`touchEmulationFiles` in `runner/frontend/vitest.config.ts`, on the separate Chromium
+touch instance. Keep desktop hover fixtures on the ordinary instance.
+
+Runner browser fixtures must mock `ws` (use `src/test/wsMock.ts`) when they do not
+exercise authentication: importing the real client connects immediately and can redirect the
+test iframe to sign-in. Supply API response fixtures for every mounted dock panel; Vite's
+HTML fallback is not a JSON API response.
+
+Node-side Runner HTTP fixtures share one compiled test executable per Vitest process.
+Each fixture still starts a separate process and isolated database. Compilation finishes
+before the unchanged readiness deadline begins; viewport cases do not each launch a
+competing Go build. CI compiles that same test executable before starting browser
+workers, so a cold Go cache cannot consume the fixture startup deadline. `BLERG_TEST_GO` selects the toolchain, with `go` on `PATH` as
+the default, and `GOFLAGS`/`BLERG_TOOL_WORKERS` retain the build concurrency bound.
+
+The browser setup records window errors and unhandled promise rejections, then fails the
+individual case after teardown. Cleanup and error reporting also run when a teardown hook
+fails. Errors during module loading or iframe navigation still need their fixture corrected;
+the setup cannot attribute work that runs before a case starts. To verify containment, run
+`VITE_VERIFY_BROWSER_ERRORS=1 npm test -- --project 'browser (chromium)' src/test/ErrorContainment.browser.test.ts`
+from `runner/frontend`. This deliberate negative probe must exit 1 with two failed cases,
+a passing final sentinel, and no run-level unhandled errors. Its two negative cases are
+skipped during ordinary runs.
+
 For the full runner browser suite, use `npm run test:browser`. The `browser` project runs
 layout and interaction tests first; after that Vitest process exits, `browser-performance`
 runs `*.performance.browser.test.{ts,tsx}` serially. CI likewise runs
@@ -145,6 +188,23 @@ runs `*.performance.browser.test.{ts,tsx}` serially. CI likewise runs
 other browser workers cannot contend with strict timing budgets. `npm test` includes
 all three ordered projects in one process. To run only performance files, use
 `npm run test:performance`.
+Long-session typing and child-event checks compare the median of 30 real browser samples
+with the unchanged 16 ms budget. Maximum timings remain in diagnostics; exact render counts
+still enforce isolation on every sample. This keeps isolated scheduler stalls on shared
+machines from failing the gate while consistently slow work still fails.
+
+The long-workspace cases also keep 50,000 events (300 mounted rows), three panels with a
+400-card board and Insights, five live workers, and 5,000 synthetic retained workers.
+Run measurements with `--maxWorkers=1`. The isolated three-strip broadcast budget is 16 ms;
+the complete development tree budgets 100 ms for event delivery and native input through a
+paint opportunity, 16 ms for synchronous input, and 2 s for a complete switch-in paint.
+Revisits also bound calendar formatting to the visible window rather than the held history.
+Timestamp native keys before renderer delivery: readiness checks can hide queued input.
+Measure store delivery separately from render counts; selectors can block without a commit.
+Set `VITE_LAUNCH_SHOTS_DIR` to a directory inside the checkout (for example
+`$PWD/.cache/long-workspace`) to capture synthetic Chrome CPU/timeline traces, per-key marks,
+timings and 390/3840 px screenshots. Trace runs collect diagnostics separately from timing
+budgets because profiling changes execution costs; render-isolation checks still apply.
 
 **Installer scripts, messaging CLI, scrub and links** (`make check-scripts` runs them all):
 
@@ -213,7 +273,7 @@ cd runner/frontend && npm ci && npm run dev
   `link-btn` on the board), from a component class or a container rule whose whole selector
   matches it at rest (no `@media`, `:hover` or attribute conditions; ancestors in the same
   file, `>` only across a direct parent), or from an inline `style` with known values.
-  Props are read left to right, and a spread or value the guard cannot resolve fails closed.
+  Props are read left to right, and a spread, inline override, role, or value the guard cannot resolve fails closed. Function returns and alternative limits retain unknown cases; CSS ancestry stops at calls that may move children, including portals.
   The guard (`packages/settings/buttons.ts`) runs with each app's `npm test` (the
   `button guard` block in `SettingsPrimitives.test.ts`, and
   `packages/chat/src/ButtonGuard.test.ts`) and fails with the file, the line and the approved
@@ -250,15 +310,52 @@ repository's up-to-date `main` with CI green:
 
 1. Before the public CI push or release cut, run the [session acceptance gate](docs/session-e2e.md):
    deterministic daemon scenarios, the real-install Hermes campaign, and the optional Claude/Codex
-   smoke when those engines are release targets. Retain the summary and private logs as release evidence.
+   smoke when those engines are release targets. Also run the operator-configured
+   [disposable restart drills](install/k8s/acceptance/RESTART-DRILLS.md) with candidate
+   images and require `restart-drills all` to exit zero, retaining its regression,
+   case and teardown receipts. Run the [runtime smokes](docs/pre-merge.md#runtime-smokes-blg-31) for host, sandbox
+   and cluster too; require exit 0. Retain the summary and private logs as release evidence.
 2. Merge this repository's `main` into it (`git fetch public && git merge public/main`).
 3. Move the `Unreleased` entries in `CHANGELOG.md` under a new `## [X.Y.Z] - YYYY-MM-DD`
    heading, and update the compare links at the bottom.
 4. Put `X.Y.Z` in `VERSION`, and commit both.
-5. Run `scripts/release-public.sh vX.Y.Z` to build and inspect the release commit, then
-   `scripts/release-public.sh --push vX.Y.Z` to push it as `main`, tag it `vX.Y.Z`, and merge
-   it back. The script documents its checks and configuration at the top.
-6. Create a GitHub release for the tag, using that version's changelog entry as the notes.
+5. Write Markdown release notes outside the checkout. They must include a nonempty
+   `## How to upgrade` section with desktop and Kubernetes instructions: backup first,
+   exact installer/deploy commands, daemon reinstall, migrations, and operator decisions.
+6. Configure `blerg.publicRepository` as the GitHub `owner/repository`, with the matching
+   HTTPS or SSH `.git` public remote, and authenticate `gh`. Build and inspect a candidate:
+   `scripts/release-public.sh vX.Y.Z-rc.1 /path/to/notes.md`. Publish it with `--push`.
+   VERSION, the changelog and embedded notes use the intended stable version even for RCs.
+7. Have the owner test the candidate. On disposable Linux desktop, macOS desktop and
+   Kubernetes installs, upgrade from the previous stable version using the documented
+   commands. Check all three migrations, daemon reinstall/reconnect, retained data,
+   backup failure and restore. Keep private drill logs outside the repository.
+8. Record acceptance in a private JSON file: `owner_accepted` (true), `candidate_tree`
+   (the public RC tree SHA), and nonempty `linux_desktop`, `macos_desktop`, `kubernetes`
+   evidence references. These are operator attestations; the script cannot run the drills.
+9. Promote the unchanged tree:
+   `scripts/release-public.sh --push --candidate vX.Y.Z-rc.1 --evidence /path/to/acceptance.json vX.Y.Z /path/to/notes.md`.
+   Any source or notes change requires a new candidate and renewed acceptance.
+
+Publication first pushes only `ci/<tag>`, then polls `ci.yml` and
+`workspace-explorer.yml` on that exact public SHA and push branch. Both must succeed,
+including the Linux and macOS security jobs. Failed, skipped or missing checks cannot
+publish. The tool rechecks evidence and public main, pushes main and the new tag
+atomically with a lease, and creates the GitHub release last. RC releases are marked
+prerelease and never trigger stable upgrade notices. The stable commit is checked
+again even when its tree matches a green RC.
+
+Never move a published stable tag or rewrite a published release. Ship fixes as a new
+patch version. The local `refs/blerg-releases/<tag>` retains the generated public SHA.
+A failed CI gate can be retried without changing that SHA, provided the tree and parent
+are unchanged. If release creation fails after the atomic push, the tag stays immutable;
+the script refuses an existing tag. Inspect its exact SHA and CI evidence before manually
+creating the missing release with the same validated notes. Automatic recovery of that
+partial publication is not implemented. No failed API request counts as success.
+
+Before cutting 0.6.0, verify #298 and BLG-319 landed and retain upgrade acceptance
+results. The release script enforces green checks; it does not waive known flakes or
+independently certify those prerequisites.
 
 **How a running service reports its version.** Each service is stamped at build time from a
 `VERSION` build argument, and reports `dev` when none was given.
@@ -289,3 +386,37 @@ the workstation daemon that `daemon/install.sh` builds is stamped `dev` today.
 Blerg is licensed under the [Apache License 2.0](LICENSE). By submitting a
 contribution you agree that it is licensed under the same terms, as set out in
 section 5 of the license.
+
+**In-app What's New.** Each release adds its person-facing notes to
+`core/internal/releasenotes/notes/X.Y.Z.json` (version, title, and plain-text items).
+These files are the release's own in-app notes, embedded in core; no release-site
+request is made. Retain earlier entries so people who skip upgrades can read
+everything since their baseline. The bundled catalog has a 32 KiB limit checked
+by tests. Keep entries short and written for people; include this file when
+reviewing release notes.
+
+Core registers the current stamped release before accepting account creation,
+and registration never moves backward. New accounts inherit it silently. The
+first sign-in resets that baseline to the current release, even if the account
+was created several upgrades earlier. Later sign-ins retain unread notes.
+Migration 107 gives pre-feature accounts the 0.5.4 baseline.
+
+The browser uses runner's same-origin
+`GET /api/me/whats-new?release=X.Y.Z`; runner verifies the human token and calls
+core's internal `POST /internal/accounts/whats-new` with the account and live
+human-session proof. Core has no CORS or browser audience override. Reads never
+mark notes seen. Only `POST` to the runner route, from Done or Escape, acknowledges
+the displayed release. A rare simultaneous display across devices is allowed.
+Failed dismissals retain the dialog for retry.
+
+The dialog scales with the viewport and offers Maximize. Blocking questions,
+other dialogs, hidden tabs and a selected unattended worker defer automatic
+display. A version-button click opens the notes immediately, including over another dialog or a waiting question. Unstamped private builds are quiet.
+The release script refuses a missing, oversized, malformed or mismatched notes
+file; tests also require a notes file for the repository's current VERSION.
+
+Release candidates are tag-only publications after exact-SHA CI; they do not
+advance public `main`. Stable publication uses current public `main` as its parent
+and requires an unchanged accepted candidate tree. Dry runs do not reserve a
+`refs/blerg-releases/<version>` identity; only `--push` records that identity
+immediately before the publication gate.

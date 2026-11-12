@@ -42,7 +42,7 @@ describe('ToastContainer', () => {
 
   it('session toast has data-testid="toast-session"', () => {
     useToastStore.setState({
-      toasts: [{ id: 1, title: 'Session waiting', body: 'foo', variant: 'session' }],
+      toasts: [{ id: 1, title: 'Workspace waiting', body: 'foo', variant: 'session' }],
     })
     renderContainer()
     expect(screen.getByTestId('toast-session')).toBeInTheDocument()
@@ -67,7 +67,7 @@ describe('ToastContainer', () => {
   it('session and message toasts use one surface', () => {
     useToastStore.setState({
       toasts: [
-        { id: 1, title: 'Session', body: 'A', variant: 'session' },
+        { id: 1, title: 'Workspace', body: 'A', variant: 'session' },
         { id: 2, title: 'Message', body: 'B', variant: 'message' },
       ],
     })
@@ -81,7 +81,7 @@ describe('ToastContainer', () => {
   it('message and session titles use the popover typography', () => {
     useToastStore.setState({
       toasts: [
-        { id: 1, title: 'Session', body: 'A', variant: 'session' },
+        { id: 1, title: 'Workspace', body: 'A', variant: 'session' },
         { id: 2, title: 'Message', body: 'B', variant: 'message' },
       ],
     })

@@ -3,6 +3,7 @@ package mcpconn
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/url"
 	"time"
@@ -31,7 +32,7 @@ func (s *Service) loadOAuth(ctx context.Context, accountID, id string) (oauthRow
 	var keyID *string
 	err := s.st.Pool().QueryRow(ctx,
 		`SELECT url, status, secret_ciphertext, key_id FROM mcp_connections
-		  WHERE id = $1 AND account_id = $2 AND auth_kind = 'oauth'`, id, accountID).Scan(&r.url, &status, &r.ct, &keyID)
+		  WHERE runner_session_id IS NULL AND id = $1 AND account_id = $2 AND auth_kind = 'oauth'`, id, accountID).Scan(&r.url, &status, &r.ct, &keyID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return oauthRow{}, ErrNotFound
 	}
@@ -136,10 +137,10 @@ func (s *Service) doRefresh(ctx context.Context, accountID, id string) (SecretRe
 	if err != nil {
 		var te *tokenError
 		if errors.As(err, &te) && te.rejected {
-			log.Printf("mcpconn: oauth refresh rejected for connection %s (status %d, code %q): needs_auth", id, te.status, te.code)
+			log.Printf("mcpconn: oauth refresh rejected for connection %s status=%d code=%s cause=%s: needs_auth", id, te.status, te.code, FailureCause(err))
 			return s.markNeedsAuth(ctx, id, row.ct)
 		}
-		log.Printf("mcpconn: oauth refresh failed for connection %s: provider unreachable or erroring (transient)", id)
+		log.Printf("mcpconn: oauth refresh failed for connection %s cause=%s (transient)", id, FailureCause(err))
 		if b.ExpiresAt.Sub(s.oauthTime()) > 0 {
 			return row.result(b), nil
 		}
@@ -156,7 +157,7 @@ func (s *Service) doRefresh(ctx context.Context, accountID, id string) (SecretRe
 		// The provider rotated the refresh token but the new bundle could not be stored. The old
 		// refresh token is spent, so the connection will need reconnecting once this access
 		// token runs out. Say so, without any token; the new access token is still valid now.
-		log.Printf("mcpconn: connection %s: the rotated oauth refresh token could not be stored (%v): the connection will need to be reconnected", id, err)
+		log.Printf("mcpconn: connection %s: rotated token persistence failed cause=%s; reconnect required", id, FailureCause(err))
 		return row.result(nb), nil
 	case stored:
 		return row.result(nb), nil
@@ -193,7 +194,7 @@ func (s *Service) storeRotated(ctx context.Context, id, accountID string, old []
 		var tag pgconn.CommandTag
 		if tag, err = s.st.Pool().Exec(pctx,
 			`UPDATE mcp_connections SET secret_ciphertext = $1, key_id = $2, last_verified_at = now(), updated_at = now()
-			  WHERE id = $3 AND account_id = $4 AND auth_kind = 'oauth' AND secret_ciphertext = $5`,
+			  WHERE runner_session_id IS NULL AND id = $3 AND account_id = $4 AND auth_kind = 'oauth' AND secret_ciphertext = $5`,
 			ct, keyID, id, accountID, old); err != nil {
 			continue
 		}
@@ -207,7 +208,7 @@ func (s *Service) storeRotated(ctx context.Context, id, accountID string, old []
 // uniform not-found either way.
 func (s *Service) markNeedsAuth(ctx context.Context, id string, ct []byte) (SecretResult, error) {
 	if _, err := s.st.Pool().Exec(ctx,
-		`UPDATE mcp_connections SET status = 'needs_auth', updated_at = now() WHERE id = $1 AND secret_ciphertext = $2`, id, ct); err != nil {
+		`UPDATE mcp_connections SET status = 'needs_auth', updated_at = now() WHERE runner_session_id IS NULL AND id = $1 AND secret_ciphertext = $2`, id, ct); err != nil {
 		return SecretResult{}, err
 	}
 	return SecretResult{}, ErrNotFound
@@ -218,6 +219,7 @@ func (s *Service) markNeedsAuth(ctx context.Context, id string, ct []byte) (Secr
 // Failures are logged without any token and never returned.
 func (s *Service) revokeUpstream(ctx context.Context, b tokenBundle) {
 	if b.RevocationEndpoint == "" {
+		log.Printf("mcpconn: upstream revocation cause=unsupported")
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revokeOpTimeout)
@@ -227,23 +229,32 @@ func (s *Service) revokeUpstream(ctx context.Context, b tokenBundle) {
 			continue
 		}
 		if err := s.revokeOne(ctx, b, t.token, t.hint); err != nil {
-			log.Printf("mcpconn: upstream revocation (%s) failed: %v", t.hint, err)
+			log.Printf("mcpconn: upstream revocation (%s) failed cause=%s", t.hint, FailureCause(err))
 		}
 	}
+}
+
+type revocationError struct {
+	cause  string
+	status int
+}
+
+func (e *revocationError) Error() string {
+	return fmt.Sprintf("revocation cause=%s status=%d", e.cause, e.status)
 }
 
 func (s *Service) revokeOne(ctx context.Context, b tokenBundle, token, hint string) error {
 	req, err := newFormRequest(ctx, b.RevocationEndpoint, url.Values{"token": {token}, "token_type_hint": {hint}}, b)
 	if err != nil {
-		return errors.New("bad endpoint")
+		return &revocationError{cause: "endpoint"}
 	}
 	resp, err := s.httpc.Do(req)
 	if err != nil {
-		return errors.New("request failed")
+		return &revocationError{cause: "transport"}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
-		return errors.New("provider answered " + resp.Status)
+		return &revocationError{cause: "http_status", status: resp.StatusCode}
 	}
 	return nil
 }

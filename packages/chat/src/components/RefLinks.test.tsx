@@ -2,10 +2,10 @@
 // until confirmed, then link in place; prose that names no card, a hex word that is no commit, and
 // anything in a fenced code block stay text; lookups are batched and asked once.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, renderHook, screen } from '@testing-library/react'
 import Markdown from './Markdown'
 import DiffView from './DiffView'
-import { RefContext, type RefContextValue } from './RefLinks'
+import { RefContext, ReferenceText, useChipOpener, type RefContextValue } from './RefLinks'
 import { CommitViewerHost } from './CommitViewer'
 import { createRefStore, DEBOUNCE_MS, splitRefs, type ChatRefs, type RefStore } from '../model/refs'
 import type { CardTarget } from './Hovercard'
@@ -17,7 +17,7 @@ function cardsReader(exists: number[]) {
   return vi.fn(async (numbers: number[]) => new Map(numbers.filter(n => exists.includes(n)).map(n => [n, { kind: 'card', source: 'blerg-board', key: `#${n}`, boardId: 'b1', title: `Card ${n}` } as CardTarget])))
 }
 
-function setup(text: string, opts: { cards?: ChatRefs['cards']; boardCards?: ChatRefs['boardCards']; commit?: (sha: string) => Promise<string | null>; openCard?: ChatRefs['openCard'] } = {}) {
+function setup(text: string, opts: { references?: boolean; cards?: ChatRefs['cards']; boardCards?: ChatRefs['boardCards']; commit?: (sha: string) => Promise<string | null>; openCard?: ChatRefs['openCard'] } = {}) {
   const store: RefStore = createRefStore()
   store.setResolvers({ cards: opts.cards, boardCards: opts.boardCards, commit: opts.commit ?? null })
   const refs: ChatRefs = { cards: opts.cards, boardCards: opts.boardCards, openCard: opts.openCard ?? vi.fn(), commits: !!opts.commit }
@@ -25,7 +25,7 @@ function setup(text: string, opts: { cards?: ChatRefs['cards']; boardCards?: Cha
   const files = { commitDiff: vi.fn(async () => null) } as unknown as TransportFiles
   const view = render(
     <CommitViewerHost files={files}>
-      <RefContext.Provider value={ctx}><Markdown text={text} /></RefContext.Provider>
+      <RefContext.Provider value={ctx}><Markdown text={text} references={opts.references} /></RefContext.Provider>
     </CommitViewerHost>,
   )
   return { store, view }
@@ -47,6 +47,18 @@ describe('splitRefs', () => {
 })
 
 describe('references in chat text', () => {
+  it('turns a card created after a miss into a link without remounting', async () => {
+    const exists: number[] = []
+    const cards = cardsReader(exists)
+    setup('See #147.', { cards })
+    await settle()
+    expect(screen.queryByTestId('md-ref')).toBeNull()
+    exists.push(147)
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000 + DEBOUNCE_MS) })
+    expect(screen.getByTestId('md-ref')).toHaveTextContent('#147')
+    expect(cards).toHaveBeenCalledTimes(2)
+  })
+
   it('"#1 priority" with no such card stays text, with no layout change', async () => {
     const cards = cardsReader([147])
     setup('This is our #1 priority.', { cards })
@@ -247,4 +259,113 @@ it.each([false, true])('renders canonical card chips in commit subjects and bodi
   render(<RefContext.Provider value={{ store, sessionId:'s', refs }}><DiffView text={withPatch ? text : text.split('diff --git')[0]} /></RefContext.Provider>)
   await settle()
   expect(screen.getAllByTestId('md-ref').map(b => b.textContent)).toEqual(['BLG-205', 'BLG-206'])
+})
+
+describe('useChipOpener (BLG-468: diagram chips)', () => {
+  it('is undefined outside a RefContext', () => {
+    const { result } = renderHook(() => useChipOpener())
+    expect(result.current).toBeUndefined()
+  })
+
+  it('wants the key, then opens it once the store resolves it as a card', async () => {
+    const store = createRefStore()
+    const openCard = vi.fn()
+    store.setResolvers({ cards: cardsReader([468]), commit: null })
+    const ctx: RefContextValue = { store, sessionId: 's1', refs: { cards: cardsReader([468]), openCard } }
+    const { result } = renderHook(() => useChipOpener(), {
+      wrapper: ({ children }) => <RefContext.Provider value={ctx}>{children}</RefContext.Provider>,
+    })
+    act(() => result.current!('card:468'))
+    expect(openCard).not.toHaveBeenCalled() // not yet resolved
+    await settle()
+    expect(openCard).toHaveBeenCalledWith(expect.objectContaining({ key: '#468' }))
+  })
+
+  it('does nothing for a key that resolves to no such card', async () => {
+    const store = createRefStore()
+    const openCard = vi.fn()
+    store.setResolvers({ cards: cardsReader([]), commit: null })
+    const ctx: RefContextValue = { store, sessionId: 's1', refs: { cards: cardsReader([]), openCard } }
+    const { result } = renderHook(() => useChipOpener(), {
+      wrapper: ({ children }) => <RefContext.Provider value={ctx}>{children}</RefContext.Provider>,
+    })
+    act(() => result.current!('card:999'))
+    await settle()
+    expect(openCard).not.toHaveBeenCalled()
+  })
+
+  it('opens immediately when the key is already resolved', () => {
+    const store = createRefStore()
+    const openCard = vi.fn()
+    store.setResolvers({ cards: cardsReader([468]), commit: null })
+    store.want('card:468')
+    const ctx: RefContextValue = { store, sessionId: 's1', refs: { openCard } }
+    const { result } = renderHook(() => useChipOpener(), {
+      wrapper: ({ children }) => <RefContext.Provider value={ctx}>{children}</RefContext.Provider>,
+    })
+    // Pre-resolve outside the hook (as if another part of the page already asked for this card).
+    return settle().then(() => {
+      act(() => result.current!('card:468'))
+      expect(openCard).toHaveBeenCalledWith(expect.objectContaining({ key: '#468' }))
+    })
+  })
+
+  it('returns a stable function across re-renders with the same context', () => {
+    const store = createRefStore()
+    const ctx: RefContextValue = { store, sessionId: 's1', refs: { openCard: vi.fn() } }
+    const { result, rerender } = renderHook(() => useChipOpener(), {
+      wrapper: ({ children }) => <RefContext.Provider value={ctx}>{children}</RefContext.Provider>,
+    })
+    const first = result.current
+    rerender()
+    expect(result.current).toBe(first)
+  })
+})
+
+for (const surface of ['markdown', 'text'] as const) describe(`${surface} GitHub issue references`, () => {
+  it.each([
+    'example-org/example-repo#19',
+    'example-org/example-repo issue #19',
+    'example-org/example-repo issues #19, #20, #22 and #23',
+  ])('links %s externally without card lookups', async text => {
+    const cards = cardsReader([19, 20, 22, 23])
+    if (surface === 'markdown') setup(text, { cards })
+    else {
+      const store = createRefStore()
+      store.setResolvers({ cards, commit: null })
+      render(<RefContext.Provider value={{ store, sessionId: 'issues', refs: { cards, openCard: vi.fn() } }}><ReferenceText text={text} /></RefContext.Provider>)
+    }
+    await settle()
+    expect(screen.queryByTestId('md-ref')).toBeNull()
+    expect(cards).not.toHaveBeenCalled()
+    const numbers = [...text.matchAll(/#(\d+)/g)].map(m => m[1])
+    expect(screen.getAllByRole('link').map(link => link.getAttribute('href'))).toEqual(numbers.map(n => `https://github.com/example-org/example-repo/issues/${n}`))
+    expect(document.body.textContent).toBe(text)
+  })
+
+  it('keeps bare and canonical cards alongside separate repository issue lists', async () => {
+    const text = 'example-org/example-repo issues #19, #20 and #23; card #19 and BLG-19; other-org/other-repo#22.'
+    const cards = cardsReader([19, 20, 22, 23])
+    const boardCards = vi.fn(async () => new Map([[19, { kind: 'card', source: 'blerg-board', key: 'BLG-19', boardId: 'b1' } as CardTarget]]))
+    if (surface === 'markdown') setup(text, { cards, boardCards })
+    else {
+      const store = createRefStore()
+      store.setResolvers({ cards, boardCards, commit: null })
+      render(<RefContext.Provider value={{ store, sessionId: 'mixed', refs: { cards, boardCards, openCard: vi.fn() } }}><ReferenceText text={text} /></RefContext.Provider>)
+    }
+    await settle()
+    expect(cards).toHaveBeenCalledExactlyOnceWith([19])
+    expect(boardCards).toHaveBeenCalledExactlyOnceWith('BLG', [19])
+    expect(screen.getAllByTestId('md-ref')).toHaveLength(2)
+    expect(screen.getAllByRole('link')).toHaveLength(4)
+  })
+})
+
+it('keeps question titles free of reference controls without enabling image loads', async () => {
+ const cards = cardsReader([147])
+ setup('Review #147 ![diagram](https://example.com/image.png)', {cards, references:false})
+ await settle()
+ expect(cards).not.toHaveBeenCalled()
+ expect(screen.queryByRole('button',{name:/Open card/})).toBeNull()
+ expect(document.querySelector('img')).toBeNull()
 })

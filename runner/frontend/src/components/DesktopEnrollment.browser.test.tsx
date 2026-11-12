@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { page } from 'vitest/browser'
@@ -14,7 +15,7 @@ vi.mock('../ws', () => import('../test/wsMock'))
 vi.mock('../authClient', async original => ({ ...await original<typeof import('../authClient')>(), getAccessToken: () => null, ensureFreshToken: async () => true }))
 afterEach(() => { invalidateChatTransport(); vi.unstubAllGlobals() })
 
-it.each([390, 3840])('keeps an enrolled chat mounted without skeleton flashes at %i px, but clears reassigned sources', async width => {
+it.each(browserWidths([390, 3840]))('keeps an enrolled chat mounted without skeleton flashes at %i px, but clears reassigned sources', async width => {
   await page.viewport(width, 900)
   ws.send.mockReturnValue(true)
   vi.stubGlobal('fetch', vi.fn(async () => new Response('[]')))

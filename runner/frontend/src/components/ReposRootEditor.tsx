@@ -150,7 +150,7 @@ export default function ReposRootEditor({ daemonId, daemonName, reposRoot, onCha
         </div>
         {applied && (
           <p data-testid="repos-root-applied" role="status" style={{ margin: '4px 0 0', fontSize: '0.72rem', color: 'var(--amber)' }}>
-            ✓ Applied — new sessions on {daemonName} use this folder.
+            ✓ Applied — new workspaces on {daemonName} use this folder.
           </p>
         )}
       </div>
@@ -202,7 +202,7 @@ export default function ReposRootEditor({ daemonId, daemonName, reposRoot, onCha
         </p>
       ) : (
         <p style={{ margin: '4px 0 0', fontSize: '0.72rem', color: 'var(--fog-dim)' }}>
-          An absolute path on that machine; it's created if missing. Running sessions aren't moved.
+          An absolute path on that machine; it's created if missing. Running workspaces aren't moved.
         </p>
       )}
     </form>

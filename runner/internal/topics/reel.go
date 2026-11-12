@@ -36,11 +36,16 @@ type Artifact struct {
 // still run something; EndedAt is its end, once it ended; ShowTokens is the Insights rule's answer;
 // CommitURL is a commit's web page in the session's repository ("" or nil: not known).
 type Options struct {
-	ThroughSeq int64
-	Live       bool
-	EndedAt    *time.Time
-	ShowTokens bool
-	CommitURL  func(sha string) string
+	// PageStrokes limits feed entries to this recording-sequence window while keeping
+	// pending attention visible. Lifecycle context outside the page only resolves state.
+	PageStrokes     bool
+	StrokeMinSeq    int64
+	StrokeBeforeSeq int64
+	ThroughSeq      int64
+	Live            bool
+	EndedAt         *time.Time
+	ShowTokens      bool
+	CommitURL       func(sha string) string
 	// AskClosed names the asks (by message id) closed without an answer (the messages rows).
 	AskClosed map[string]bool
 	// AskDismissed names the asks the person dismissed from Needs you (also in AskClosed).
@@ -295,7 +300,13 @@ func Build(events []Event, arts []Artifact, opt Options) Reel {
 		reel.Topics = append(reel.Topics, *wins[i])
 	}
 	reel.Unmarked = unmarked(rest)
-	reel.Strokes, reel.StrokesTruncated = CapStrokes(strokes(events, wins, opt), MaxStrokes)
+	if opt.PageStrokes {
+		// The database already bounds this page. Keep all of it, including old
+		// backdated marks and pending context, without silently dropping a cursor row.
+		reel.Strokes = strokes(events, wins, opt)
+	} else {
+		reel.Strokes, reel.StrokesTruncated = CapStrokes(strokes(events, wins, opt), MaxStrokes)
+	}
 	return reel
 }
 

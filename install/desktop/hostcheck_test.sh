@@ -99,6 +99,24 @@ mkbin "$tmp/bin-nocurl"
 out="$(PATH="$tmp/bin-nocurl" ./blerg-up.sh --no-daemon 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q "curl isn't installed" <<<"$out" || t "missing curl not reported (rc=$rc)"
 
+# --- Python is needed for personal desktop enrollment, before any Docker work.
+mkbin "$tmp/bin-nopython" curl docker
+rm "$tmp/bin-nopython/python3"
+cat > "$tmp/bin-nopython/docker" <<'EOS'
+#!/bin/sh
+echo called >> "$STUB_DOCKER_LOG"
+exit 1
+EOS
+chmod +x "$tmp/bin-nopython/docker"
+for script in ./blerg-up.sh './daemon/install.sh preflight' './daemon/install.sh install'; do
+  : > "$tmp/python-docker.log"
+  # Word splitting supplies the daemon subcommand; paths above have no spaces.
+  out="$(PATH="$tmp/bin-nopython" STUB_DOCKER_LOG="$tmp/python-docker.log" $script 2>&1)"; rc=$?
+  [ "$rc" != 0 ] && grep -q "Python 3 isn't installed" <<<"$out" || t "$script: missing Python not reported (rc=$rc)"
+  grep -q 'sudo apt install python3' <<<"$out" || t "$script: missing Python has no repair command"
+  [ ! -s "$tmp/python-docker.log" ] || t "$script: contacted Docker before checking Python"
+done
+
 # --- first-run setup: where the person creates the first account (stub curl and docker)
 mkbin "$tmp/bin-setup"
 cat > "$tmp/bin-setup/curl" <<'EOS'

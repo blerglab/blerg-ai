@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import SessionMcpSignIn from "./SessionMcpSignIn";
 import { apiFetch } from "./apiFetch";
 import type { Site } from "./Shell";
 
@@ -26,11 +27,11 @@ type ConnectionList = { connections: Connection[]; max: number };
 type ConnEvent = { id: number; action: string; from_value: string; to_value: string; created_at: string };
 const POLICY_LABEL: Record<string, string> = { strict: "Ask me", auto_accept: "Accept automatically" };
 const POLICY_HELP =
-  "Accept automatically trusts this server to change what an agent may do without asking you, and a changed description can steer the agent's use of your other connections and the session's own tools. Use it only for servers your organization runs. Takes effect in running sessions within five minutes.";
+  "Accept automatically trusts this server to change what an agent may do without asking you, and a changed description can steer the agent's use of your other connections and the workspace's own tools. Use it only for servers your organization runs. Takes effect in running workspaces within five minutes.";
 type AuthKind = "static" | "oauth" | "none";
 type Editing = { id: string; mode: "rename" | "secret" | "remove" };
 
-const SESSION_EXPIRED = "Your session has expired. Reload the page to sign in again.";
+const SESSION_EXPIRED = "Your sign-in has expired. Reload the page to sign in again.";
 const DEFAULT_HEADER = "Authorization";
 const DEFAULT_MAX = 20;
 const NAME_HINT = "Lowercase letters, digits and hyphens, up to 32 characters, starting with a letter or digit.";
@@ -38,8 +39,8 @@ const NAME_HINT = "Lowercase letters, digits and hyphens, up to 32 characters, s
 const BAD_SIGN_IN_URL =
   "The server returned what is not a valid https sign-in address, so you were not redirected.";
 const NEEDS_AUTH_TEXT =
-  "Sign-in expired or was revoked \u2014 sessions and crons that use this connection cannot run until you reconnect";
-const ERROR_TEXT = "This connection could not be reached or verified. Sessions and crons that use it may fail.";
+  "Sign-in expired or was revoked \u2014 workspaces and crons that use this connection cannot run until you reconnect";
+const ERROR_TEXT = "This connection could not be reached or verified. Workspaces and crons that use it may fail.";
 
 // Friendly text for the callback's ?mcp_oauth=error&reason=<word>. Only these words are mapped;
 // anything else (including raw query text) gets the generic message and is never displayed.
@@ -359,9 +360,10 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
 
   return (
     <section className="settings-section section">
-      <p className="eyebrow">Sessions</p>
+      <p className="eyebrow">Workspaces</p>
       <h2 className="settings-heading section-title">MCP connections</h2>
-      <p className="settings-description">Connect external tools that you can choose for your sessions.</p>
+      <p className="settings-description">Connect external tools that you can choose for your workspaces.</p>
+ <SessionMcpSignIn />
 
       {loading && <p className="muted">Loading…</p>}
       {error && (
@@ -390,7 +392,7 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
           </p>
           {connections.length === 0 ? (
             <p className="muted">
-              No MCP connections yet. Add one below, then select it when you start a session.
+              No MCP connections yet. Add one below, then select it when you start a workspace.
             </p>
           ) : (
             <ul className="card-list">
@@ -564,7 +566,7 @@ export default function McpConnectionsSection({ site }: { site?: Site | null }) 
                     {mode === "remove" && (
                       <div role="group" aria-label={`Confirm removing ${c.name}`}>
                         <p className="field-help">
-                          Remove {c.name}? Sessions and crons that use it lose access to its tools.
+                          Remove {c.name}? Workspaces and crons that use it lose access to its tools.
                           {c.auth_kind === "oauth" &&
                             " The access you granted is also revoked at the provider where the provider supports it."}
                         </p>

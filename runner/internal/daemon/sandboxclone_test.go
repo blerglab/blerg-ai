@@ -149,6 +149,9 @@ func TestSandboxedChildWithoutACloneIsRefused(t *testing.T) {
 
 func cloneFixture(t *testing.T, id string) (repo, clone string) {
 	t.Helper()
+	dockerDir, dockerLog := fakeDocker(t)
+	t.Setenv("PATH", dockerDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_DOCKER_LOG", dockerLog)
 	t.Setenv(DaemonStateDirEnv, t.TempDir())
 	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")

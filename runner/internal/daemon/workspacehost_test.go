@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -52,7 +53,7 @@ func TestAgentWorkspaceReadUsesOwnFolderAndNeverResumes(t *testing.T) {
 		t.Fatalf("ended session read: %+v", r)
 	}
 }
-func TestManagerWorkspaceReadRoutesAgentAndTerminalFolders(t *testing.T) {
+func TestManagerWorkspaceReadRoutesAgentAndLegacyAgentFolders(t *testing.T) {
 	host, sender, dir := newTestHost(t, &scriptedAgentProvider{}, "")
 	host.Spawn(protocol.SpawnSession{SessionID: "workspace", Repo: "proj", Kind: "agent"})
 	defer host.Kill("workspace")
@@ -75,7 +76,7 @@ func TestManagerWorkspaceReadRoutesAgentAndTerminalFolders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager.sessions["terminal"] = &Session{ProjectPath: t.TempDir(), workspace: terminalDir, workspaceInfo: info, done: ended}
+	bindLegacyAgentFixture(t, manager, "terminal", terminalDir, info, false, ended)
 	raw, _ = json.Marshal(protocol.ReadWorkspaceFile{RequestID: "terminal", SessionID: "terminal", Path: "fixture.txt"})
 	manager.handleReadWorkspaceFile(raw)
 	got := waitWorkspaceResult(t, sender, "terminal")
@@ -85,7 +86,7 @@ func TestManagerWorkspaceReadRoutesAgentAndTerminalFolders(t *testing.T) {
 	}
 	// Reattachment uses a different PTY cwd; reads enter a separate runtime helper.
 	remote := processExplorer(t, terminalDir, legacyExplorerStart("terminal"))
-	manager.BindWorkspaceExplorer("terminal", &legacySandboxExplorer{id: "terminal", alias: terminalDir, live: func() bool {
+	manager.agents.BindWorkspaceExplorer("terminal", &legacySandboxExplorer{id: "terminal", alias: terminalDir, live: func() bool {
 		select {
 		case <-ended:
 			return false
@@ -94,7 +95,7 @@ func TestManagerWorkspaceReadRoutesAgentAndTerminalFolders(t *testing.T) {
 		}
 	}, remote: remote})
 	for i, name := range []string{filepath.Join(terminalDir, "fixture.txt"), "/workspace/fixture.txt"} {
-		manager.sessions["terminal"].sandboxed = true
+		manager.agents.get("terminal").sandboxed = true
 		request := fmt.Sprintf("terminal-absolute-%d", i)
 		raw, _ = json.Marshal(protocol.ReadWorkspaceFile{RequestID: request, SessionID: "terminal", Path: name})
 		manager.handleReadWorkspaceFile(raw)
@@ -276,4 +277,14 @@ func TestProjectReadmeSymlinkRoots(t *testing.T) {
 			})
 		}
 	}
+}
+
+func bindLegacyAgentFixture(t *testing.T, manager *Manager, id, root string, info os.FileInfo, sandboxed bool, ended <-chan struct{}) {
+	t.Helper()
+	if manager.agents == nil {
+		manager.agents = NewAgentHost(manager.client, AgentHostConfig{})
+	}
+	sess := &agentSession{workspace: root, workspaceInfo: info, sandboxed: sandboxed, runDone: ended, workspaceCtx: context.Background(), loop: &fakeRefreshDriver{}}
+	sess.status.Store("idle")
+	manager.agents.sessions[id] = sess
 }

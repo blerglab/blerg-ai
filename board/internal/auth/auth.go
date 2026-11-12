@@ -32,6 +32,7 @@ const (
 
 // Principal is the resolved identity of a request.
 type Principal struct {
+	PersonBehind  bool   // verified signed Core exchange proof; never set from request headers
 	CoreAccountID string // verified Core on_behalf_of, never supplied by a native Board token
 	Kind          Kind
 	Token         *db.Token // set for service and agent
@@ -259,7 +260,7 @@ func corePrincipal(s coreauth.Synthesized) Principal {
 		}
 		tok.BoardID = &board
 	}
-	return Principal{Kind: kind, FromCore: true, Token: tok, CoreAccountID: s.OnBehalfOf}
+	return Principal{Kind: kind, FromCore: true, Token: tok, CoreAccountID: s.OnBehalfOf, PersonBehind: s.PersonBehind}
 }
 
 // invalidProjectBoard is the board a token with a malformed Project claim is
@@ -405,4 +406,15 @@ func (p Principal) requireCapability(boardID, capability string) error {
 		return fmt.Errorf("token lacks capability %s", capability)
 	}
 	return nil
+}
+
+// RequireArchive keeps ordinary card.write credentials from archiving directly.
+func (p Principal) RequireArchive(boardID string) error {
+	if err := p.RequireBoard(boardID, "card.write"); err != nil {
+		return err
+	}
+	if p.IsHuman() || p.IsNativeService() || (p.FromCore && p.PersonBehind) {
+		return nil
+	}
+	return errors.New("archiving requires a person behind the board access")
 }

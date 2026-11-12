@@ -2,7 +2,7 @@
 // run-sessions agent token for the person signed in to the board (POST
 // /internal/tokens/board-automation), and to revoke one it minted earlier (.../revoke).
 //
-// Authentication is BLERG_CORE_BOARD_MINT_KEY, a key that opens only those two routes on core
+// Authentication is BLERG_CORE_BOARD_MINT_KEY, a key that opens only the mint, revoke, and credential-bound identity routes on core
 // (not the internal key, which reads engine credentials). The person is proved by the
 // board-audience access token their browser sent the board on the same request; core verifies
 // it as its own token and checks that its browser session is live. The board never sees the
@@ -181,4 +181,23 @@ func (c *Client) Revoke(ctx context.Context, accountID, tokenID, boardID string)
 		return nil
 	}
 	return statusErr(resp.StatusCode)
+}
+
+// Identity asks only for the username belonging to this verified credential.
+func (c *Client) Identity(ctx context.Context, accessToken string) (string, error) {
+	resp, err := c.post(ctx, "/internal/tokens/board-automation/identity", map[string]string{"access_token": accessToken})
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return "", statusErr(resp.StatusCode)
+	}
+	var out struct {
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<10)).Decode(&out); err != nil {
+		return "", ErrUnavailable
+	}
+	return out.Username, nil
 }

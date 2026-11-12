@@ -285,13 +285,13 @@ func TestHermesApprovalQuestionIsPostedOwnerOnly(t *testing.T) {
 
 // Closing an ask posts an empty answer to the reply route; a refusal there is
 // logged instead of leaving a live card behind silently.
-func TestCloseAskPostsEmptyAnswerAndLogsRefusal(t *testing.T) {
+func TestCloseAskExpiresWithoutAnswerAndLogsRefusal(t *testing.T) {
 	type call struct{ path, auth, body string }
 	calls := make(chan call, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		calls <- call{r.URL.Path, r.Header.Get("Authorization"), string(raw)}
-		w.WriteHeader(http.StatusForbidden)
+		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte(`{"error":"refused"}`))
 	}))
 	defer server.Close()
@@ -303,7 +303,7 @@ func TestCloseAskPostsEmptyAnswerAndLogsRefusal(t *testing.T) {
 	m.CloseAsk("ask-1", "")
 	select {
 	case c := <-calls:
-		if c.path != "/api/messages/ask-1/reply" || c.auth != "Bearer fixture-token" || strings.TrimSpace(c.body) != `{"answer":""}` {
+		if c.path != "/api/messages/ask-1/expire" || c.auth != "Bearer fixture-token" || strings.TrimSpace(c.body) != `{}` {
 			t.Fatalf("close posted %+v", c)
 		}
 	case <-time.After(10 * time.Second):
@@ -312,10 +312,24 @@ func TestCloseAskPostsEmptyAnswerAndLogsRefusal(t *testing.T) {
 	waitUntil(t, "refused close logged", func() bool {
 		logMu.Lock()
 		defer logMu.Unlock()
-		return strings.Contains(logged.String(), "closing ask ask-1") && strings.Contains(logged.String(), "403")
+		return strings.Contains(logged.String(), "closing ask ask-1") && strings.Contains(logged.String(), "502")
 	})
 }
 
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+func TestHermesApprovalReadsOnlyTheRawAnswer(t *testing.T) {
+	for _, tc := range []struct{ answer, want string }{
+		{"1", "once"},
+		{"[Answered by the person.]\n1", "deny"},
+		{"[Answered by the parent session.]\n1", "deny"},
+		{"[Answer source not recorded.]\n1", "deny"},
+	} {
+		_, got := hermesApprovalAnswer(t, tc.answer, []string{"once", "deny"})
+		if got != tc.want {
+			t.Errorf("labelled approval %q = %q, want %q", tc.answer, got, tc.want)
+		}
+	}
+}

@@ -1,3 +1,5 @@
+import { openInsights } from '../lib/openInsights'
+import { openSessionBoard } from '../lib/openSessionBoard'
 import RuntimeIcon from './RuntimeIcon'
 import { openSessionFile } from '../lib/openSessionFile'
 import { useEffect, useMemo, useState } from 'react'
@@ -14,7 +16,7 @@ import { WorkspaceFileViewer, type Ticket } from '@blerglab/chat'
 import type { PaletteCommand, PaletteProvider } from '../commands/registry'
 import { useBoardOrigin, loadBoardOrigin } from '../lib/boardLink'
 import { signedInAccount } from '../lib/liveBoardCard'
-import { boardPageUrl } from '../lib/sessionBoardLinks'
+import { boardPageUrl, useSessionBoardLinks } from '../lib/sessionBoardLinks'
 import { recentSessionIds, recentSessionOrder, rememberSessionVisit } from '../lib/recentSessions'
 
 export default function RunnerCommands({ onNewSession }: { onNewSession(): void }) {
@@ -27,6 +29,7 @@ export default function RunnerCommands({ onNewSession }: { onNewSession(): void 
   const sessionId = location.pathname.match(/^\/sessions\/([^/]+)\/?$/)?.[1]
   const session = sessions.find(s => s.id === sessionId)
   const activeSessionId = session?.id
+  const boardLinks = useSessionBoardLinks(activeSessionId ?? '')
   const account = signedInAccount()
   // Read on every render: a visit recorded by the effect below shows the next time the palette opens.
   const visited = recentSessionIds(account)
@@ -34,15 +37,15 @@ export default function RunnerCommands({ onNewSession }: { onNewSession(): void 
   const offered = useMemo(() => new Map(recentSessionOrder(sessions, visitedKey ? visitedKey.split(',') : [], sessionId).map((id, i) => [id, i])), [sessions, visitedKey, sessionId])
   const [viewing, setViewing] = useState<{ session: string; path: string; account: string } | null>(null)
   const items = useMemo<PaletteCommand[]>(() => [
-    { id: 'new-session', destructive: false, title: 'New session', keywords: 'Start a new session', empty: true, run: onNewSession },
+    { id: 'new-session', destructive: false, title: 'New workspace', keywords: 'Start a new workspace', empty: true, run: onNewSession },
     { id: 'settings', destructive: false, title: 'Settings', keywords: 'Open Settings', empty: true, run: () => setSettingsOpen(true) },
-    { id: 'open-board', destructive: false, title: 'Open board', empty: true, here: session ? 5 : undefined, run: () => { window.open(`${boardOrigin}/boards`, '_blank', 'noopener') } },
-    ...['Sessions', 'Insights', 'Crons', 'Proposals'].map(title => ({ id: `page:${title}`, destructive: false, title: `Open ${title}`, run: () => navigate(`/${title.toLowerCase()}`) })),
+    { id: 'open-board', destructive: false, title: 'Open board', empty: true, here: session ? 5 : undefined, run: () => { const board = boardLinks[0]; if (activeSessionId && board && openSessionBoard(activeSessionId, board.id, board.name)) return; window.open(`${boardOrigin}/boards`, '_blank', 'noopener') } },
+    ...['Sessions', 'Insights', 'Crons', 'Proposals'].map(title => ({ id: `page:${title}`, destructive: false, title: `Open ${title === 'Sessions' ? 'Workspaces' : title}`, run: () => { if (title !== 'Insights' || !openInsights()) navigate(`/${title.toLowerCase()}`) } })),
     // Search finds every other session (archived, ended, cron runs); the empty palette offers only
     // the ones in `offered`. The session in view is never offered: it is already open.
     ...sessions.filter(s => s.id !== sessionId).map(s => ({ id: `session:${s.id}`, destructive: false, title: s.title, group: 'sessions' as const, repo: s.repo, recentAt: s.started_at, recentRank: offered.get(s.id), icon: <RuntimeIcon runtime={s.runtime} machine={s.daemon_id} />, detail: s.archived_at ? `${s.status} · archived` : s.status, run: () => navigate(`/sessions/${encodeURIComponent(s.id)}`) })),
-    ...(session ? [{ id: `quick-open:${session.id}`, destructive: false, title: 'Quick open session files', shortcut: 'Ctrl/⌘+P', here: 1, run: () => palette?.open('files') }] : []),
-  ], [navigate, onNewSession, palette, sessions, session, sessionId, boardOrigin, offered])
+    ...(session ? [{ id: `quick-open:${session.id}`, destructive: false, title: 'Quick open workspace files', shortcutGroup: 'Explorer' as const, shortcut: 'Ctrl/⌘+P', here: 1, run: () => palette?.open('files') }] : []),
+  ], [navigate, onNewSession, palette, sessions, session, sessionId, boardOrigin, offered, boardLinks, activeSessionId])
   const providers = useMemo<PaletteProvider[]>(() => [
     cardProvider(ticket => setCard({ ticket, account: signedInAccount() })),
     {
@@ -58,12 +61,12 @@ export default function RunnerCommands({ onNewSession }: { onNewSession(): void 
         const boards = reply.boards ?? []
         return { items: boards.map(board => ({
           id: `board:${board.id}`, destructive: false, title: `Open board: ${board.name}`,
-          run: () => { window.open(boardPageUrl(origin, board.id), '_blank', 'noopener') },
+          run: () => { if (!activeSessionId || !boardLinks.some(link => link.id === board.id && link.readable) || !openSessionBoard(activeSessionId, board.id, board.name)) window.open(boardPageUrl(origin, board.id), '_blank', 'noopener') },
         })) }
       },
     },
     ...(activeSessionId ? [workspaceProvider(activeSessionId, path => { const request = { session: activeSessionId, path, account: signedInAccount() }; if (!openSessionFile(request)) setViewing(request) })] : []),
-  ], [activeSessionId])
+  ], [activeSessionId, boardLinks])
   usePaletteCommands(items, providers)
   useEffect(() => {
     if (!sessionId) return

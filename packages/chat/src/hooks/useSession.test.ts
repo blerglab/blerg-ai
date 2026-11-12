@@ -285,3 +285,53 @@ describe('a send completing after navigation', () => {
     expect(hook.result.current.queued[0].text).toBe('For the first session')
   })
 })
+
+describe('Stop acts on current work', () => {
+ beforeEach(resetChatState)
+ it('does not send a stale turn identity after a new turn or restart', async () => {
+  const fake=createFakeTransport()
+  const calls: unknown[][]=[]
+  fake.transport.interrupt=async (...args: unknown[])=>{calls.push(args)}
+  const {result}=mount(fake)
+  act(()=>fake.emit({...ev(1),kind:'status_changed',payload:{status:'running',reason:'turn'}}))
+  const pressed=result.current.interrupt!
+  await act(async()=>pressed())
+  act(()=>{
+   fake.emit({...ev(2),kind:'status_changed',payload:{status:'idle',reason:'turn_done'}})
+   fake.emit({...ev(3),kind:'status_changed',payload:{status:'running',reason:'turn'}})
+  })
+  await act(async()=>pressed())
+  await act(async()=>result.current.interrupt!())
+  expect(calls).toEqual([[SESSION],[SESSION],[SESSION]])
+ })
+})
+
+// A live file's own republish (BLG-470) is never persisted and never replayed: a browser that
+// missed it (a reconnect, or a gap-driven backfill while the connection never dropped) only
+// catches up if something explicitly re-reads the file list.
+describe('useSession refetches the file list on reconnect and on a gap (BLG-470 round 2 #3)', () => {
+  beforeEach(resetChatState)
+
+  it('refetches after a reconnect, not on the first connect', async () => {
+    const t = createFakeTransport()
+    mount(t)
+    await act(async () => {})
+    const callsAfterMount = t.files!.listCalls
+
+    act(() => t.setConnected(false))
+    act(() => t.setConnected(true))
+    await act(async () => {})
+    expect(t.files!.listCalls).toBe(callsAfterMount + 1)
+  })
+
+  it('refetches when a gap-driven backfill runs (the connection never dropped)', async () => {
+    const t = createFakeTransport()
+    mount(t)
+    await act(async () => {})
+    const before = t.files!.listCalls
+
+    act(() => t.triggerArtifactsStale())
+    await act(async () => {})
+    expect(t.files!.listCalls).toBe(before + 1)
+  })
+})

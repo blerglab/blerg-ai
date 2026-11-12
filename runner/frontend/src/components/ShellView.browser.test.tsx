@@ -1,7 +1,8 @@
 import '../index.css'
 import './ShellWorkspace.css'
-import { act, render, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { expect, it, vi } from 'vitest'
+import { page, userEvent } from 'vitest/browser'
 import ShellView from './ShellView'
 import { FakeShell } from '../test/shellMock'
 import { restoreShells, ShellRateGroup } from '../shellTransport'
@@ -33,6 +34,22 @@ it('keeps terminal text on the cell grid so selection reaches the end of a line'
   }
   expect(getComputedStyle(row).letterSpacing).toMatch(/^(normal|0px)$/)
   expect(Math.abs(drawn - 60 * cell)).toBeLessThan(2)
+  view.unmount()
+})
+
+// BLG-484: a terminal keeps its own Ctrl/Cmd+A (xterm's hidden input textarea sends it straight to
+// the shell, as Ctrl+A always has); nothing in the app should turn it into a page-wide selection.
+it('sends Ctrl+A straight to the shell and never selects the page', async () => {
+  const shell = new FakeShell('ctrl-a')
+  const view = render(<><p>Page text behind</p><div className="shell-terminal" style={{ width: 900, height: 300, display: 'flex' }}><ShellView transport={shell} /></div></>)
+  await waitFor(() => expect(shell.resizes.length).toBeGreaterThan(0))
+  const textarea = view.container.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement
+  textarea.focus()
+  await userEvent.keyboard('{Control>}a{/Control}')
+  const sent = () => shell.inputs.map(bytes => new TextDecoder().decode(bytes))
+  await waitFor(() => expect(sent()).toContain('\u0001'))
+  expect(document.activeElement).toBe(textarea)
+  expect(window.getSelection()?.toString() ?? '').toBe('')
   view.unmount()
 })
 
@@ -160,4 +177,25 @@ it.each([
     expect(shell.endedMessage?.()).toBe('')
     view.unmount()
   } finally { vi.unstubAllGlobals() }
+})
+
+it.each([390,3840])('allows withdrawing one persistent host shell while disconnected at %i px',async width=>{
+ await page.viewport(width,900)
+ class HostShell extends FakeShell {
+  withdrew=false
+  async withdrawConsent(){this.withdrew=true;this.state?.('closed');return true}
+  endedMessage(){return 'This shell ended. Consent withdrawn. Cleanup is pending until the desktop reconnects.'}
+ }
+ const shell=new HostShell('offline-consent')
+ Object.assign(shell.info,{runtime:'host',persistent:true,consent_id:'acceptance',lifetime_until:2000000000})
+ shell.connectionState='disconnected'
+ const view=render(<div style={{width:'100%',height:800}}><ShellView transport={shell}/></div>)
+ const button=screen.getByRole('button',{name:'Withdraw consent'})
+ expect(button).toBeVisible()
+ const bounds=button.getBoundingClientRect();expect(bounds.left).toBeGreaterThanOrEqual(0);expect(bounds.right).toBeLessThanOrEqual(width)
+ await userEvent.click(button)
+ expect(shell.withdrew).toBe(true)
+ await waitFor(()=>expect(screen.getByText(/Cleanup is pending/)).toBeVisible())
+ expect(screen.queryByRole('button',{name:'Withdraw consent'})).not.toBeInTheDocument()
+ view.unmount()
 })

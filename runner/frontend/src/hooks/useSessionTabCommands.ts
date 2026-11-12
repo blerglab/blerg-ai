@@ -1,27 +1,31 @@
 import { useEffect, useMemo, useRef } from 'react'
 import { usePaletteCommands } from '../commands/context'
 import { ownsAppShortcut, visibleSurfaceIsOpen } from '../commands/shortcutOwnership'
-import { tabLabel, type SessionTabs } from './useSessionTabs'
+import { tabLabel, useSessionTitles, type SessionTabs } from './useSessionTabs'
 import { toggleWrapIn } from '@blerglab/chat'
 
 const blockingSurfaces = '[aria-modal="true"], dialog[open], [role="menu"], [popover]:popover-open, .confirm-popover'
 
 /** Session tab bindings share the palette's capture claim, IME and editor ownership policy. */
 export function useSessionTabCommands(sessionTabs: SessionTabs) {
-  const { active, tabs, select, close, groups, focused, phone, split, nextGroup, targetFor, tabFocused } = sessionTabs
+  const titles = useSessionTitles(sessionTabs.tabs, sessionTabs.labels)
+  const { active, tabs, select, close, groups, focused, phone, split, nextGroup, targetFor, tabFocused, requestShellRename } = sessionTabs
   const group = groups.find(group => group.id === focused)!
   const modifier = /Mac|iPhone|iPad|iPod/.test(navigator.platform) ? 'Control' : 'Alt'
   const commands = useMemo(() => {
-    const ids = phone ? ['chat', ...tabs.map(tab => tab.id)] : group.tabs
+    const ids = phone ? groups.flatMap(g => g.tabs) : group.tabs
     const choose = (id: string) => {
       select(id)
       // Selecting the current tab from another pane still brings its content back into focus.
-      if (id === active && !phone) targetFor(id).querySelector<HTMLElement>(id === 'chat' ? '.agent-composer textarea' : '.xterm-helper-textarea, .hosted-view:not([hidden]) [role="region"]')?.focus({ preventScroll: true })
+      if (id === active && !phone) targetFor(id).querySelector<HTMLElement>('.agent-composer textarea, .xterm-helper-textarea, .hosted-view:not([hidden]) [role="region"]')?.focus({ preventScroll: true })
     }
-    const step = (direction: number) => choose(ids[(ids.indexOf(active) + direction + ids.length) % ids.length])
+    const step = (direction: number) => { if (ids.length) choose(ids[(ids.indexOf(active) + direction + ids.length) % ids.length]) }
     return [
-      { id: 'tab-chat', destructive: false, title: 'Back to Chat', shortcut: ids[0] === 'chat' ? `Esc / ${modifier}+1` : 'Esc', run: () => choose('chat') },
-      ...ids.slice(0, 9).map((id, index) => ({ id: `tab-number-${index + 1}`, destructive: false, title: `Go to tab ${index + 1}: ${id === 'chat' ? 'Chat' : tabLabel(tabs.find(tab => tab.id === id)!.view)}`, shortcut: `${modifier}+${index + 1}`, run: () => choose(id) })),
+      { id: 'tab-reopen', destructive: false, title: 'Reopen closed tab', shortcut: 'Ctrl/⌘+Shift+T', run: sessionTabs.reopenClosed },
+      { id: 'layout-restore', destructive: false, title: 'Restore layout', run: sessionTabs.restoreLayout },
+      { id: 'layout-reset', destructive: false, title: 'Reset layout', run: sessionTabs.resetLayout },
+      { id: 'tab-chat', destructive: false, title: 'Back to Main', shortcut: ids[0] === 'chat' ? `Esc / ${modifier}+1` : 'Esc', run: () => choose('chat') },
+      ...ids.slice(0, 9).map((id, index) => ({ id: `tab-number-${index + 1}`, destructive: false, title: `Go to tab ${index + 1}: ${id === 'chat' ? 'Main' : tabLabel(tabs.find(tab => tab.id === id)!.view, titles)}`, shortcut: `${modifier}+${index + 1}`, run: () => choose(id) })),
       { id: 'tab-next', destructive: false, title: 'Next tab', shortcut: `${modifier}+]`, run: () => step(1) },
       { id: 'tab-previous', destructive: false, title: 'Previous tab', shortcut: `${modifier}+[`, run: () => step(-1) },
       ...(!phone && !tabFocused ? [
@@ -32,10 +36,11 @@ export function useSessionTabCommands(sessionTabs: SessionTabs) {
       ] : []),
       // The focused viewer's wrap toggle (#265): code, a raw file or a diff; nothing in other views.
       // Alt+Z itself belongs to the viewer (its own keydown), never to the window.
-      ...(active === 'chat' || tabs.find(tab => tab.id === active)?.view.kind === 'shell' ? [] : [{ id: 'view-wrap', destructive: false, title: 'Toggle line wrap', shortcut: 'Alt+Z', run: () => { toggleWrapIn(targetFor(active).querySelector('.hosted-view:not([hidden])')) } }]),
-      ...(active === 'chat' ? [] : [{ id: 'tab-close', destructive: tabs.find(tab => tab.id === active)?.view.kind === 'shell', title: 'Close current tab', shortcut: `${modifier}+W`, run: () => close(active) }]),
+      ...(!active || active === 'chat' || ['shell', 'session-chat'].includes(tabs.find(tab => tab.id === active)?.view.kind ?? '') ? [] : [{ id: 'view-wrap', destructive: false, title: 'Toggle line wrap', shortcutGroup: 'Explorer' as const, shortcut: 'Alt+Z', run: () => { toggleWrapIn(targetFor(active).querySelector('.hosted-view:not([hidden])')) } }]),
+      ...(tabs.find(tab => tab.id === active)?.view.kind === 'shell' ? [{ id: 'shell-rename', destructive: false, title: 'Rename shell', run: () => requestShellRename(active) }] : []),
+      ...(!active ? [] : [{ id: 'tab-close', destructive: tabs.find(tab => tab.id === active)?.view.kind === 'shell', title: 'Close current tab', shortcut: `${modifier}+W`, run: () => close(active) }]),
     ]
-  }, [active, tabs, modifier, select, close, group, groups.length, phone, split, nextGroup, targetFor, tabFocused])
+  }, [active, tabs, modifier, select, close, group, groups, phone, split, nextGroup, targetFor, tabFocused, titles, requestShellRename, sessionTabs.reopenClosed, sessionTabs.restoreLayout, sessionTabs.resetLayout])
   usePaletteCommands(commands)
   // React may commit a preview/toolbar update before this native event reaches window.
   const claimed = useRef(new WeakMap<KeyboardEvent, string>())
@@ -46,11 +51,14 @@ export function useSessionTabCommands(sessionTabs: SessionTabs) {
       commands.find(command => command.id === id)?.run()
     }
     const keydown = (event: KeyboardEvent) => {
+      // Sidebar tools own a separate tab group and never select a workspace panel.
+      if (event.composedPath().some(node => node instanceof Element && node.closest('.session-dock-windows'))) return
       if (event.key === 'Escape' && document.querySelector('.session-groups[data-tab-dragging]')) return
       if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || ownsAppShortcut(event)) return
       if ([...event.composedPath(), document.activeElement].some(node => node instanceof Element && node.closest('.review-editor, .tiptap, .document-toolbar, [contenteditable]:not([contenteditable="false"])'))) return
       let id: string | undefined
-      if (event.key === 'Escape' && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && event.key.toLowerCase() === 't') id = 'tab-reopen'
+      else if (event.key === 'Escape' && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
         if (active === 'chat' || visibleSurfaceIsOpen(blockingSurfaces)) return
         const path = [...event.composedPath(), document.activeElement]
         if (path.some(node => node instanceof Element && node.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], [role="combobox"], [role="menu"], [role="dialog"]'))) return

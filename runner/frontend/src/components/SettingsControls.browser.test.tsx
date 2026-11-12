@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 // Card #86 in a real browser: Settings' buttons and dropdowns are the app's (no native look), with a
 // focus ring and a dimmed disabled state, and the dialog fits a phone and uses a 4K screen.
 import { describe, expect, it, vi, afterEach } from 'vitest'
@@ -16,16 +17,24 @@ const json = (body: unknown) => Promise.resolve(new Response(JSON.stringify(body
 afterEach(() => vi.restoreAllMocks())
 
 describe('Settings controls', () => {
-  it.each([390, 3840])('draws every button and select in the app style at %i px', async width => {
+  it.each(browserWidths([390, 1024, 3840]))('draws every button and select in the app style at %i px', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 844)
     apiFetch.mockImplementation((path: string) => path === '/api/daemons'
       ? json([{ id: 'host', name: 'Workstation', mode: 'workstation', available_engines: ['codex', 'claude'] }])
-      : path === '/api/cluster/status' ? json({ configured: false }) : json({ rules: [rule], limits }))
+      : path === '/api/cluster/status' ? json({ configured: false })
+        : path === '/api/skills/settings' ? json({ install: {}, account: {}, workspace: {}, effective: {}, admin: true, workspaces: [] })
+          : json({ rules: [rule], limits }))
     render(<SettingsDialog onClose={() => {}} />)
     await screen.findByRole('button', { name: 'Add rule' })
     const dialog = screen.getByRole('dialog', { name: 'Settings' })
+    await userEvent.click(screen.getByText('Skills', { selector: 'summary' }))
+    const scope = screen.getByRole('combobox', { name: 'Apply to' })
+    await expect.element(scope).toBeEnabled()
+    expect(scope.getBoundingClientRect().width).toBeLessThan(300)
+    // Reserve the app select's chevron gutter; shared settings padding must not overlap text.
+    expect(parseFloat(getComputedStyle(scope).paddingRight)).toBeGreaterThanOrEqual(30)
     const selects = [...dialog.querySelectorAll('select')]
-    expect(selects.length).toBe(5)
+    expect(selects.length).toBe(7) // includes the pop-out length (Chat section)
     for (const s of selects) {
       const cs = getComputedStyle(s)
       expect(cs.appearance).toBe('none')
@@ -41,6 +50,12 @@ describe('Settings controls', () => {
       expect(cs.borderTopLeftRadius).not.toBe('0px')
       expect(cs.borderTopWidth).toBe('1px')
       expect(cs.fontFamily).toBe(getComputedStyle(dialog).fontFamily)
+    }
+    // Each core Settings deep link (People and Install included: this fixture is an
+    // administrator) stays at its natural width, never stretched across the dialog.
+    for (const label of ['Account', 'Integrations', 'People', 'Install']) {
+      const link = await screen.findByRole('link', { name: label })
+      expect(link.getBoundingClientRect().width).toBeLessThan(200)
     }
     // Disabled: Save colors with nothing to save is dimmed.
     const save = screen.getByRole('button', { name: 'Save colors' })
@@ -64,8 +79,12 @@ describe('Settings controls', () => {
     const shots = (import.meta.env as Record<string, string | undefined>).VITE_SETTINGS_SHOTS
     if (shots) {
       await page.screenshot({ path: `${shots}/runner-settings-${width}.png` })
+      scope.scrollIntoView({ block: 'center' })
+      await page.screenshot({ path: `${shots}/runner-skills-${width}.png` })
       screen.getByRole('heading', { name: 'Code colors' }).scrollIntoView({ block: 'start' })
       await page.screenshot({ path: `${shots}/runner-code-colors-${width}.png` })
+      screen.getByRole('heading', { name: 'Blerg’s main Settings' }).scrollIntoView({ block: 'start' })
+      await page.screenshot({ path: `${shots}/runner-core-settings-${width}.png` })
     }
   })
 })

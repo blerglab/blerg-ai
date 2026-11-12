@@ -4,8 +4,8 @@ import { apiFetch } from "./apiFetch";
 type Limits = { parallel: number; starts_per_hour: number };
 type View = Limits & { defaults: Limits; ranges: Record<keyof Limits, [number, number]> };
 const fields: { key: keyof Limits; label: string; help: string }[] = [
-  { key: "parallel", label: "Child sessions at once, per parent", help: "A parent must stop a child before starting another at this limit." },
-  { key: "starts_per_hour", label: "Child starts per rolling hour, per parent", help: "Approval requests reserve rate budget too. Refusals say when the next start is possible." },
+  { key: "parallel", label: "Workers at once, per agent", help: "An agent must stop a worker before starting another at this limit." },
+  { key: "starts_per_hour", label: "Worker starts per rolling hour, per agent", help: "Approval requests reserve rate budget too. Refusals say when the next start is possible." },
 ];
 
 export default function ChildLimitsSection() {
@@ -21,11 +21,11 @@ export default function ChildLimitsSection() {
   useEffect(() => {
     let cancelled = false;
     apiFetch("/api/settings/child-limits").then(async res => {
-      if (!res.ok) throw new Error("Could not load the child start limits.");
+      if (!res.ok) throw new Error("Could not load the worker start limits.");
       const v = await res.json() as View;
       if (!v.ranges?.parallel || !v.ranges?.starts_per_hour || !v.defaults || !Number.isInteger(v.parallel) || !Number.isInteger(v.starts_per_hour)) throw new Error("Invalid limits");
       if (!cancelled) take(v);
-    }).catch(() => { if (!cancelled) setError("Could not load the child start limits."); });
+    }).catch(() => { if (!cancelled) setError("Could not load the worker start limits."); });
     return () => { cancelled = true; };
   }, []);
   const submit = async (e: React.FormEvent) => {
@@ -39,7 +39,7 @@ export default function ChildLimitsSection() {
       });
       if (!res.ok) {
         const reason = (await res.text()).trim();
-        setError(reason && !reason.startsWith("<") ? reason.slice(0, 200) : "Could not save the child start limits.");
+        setError(reason && !reason.startsWith("<") ? reason.slice(0, 200) : "Could not save the worker start limits.");
         return;
       }
       take(await res.json() as View); setSaved(true);
@@ -48,8 +48,8 @@ export default function ChildLimitsSection() {
   };
   return <section className="settings-section section" data-testid="child-limits">
     <p className="eyebrow">Administration</p>
-    <h2 className="settings-heading section-title">Child session limits</h2>
-    <p className="settings-description">Choose how many sessions an agent can start and run at once.</p>
+    <h2 className="settings-heading section-title">Worker limits</h2>
+    <p className="settings-description">Choose how many workers an agent can start and run at once.</p>
     {error && <p className="field-error" role="alert">{error}</p>}
     {view && <form className="card card-form" onSubmit={submit}>
       {fields.map(f => {
@@ -67,7 +67,7 @@ export default function ChildLimitsSection() {
       {saved && <p className="field-help" role="status">Saved. The new limits apply at the next start request.</p>}
       <div className="card-actions">
         <button type="button" className="settings-action btn" disabled={saving} onClick={() => { setDraft({ parallel: String(view.defaults.parallel), starts_per_hour: String(view.defaults.starts_per_hour) }); setSaved(false); }}>Use the defaults</button>
-        <button type="submit" className="settings-action btn btn-primary" disabled={saving}>{saving ? "Saving…" : "Save child limits"}</button>
+        <button type="submit" className="settings-action btn btn-primary" disabled={saving}>{saving ? "Saving…" : "Save worker limits"}</button>
       </div>
     </form>}
   </section>;

@@ -95,10 +95,10 @@ func parseChallenges(values []string) (resourceMetadata, scope string) {
 // netErr turns a fetch error into a ValidationError in fixed words: a policy refusal says so, and
 // nothing the remote server returned is repeated.
 func netErr(what string, err error) error {
+	log.Printf("mcpconn: oauth discovery stage=%s cause=%s", what, FailureCause(err))
 	if errors.Is(err, netguard.ErrBlockedAddress) || errors.Is(err, netguard.ErrURLNotPermitted) {
 		return invalid("%s is not permitted by the network policy", what)
 	}
-	log.Printf("mcpconn: oauth discovery: %s: %v", what, err)
 	return invalid("could not reach %s", what)
 }
 
@@ -209,7 +209,7 @@ func (s *Service) fetchResourceMetadata(ctx context.Context, mcpURL, hint string
 		return prm, nil
 	}
 	if lastErr != nil {
-		log.Printf("mcpconn: oauth discovery: resource metadata: %v", lastErr)
+		log.Printf("mcpconn: oauth discovery stage=resource_metadata cause=%s", FailureCause(lastErr))
 	}
 	return protectedResource{}, invalid("the server does not advertise OAuth (no protected resource metadata found)")
 }
@@ -247,7 +247,7 @@ func (s *Service) fetchAuthServer(ctx context.Context, issuer string) (authServe
 		return m, nil
 	}
 	if lastErr != nil {
-		log.Printf("mcpconn: oauth discovery: authorization server metadata: %v", lastErr)
+		log.Printf("mcpconn: oauth discovery stage=issuer_metadata cause=%s", FailureCause(lastErr))
 	}
 	return authServer{}, invalid("could not read the authorization server's metadata")
 }
@@ -392,7 +392,7 @@ func (s *Service) register(ctx context.Context, as authServer, redirectURI, scop
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil || (resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK) {
-		log.Printf("mcpconn: oauth discovery: registration: status %d err %v", resp.StatusCode, err)
+		log.Printf("mcpconn: oauth discovery stage=registration status=%d cause=%s", resp.StatusCode, FailureCause(err))
 		return registeredClient{}, invalid("the authorization server refused to register a client")
 	}
 	var out struct {

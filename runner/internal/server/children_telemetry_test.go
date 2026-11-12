@@ -42,11 +42,17 @@ func TestChildTelemetryUsesNativeToolsPendingUsageAndActualIdle(t *testing.T) {
 	if working["tool_calls"] != float64(1) || working["activity"] != "running terminal · go test ./..." {
 		t.Fatalf("native activity missing: %+v", working)
 	}
-	seedEvent(t, fx.pool, child, time.Now(), "turn_done", turnDonePayload("fixture-model", 20, 5, 0, 0))
+	endedAt := time.Now().UTC().Truncate(time.Microsecond)
+	seedEvent(t, fx.pool, child, endedAt, "turn_done", turnDonePayload("fixture-model", 20, 5, 0, 0))
 	if _, err := fx.pool.Exec(t.Context(), `UPDATE sessions SET status='idle' WHERE id=$1`, child); err != nil {
 		t.Fatal(err)
 	}
 	idle := telemetryChild(t, fx)
+	timestamp, _ := idle["last_turn_ended_at"].(string)
+	parsedEnd, parseErr := time.Parse(time.RFC3339Nano, timestamp)
+	if parseErr != nil || !parsedEnd.Equal(endedAt) {
+		t.Fatalf("live response lost last turn end: %v", idle["last_turn_ended_at"])
+	}
 	if idle["status"] != "idle" || idle["tokens"] != float64(25) || idle["activity"] == working["activity"] {
 		t.Fatalf("idle child still running/empty: %+v", idle)
 	}

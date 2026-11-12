@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -123,5 +124,35 @@ func TestSessionModelPerRole(t *testing.T) {
 	}
 	if got := spawnCard(pinned.ID, map[string]string{}); got != "board-default" {
 		t.Errorf("worker model after clearing the card override = %q, want board-default", got)
+	}
+}
+
+func TestCardSpawnUsesEveryRepository(t *testing.T) {
+	srv, pool := testServer(t)
+	ctx := context.Background()
+	cookie := humanToken(t, srv)
+	fake := &fakeRunner{lifecycle: "running"}
+	srvAPI.SetRunner(api.RunnerConfig{Driver: fake, PublicURL: "https://example.com", AgentURL: "https://example.com"})
+	repos := []string{"example/api", "example/web"}
+	board, err := db.CreateBoard(ctx, pool, db.BoardParams{Name: "workspace", Repos: repos})
+	if err != nil {
+		t.Fatal(err)
+	}
+	card, err := db.CreateCard(ctx, pool, board.ID, db.CardParams{Title: strPtr("Change both"), Repos: &repos}, db.EventMeta{Actor: "human"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := request(t, srv, "POST", "/api/cards/"+card.Card.ID+"/spawn", cookie, nil, map[string]string{})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("spawn: %d", resp.StatusCode)
+	}
+	raw, _ := json.Marshal(fake.started[len(fake.started)-1])
+	var got struct{ Repositories []struct{ Repo string } }
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Repositories) != 2 || got.Repositories[0].Repo != repos[0] || got.Repositories[1].Repo != repos[1] {
+		t.Fatalf("card lost repositories: %+v", got.Repositories)
 	}
 }

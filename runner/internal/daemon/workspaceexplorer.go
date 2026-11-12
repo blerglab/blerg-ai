@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -293,6 +294,15 @@ func (e *LocalExplorer) readDirectoryUsing(ctx context.Context, name string, bud
 	var entries []protocol.WorkspaceEntry
 	fingerprints := map[string]string{}
 	truncated := false
+	// Members of the reserved folder read as the root's own; the folder does not.
+	var reserved []protocol.WorkspaceMember
+	if name == "." {
+		for _, member := range e.manifest.Members {
+			if protocol.ReservedMemberPath(member.Path) {
+				reserved = append(reserved, member)
+			}
+		}
+	}
 	reportedOpenFailure := false
 	for {
 		if err := ctx.Err(); err != nil {
@@ -300,12 +310,18 @@ func (e *LocalExplorer) readDirectoryUsing(ctx context.Context, name string, bud
 		}
 		batch, readErr := dir.ReadDir(128)
 		for _, ent := range batch {
+			if err := ctx.Err(); err != nil {
+				return nil, "", false, err
+			}
 			if *budget <= 0 {
 				truncated = true
 				break
 			}
 			*budget--
 			child := path.Join(name, ent.Name())
+			if len(reserved) > 0 && child == protocol.WorkspaceReservedFolder {
+				continue
+			}
 			if !utf8.ValidString(ent.Name()) || !workspacePublicDirectoryPath(child) || (!ent.IsDir() && workspaceSecretFile(ent.Name())) {
 				continue
 			}
@@ -341,6 +357,21 @@ func (e *LocalExplorer) readDirectoryUsing(ctx context.Context, name string, bud
 		if truncated || readErr != nil {
 			break
 		}
+	}
+	for _, member := range reserved {
+		file, err := e.openDirectory(member.Path)
+		if err != nil {
+			continue // reported by UnavailableMembers
+		}
+		info, err := file.Stat()
+		_ = file.Close()
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		row := protocol.WorkspaceEntry{Name: path.Base(member.Path), Path: member.Path, Directory: true}
+		e.decorateWorkspaceEntry(&row, info)
+		fingerprints[row.Path] = workspaceMetadataFingerprint(info)
+		entries = append(entries, row)
 	}
 	if listing.validate != nil && !listing.validate() {
 		return nil, "", false, errExplorerStale
@@ -502,6 +533,9 @@ func (e *LocalExplorer) searchWithBudget(ctx context.Context, req protocol.Works
 		}
 		res.Truncated = res.Truncated || cut
 		rules, ignored := policy.annotate(ctx, dir, rows)
+		if rules != nil && rules.required && rules.failed {
+			return errWorkspaceIgnoreUnavailable
+		}
 		for i, row := range rows {
 			if ignored[i] && (!row.Directory || rules == nil || !rules.tracked[rules.relative(row.Path)]) {
 				continue
@@ -553,7 +587,7 @@ func (e *LocalExplorer) searchWithBudget(ctx context.Context, req protocol.Works
 		}
 	}
 	if err := walk(name, depthOffset, nil); err != nil {
-		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if errors.Is(err, errWorkspaceIgnoreUnavailable) || !errors.Is(err, context.DeadlineExceeded) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return explorerFailure(req, "unavailable")
 		}
 		res.Truncated = true
@@ -562,6 +596,8 @@ func (e *LocalExplorer) searchWithBudget(ctx context.Context, req protocol.Works
 	res.ErrorCode = ""
 	return res
 }
+
+var errWorkspaceIgnoreUnavailable = errors.New("workspace ignore rules unavailable")
 
 var errExplorerStale = errors.New("workspace directory changed")
 
@@ -644,7 +680,11 @@ func (e *LocalExplorer) memberAvailable(name string) bool {
 }
 
 func (e *LocalExplorer) anchorFor(name string) (*os.Root, string, *workspaceMemberAnchor) {
-	for _, member := range e.manifest.Members {
+	// The innermost member wins: a root member contains the reserved folder.
+	members := slices.SortedStableFunc(slices.Values(e.manifest.Members), func(a, b protocol.WorkspaceMember) int {
+		return len(b.Path) - len(a.Path)
+	})
+	for _, member := range members {
 		if member.Path != "." && name != member.Path && !strings.HasPrefix(name, member.Path+"/") {
 			continue
 		}

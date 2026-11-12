@@ -45,6 +45,10 @@ export interface FakeFiles extends TransportFiles {
   serve(body: string | Uint8Array, status?: number): void
   /** The reply an upload of `name` gets (also what the default upload resolves with). */
   created(name: string, size?: number): UploadedFile
+  /** Ids snapshot() was asked for, in order. */
+  snapshotCalls: string[]
+  /** Set, snapshot() rejects with it instead of resolving. */
+  snapshotError: Error | null
 }
 
 export interface FakeTransportOptions {
@@ -91,6 +95,8 @@ export function createFakeFiles(initial: ArtifactInfo[] = []): FakeFiles {
     uploadImpl: null,
     downloadError: null,
     removeError: null,
+    snapshotCalls: [],
+    snapshotError: null,
     serve(body, status = 200) {
       rawBody = body
       rawError = status === 410 ? new ArtifactGoneError()
@@ -119,6 +125,15 @@ export function createFakeFiles(initial: ArtifactInfo[] = []): FakeFiles {
       files.removed.push(id)
       if (files.removeError) throw files.removeError
       files.items = files.items.filter(a => a.id !== id)
+    },
+    async snapshot(_sessionId, id) {
+      files.snapshotCalls.push(id)
+      if (files.snapshotError) throw files.snapshotError
+      const live = files.items.find(a => a.id === id)
+      const name = live ? `${live.name.replace(/\.[^./]+$/, '')}-snapshot${live.name.match(/\.[^./]+$/)?.[0] ?? ''}` : 'snapshot'
+      const snap: ArtifactInfo = { id: `snap-${id}`, name, size: live?.size ?? 0, content_type: live?.content_type ?? '', view: live?.view ?? 'none', origin: live?.origin ?? 'agent', version: 1 }
+      files.items = [snap, ...files.items]
+      return snap
     },
     upload(_sessionId, file, onProgress, signal) {
       files.uploads.push({ file, signal, onProgress })
@@ -235,8 +250,8 @@ export function createFakeTransport(opts: FakeTransportOptions = {}) {
       each(h => h.onReplayDone(full))
     },
     /** The server says an ask was answered or closed (message_answered). */
-    closeAsk(messageId: string, answer = '', dismissed = false, dismissedBy?: 'you' | 'other') {
-      each(h => h.onAskClosed?.(messageId, answer, dismissed, dismissedBy))
+    closeAsk(messageId: string, answer = '', dismissed = false, dismissedBy?: 'you' | 'other', withdrawn?: boolean) {
+      each(h => h.onAskClosed?.(messageId, answer, dismissed, dismissedBy, withdrawn))
     },
     /** The transport found the gap too long to replay: the held transcript is dropped. */
     reset() {
@@ -248,6 +263,10 @@ export function createFakeTransport(opts: FakeTransportOptions = {}) {
     setConnected(c: boolean) {
       connected = c
       each(h => h.onConnection(c))
+    },
+    /** A gap-driven backfill ran while the connection never dropped (BLG-470 round 2 #3). */
+    triggerArtifactsStale() {
+      each(h => h.onArtifactsStale?.())
     },
     /** send answers queued=false (as a transport whose socket just closed) without recording. */
     refuseSend(r: boolean) { refuse = r },

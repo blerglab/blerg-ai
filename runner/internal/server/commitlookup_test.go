@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
@@ -66,6 +67,7 @@ func newCommitFx(t *testing.T) *commitFx {
 	fx.api.RegisterCommitRoutes(fx.mux)
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true)
+	dc.SetWorkBranches(true) // current daemon: immutable recorded branch names
 	fx.api.hub.Register(dc)
 	fixtureOwnDesktop(t, fx.pool, dc, topicOwner)
 	for _, sid := range []string{fx.sess, fx.privSess, fx.ended} {
@@ -343,5 +345,150 @@ func TestCommitLookupCapsReadsInFlightPerSession(t *testing.T) {
 	cancel()
 	for range commitPendingPerSession {
 		<-waiting
+	}
+}
+
+func TestBranchGitUsesLocalBrokerAndOwnerChecks(t *testing.T) {
+	fx := newCommitFx(t)
+	path := "/api/sessions/" + fx.sess + "/git?branch=work/card&base=main"
+	owner := fx.token(topicOwner, "human")
+	rec := fx.answered(path, owner, func(q protocol.ReadCommit) protocol.CommitResult {
+		if q.Branch != "work/card" || q.Base != "main" || q.SHA != "" {
+			t.Fatalf("request %+v", q)
+		}
+		return protocol.CommitResult{OK: true, Branch: &protocol.BranchInfo{Name: q.Branch, Base: q.Base, Commits: []protocol.BranchCommit{{SHA: fixtureSHA, Message: "Local", Author: "Example", Date: "2026-10-01T00:00:00Z"}}}}
+	})
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "Local") {
+		t.Fatalf("read: %d %s", rec.Code, rec.Body)
+	}
+	if rec := fx.refused(path, fx.token(topicOther, "human")); rec.Code != 403 {
+		t.Fatalf("nonowner: %d", rec.Code)
+	}
+	if rec := fx.refused("/api/sessions/"+fx.sess+"/git?branch=main..HEAD", owner); rec.Code != 422 {
+		t.Fatalf("bad branch: %d", rec.Code)
+	}
+	rec = fx.answered("/api/sessions/"+fx.sess+"/git/diff?branch=work/card", owner, func(q protocol.ReadCommit) protocol.CommitResult {
+		if !q.Patch {
+			t.Fatal("expected diff")
+		}
+		return protocol.CommitResult{OK: true, PatchB64: base64.StdEncoding.EncodeToString([]byte("diff --git a/a b/a\n+local\n"))}
+	})
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "+local") {
+		t.Fatalf("diff: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestBranchGitInvalidBoardProofCannotFallBackToStoredHuman(t *testing.T) {
+	fx := newCommitFx(t)
+	req := httptest.NewRequest("GET", "/api/sessions/"+fx.sess+"/git", nil)
+	req.Header.Set("Authorization", "Bearer "+fx.token(topicOwner, "human"))
+	req.Header.Set(desktopViewerHeader, "invalid-proof")
+	rec := httptest.NewRecorder()
+	fx.mux.ServeHTTP(rec, req)
+	if rec.Code != 403 {
+		t.Fatalf("invalid proof fell back: %d", rec.Code)
+	}
+	select {
+	case <-fx.dc.send:
+		t.Fatal("read reached daemon")
+	default:
+	}
+}
+
+func TestBranchGitAcceptsOnlyVerifiedHumanBoardViewer(t *testing.T) {
+	fx := newCommitFx(t)
+	makeProof := func(account, kind string) string {
+		return mintRunnerToken(t, fx.priv, "core-1", identity.Claims{Sub: account, Aud: "blerg-board", Kind: kind, Sid: testSID, Caps: []string{coreAuthBrowserCap}, ExpiresAt: time.Now().Add(time.Minute).Unix()})
+	}
+	path := "/api/sessions/" + fx.sess + "/git?branch=work/card"
+	for _, tc := range []struct {
+		account, kind string
+		code          int
+	}{{topicOther, "human", 403}, {topicOwner, "agent", 403}, {topicOwner, "human", 200}} {
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", "Bearer stored-automation")
+		req.Header.Set(desktopViewerHeader, makeProof(tc.account, tc.kind))
+		rec := httptest.NewRecorder()
+		if tc.code == 200 {
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				var q protocol.ReadCommit
+				select {
+				case raw := <-fx.dc.send:
+					if json.Unmarshal(raw, &q) != nil {
+						return
+					}
+				case <-time.After(3 * time.Second):
+					return
+				}
+				fx.api.hub.deliverCommitResult(fx.dc, protocol.CommitResult{Type: "commit_result", RequestID: q.RequestID, SessionID: q.SessionID, WorkspaceGitRef: q.WorkspaceGitRef, OK: true, Branch: &protocol.BranchInfo{Name: q.Branch, Commits: []protocol.BranchCommit{}}})
+			}()
+			fx.mux.ServeHTTP(rec, req)
+			<-done
+		} else {
+			fx.mux.ServeHTTP(rec, req)
+		}
+		if rec.Code != tc.code {
+			t.Fatalf("%s %s: %d %s", tc.account, tc.kind, rec.Code, rec.Body)
+		}
+	}
+}
+
+func TestBranchGitExplainsOlderDaemonReply(t *testing.T) {
+	fx := newCommitFx(t)
+	rec := fx.answered("/api/sessions/"+fx.sess+"/git?branch=work/card", fx.token(topicOwner, "human"), func(q protocol.ReadCommit) protocol.CommitResult {
+		return protocol.CommitResult{OK: true, Commit: &protocol.CommitInfo{SHA: fixtureSHA}}
+	})
+	if rec.Code != 409 || !strings.Contains(rec.Body.String(), "Update") {
+		t.Fatalf("old daemon: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestBranchGitExplainsMissingLocalObjects(t *testing.T) {
+	fx := newCommitFx(t)
+	rec := fx.answered("/api/sessions/"+fx.sess+"/git/diff?branch=work/card", fx.token(topicOwner, "human"), func(q protocol.ReadCommit) protocol.CommitResult {
+		return protocol.CommitResult{ErrorCode: "objects_unavailable"}
+	})
+	if rec.Code != 424 || !strings.Contains(rec.Body.String(), "Blobless") {
+		t.Fatalf("missing objects: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestCommitFileRouteOwnerAndVersions(t *testing.T) {
+	fx := newCommitFx(t)
+	path := "/api/sessions/" + fx.sess + "/commits/0123456/file?path=src%2Fa.txt&side=original"
+	owner := fx.token(topicOwner, "human")
+	rec := fx.answered(path, owner, func(q protocol.ReadCommit) protocol.CommitResult {
+		if q.FilePath != "src/a.txt" || !q.Original || !q.Patch {
+			t.Errorf("file request: %+v", q)
+		}
+		return protocol.CommitResult{OK: true, File: true, PatchB64: base64.StdEncoding.EncodeToString([]byte("whole original file\n"))}
+	})
+	if rec.Code != 200 || rec.Body.String() != "whole original file\n" || rec.Header().Get("Content-Security-Policy") != "sandbox" {
+		t.Fatalf("file: %d %s", rec.Code, rec.Body)
+	}
+	rec = fx.answered(path, owner, func(q protocol.ReadCommit) protocol.CommitResult {
+		return protocol.CommitResult{OK: true, PatchB64: base64.StdEncoding.EncodeToString([]byte("old daemon diff"))}
+	})
+	if rec.Code != 409 {
+		t.Fatalf("old daemon accepted: %d", rec.Code)
+	}
+	if rec = fx.refused(path, fx.token(topicOther, "human")); rec.Code != 403 {
+		t.Fatalf("non-owner: %d", rec.Code)
+	}
+	if rec = fx.refused("/api/sessions/"+fx.sess+"/commits/0123456/file?path=../secret&side=changed", owner); rec.Code != 422 {
+		t.Fatalf("invalid path: %d", rec.Code)
+	}
+}
+
+func TestCommitBrokerTimeoutHasSafeCause(t *testing.T) {
+	h := NewHub()
+	dc := &DaemonConn{ID: "daemon", send: make(chan []byte, 1)}
+	h.Register(dc)
+	h.SetSessionOwner("session", dc.ID)
+	_, err := h.requestCommitRead(t.Context(), dc, "owner", protocol.ReadCommit{SessionID: "session", BoardHistory: true}, 0)
+	if !errors.Is(err, errCommitUnavailable) || boardCodeErrorCause(err) != "commit_reply_timeout" {
+		t.Fatalf("timeout lost its cause: %v (%s)", err, boardCodeErrorCause(err))
 	}
 }

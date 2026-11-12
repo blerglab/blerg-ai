@@ -18,9 +18,8 @@ import (
 // messaging token.
 const recordSchemaVersion = 2
 
-// SessionRecord holds the information needed to recreate a Claude session after
-// a hard restart (tmux server death). It is persisted as JSON in
-// <ReposRoot>/.blerg-runner/sessions/<sessionID>.json.
+// SessionRecord is obsolete Terminal metadata retained only for conservative legacy
+// cleanup and migration. It never authorizes session recovery.
 type SessionRecord struct {
 	Version                    int    `json:"version"`
 	SessionID                  string `json:"session_id"`
@@ -89,20 +88,20 @@ var ownedByDaemon = func(info fs.FileInfo) bool {
 // directory is reported as exists=false, not an error.
 func secureRecordsDir(reposRoot string, create bool) (exists bool, err error) {
 	if create {
-		if err := os.MkdirAll(reposRoot, 0o750); err != nil { //nolint:gosec // G703: reposRoot is trusted daemon/pod configuration, never a browser or tool path.
+		if err := os.MkdirAll(reposRoot, 0o750); err != nil {
 			return false, err
 		}
 	}
 	for _, d := range []string{filepath.Join(reposRoot, ".blerg-runner"), recordsDir(reposRoot)} {
-		info, err := os.Lstat(d) //nolint:gosec // G703: fixed recovery directories under configured reposRoot; symlink and ownership checks follow.
+		info, err := os.Lstat(d)
 		if errors.Is(err, fs.ErrNotExist) {
 			if !create {
 				return false, nil
 			}
-			if err := os.Mkdir(d, 0o700); err != nil { //nolint:gosec // G703: fixed recovery directories under configured reposRoot, with private ownership checked below.
+			if err := os.Mkdir(d, 0o700); err != nil {
 				return false, err
 			}
-			if info, err = os.Lstat(d); err != nil { //nolint:gosec // G703: rechecks the newly created fixed recovery directory before it is trusted.
+			if info, err = os.Lstat(d); err != nil {
 				return false, err
 			}
 		} else if err != nil {
@@ -267,23 +266,4 @@ func transcriptExists(sessionID string) bool {
 	}
 	matches, err := filepath.Glob(filepath.Join(home, ".claude", "projects", "*", sessionID+".jsonl"))
 	return err == nil && len(matches) > 0
-}
-
-// recoverableRecords returns records whose session is neither live in tmux nor
-// already managed by the daemon — i.e. abandoned by a hard restart.
-func recoverableRecords(records []SessionRecord, liveIDs, managedIDs []string) []SessionRecord {
-	skip := make(map[string]struct{})
-	for _, id := range liveIDs {
-		skip[id] = struct{}{}
-	}
-	for _, id := range managedIDs {
-		skip[id] = struct{}{}
-	}
-	var out []SessionRecord
-	for _, r := range records {
-		if _, ok := skip[r.SessionID]; !ok {
-			out = append(out, r)
-		}
-	}
-	return out
 }

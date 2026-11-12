@@ -2,7 +2,7 @@
 
 Sessions run in an image Blerg builds: Debian with git, Node.js 22 (at least 22.12), Go 1.26.9
 (the version in `go.mod`), Python and build tools, the engine
-CLIs (`claude`, `codex`, `hermes`), `tmux`, and a non-root `agent` user. Each install has its
+CLIs (`claude`, `codex`, `hermes`), and a non-root `agent` user. Each install has its
 own:
 
 - the desktop **Local sandbox** runs `blerg-runner-sandbox:latest`, built from
@@ -39,7 +39,7 @@ You can also start from scratch. Inside the image the runner needs:
 - the engine binaries on `PATH` under their usual names (`claude`, `codex`, `hermes`): the daemon
   checks for the chosen engine inside the image before every sandboxed Agent launch, and refuses
   if it is missing;
-- `git`, `tmux` and a POSIX shell;
+- `git` and a POSIX shell;
 - a non-root user whose UID matches yours on the desktop install, or files the session writes into
   your repository come out owned by someone else. Blerg's own build takes `--build-arg UID=$(id -u)`
   for this;
@@ -52,10 +52,11 @@ You can also start from scratch. Inside the image the runner needs:
 `BLERG_RUNNER_SANDBOX_IMAGE` on the daemon process names something else: a tag you built, or an
 image to pull from a registry you are logged in to. The variable goes in the daemon's service
 unit, not your shell; [`install/desktop/DAEMON.md`](../install/desktop/DAEMON.md) says where. To
-rebuild Blerg's own image after changing `runner/sandbox/`:
+rebuild Blerg's own image after changing `runner/sandbox/`, from the repository root (the build
+copies runner sources, so the context is the whole repository):
 
 ```
-docker build --build-arg UID=$(id -u) -t blerg-runner-sandbox:latest runner/sandbox
+docker build -f runner/sandbox/Dockerfile --build-arg UID=$(id -u) -t blerg-runner-sandbox:latest .
 ```
 
 **Kubernetes (cluster runtime).** `BLERG_RUNNER_AGENT_IMAGE` in the `blerg-config` ConfigMap names
@@ -74,8 +75,8 @@ rebuild, and relaunch sessions; running sessions keep the image they started wit
 
 ## What a sandbox works in, and where its commits land
 
-Every Local sandbox session works in a clone of its own, never in your checkout: a Terminal or
-Agent session from the launch sheet, a board's card run, a cron and a sandboxed child alike. It
+Every Local sandbox session works in a clone of its own, never in your checkout: an agent
+session from the launch sheet, a board's card run, a cron and a sandboxed child alike. It
 has no write access to any part of your repository's `.git` (refs, configuration, hooks, objects,
 other worktrees), and none to your working tree.
 
@@ -124,32 +125,36 @@ refreshing": run `claude` or `codex` once on this machine, outside the sandbox, 
 there. The daemon does not refresh a sign-in itself.
 
 **The clone.** The daemon makes it with `git clone --shared` into its state directory
-(`~/.blerg-runner-daemon/sandbox-clones/<session-id>`), on a new branch `wip/<session-id>` that
+(`~/.blerg-runner-daemon/sandbox-clones/<session-id>`), on a new branch `<work-branch>` that
 starts at your checkout's current commit; the clone holds no other branch. The clone borrows your
 repository's objects (Git alternates), which is why that one directory is mounted read-only at its
 own path; new objects go into the clone's own store. A folder that is a linked worktree is cloned
 the same way. An empty folder that is not a repository yet (a **New folder** or a **No repository**
 scratch folder) is made one first (`git init`, no commit), and the session's first commit is the
-first on `wip/<session-id>`. If the clone cannot be made (a folder with content that is not a Git
+first on `<work-branch>`. If the clone cannot be made (a folder with content that is not a Git
 repository, an empty folder inside another repository's working tree, a folder that is not the
 top of its repository, a repository that borrows objects from another one, an existing
-`wip/<session-id>`), the start is refused; your checkout is never mounted instead. As its last
+`<work-branch>`), the start is refused; your checkout is never mounted instead. As its last
 check before Docker, the daemon refuses to mount anything but the session's own clone with the
 daemon's record of it.
 
-**Where the commits land: `wip/<session-id>` in your repository.** At the end of each turn
+`<work-branch>` is the immutable branch returned by `session result`, such as
+`wip/ticket-data-7d67a123`. [Work branch settings](work-branches.md) can override
+the default. Existing sessions retain their original branch names.
+
+**Where the commits land: `<work-branch>` in your repository.** At the end of each turn
 (before the turn's end is reported, so a parent told a child finished finds the commits), and when
 the session stops, the daemon fetches that one branch from the clone
-(`+refs/heads/wip/<session-id>:refs/heads/wip/<session-id>`, nothing else). A Terminal session's
-turn end is when its screen goes from running to idle. Nothing is merged into your branch and
-nothing is pushed: check out, merge or delete `wip/<session-id>` yourself. The session's checked-out
+(`+refs/heads/<work-branch>:refs/heads/<work-branch>`, nothing else). Nothing is merged into your
+branch and
+nothing is pushed: check out, merge or delete `<work-branch>` yourself. The session's checked-out
 branch, your `main` and every other branch stay where they were. While the session runs, prefer
-merging `wip/<session-id>` or looking at it from another worktree: if you have it checked out, the
+merging `<work-branch>` or looking at it from another worktree: if you have it checked out, the
 daemon does not move it under your working tree, and brings the session's commits to
-`wip/<session-id>.incoming` instead (the session's transcript says so once).
+`<work-branch>.incoming` instead (the session's transcript says so once).
 
 **Work left uncommitted when the session stops** is committed for it, inside its container, onto
-`wip/<session-id>` (subject "Uncommitted work when the session stopped (committed by Blerg)",
+`<work-branch>` (subject "Uncommitted work when the session stopped (committed by Blerg)",
 with the clone's hooks switched off), and that commit comes back with the last fetch. Untracked
 files the session hid through Git settings (`status.showUntrackedFiles`, `.git/info/exclude`,
 `core.excludesFile`) are part of it, and the check that decides whether the clone can be removed
@@ -195,23 +200,18 @@ commands that create the clone, before anything ran in it). Whether the clone st
 asked inside the container; the commit a filing names is read from the clone's `HEAD` as plain
 files. Diffs (`blerg-runner diff`) and published files are made inside the container from the
 clone, the files panel reads the clone's files (never its `.git`), and the commits a History chip
-names are on `wip/<session-id>` in your repository from the end of the turn that made them.
+names are on `<work-branch>` in your repository from the end of the turn that made them.
 
 **When the session stops or is discarded**, its branch is fetched one last time. A branch with no
 commit of its own is then deleted from your repository; a branch with commits is always kept. The
 clone is removed only when the check inside the container, just before it is removed, finds
-nothing that is not on `wip/<session-id>` (no uncommitted change, stash, other branch, or a HEAD
+nothing that is not on `<work-branch>` (no uncommitted change, stash, other branch, or a HEAD
 elsewhere); otherwise, or if that check could not run, the clone is kept and the daemon log names
 it. After a daemon restart nothing hosts a sandboxed Agent session again: the daemon finds its
 container, commits its leftover work, removes the container and brings its branch back the same
-way. A sandboxed Terminal session is reattached to the same clone. A running Terminal sandbox
-that the daemon has no clone record for, or whose container mounts anything but that clone (one an
-older daemon started with your folder mounted), is stopped when the updated daemon reattaches;
-a session the daemon is running keeps running, and a missing recovery record (a failed write, a
-changed repos root) never stops one, and a recovery record that names your
-folder is not recovered; both say why in the session, once. Every docker call is bounded (the
-sandbox's `docker run` uses `--pull=never`, so a missing image fails at once instead of pulling), and a container whose tmux does not answer is left alone for that
-pass rather than holding it. If a container cannot be removed at the stop, its clone is kept and
+way. Legacy Terminal sessions are never resumed;
+a container that does not answer is left alone for that pass. Every Docker call is bounded.
+If a container cannot be removed at the stop, its clone is kept and
 not fetched (the fetch only runs unpaused once the container is gone).
 
 `blerg-runner session result <id>` names the branch for every sandboxed session in a repository and
@@ -265,7 +265,7 @@ must resolve canonical roots, authorize destinations and discover submodules.
 errors and owner-authorized recovery locations; validate provenance before delivery.
 `DefaultWorkspaceBudget` applies once per session. Folder children may choose a
 parent-manifest subset through `ValidateWorkspaceChild`, retaining existing child
-authorization and allocating each member's own wip/<child-id> branch. Shell grants
+authorization and allocating each member's recorded work branch. Shell grants
 are never inherited. Unqualified project tools refuse folder sessions: member-aware
 routes must verify member/project and generation against trusted manifest state;
 explorer discovery never confers project authority.
@@ -313,6 +313,9 @@ then stops and removes the exact immutable runtime. A fresh, memory-capped helpe
 snapshots leftover work without reading agent Git configuration. Clean, saved
 members may be released independently; uncertain members retain recovery paths.
 Durable preparation/removal/member/allocation intents reconcile process crashes.
+A durable stop intent retains unfinished cleanup without claiming heartbeat liveness.
+Transient cleanup failures remain retryable; the daemon logs the retained transition
+once per recovery sequence, including a safe storage-unavailable cause when applicable.
 
 `LocalWorkspaceService` connects Manager/AgentHost dispatch, child authorization,
 turn-end sync, stop, recovery and results. Its selection, authenticated runtime
@@ -425,7 +428,7 @@ implement containment, policy, grants or transport; those remain P5/runtime work
 Cluster workspace-v2 jobs mount only the project volume at `/workspace/projects`;
 `/workspace` remains HOME. Members use their stable ID as the manifest-relative
 path, so duplicate display names do not collide. The runtime guide lists each path
-and its `wip/<session-id>` branch. All members must be prepared before agent spawn.
+and its `<work-branch>` branch. All members must be prepared before agent spawn.
 
 The trusted selection service supplies `SessionJobSpec.Workspace` plus private
 `WorkspaceMembers` contexts. These are not browser/agent manifest fields. The
@@ -460,10 +463,11 @@ are retried. Settlement snapshots bounded regular object
 files into an isolated bare directory, ignoring live config/index/includes/remotes,
 and pushes explicit verified heads to authorized destinations under the existing
 force-push policy. Git workers share a rotating single-worker 80-second round and
-a 512 MiB aggregate memory ceiling. Workspace-v2 currently enforces that ceiling
-on the entire runner container (including the engine and all Git descendants),
-while preserving any tighter existing limit. P6 must provide a dedicated enforced
-Git cgroup before allowing a larger engine container budget. Integer byte, IEC
+a 512 MiB aggregate memory budget. Until Git runs in its own memory group
+(BLG-559, 0.7.0), that budget is not enforced separately: the configured pod limit
+(`BLERG_RUNNER_POD_MEM_LIMIT`) bounds the engine, its builds and all Git
+descendants together. Clamping the whole container to Git's budget made every
+cluster worker run out of memory (BLG-558). Integer byte, IEC
 and decimal K/M/G/T resource quantities are supported; unknown quantities refuse
 the workspace launch. Partial preparation removes only proven unused clones;
 uncertain allocations and local work remain retained. Volumes are conservatively

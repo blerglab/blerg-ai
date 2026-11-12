@@ -25,6 +25,17 @@ async function mount() {
   await act(async () => { for (let i = 0; i < 12; i++) await Promise.resolve() })
 }
 describe('questions in the bell', () => {
+  it('lists a child command approval without offering Dismiss', async () => {
+    items = []
+    useMessageStore.setState({ messages: [{ id: 'approval', session_id: 'child', kind: 'ask',
+      status: 'open', body: 'Allow this command?', created_at: new Date().toISOString(),
+      answerable: true, owner_only: true }] })
+    await mount()
+    fireEvent.click(screen.getByRole('button', { name: /Notifications/ }))
+    expect(screen.getByTestId('bell-question')).toHaveTextContent('Allow this command?')
+    expect(screen.queryByRole('button', { name: /Dismiss question/ })).toBeNull()
+  })
+
   afterEach(() => useMessageStore.setState({ messages: [] }))
   it('lists an open question the agent did not wait on that this person answers, and only that', async () => {
     items = []
@@ -43,7 +54,7 @@ describe('questions in the bell', () => {
     const rows = screen.getAllByTestId('bell-question')
     expect(rows).toHaveLength(1)
     expect(rows[0].textContent).toContain('Ship the blue one?')
-    expect(screen.getByRole('link', { name: 'Answer in the session' }).getAttribute('href')).toBe('/sessions/sess-q')
+    expect(screen.getByRole('link', { name: 'Answer in the workspace' }).getAttribute('href')).toBe('/sessions/sess-q')
   })
 })
 
@@ -63,7 +74,7 @@ describe('review requests and Dismiss in the bell (card #155)', () => {
     fireEvent.click(bell)
     const row = screen.getByTestId('bell-review')
     expect(row.textContent).toContain('plan.md v2: Approve the plan?')
-    expect(screen.getByRole('link', { name: 'Review in the session' }).getAttribute('href')).toBe('/sessions/sess-q?artifact=a1')
+    expect(screen.getByRole('link', { name: 'Review in the workspace' }).getAttribute('href')).toBe('/sessions/sess-q?artifact=a1')
     vi.useFakeTimers()
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss review request: plan.md' }))
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss question: Ship the blue one?' }))
@@ -73,7 +84,7 @@ describe('review requests and Dismiss in the bell (card #155)', () => {
     const posted = () => apiFetch.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST').map(([url, init]) => [url, (init as RequestInit).body ?? null])
     expect(posted()).toEqual([])
     await act(async () => { vi.advanceTimersByTime(DISMISS_UNDO_MS) })
-    expect(posted()).toEqual([['/api/review-requests/r1/decide', '{"decision":"dismiss"}'], ['/api/messages/q1/dismiss', null]])
+    expect(posted()).toEqual([['/api/review-requests/r1/decide', '{"decision":"dismiss"}'], ['/api/messages/q1/dismiss', JSON.stringify({ revision_seq: 0 })]])
   })
 
   it('Undo brings it back and sends nothing; a refused dismissal comes back with the reason', async () => {
@@ -137,7 +148,9 @@ describe('proposal notifications', () => {
     items = [...items, proposal('p2', 'Second card', Date.now() + 7 * 86400_000)]
     await act(async () => { fireEvent(window, new Event('focus')); for (let i = 0; i < 12; i++) await Promise.resolve() })
     expect(screen.getByText('Second card')).toBeTruthy()
-    expect(screen.getAllByRole('link', { name: 'Open session' })).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: /^DRAFT / })).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: 'DRAFT First card' }))
+    expect(screen.getByRole('link', { name: 'Open workspace' })).toBeTruthy()
   })
   it('fires one notification when the deadline enters its warning window', async () => {
     vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })

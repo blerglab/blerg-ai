@@ -525,7 +525,7 @@ func ListChildSessions(ctx context.Context, pool *pgxpool.Pool, parentID string)
 		SELECT s.id::text, COALESCE(s.title, ''), COALESCE(s.engine, ''), COALESCE(s.model, ''),
 		       COALESCE(s.effort, ''), COALESCE(s.runtime, ''), s.status, COALESCE(s.delegation_via, ''),
 		       s.started_at, s.ended_at, s.keep_running,
-		       (SELECT count(*) FROM messages m WHERE m.session_id = s.id AND m.kind = 'ask' AND m.status = 'open' AND NOT m.no_wait),
+		       (SELECT count(*) FROM messages m WHERE m.session_id = s.id AND m.kind = 'ask' AND m.status = 'open' AND (m.child_escalated OR (NOT m.no_wait AND EXISTS(SELECT 1 FROM session_failure_alerts f WHERE f.message_id=m.id)))),
 		       COALESCE(s.spawning_account_id,'')
 		  FROM sessions s
 		 WHERE s.parent_session_id = $1::uuid AND s.archived_at IS NULL
@@ -567,7 +567,7 @@ func ReadChildrenDigest(ctx context.Context, pool *pgxpool.Pool, parentID string
 		       COALESCE(max(e.seq), 0)::bigint
 		  FROM sessions s
 		  LEFT JOIN LATERAL (SELECT count(*) AS n FROM messages m
-		                      WHERE m.session_id = s.id AND m.kind = 'ask' AND m.status = 'open' AND NOT m.no_wait) a ON true
+		                      WHERE m.session_id = s.id AND m.kind = 'ask' AND m.status = 'open' AND (m.child_escalated OR (NOT m.no_wait AND EXISTS(SELECT 1 FROM session_failure_alerts f WHERE f.message_id=m.id)))) a ON true
 		  LEFT JOIN LATERAL (SELECT max(ev.seq) AS seq FROM agent_events ev WHERE ev.session_id = s.id) e ON true
 		 WHERE s.parent_session_id = $1::uuid`, parentID,
 	).Scan(&d.Count, &d.Statuses, &d.MaxEndedAt, &d.OpenAsks, &d.MaxSeq)
@@ -582,7 +582,7 @@ func countOne(ctx context.Context, pool *pgxpool.Pool, sql string, args ...any) 
 
 // CountRunningChildren counts the parent's children that have not ended ("running" = ended_at IS NULL).
 func CountRunningChildren(ctx context.Context, pool *pgxpool.Pool, parentID string) (int, error) {
-	return countOne(ctx, pool, `SELECT count(*)::int FROM sessions WHERE parent_session_id = $1::uuid AND ended_at IS NULL`, parentID)
+	return countOne(ctx, pool, `SELECT count(*)::int FROM sessions WHERE parent_session_id = $1::uuid AND delegation_via IS DISTINCT FROM 'person' AND ended_at IS NULL`, parentID)
 }
 
 // ParentStartWindow counts a parent's starts and approval attempts in the rolling
@@ -597,7 +597,7 @@ func ParentStartWindow(ctx context.Context, pool *pgxpool.Pool, parentID string,
 	err := pool.QueryRow(ctx, `
 		WITH starts AS (
 		  SELECT started_at AS at FROM sessions
-		   WHERE parent_session_id = $1::uuid AND started_at > $2
+		   WHERE parent_session_id = $1::uuid AND delegation_via IS DISTINCT FROM 'person' AND started_at > $2
 		     AND end_reason IS DISTINCT FROM '`+EndReasonStartFailed+`'
 		  UNION ALL
 		  SELECT created_at FROM delegation_requests

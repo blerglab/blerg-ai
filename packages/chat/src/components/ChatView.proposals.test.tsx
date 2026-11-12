@@ -41,9 +41,9 @@ describe('the proposal card', () => {
     mount(BOARD, { onEditProposal: () => {} })
     const card = await screen.findByTestId('proposal-card')
     await waitFor(() => expect(card.textContent).toContain('Export button is stale'))
-    expect(card.textContent).toContain('This session wants to file a card on Product')
+    expect(card.textContent).toContain('This workspace wants to file a card on Product')
     expect(card.textContent).toContain('Steps: open the list')
-    expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['Approve', 'Edit', 'Reject', 'Allow for this session'])
+    expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['Approve', 'Edit', 'Reject', 'Allow for this workspace'])
   })
 
   it('approves the exact draft reviewed, then shows the created card with Open', async () => {
@@ -64,10 +64,35 @@ describe('the proposal card', () => {
     expect(screen.queryByTestId('proposal-actions')).toBeNull()
   })
 
+  it.each(['board_metadata', 'board_create', 'mcp'])('keeps board metadata approval one request at a time for %s events', async kind => {
+    seedRequest(kind)
+    const detail = readProposalView({ id: 'p1', kind: 'board_metadata', state: 'pending',
+      arguments_raw: '{"require_repo":false}', arguments: { require_repo: false },
+      connection_name: 'Board metadata', tool: 'update_board_metadata' })
+    const { decide } = mount(detail)
+    await screen.findByRole('button', { name: 'Approve' })
+    expect(screen.queryByRole('button', { name: 'Allow for this workspace' })).toBeNull()
+    expect(screen.getByText('Show exact request')).toBeInTheDocument()
+    expect(screen.getByText(detail.argumentsRaw)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
+    expect(decide).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm approve' }))
+    await waitFor(() => expect(decide).toHaveBeenCalledWith('p1', 'approve', { expected: detail.argumentsRaw }))
+  })
+
+  it.each(['blerg_card_archive', 'unknown_tool'])('confirms %s through chat transport', async tool => {
+    seedRequest('mcp')
+    const { decide } = mount({ ...BOARD, kind: 'mcp', tool })
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }))
+    expect(decide).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm approve' }))
+    await waitFor(() => expect(decide).toHaveBeenCalledOnce())
+  })
+
   it('allows the scope for the session', async () => {
     seedRequest()
     const { decide } = mount(BOARD)
-    fireEvent.click(await screen.findByRole('button', { name: 'Allow for this session' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow for this workspace' }))
     await waitFor(() => expect(decide).toHaveBeenCalledWith('p1', 'approve', { expected: BOARD.argumentsRaw, allowForSession: true }))
   })
 
@@ -91,7 +116,7 @@ describe('the proposal card', () => {
     seedRequest('mcp')
     mount({ ...BOARD, kind: 'mcp', target: 'Mail', tool: 'send_mail', title: 'send_mail: to=a@example.com', summary: '' }, { onEditProposal: () => {} })
     const card = await screen.findByTestId('proposal-card')
-    await waitFor(() => expect(card.textContent).toContain('This session wants to run send_mail on Mail'))
+    await waitFor(() => expect(card.textContent).toContain('This workspace wants to run send_mail on Mail'))
     expect(within(card).queryByRole('button', { name: 'Edit' })).toBeNull()
   })
 
@@ -100,7 +125,7 @@ describe('the proposal card', () => {
     const manage = vi.fn()
     mount('forbidden', { onManagePermissions: manage })
     act(() => seed(ev(3, 'proposal_decided', { proposal_id: 'p1', kind: 'board_file', state: 'done', auto: true, grant_id: 'g1', card: CARD })))
-    await waitFor(() => expect(screen.getByTestId('proposal-outcome').textContent).toContain('approved by a session permission'))
+    await waitFor(() => expect(screen.getByTestId('proposal-outcome').textContent).toContain('approved by a workspace permission'))
     expect(screen.getByTestId('proposal-ticket').textContent).toContain('Export button is stale')
     fireEvent.click(screen.getByRole('button', { name: 'Permissions' }))
     expect(manage).toHaveBeenCalledOnce()
@@ -109,7 +134,7 @@ describe('the proposal card', () => {
   it('tells someone who is not the owner that it waits for the owner, with no actions', async () => {
     seedRequest()
     mount('forbidden')
-    await waitFor(() => expect(screen.getByTestId('proposal-card').textContent).toContain("Waiting for the session owner's decision"))
+    await waitFor(() => expect(screen.getByTestId('proposal-card').textContent).toContain("Waiting for the workspace owner's decision"))
     expect(screen.queryByTestId('proposal-actions')).toBeNull()
   })
 
@@ -143,7 +168,7 @@ describe('the proposal card, fix round 1', () => {
     const manage = vi.fn()
     const t = mount(BOARD, { onManagePermissions: manage })
     t.decide.mockRejectedValueOnce(Object.assign(new Error('Board refused the draft. The permission for this session was kept.'), { status: 422, permissionKept: true }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Allow for this session' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Allow for this workspace' }))
     const err = await screen.findByTestId('proposal-error')
     expect(err.textContent).toContain('was kept')
     fireEvent.click(within(err).getByRole('button', { name: 'Revoke in Permissions' }))
@@ -177,12 +202,14 @@ describe('a proposed board', () => {
     Object.assign(t.transport, { proposal: vi.fn(async () => NEW_BOARD), decideProposal: decide })
     render(<ChatView session={SESSION} transport={t.transport} meta={running} onEditProposal={() => {}} />)
     const card = await screen.findByTestId('proposal-card')
-    await waitFor(() => expect(card.textContent).toContain('This session wants to create a board named Launch'))
+    await waitFor(() => expect(card.textContent).toContain('This workspace wants to create a board named Launch'))
     expect(card.textContent).toContain('Repositories: team/app')
     // No Edit and no Allow for this session: a board is always the owner's own decision.
     expect(within(card).getAllByRole('button').map(b => b.textContent)).toEqual(['Approve', 'Reject'])
     fireEvent.click(within(card).getByRole('button', { name: 'Approve' }))
-    await waitFor(() => expect(screen.getByTestId('proposal-outcome').textContent).toContain('Board created · this session has File without asking'))
+    expect(decide).not.toHaveBeenCalled()
+    fireEvent.click(within(card).getByRole('button', { name: 'Confirm approve' }))
+    await waitFor(() => expect(screen.getByTestId('proposal-outcome').textContent).toContain('Board created · this workspace has File without asking'))
     expect(decide).toHaveBeenCalledWith('p1', 'approve', { expected: NEW_BOARD.argumentsRaw })
   })
 

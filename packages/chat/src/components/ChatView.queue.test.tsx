@@ -208,7 +208,7 @@ describe('ChatView queued messages and Esc', () => {
     // A message was sent: the server opens a new start attempt for the resume.
     act(() => t.emit(ev(5, 'start_stage', plan('Resuming: creating a new Job'))))
     const panel = screen.getByTestId('start-progress')
-    expect(panel.textContent).toMatch(/Resuming session/)
+    expect(panel.textContent).toMatch(/Resuming workspace/)
     expect(panel.textContent).toMatch(/creating a new Job/)
     expect(screen.queryByTestId('offline-banner')).toBeNull()
     // It sits after the conversation, not above it.
@@ -286,9 +286,9 @@ describe('ChatView queued messages and Esc', () => {
   it('says a stopped session has ended, says why, and locks the composer', () => {
     mount(createFakeTransport(), { ...base, status: 'stopped', end_reason: 'stopped_by_user', ended_by: { kind: 'human', self: true } })
     const banner = screen.getByTestId('ended-banner')
-    expect(banner.textContent).toMatch(/This session has ended/)
+    expect(banner.textContent).toMatch(/This workspace has ended/)
     expect(banner.textContent).toMatch(/Ended by you/)
-    expect(banner.textContent).toMatch(/start a new session/)
+    expect(banner.textContent).toMatch(/start a new workspace/)
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).disabled).toBe(true)
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).placeholder).toMatch(/has ended/)
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
@@ -296,7 +296,7 @@ describe('ChatView queued messages and Esc', () => {
 
   it('still says it ended when no reason was recorded, and shows nothing for a live session', () => {
     const { unmount } = mount(createFakeTransport(), { ...base, status: 'ended' })
-    expect(screen.getByTestId('ended-banner').textContent).toMatch(/This session has ended/)
+    expect(screen.getByTestId('ended-banner').textContent).toMatch(/This workspace has ended/)
     unmount()
     mount(createFakeTransport(), { ...base, status: 'idle' })
     expect(screen.queryByTestId('ended-banner')).toBeNull()
@@ -448,6 +448,46 @@ describe('a queued message nothing records', () => {
     expect(screen.queryByTestId('queued-message')).toBeNull()
   })
 
+  it('does not warn once the server has acknowledged a steered message, however long the step runs', async () => {
+    const { t } = mount(createFakeTransport(), { ...base, status: 'idle' })
+    await enter(type('mid-turn, long step'))
+    const id = t.sentWith[0].opts!.clientId!
+    // The server confirms receipt right away (input_accepted), well before the step finishes.
+    act(() => t.emit(ev(6, 'input_accepted', { client_id: id, text: 'mid-turn, long step' })))
+    // A long tool call: several minutes pass with nothing else recorded and the status unchanged.
+    act(() => { vi.advanceTimersByTime(20_000) })
+    expect(screen.queryByTestId('send-notice')).toBeNull()
+    expect(screen.getByTestId('queued-message').textContent).not.toMatch(/may not have been delivered/i)
+    // The agent reaches it at its next step: the real event replaces the bubble, no warning shown.
+    act(() => t.emit(ev(7, 'user_message', { text: 'mid-turn, long step', source: 'chat', client_id: id })))
+    expect(screen.queryByTestId('queued-message')).toBeNull()
+    expect(screen.queryByTestId('send-notice')).toBeNull()
+  })
+
+  it('retracts the warning once a late delivery acknowledgment lands — a slow step, not a lost message', async () => {
+    const { t } = mount(createFakeTransport(), { ...base, status: 'idle' })
+    await enter(type('a long step under load'))
+    const id = t.sentWith[0].opts!.clientId!
+    // Nothing is heard for the full timeout: the daemon was busy with the long tool call.
+    act(() => { vi.advanceTimersByTime(20_000) })
+    expect(screen.getByTestId('send-notice')).toBeInTheDocument()
+    // The server's receipt finally lands, late: the message was delivered all along.
+    act(() => t.emit(ev(6, 'input_accepted', { client_id: id, text: 'a long step under load' })))
+    expect(screen.queryByTestId('send-notice')).toBeNull()
+  })
+
+  it('warns, and logs the cause, when a message is truly lost (a dropped socket, never accepted)', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    mount(createFakeTransport(), { ...base, status: 'idle' })
+    await enter(type('gone for good'))
+    // No input_accepted ever arrives (the socket dropped before the server could ack it).
+    act(() => { vi.advanceTimersByTime(20_000) })
+    expect(screen.getByTestId('send-notice')).toBeInTheDocument()
+    expect(screen.getByTestId('queued-message').textContent).toMatch(/may not have been delivered/i)
+    expect(errorSpy).toHaveBeenCalled()
+    errorSpy.mockRestore()
+  })
+
   it('a message once recorded does not come back when the transcript is loaded again', async () => {
     const { t } = mount()
     await enter(type('recorded'))
@@ -456,4 +496,10 @@ describe('a queued message nothing records', () => {
     act(() => useTranscriptStore.getState().resetEvents(SESSION))
     expect(screen.queryByTestId('queued-message')).toBeNull()
   })
+})
+
+it.each(['worker', 'channel'] as const)('names an ended %s by its role', conversationNoun => {
+  render(<ChatView session={SESSION} conversationNoun={conversationNoun} transport={createFakeTransport().transport} meta={{ ...base, status: 'ended' }} />)
+  expect(screen.getByTestId('ended-banner')).toHaveTextContent(`This ${conversationNoun} has ended.`)
+  expect(screen.getByRole('textbox')).toHaveAttribute('placeholder', `This ${conversationNoun} has ended — start a new ${conversationNoun} to keep working`)
 })

@@ -26,7 +26,7 @@
 //   kept either way.
 // - The `end` frame's data may carry `status` (a SessionStatus) or the runner's result body
 //   ({lifecycle}); `error` is reported as 'error', anything else as 'ended'.
-import type { AgentEvent, AgentEventsReplayDone, AssistantTextPayload, EndedBy, SessionStatus } from '../types'
+import type { AgentEvent, AgentEventsReplayDone, ArtifactPayload, AssistantTextPayload, EndedBy, SessionStatus } from '../types'
 import { createFiles } from './files'
 import { openSseStream, type SseStream } from './sse'
 import type { FileLimits, OlderPage, SessionMeta, SubscribeHandlers, SubscribeOptions, Transport } from './types'
@@ -191,6 +191,12 @@ export function createProxyTransport(opts: ProxyTransportOptions): Transport {
               else h.onStreaming((ev.payload as AssistantTextPayload).text)
               return
             }
+            if (ev.transient && ev.kind === 'artifact') {
+              // A live file's republish (BLG-470): never persisted, applied straight to the one
+              // artifact id named. See blerg.ts's identical branch for why.
+              h.onArtifactUpdated?.(ev.payload as ArtifactPayload)
+              return
+            }
             h.onEvent(ev)
             return
           }
@@ -273,8 +279,8 @@ export function createProxyTransport(opts: ProxyTransportOptions): Transport {
 
     // Cuts the running turn short (the runner's /interrupt, mirrored). An app without the route
     // (404 or 501) is not an error: the turn simply runs on.
-    async interrupt(sessionId) {
-      const r = await post(`${session(sessionId)}/interrupt`)
+    async interrupt(sessionId, targetEventId) {
+      const r = await post(`${session(sessionId)}/interrupt`, targetEventId ? { target_event_id: targetEventId } : undefined)
       if (!r.ok && r.status !== 404 && r.status !== 501) throw new Error(`HTTP ${r.status}`)
     },
 

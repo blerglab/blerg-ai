@@ -26,6 +26,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/blerglab/blerg-ai/contracts/identity"
+	"github.com/blerglab/blerg-ai/runner/internal/commandsteps"
 	"github.com/blerglab/blerg-ai/runner/internal/cron"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/mcpgw"
@@ -245,31 +246,33 @@ func runView(r db.CronRun) cronRunView {
 
 // cronView is a cron as the UI sees it. It has no token id: only when the token expires.
 type cronView struct {
-	ID                  string          `json:"id"`
-	Name                string          `json:"name"`
-	Status              string          `json:"status"` // active | disabled | paused | expired
-	Enabled             bool            `json:"enabled"`
-	Schedule            string          `json:"schedule"`
-	Timezone            string          `json:"timezone"`
-	Prompt              string          `json:"prompt"`
-	Engine              string          `json:"engine"`
-	Model               *string         `json:"model"`
-	Effort              *string         `json:"effort"`
-	Runtime             string          `json:"runtime"`
-	DaemonID            *string         `json:"daemon_id"`
-	BoardID             *string         `json:"board_id"`
-	MCP                 json.RawMessage `json:"mcp"`
-	TokenExpiresAt      time.Time       `json:"token_expires_at"`
-	GraceSeconds        int             `json:"grace_seconds"`
-	MaxRuntimeSeconds   int             `json:"max_runtime_seconds"`
-	NextRunAt           time.Time       `json:"next_run_at"`
-	LastRunAt           *time.Time      `json:"last_run_at"`
-	ConsecutiveFailures int             `json:"consecutive_failures"`
-	PausedReason        *string         `json:"paused_reason"`
-	LastRun             *cronRunView    `json:"last_run"`
-	ConnectionProblems  []string        `json:"connection_problems"`
-	CreatedAt           time.Time       `json:"created_at"`
-	UpdatedAt           time.Time       `json:"updated_at"`
+	CommandSteps        *commandsteps.Definition `json:"command_steps"`
+	ID                  string                   `json:"id"`
+	Name                string                   `json:"name"`
+	Status              string                   `json:"status"` // active | disabled | paused | expired
+	Enabled             bool                     `json:"enabled"`
+	Schedule            string                   `json:"schedule"`
+	Timezone            string                   `json:"timezone"`
+	Prompt              string                   `json:"prompt"`
+	Engine              string                   `json:"engine"`
+	Model               *string                  `json:"model"`
+	Effort              *string                  `json:"effort"`
+	Runtime             string                   `json:"runtime"`
+	DaemonID            *string                  `json:"daemon_id"`
+	BoardID             *string                  `json:"board_id"`
+	MCP                 json.RawMessage          `json:"mcp"`
+	TokenExpiresAt      time.Time                `json:"token_expires_at"`
+	GraceSeconds        int                      `json:"grace_seconds"`
+	MaxRuntimeSeconds   int                      `json:"max_runtime_seconds"`
+	NextRunAt           time.Time                `json:"next_run_at"`
+	LastRunAt           *time.Time               `json:"last_run_at"`
+	ConsecutiveFailures int                      `json:"consecutive_failures"`
+	PausedReason        *string                  `json:"paused_reason"`
+	LastRun             *cronRunView             `json:"last_run"`
+	ConnectionProblems  []string                 `json:"connection_problems"`
+	CreatedAt           time.Time                `json:"created_at"`
+	UpdatedAt           time.Time                `json:"updated_at"`
+	RuntimeTargetID     *string                  `json:"runtime_target_id,omitempty"`
 }
 
 func (h *cronsHandler) view(ctx context.Context, c *db.Cron) cronView {
@@ -283,8 +286,8 @@ func (h *cronsHandler) view(ctx context.Context, c *db.Cron) cronView {
 		status = "disabled"
 	}
 	v := cronView{
-		ID: c.ID, Name: c.Name, Status: status, Enabled: c.Enabled, Schedule: c.Schedule, Timezone: c.Timezone, Prompt: c.Prompt, Engine: c.Engine,
-		Model: c.Model, Effort: c.Effort, Runtime: c.Runtime, DaemonID: c.DaemonID, BoardID: c.BoardID, MCP: c.MCP,
+		CommandSteps: c.CommandSteps, ID: c.ID, Name: c.Name, Status: status, Enabled: c.Enabled, Schedule: c.Schedule, Timezone: c.Timezone, Prompt: c.Prompt, Engine: c.Engine,
+		Model: c.Model, Effort: c.Effort, Runtime: c.Runtime, RuntimeTargetID: c.RuntimeTargetID, DaemonID: c.DaemonID, BoardID: c.BoardID, MCP: c.MCP,
 		TokenExpiresAt: c.TokenExpiresAt, GraceSeconds: c.GraceSeconds, MaxRuntimeSeconds: c.MaxRuntimeSeconds,
 		NextRunAt: c.NextRunAt, LastRunAt: c.LastRunAt, ConsecutiveFailures: c.ConsecutiveFailures, PausedReason: c.PausedReason,
 		ConnectionProblems: h.svc.MissingConnections(c.ID), CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt,
@@ -452,17 +455,20 @@ func (h *cronsHandler) get(w http.ResponseWriter, r *http.Request) {
 }
 
 type cronCreateRequest struct {
-	Name     string          `json:"name"`
-	Schedule string          `json:"schedule"`
-	Timezone string          `json:"timezone"`
-	Prompt   string          `json:"prompt"`
-	Engine   string          `json:"engine"`
-	Model    *string         `json:"model"`
-	Effort   *string         `json:"effort"`
-	Runtime  string          `json:"runtime"`
-	DaemonID *string         `json:"daemon_id"`
-	BoardID  *string         `json:"board_id"`
-	MCP      json.RawMessage `json:"mcp"`
+	CommandSteps        []commandsteps.Step `json:"command_steps"`
+	ApproveCommandSteps bool                `json:"approve_command_steps"`
+	Name                string              `json:"name"`
+	Schedule            string              `json:"schedule"`
+	Timezone            string              `json:"timezone"`
+	Prompt              string              `json:"prompt"`
+	Engine              string              `json:"engine"`
+	Model               *string             `json:"model"`
+	Effort              *string             `json:"effort"`
+	Runtime             string              `json:"runtime"`
+	DaemonID            *string             `json:"daemon_id"`
+	BoardID             *string             `json:"board_id"`
+	MCP                 json.RawMessage     `json:"mcp"`
+	RuntimeTargetID     string              `json:"runtime_target_id,omitempty"`
 	// GraceSeconds is a pointer so an explicit 0 (no catch-up window) is told from an absent field,
 	// which takes the default.
 	GraceSeconds      *int `json:"grace_seconds"`
@@ -481,6 +487,30 @@ func (h *cronsHandler) create(w http.ResponseWriter, r *http.Request) {
 	if !restrictedEngineSupported(req.Engine) {
 		writeError(w, http.StatusBadRequest, "crons require an engine with restricted-tool support")
 		return
+	}
+	if err := h.api.runtimeTargetProblem(r.Context(), req.Runtime, req.RuntimeTargetID); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	if req.RuntimeTargetID != "" && (req.Runtime == "" || req.Runtime == "auto") {
+		req.Runtime = runnerRuntimeCluster
+	}
+	// Approval binds the target the row will hold: the migration's trigger fills it otherwise.
+	if req.Runtime == runnerRuntimeCluster && req.RuntimeTargetID == "" {
+		req.RuntimeTargetID = db.DefaultRuntimeTargetID
+	}
+	var commands *commandsteps.Definition
+	if len(req.CommandSteps) > 0 {
+		if !req.ApproveCommandSteps {
+			writeError(w, http.StatusBadRequest, "approve the exact fixed commands before saving")
+			return
+		}
+		var err error
+		commands, err = commandsteps.ApproveForRuntime(req.CommandSteps, req.Runtime, derefOrEmpty(req.DaemonID), p.Sub, time.Now(), req.RuntimeTargetID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	ctx := r.Context()
 	// Everything that can be judged without side effects comes before the mint, so a bad request
@@ -510,8 +540,8 @@ func (h *cronsHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	row, err := h.sched.CreateCron(ctx, cron.NewCron{
-		Owner: p.Sub, Name: req.Name, Enabled: true, Schedule: req.Schedule, Timezone: req.Timezone, Prompt: req.Prompt, Engine: req.Engine,
-		Model: req.Model, Effort: req.Effort, Runtime: req.Runtime, DaemonID: req.DaemonID, BoardID: req.BoardID, MCP: mcp,
+		CommandSteps: commands, Owner: p.Sub, Name: req.Name, Enabled: true, Schedule: req.Schedule, Timezone: req.Timezone, Prompt: req.Prompt, Engine: req.Engine,
+		Model: req.Model, Effort: req.Effort, Runtime: req.Runtime, RuntimeTargetID: nonemptyTarget(req.RuntimeTargetID), DaemonID: req.DaemonID, BoardID: req.BoardID, MCP: mcp,
 		TokenID: tokenID, TokenExpiresAt: exp, GraceSeconds: req.GraceSeconds, MaxRuntimeSeconds: req.MaxRuntimeSeconds,
 	})
 	if err != nil {
@@ -523,20 +553,23 @@ func (h *cronsHandler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 type cronPatchRequest struct {
-	Name              *string          `json:"name"`
-	Enabled           *bool            `json:"enabled"`
-	Schedule          *string          `json:"schedule"`
-	Timezone          *string          `json:"timezone"`
-	Prompt            *string          `json:"prompt"`
-	Engine            *string          `json:"engine"`
-	Model             *string          `json:"model"`
-	Effort            *string          `json:"effort"`
-	Runtime           *string          `json:"runtime"`
-	DaemonID          *string          `json:"daemon_id"`
-	BoardID           *string          `json:"board_id"`
-	MCP               *json.RawMessage `json:"mcp"`
-	GraceSeconds      *int             `json:"grace_seconds"`
-	MaxRuntimeSeconds *int             `json:"max_runtime_seconds"`
+	CommandSteps        *[]commandsteps.Step `json:"command_steps"`
+	ApproveCommandSteps bool                 `json:"approve_command_steps"`
+	Name                *string              `json:"name"`
+	Enabled             *bool                `json:"enabled"`
+	Schedule            *string              `json:"schedule"`
+	Timezone            *string              `json:"timezone"`
+	Prompt              *string              `json:"prompt"`
+	Engine              *string              `json:"engine"`
+	Model               *string              `json:"model"`
+	Effort              *string              `json:"effort"`
+	Runtime             *string              `json:"runtime"`
+	DaemonID            *string              `json:"daemon_id"`
+	BoardID             *string              `json:"board_id"`
+	MCP                 *json.RawMessage     `json:"mcp"`
+	GraceSeconds        *int                 `json:"grace_seconds"`
+	MaxRuntimeSeconds   *int                 `json:"max_runtime_seconds"`
+	RuntimeTargetID     *string              `json:"runtime_target_id,omitempty"`
 }
 
 func (h *cronsHandler) patch(w http.ResponseWriter, r *http.Request) {
@@ -556,9 +589,57 @@ func (h *cronsHandler) patch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "crons require an engine with restricted-tool support")
 		return
 	}
+	rt := c.Runtime
+	if req.Runtime != nil {
+		rt = *req.Runtime
+	}
+	if req.RuntimeTargetID != nil && *req.RuntimeTargetID != "" && (rt == "" || rt == "auto") {
+		rt = "cluster"
+		req.Runtime = &rt
+	}
+	if req.RuntimeTargetID != nil {
+		if err := h.api.runtimeTargetProblem(r.Context(), rt, *req.RuntimeTargetID); err != nil {
+			writeAPIError(w, err)
+			return
+		}
+	}
 	patch := cron.CronPatch{
 		Name: req.Name, Enabled: req.Enabled, Schedule: req.Schedule, Timezone: req.Timezone, Prompt: req.Prompt, Engine: req.Engine, Model: req.Model, Effort: req.Effort,
-		Runtime: req.Runtime, DaemonID: req.DaemonID, BoardID: req.BoardID, GraceSeconds: req.GraceSeconds, MaxRuntimeSeconds: req.MaxRuntimeSeconds,
+		Runtime: req.Runtime, RuntimeTargetID: req.RuntimeTargetID, DaemonID: req.DaemonID, BoardID: req.BoardID, GraceSeconds: req.GraceSeconds, MaxRuntimeSeconds: req.MaxRuntimeSeconds,
+	}
+	placementChanged := c.CommandSteps != nil && len(c.CommandSteps.Steps) > 0 && ((req.Runtime != nil && *req.Runtime != c.Runtime) || (req.DaemonID != nil && *req.DaemonID != derefOrEmpty(c.DaemonID)) || (req.RuntimeTargetID != nil && *req.RuntimeTargetID != derefOrEmpty(c.RuntimeTargetID)))
+	if placementChanged && c.CommandSteps != nil && req.CommandSteps == nil {
+		steps := c.CommandSteps.Steps
+		req.CommandSteps = &steps
+	}
+	if req.CommandSteps != nil && (placementChanged || c.CommandSteps == nil || commandsteps.Hash(*req.CommandSteps) != commandsteps.Hash(c.CommandSteps.Steps)) {
+		if !req.ApproveCommandSteps {
+			writeError(w, http.StatusBadRequest, "approve the exact fixed commands before saving")
+			return
+		}
+		runtime, daemonID := c.Runtime, derefOrEmpty(c.DaemonID)
+		if req.Runtime != nil {
+			runtime = *req.Runtime
+		}
+		if req.DaemonID != nil {
+			daemonID = *req.DaemonID
+		}
+		targetID := derefOrEmpty(c.RuntimeTargetID)
+		if req.RuntimeTargetID != nil {
+			targetID = *req.RuntimeTargetID
+		}
+		if runtime == runnerRuntimeCluster && targetID == "" {
+			targetID = db.DefaultRuntimeTargetID
+		}
+		commands, err := commandsteps.ApproveForRuntime(*req.CommandSteps, runtime, daemonID, p.Sub, time.Now(), targetID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if len(*req.CommandSteps) == 0 {
+			commands = nil
+		}
+		patch.CommandSteps = &commands
 	}
 	// A PATCH that leaves `mcp` as it is (the form sends it back unchanged, or not at all) is not
 	// judged against the live upstreams: a cron whose connection is gone, needs signing in or is

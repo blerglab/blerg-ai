@@ -1,4 +1,6 @@
-import { hasLiveParent } from '../lib/sessionTree'
+import { openInsights } from '../lib/openInsights'
+import { useIsMobile } from '../hooks/useIsMobile'
+import { openWhatsNew } from '../lib/whatsNew'
 import { ACTIVE_STATUSES, selectSessionSections, useSessionListFilters, useSessionListSessions } from '../lib/sessionSelection'
 import { useShallow } from 'zustand/react/shallow'
 import { startTransition, useCallback, useEffect, useMemo, useOptimistic, useState, createContext, useContext } from 'react'
@@ -8,7 +10,7 @@ import { apiFetch } from '../apiFetch'
 import type { SessionInfo, DaemonInfo } from '../types'
 import { useSessionStore } from '../hooks/useSessionStore'
 import { LiveSessionCard as SessionCard, type SessionCardProps } from './SessionCard'
-import { type SessionTree } from '../lib/sessionTree'
+import { type SessionTree, rootSessionId, sessionSearchReason } from '../lib/sessionTree'
 import { getFocus, useChildrenExpanded, setChildrenExpanded } from '../lib/sidebarPrefs'
 import ProposalNotifications, { ProposalBell } from './ProposalNotifications'
 import type { ProposalInbox } from '../hooks/useProposalInbox'
@@ -18,7 +20,6 @@ import { prefetchLaunchData } from '../lib/launchCache'
 import { formatBuild } from '../lib/buildInfo'
 import { setSettingsOpen } from '../lib/settingsDialog'
 import UsageMeters from './UsageMeters'
-import { displayState, waitingBannerText } from '../lib/displayState'
 import SidePane from './SidePane'
 import { SessionToolsHost } from '../panes/context'
 import SessionTiles from './SessionTiles'
@@ -32,7 +33,7 @@ interface Props {
   proposalInbox?: ProposalInbox
 }
 
-const Nesting = createContext<{ tree: SessionTree; activeId?: string; daemons: DaemonInfo[]; query: string } | null>(null)
+const Nesting = createContext<{ tree: SessionTree; activeId?: string; daemons: DaemonInfo[]; query: string; sidebar: boolean } | null>(null)
 
 /** A parent's started sessions. Collapsing hides every descendant; the parent card's live
  *  aggregate glyph still reflects their work and its count preserves the tree's presence. */
@@ -44,10 +45,10 @@ function SessionBranch(props: SessionCardProps) {
   const shown = context?.query ? searchChoice?.query === context.query ? searchChoice.open : true : expanded
   const query = context?.query
   const toggle = useCallback(() => { const next = !shown; if (query) setSearchChoice({ query, open: next }); setChildrenExpanded(props.session.id, next) }, [shown, query, props.session.id])
-  const childrenControl = useMemo(() => children.length > 0 ? { total: children.length, shown: !!shown, toggle } : null, [children.length, shown, toggle])
+  const childrenControl = useMemo(() => children.length > 0 ? { total: children.length, shown: !!shown, toggle, countOnly: context?.sidebar } : null, [children.length, shown, toggle, context?.sidebar])
   return <div data-session-branch={props.session.id}>
-    <SessionCard {...props} childrenControl={childrenControl} />
-    {shown && children.length > 0 && <div data-testid="nested-sessions" style={{ marginLeft: 21, paddingLeft: 8, borderLeft: '1px solid var(--stone)' }}>{children.map(child => <SessionBranch key={child.id} session={child} daemon={context?.daemons.find(d => d.id === child.daemon_id)} active={context?.activeId === child.id} nested />)}</div>}
+    <SessionCard {...props} matchReason={context?.sidebar && context.query ? sessionSearchReason(context.tree, props.session, context.query) : undefined} childrenControl={childrenControl} />
+    {!context?.sidebar && shown && children.length > 0 && <div data-testid="nested-sessions" style={{ marginLeft: 21, paddingLeft: 8, borderLeft: '1px solid var(--stone)' }}>{children.map(child => <SessionBranch key={child.id} session={child} daemon={context?.daemons.find(d => d.id === child.daemon_id)} active={context?.activeId === child.id} nested />)}</div>}
   </div>
 }
 
@@ -169,7 +170,7 @@ function AutomatedSection({
           textTransform: 'uppercase',
           flex: 1,
         }}>
-          Automated
+          Workers and runs
         </span>
         <span data-testid="automated-summary" style={{ color: running > 0 ? 'var(--amber)' : 'var(--stone)', fontSize: '0.7rem' }}>
           {running > 0 ? `${running} running` : ''}{running > 0 && recent > 0 ? ' · ' : ''}{recent > 0 ? `${recent} recent` : ''}
@@ -260,7 +261,7 @@ function HistorySection({
           History
         </span>
         <span style={{ color: 'var(--stone)', fontSize: '0.7rem' }}>
-          {sessions.length} session{sessions.length !== 1 ? 's' : ''}
+          {sessions.length} workspace{sessions.length !== 1 ? 's' : ''}
         </span>
       </button>
 
@@ -290,7 +291,7 @@ export default function SessionList(props: Props) {
 function SessionListPane(props: Props) {
   const tools = useContext(SessionToolsHost)
   const viewport = useViewportWidth()
-  const pane = usePaneLayout('session-list', 'Toggle session list', { min: 240, max: Math.max(240, viewport * .4), default: 300 }, true)
+  const pane = usePaneLayout('session-list', 'Toggle workspace list', { min: 240, max: Math.max(240, viewport * .4), default: 300 }, true)
   const { toggle: toggleList } = pane
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
@@ -303,12 +304,12 @@ function SessionListPane(props: Props) {
   }, [toggleList])
   const icon = <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M8 4v16M12 9h5M12 13h5" /></svg>
   const actions = <>
-    <button type="button" className="icon-btn" aria-label="New session" title="New session" onClick={props.onNewSession} onPointerEnter={prefetchLaunchData} onFocus={prefetchLaunchData}><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
+    <button type="button" className="icon-btn" aria-label="New workspace" title="New workspace" onClick={props.onNewSession} onPointerEnter={prefetchLaunchData} onFocus={prefetchLaunchData}><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
     <div className="session-tools-slot" ref={tools?.setHost} />
     <SessionTiles />
     <div className="session-rail-bell">{props.proposalInbox ? <ProposalBell inbox={props.proposalInbox} /> : <ProposalNotifications />}</div>
   </>
-  return <SidePane layout={pane} label="Session list" toggleLabel="Toggle session list" icon={icon} railActions={actions} keepMounted>
+  return <SidePane layout={pane} label="Workspace list" toggleLabel="Toggle workspace list" icon={icon} railActions={actions} keepMounted>
     <SessionListBody {...props} />
   </SidePane>
 }
@@ -321,13 +322,15 @@ function SessionListBody({ onNewSession, variant = 'page', proposalInbox }: Prop
   const routeSessionId = location.pathname.match(/^\/sessions\/([^/]+)/)?.[1]
   // The row clicked is highlighted at once: the switch to a session renders as a transition (the
   // router's), and until it commits the location still names the session being left.
-  const [activeSessionId, setOptimisticActive] = useOptimistic(routeSessionId)
+  const [optimisticSessionId, setOptimisticActive] = useOptimistic(routeSessionId)
+  const activeSessionId = rootSessionId(sessions, optimisticSessionId)
   const openSession = useCallback((id: string) => {
     startTransition(() => {
       setOptimisticActive(id)
       navigate(`/sessions/${id}`)
     })
   }, [navigate, setOptimisticActive])
+  const compactCards = useIsMobile()
   const isSidebar = variant === 'sidebar'
   const isCronsActive = location.pathname.startsWith('/crons')
   const isProposalsActive = location.pathname.startsWith('/proposals')
@@ -406,7 +409,7 @@ function SessionListBody({ onNewSession, variant = 'page', proposalInbox }: Prop
 
   return (
     <OpenSessionContext.Provider value={openSession}>
-    <Nesting.Provider value={{ tree, activeId: isSidebar ? activeSessionId : undefined, daemons, query: q }}>
+    <Nesting.Provider value={{ tree, activeId: isSidebar ? activeSessionId : undefined, daemons, query: q, sidebar: isSidebar || compactCards }}>
     <div style={isSidebar ? {
       width: '100%',
       minHeight: 0,
@@ -442,7 +445,7 @@ function SessionListBody({ onNewSession, variant = 'page', proposalInbox }: Prop
             fontSize: '0.82rem',
             letterSpacing: '0.14em',
             textTransform: 'uppercase',
-          }}>Sessions</span>
+          }}>Workspaces</span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         {/* The app's one Notifications bell: what needs you, and push to this browser. */}
@@ -492,14 +495,14 @@ function SessionListBody({ onNewSession, variant = 'page', proposalInbox }: Prop
             <div
               data-testid="place-pills"
               role="group"
-              aria-label="Where sessions run"
+              aria-label="Where workspaces run"
               style={{ display: 'flex', flexWrap: 'wrap', gap: 5, alignItems: 'center' }}
             >
               {places > 1 && (
                 <PlacePill
                   testId="focus-pill-all"
                   selected={effectiveFocus === null}
-                  title="Sessions everywhere"
+                  title="Workspaces everywhere"
                   onSelect={() => handleSetFocus(null)}
                 >
                   All
@@ -510,7 +513,7 @@ function SessionListBody({ onNewSession, variant = 'page', proposalInbox }: Prop
                   ? `${clusterActive}/${cluster.max}`
                   : clusterActive !== null ? `${clusterActive}` : ''
                 const title = clusterActive !== null
-                  ? `${clusterActive}${cluster.max !== null ? ` of ${cluster.max}` : ''} cluster sessions running`
+                  ? `${clusterActive}${cluster.max !== null ? ` of ${cluster.max}` : ''} cluster workspaces running`
                   : 'Cluster'
                 const body = (
                   <>
@@ -568,7 +571,7 @@ function SessionListBody({ onNewSession, variant = 'page', proposalInbox }: Prop
           type="text"
           value={query}
           onChange={e => setQuery(e.target.value)}
-          placeholder="Search sessions…"
+          placeholder="Search workspaces…"
           style={{
             width: '100%',
             background: 'var(--basalt)',
@@ -583,7 +586,6 @@ function SessionListBody({ onNewSession, variant = 'page', proposalInbox }: Prop
         />
       </div>
 
-      <WaitingBanner />
 
       {/* Content. No top padding: the search row's 6px is the whole gap below the search box, the
           same as the gap between the header's separator line and the box above it. */}
@@ -710,7 +712,7 @@ function SessionListBody({ onNewSession, variant = 'page', proposalInbox }: Prop
           <div
             role="link"
             data-testid="insights-nav"
-            onClick={() => navigate('/insights')}
+            onClick={() => { if (!openInsights()) navigate('/insights') }}
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -781,7 +783,11 @@ function SessionListBody({ onNewSession, variant = 'page', proposalInbox }: Prop
             fontFamily: 'var(--mono)',
           }}
         >
-          Blerg {build.main}
+          {/^v?\d+\.\d+\.\d+$/.test(serverRelease) ? <button
+            className="btn small"
+            onClick={openWhatsNew}
+            aria-label={`What’s New in Blerg ${build.main}`}
+          >Blerg {build.main}</button> : <>Blerg {build.main}</>}
           {build.commit && <span style={{ opacity: 0.7 }}> · {build.commit}</span>}
           {build.update && (
             <>
@@ -806,24 +812,3 @@ function SessionListBody({ onNewSession, variant = 'page', proposalInbox }: Prop
   )
 }
 
-// Only root sessions ask the person; keep their waiting count independent of list structure.
-function WaitingBanner() {
-  const waitingCount = useSessionStore(s => s.sessions.filter(session => !session.archived_at && !hasLiveParent(session, s.sessions) && displayState(session) === 'waiting').length)
-  return waitingCount > 0 ? (
-    <div data-testid="waiting-banner" style={{
-      background: 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))',
-      borderBottom: '1px solid var(--blaze)',
-      padding: '10px 16px',
-      display: 'flex',
-      alignItems: 'center',
-      gap: 8,
-      color: 'var(--amber)',
-      fontSize: '0.9rem',
-      fontWeight: 600,
-      letterSpacing: '0.05em',
-    }}>
-      <span>⚡</span>
-      <span style={{ flex: 1, minWidth: 0 }}>{waitingBannerText(waitingCount)}</span>
-    </div>
-  ) : null
-}

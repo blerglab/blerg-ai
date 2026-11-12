@@ -24,3 +24,9 @@
 .palette-group-title { margin: 8px 12px 4px; color: var(--fog); font-size: var(--text-xs); font-weight: 600; }
 .palette-destructive .palette-label > span { color: var(--danger, #f07878); }
 .palette-more { color: var(--fog); font-size: var(--text-sm); }
+
+.shortcuts-section { margin: 0 0 16px; }
+.shortcuts-list { list-style: none; margin: 0; padding: 0 12px; }
+.shortcuts-list li { display: flex; gap: 20px; justify-content: space-between; padding: 12px 4px; overflow-wrap: anywhere; }
+.shortcuts-list kbd { flex: none; color: var(--fog); font: var(--text-xs) var(--mono); }
+@media (max-width: 699px) { .shortcuts-list kbd { display: none; } }

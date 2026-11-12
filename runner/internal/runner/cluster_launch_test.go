@@ -105,6 +105,38 @@ func TestClusterPreparedWorkspaceStartsAgentHost(t *testing.T) {
 			default:
 				t.Fatal("CLUSTER_AGENT_START: prepared cluster workspace did not reach session_started")
 			}
+			skillState := daemon.PodSkillStateDir(home)
+			t.Cleanup(func() { _ = os.RemoveAll(skillState) })
+			foundSkill := false
+			err = filepath.WalkDir(skillState, func(path string, d os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if d.Name() != "SKILL.md" {
+					return nil
+				}
+				foundSkill = true
+				info, err := d.Info()
+				if err != nil {
+					return err
+				}
+				if info.Mode().Perm() != 0640 {
+					t.Fatalf("skill file must be supervisor-owned and group-readable, got %o", info.Mode().Perm())
+				}
+				for parent := filepath.Dir(path); parent != filepath.Dir(skillState); parent = filepath.Dir(parent) {
+					info, err := os.Stat(parent)
+					if err != nil {
+						return err
+					}
+					if info.Mode().Perm() != 0750 {
+						t.Fatalf("skill ancestor must allow only group read/traverse, got %o", info.Mode().Perm())
+					}
+				}
+				return nil
+			})
+			if err != nil || !foundSkill {
+				t.Fatalf("missing skill pack: %v", err)
+			}
 			rt.FenceAdmission()
 			if _, _, err := admit(t.Context(), msg); err == nil {
 				t.Fatal("fenced runtime admitted")

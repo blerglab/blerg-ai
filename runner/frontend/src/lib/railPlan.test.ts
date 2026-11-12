@@ -52,6 +52,6 @@ describe('railPlan', () => {
     expect(assigneeName({ kind: 'subagent', id: 'toolu_2' }, titles, [{ key: 'toolu_2', title: 'Running one' }], [])).toBe('Running one')
     expect(assigneeName({ kind: 'subagent', id: 'toolu_3' }, titles, [{ key: 'toolu_3', title: 'Subagent · started earlier' }], [])).toBe('a subagent')
     expect(assigneeName({ kind: 'child_session', id: 'u-1' }, undefined, [], [{ id: 'u-1', title: 'Child' }])).toBe('Child')
-    expect(assigneeName({ kind: 'child_session', id: 'u-2' }, undefined, [], [{ id: 'u-2', title: '' }])).toBe('a started session')
+    expect(assigneeName({ kind: 'child_session', id: 'u-2' }, undefined, [], [{ id: 'u-2', title: '' }])).toBe('a worker')
   })
 })

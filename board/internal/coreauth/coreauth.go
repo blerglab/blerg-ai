@@ -18,12 +18,15 @@ import (
 	"errors"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"github.com/blerglab/blerg-ai/contracts/identity"
+	"github.com/blerglab/blerg-ai/contracts/theme"
 )
 
 const (
@@ -59,11 +62,12 @@ func SensitiveCaps(capability string) bool {
 // types (kept here to avoid an import cycle: auth needs this package, so this
 // package must not need auth's types).
 type Synthesized struct {
-	Sub        string
-	Kind       string // "human" | "service" | "agent" (identity.PrincipalKind values)
-	Caps       []string
-	Lineage    string
-	OnBehalfOf string
+	PersonBehind bool
+	Sub          string
+	Kind         string // "human" | "service" | "agent" (identity.PrincipalKind values)
+	Caps         []string
+	Lineage      string
+	OnBehalfOf   string
 	// Project is the token's project claim. For a core-issued AGENT token
 	// aimed at blerg-board it is a board id (see auth.corePrincipal);
 	// "" means the token is not narrowed to any board.
@@ -74,12 +78,13 @@ type Synthesized struct {
 // to build a board-local principal.
 func Synthesize(p identity.Principal) Synthesized {
 	return Synthesized{
-		Sub:        p.Sub,
-		Kind:       p.Kind,
-		Caps:       append([]string(nil), p.Caps...),
-		Lineage:    p.Lineage,
-		OnBehalfOf: p.OnBehalfOf,
-		Project:    p.Project,
+		PersonBehind: p.PersonBehind,
+		Sub:          p.Sub,
+		Kind:         p.Kind,
+		Caps:         append([]string(nil), p.Caps...),
+		Lineage:      p.Lineage,
+		OnBehalfOf:   p.OnBehalfOf,
+		Project:      p.Project,
 	}
 }
 
@@ -102,7 +107,7 @@ type Client struct {
 func NewClient(coreURL string) *Client {
 	return &Client{
 		baseURL:    strings.TrimRight(coreURL, "/"),
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		httpClient: &http.Client{Timeout: 10 * time.Second, Transport: failurelog.Default.Transport("board", "core", nil)},
 		keys:       identity.KeySet{},
 		revoked:    identity.RevocationSet{},
 	}
@@ -133,19 +138,19 @@ func (c *Client) loop(ctx context.Context, interval time.Duration, fn func(conte
 func (c *Client) refreshJWKS(ctx context.Context) {
 	raw, err := c.get(ctx, "/.well-known/jwks")
 	if err != nil {
-		log.Printf("coreauth: jwks refresh failed: %v", err)
+		failurelog.Default.Event("board:core-jwks-fetch", slog.LevelError, "component", "board", "upstream", "core", "stage", "JWKS fetch", "cause", failurelog.Cause(err))
 		return
 	}
 	var enc map[string]string
 	if err := json.Unmarshal(raw, &enc); err != nil {
-		log.Printf("coreauth: jwks decode failed: %v", err)
+		failurelog.Default.Event("board:core-jwks-decode", slog.LevelError, "component", "board", "upstream", "core", "stage", "JWKS decode", "cause", failurelog.Cause(err))
 		return
 	}
 	keys := make(identity.KeySet, len(enc))
 	for kid, b64 := range enc {
 		pub, err := base64.RawURLEncoding.DecodeString(b64)
 		if err != nil || len(pub) != ed25519.PublicKeySize {
-			log.Printf("coreauth: jwks: skipping malformed key %q", kid)
+			failurelog.Default.Event("board:core-jwks-key", slog.LevelError, "component", "board", "upstream", "core", "stage", "JWKS invalid key", "cause", failurelog.Cause(err))
 			continue
 		}
 		keys[kid] = ed25519.PublicKey(pub)
@@ -169,12 +174,12 @@ type revocation struct {
 func (c *Client) refreshRevocations(ctx context.Context) {
 	raw, err := c.get(ctx, "/revocations")
 	if err != nil {
-		log.Printf("coreauth: revocations refresh failed: %v", err)
+		failurelog.Default.Event("board:core-revocations-fetch", slog.LevelError, "component", "board", "upstream", "core", "stage", "revocations fetch", "cause", failurelog.Cause(err))
 		return
 	}
 	var list []revocation
 	if err := json.Unmarshal(raw, &list); err != nil {
-		log.Printf("coreauth: revocations decode failed: %v", err)
+		failurelog.Default.Event("board:core-revocations-decode", slog.LevelError, "component", "board", "upstream", "core", "stage", "revocations decode", "cause", failurelog.Cause(err))
 		return
 	}
 	m := make(identity.RevocationSet, len(list))
@@ -306,4 +311,12 @@ func (c *Client) Verify(raw string) (Synthesized, error) {
 		return Synthesized{}, err
 	}
 	return Synthesize(p), nil
+}
+
+// ThemeProxy relays only the account appearance preference to Core.
+func (c *Client) ThemeProxy() http.HandlerFunc {
+	if c == nil {
+		return theme.Proxy("", "blerg-board")
+	}
+	return theme.Proxy(c.baseURL, "blerg-board")
 }

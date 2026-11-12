@@ -103,6 +103,7 @@ export default function ModelPicker({
       <span style={labelStyle}>Model</span>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         {main.map(m => (
+          // button-guard-ignore: pillStyle supplies known background and border values for both selection states
           <button className="settings-action"
             key={m.id}
             type="button"
@@ -170,6 +171,7 @@ function EffortRow({ label, efforts, auto, effort, onEffortChange, titleFor, lab
       <span style={labelStyle}>{label}</span>
       <div role="radiogroup" aria-label="Effort" style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         {auto && (
+          // button-guard-ignore: pillStyle supplies known background and border values for both selection states
           <button className="settings-action"
             type="button"
             role="radio"
@@ -183,6 +185,7 @@ function EffortRow({ label, efforts, auto, effort, onEffortChange, titleFor, lab
           </button>
         )}
         {efforts.map(e => (
+          // button-guard-ignore: pillStyle supplies known background and border values for both selection states
           <button className="settings-action"
             key={e}
             type="button"

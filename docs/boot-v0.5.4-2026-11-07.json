@@ -1,0 +1,41 @@
+{
+  "version": "v0.5.4",
+  "source_commit": "2ca05a604",
+  "harness_commit": "df99741a3",
+  "status": "complete",
+  "boot": {
+    "samplesMs": [
+      3487,
+      8237,
+      8137
+    ],
+    "navigation": [
+      {
+        "responseEndMs": 20.200000000186265,
+        "domInteractiveMs": 28.700000000186265,
+        "loadEndMs": 128.79999999981374,
+        "transferBytes": 952
+      },
+      {
+        "responseEndMs": 8.700000000186265,
+        "domInteractiveMs": 27.700000000186265,
+        "loadEndMs": 138.8999999994412,
+        "transferBytes": 952
+      },
+      {
+        "responseEndMs": 6.400000000372529,
+        "domInteractiveMs": 21.700000000186265,
+        "loadEndMs": 132.30000000074506,
+        "transferBytes": 952
+      }
+    ],
+    "readiness": "version-neutral transcript event row or folded tool group plus two animation frames"
+  },
+  "fixture": {
+    "sessions": 446,
+    "events": 176000,
+    "long_transcript_events": 8000,
+    "card_links": 0,
+    "note": "Native historical schema; boot-only seed excludes newer card-link and worker-kind columns; all historical services and frontends built from tag; served runner index verified byte-for-byte."
+  }
+}

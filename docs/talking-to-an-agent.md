@@ -1,11 +1,16 @@
 # Talking to a running agent
 
+Get a session's recorded branch with `blerg-runner session result <id>` and use
+its `branch` value wherever `<work-branch>` appears below. For a child, pass the
+child's ID. Branch names stay fixed after a rename; never derive them from IDs
+or titles. Workspace results also report each member's branch.
+
 How messages, interrupts and pausing work in the chat view of a Claude Code session. (The
 engine-specific notes are at the end.)
 
 ## Interactive and unattended
 
-Every agent session is started in one of two modes, and the agent is told which:
+Every agent workspace is started in one of two modes, and the agent is told which:
 
 - **Interactive**: you are reading the chat as it happens. The agent talks a plan over before it
   acts on anything large, says what it is doing between tool calls, and when it needs a decision it
@@ -22,14 +27,14 @@ Who gets which, unless the start says otherwise:
 | A tool, through the agent contract or MCP | unattended, unless it asks for interactive |
 | A cron | always unattended |
 | A board card's **Run**, and the board's reviews | unattended |
-| A board card's **Discuss**, and the board session | interactive |
+| A board card's **Discuss**, and the board workspace | interactive |
 
-To choose it yourself: tick **Unattended** on the launch sheet (it is offered for an agent session,
+To choose it yourself: tick **Unattended** on the launch sheet (it is offered for an agent workspace,
 not a terminal one), or send `"interaction": "interactive"` or `"interaction": "unattended"` in the
 body of `POST /api/runner/start`.
 
-The mode is fixed for the session's life: it cannot be changed after the start. A session started
-unattended says **Unattended** under its title on the session page. You can still write to one;
+The mode is fixed for the workspace's life: it cannot be changed after the start. A workspace started
+unattended says **Unattended** under its title on the workspace page. You can still write to one;
 the message is delivered as usual.
 
 ## Choose a board at launch
@@ -48,7 +53,7 @@ Discovery has a timeout and a Retry control; launches without a board do not wai
 
 ## When the app calls you
 
-The runner tells you when a session needs you: a toast in the runner page you have open and, when
+The runner tells you when a workspace needs you: a toast in the runner page you have open and, when
 you have not used it for a few minutes, a notification on your phone or desktop.
 
 - **Waiting for your input**: the agent stopped mid-turn for you.
@@ -58,24 +63,74 @@ you have not used it for a few minutes, a notification on your phone or desktop.
   minutes at most; then you are told the agent is waiting for you while a task still runs.
 - **A question** the agent asked with `blerg-runner ask`.
 
-Failed sessions and sessions paused unexpectedly after a restart leave an open alert in **Needs
-you** and send a push, including unattended sessions and children. The alert gives the reason and
+Failed workspaces and workspaces paused unexpectedly after a restart leave a notice in the
+conversation and send a push, including unattended workspaces and workers. The notice gives the reason and
 what is known about work delivery or retention. Missing delivery evidence is called unconfirmed;
-it is never called delivered or lost without evidence. A private session sends only a generic push.
-Open its session to check the work, then dismiss the alert. Alerts survive the session ending and
-the runner restarting. Clean turn finishes and requested stops stay quiet unless work needs recovery.
+it is never called delivered or lost without evidence. A private workspace sends only a generic push.
+Open its conversation to check the work. Notices survive the session ending and the runner
+restarting. When a session recovers or is discarded, Blerg adds a note to History. Repeated
+reports for the same failure share one notice. A new failure within a day of recovery is quiet.
+Clean turn finishes and requested stops stay quiet unless work needs recovery.
+Notices never appear in **Questions** or **Needs you**, and cannot be answered or dismissed as
+questions. Existing failure and recovery alert questions are converted during upgrade, with their
+text preserved in the conversation. **Needs you** keeps real questions, approvals and **Resume**;
+a paused session still has its Resume control.
 
-A child failure also reaches its coordinator as a `child_turn` notice. If the coordinator is ended,
-paused or unavailable, the alert says it is not responding. Otherwise Blerg checks after three
-minutes. Reading the child's result, sending it a new input, archiving it, or dismissing its alert counts as handling it.
+A worker failure also reaches Main (or the named worker coordinating it). If that session is ended,
+paused or unavailable, the notice says it is not responding. Otherwise Blerg checks after three
+minutes. Reading the worker's result, sending it a new input or archiving it counts as handling it.
 
-A child's `blerg-runner ask --no-wait` goes directly to the person who owns it, in **Needs you** and
-the bell; the CLI says where it went. The child keeps working. A blocking ask still tells the parent,
-which can answer it or escalate a decision that belongs to the person.
+Settings → Account lets you set your time zone and optional daily quiet hours (off by default).
+The browser supplies the initial zone; agents receive your current local time and zone each turn.
+During quiet hours, ordinary push notifications wait and combine to the latest per session.
+Questions remain in Needs you. `blerg-runner ask --urgent` explicitly interrupts quiet hours and
+requires your answer, including for a child. Destructive questions and command approvals also
+notify immediately. Ordinary `ask --person` questions still respect quiet hours; use `--urgent`
+only when waiting would cause harm. After the window, delivery rechecks your login and privacy
+and summarizes the activity if you already answered a held question.
 
-Ordinary waiting and turn-finish notices do not call you for sessions nobody watches: an unattended one, a cron's, and one a tool started
+A child's question, including `blerg-runner ask --no-wait`, goes first to its parent agent as a
+`child_turn` notice with the question ID and full text. It stays out of your **Needs you** and
+sends no push while the parent handles it. Only the parent's session credential can answer with
+`blerg-runner session answer <child> <question-id> "text"`; the answer reaches the child.
+
+The parent can deliberately send the question to you with
+`blerg-runner session escalate <child> <question-id> --summary "..." --recommendation "..."`.
+You see Main's plain-language summary and recommendation, followed by the worker's original
+question. Every worker question reaches Main first, including `ask --person`, command approvals
+and destructive phrases such as “force push” or “drop database.” Those flags require Main to
+escalate; Main cannot answer them. Only you can approve destructive actions.
+Parent messages are refused while a blocking question requires you; input already in
+flight waits behind the native ask. When you resolve it, the parent gets a notice and can resend.
+`session watch` prints “waiting on the person” and exits with code 5 while a blocking question
+waits for you; a no-wait question lets the watch go on.
+Only you can resolve such a question. If the child is interrupted or its `ask` times out, the
+parent's interrupt stops the child but not the question: it stays in Needs you, marked “no longer
+waited on”, and the parent still cannot send input past it. Your answer reaches the child as a
+message. A session started with a runner key has no owner, so any signed-in person can answer.
+Ordinary messages and Blerg notices never answer a blocked native ask; they queue until its
+recorded answer arrives. After a restart, blocking questions whose waiters died are withdrawn
+and the parent is told; no-wait questions stay open. A daemon that cannot reach the server for
+this keeps hosting the session and retries on its next connection. Closing a session’s own
+question without an answer is logged. An interrupted native waiter saves its close notice and
+retries until the server acknowledges it, including after a host restart. An answer committed
+just before the interruption then reaches the session as a message. Parents can still post their
+own `blerg-runner ask`.
+A clarifying question's answer reaches the engine exactly as given, so it still matches its
+option; a child's model is told who answered only on free-text questions.
+
+Worker questions wait for Main without a time limit, including while Main is busy, paused or
+disconnected. They reach Main at its next step. Only Main explicitly escalating a question sends it to you. Answer and escalation share a lock:
+if escalation wins, a parent answer is refused. Each decision records who answered or escalated
+it and why. Pending worker questions have no attention tone or question chip in your panel.
+If Main has ended or is gone, the worker stops waiting without an answer. A plain notice names
+the worker without repeating its question. An older daemon that cannot safely route worker
+questions also stops waiting with an update notice. Discard withdraws unanswered questions;
+archived workers cannot leave an open question behind. Explicitly person-only questions stay with the person. Failure alerts remain conversation notices.
+
+Ordinary waiting and turn-finish notices do not call you for workspaces nobody watches: an unattended one, a cron's, and one a tool started
 without asking for you in the chat. Their questions still show on the Messages page. A board
-card's **Discuss**, the board session and a board's **Assist** have you in them and do call you.
+card's **Discuss**, the board workspace and a board's **Assist** have you in them and do call you.
 
 ## Sending a message while the agent works
 
@@ -85,12 +140,12 @@ delivered and the agent adjusts without losing the turn. Until then it shows as 
 the chat, and becomes a normal message of yours once the agent has taken it.
 
 The server saves accepted chat messages before sending them to the daemon. Their queued bubbles
-survive switching sessions and reloading the page. If the daemon restarts before taking a message,
+survive switching workspaces and reloading the page. If the daemon restarts before taking a message,
 the server delivers it again when an updated daemon returns; retained client-id receipts
 prevent replay of known-consumed messages. Older daemons receive the original send but are
-not sent automatic retries: upgrade the daemon for reconnect recovery. A session may have
+not sent automatic retries: upgrade the daemon for reconnect recovery. A workspace may have
 64 pending messages, up to 4 MiB together; each serialized message is limited to 256 KiB.
-A session that ends reports remaining queued messages as not delivered.
+A workspace that ends reports remaining queued messages as not delivered.
 A queued message stays visible until the agent records it or reports that it could not take it.
 
 Two things to know:
@@ -116,7 +171,7 @@ one: it starts again at each thinking phase, and a child's count is its output s
 began. Claude and Codex always show the clock: neither reports reasoning tokens while the model is
 still thinking (Claude's count comes after the thinking block and covers the whole reply; Codex's
 comes after the request ends), so a count there would be the wrong one. Counts come from the
-engine, never from the length of its text, and like other token numbers only the session's owner
+engine, never from the length of its text, and like other token numbers only the workspace's owner
 and an administrator see them; anyone else sees the clock. The Running now card uses the same
 reasoning line for a child; status glyphs stay compact. The thinking itself still arrives as one
 card when it is over. "Retrying the model (attempt 2)…" appears while the engine retries a failed API
@@ -136,44 +191,47 @@ act on line by line. See [Review and mark-up](artifacts.md#review-and-mark-up).
 
 ## Files the agent mentions
 
-When the agent's text names a file in the session's folder that it did not publish, you can open it.
+When the agent's text names a file in the workspace's folder that it did not publish, you can open it.
 A relative link (`[the readme](README.md)`, `[x](docs/a.md#L12)`) or inline code that looks like a
 path (`runner/internal/server/artifacts.go:120`, `README.md`, `./scripts/scrub.sh`, `/workspace/x`)
-is drawn with a dotted underline and the hint "Open from the session's folder". Only the agent's
+is drawn with a dotted underline and the hint "Open from the workspace's folder". Only the agent's
 text is read this way, never your own messages, a code block, a URL or a host path such as
 `/home/...`. A bare `foo.bar` is not taken for a file unless its extension is a known one, and a name
 with a slash needs a file-like last part (`and/or` and `src/components` stay text). A bare name with no
-folder (`plan.md`) that is also a file published in the session opens that published file instead.
+folder (`plan.md`) that is also a file published in the workspace opens that published file instead.
 
-A click reads the file through the session (`GET /api/sessions/{id}/workspace-file?path=`, without any
+A click reads the file through the workspace (`GET /api/sessions/{id}/workspace-file?path=`, without any
 `:line`, `#L` or query part) and opens it in the same viewer as published files: markdown, text, JSON,
 CSV, images and PDF as usual; html in a sandboxed frame with no network, and svg only as an image.
-Code files show numbered, highlighted lines, scrolled to the line the text named. The header says
-"From the session's folder · as of now"; **Copy path**, **Download** and **Save a copy to Files** act
-on what was read (the copy is kept as your own file even after the folder changes). Only the session's
+Code files show numbered, highlighted lines, scrolled to the line the text named. File tabs carry
+the full path in their tooltip. The toolbar beneath a file tab shows a path only when directories
+add useful context; it does not repeat a filename. **Copy path**, **Download** and **Save a copy to Files** act
+on what was read (the copy is kept as your own file even after the folder changes). Only the workspace's
 owner sees these links, because the route refuses everyone else. A refusal is one plain sentence, not
-the server's text: not found, files that usually hold secrets, other paths Blerg won't open, a session
+the server's text: not found, files that usually hold secrets, other paths Blerg won't open, a workspace
 that isn't running, a busy reader (try again), or a file too large. The board's chat does not open them.
 
 ## Cards and commits the messages name
 
 In a message, the agent's or yours, a card number (`#147`) and a commit hash (`08025f2c`) become the
 same chips as elsewhere once Blerg has confirmed them: a hovercard on hover, and a click opens the
-ticket dialog or the commit viewer. A number is a card only when the session's board is known (the
-one board the session has access to) and the card exists there; a hash (7 to 40 hex digits) is a
-commit only when the session's repository says so, which only the session's owner can ask, so
-someone the session is shared with sees plain text. Until then the text is drawn exactly as written,
+ticket dialog or the commit viewer. A number is a card only when the workspace's board is known (the
+one board the workspace has access to) and the card exists there; a hash (7 to 40 hex digits) is a
+commit only when the workspace's repository says so, which only the workspace's owner can ask, so
+someone the workspace is shared with sees plain text. Until then the text is drawn exactly as written,
 so nothing moves when it turns into a link. "#1 priority" with no card #1, a hex word that is no
 commit, anything in a fenced code block and anything inside a link stay text; inline code links only
 when it holds nothing but a hash. The lookups are batched and each reference is asked once per
-session.
+workspace.
 
 The same goes for the checklist, on Plan and on Live's checklist line: an item that names a card
-("#155 Dismiss in Needs you") links to it once the card is confirmed on the session's board, and the
+("#155 Dismiss in Needs you") links to it once the card is confirmed on the workspace's board, and the
 card's state glyph (✓ ◐ ○) shows beside the item when it differs from the item's own. An unticked
 item whose card is done is a plan that has fallen behind, visible at a glance.
 
 ## When the agent asks, updates or leaves a note
+
+Workers reach Main with `blerg-runner ask` for decisions and `blerg-runner note` for information. A worker note sends only a metadata notice to Main, who reads its untrusted text with `blerg-runner session result <child>`. Notes remain in that result across reads; long bodies are clipped with `truncated` set, and the full text remains in the worker events. Worker notes do not notify you or enter Needs you. A plain mid-turn chat reply does not notify Main. Use `publish` for long content.
 
 An agent reaches you with `blerg-runner ask`, `blerg-runner update` and `blerg-runner note`, and
 they now show in the session's chat as they are sent:
@@ -193,7 +251,7 @@ they now show in the session's chat as they are sent:
 - An **update** and a **note** are system cards. You can reply to a note; the agent reads the reply
   with a reference to the note it answers.
 
-The board's own session chat has no reply box on an ask card: type the answer in its message box,
+The board's own workspace chat has no reply box on an ask card: type the answer in its message box,
 which answers the open question the same way. So does a message sent through the runner's API
 (`POST /api/runner/sessions/{id}/message`, or the MCP `send_message` tool) by a person or an API
 caller; a board's own automation never answers a question.
@@ -258,7 +316,7 @@ yours, an API failure reads as the agent's message, retries and compactions show
 slash skill shows its instructions. Asks, updates and notes from `blerg-runner`, and an answer
 typed in the chat, work with any daemon.
 
-If the browser falls behind a very busy session and the server has to drop live events for it, the
+If the browser falls behind a very busy workspace and the server has to drop live events for it, the
 chat is told and fetches them again; you may see the transcript fill in a moment later, not lose a
 line.
 
@@ -281,27 +339,47 @@ pastes plain text, and undo (Ctrl/Cmd+Z) takes a paste back in one step.
 
 ## Interrupting
 
-**Stop** (■), in the session header immediately left of End session and shown only while the agent
+**Stop** (■), in the workspace header immediately left of End workspace and shown only while the agent
 works, cancels what the agent is doing right now. It is kept far from Send so it is not pressed by
-accident, and Esc does not interrupt. The conversation and the
-session stay as they are, and any message you had already queued runs next, as its own turn. It does
-not restart the agent: its context is kept.
+accident, and Esc does not interrupt. Stop keeps the conversation available, and queued messages run
+next. Stop also ends Blerg's wait on background
+work. A background run keeps going unless the engine stops it; the chat says “Stopped; background work may still be running” while it remains in the running inventory. If the channel is idle and no input is held, Stop leaves the engine alone and says there is no active turn to stop. Stop acts on the work running now, including child work under an idle root. Every press reports whether work is stopping, stopped, absent, or could not stop. Presses during an existing Stop repeat its visible progress. A brief 500 ms guard after completion absorbs late double-clicks; after that, Stop cancels the next turn if it has started. Browser turn identities do not gate Stop.
 
-## Pausing a cluster session
+If Codex acknowledges Stop but does not finish the turn within 30 seconds, Blerg restarts its
+engine and resumes the conversation before delivering queued input. Background runs may outlive the engine. Replacing its root process does not prove its tool children ended, so their last inventory remains listed until completion is confirmed. Repeated Stops do not extend the deadline or
+exhaust the restart budget. A refused restart reports its reason and marks queued messages as not
+delivered. Stop intent is retained before the interrupt, so a daemon restart during Stop does not
+automatically continue the stopped turn, including when Stop arrives after shutdown has frozen
+engine-driven recovery writes. A refused cancellation leaves queued messages waiting and reports
+why Stop could not finish, so it can be retried.
 
-A cluster session costs a pod while it runs. **Pause** (in the session header's ⋯ menu, for a live
-cluster session) frees the pod and keeps the session: its conversation is kept and it shows as having no
-pod. Send it a message and a new pod resumes it, exactly as after an eviction. A paused session waits 24
+OpenClaw keeps Stop attached to the current turn while its process starts. Its owned process group stops with a forced turn end; detached background work may remain. Cleanup refusals can be retried.
+
+Codex also bounds child-only Stop to 30 seconds, holds queued root input until the child work ends or the engine is replaced, and reports a refused cleanup so Stop can be retried.
+
+Hermes also bounds completion after Stop to 30 seconds and holds new input until the stopped turn ends or its gateway is safely replaced. A refused interrupt or cleanup is reported; queued input stays waiting.
+
+Claude also keeps a fallback deadline when background work holds queued input before the next
+turn begins. Repeated Stops and acknowledgments do not extend that deadline. If the engine must
+be replaced, input it never consumed is delivered once after the conversation resumes. Turn-end synchronization and input gates do not consume this deadline. A forced Claude replacement cleans up its owned process group on the host and in a sandbox. Detached shells can survive that group, so Blerg keeps their inventory and reports that background work may still be running. Monitors, in-process subagents, and pending native calls end with the engine; only unconfirmed Bash work stays listed. Input the engine echoed is never redelivered, even if event delivery was blocked.
+
+A later background completion notification may wake the engine again after Stop. That is expected: Stop ends the current turn, and does not suppress future background notifications.
+
+## Pausing a cluster workspace
+
+A cluster workspace costs a pod while it runs. **Pause** (in the workspace header's ⋯ menu, for a live
+cluster workspace) frees the pod and keeps the workspace: its conversation is kept and it shows as having no
+pod. Send it a message and a new pod resumes it, exactly as after an eviction. A paused workspace waits 24
 hours for a message and is then ended ("not resumed"). Whatever the agent was doing when you paused is
 cut off.
 
-**End session** (the red ✕ in the session header; click it twice) ends a session for good: an ended
-session cannot be resumed, the chat says so, and the message box is locked. **Discard**, in the ⋯ menu,
+**End workspace** (the red ✕ in the workspace header; click it twice) ends a workspace for good: an ended
+workspace cannot be resumed, the chat says so, and the message box is locked. **Discard**, in the ⋯ menu,
 ends and archives it (with its children); its history and URL are kept.
 
 The header's controls are icons, their names in the tooltips: the star, Insights, Stop (while the agent
-works) and End session. On a phone the header keeps search and Stop; End session is in the command palette. The app has one Notifications bell, beside **+ New** at the top of the session list (on a phone, in a
-session's header, where Insights moves into ⋯): what needs you (proposals and questions) and, at its
+works) and End workspace. On a phone the header keeps search and Stop; End workspace is in the command palette. The app has one Notifications bell, beside **+ New** at the top of the workspace list (on a phone, in a
+workspace's header, where Insights moves into ⋯): what needs you (proposals and questions) and, at its
 foot, the switch that turns push notifications for this browser on or off.
 
 Transient notices and shell errors share a dismissible stack near the top of the page. It scrolls
@@ -310,7 +388,7 @@ inside the visible area above the keyboard. Shell connection notices stay above 
 
 ## Long conversations
 
-Opening a long session shows the most recent part of the conversation at once and loads the earlier
+Opening a long workspace shows the most recent part of the conversation at once and loads the earlier
 messages in the background; a "Loading earlier messages" line is at the top while that runs, and your
 place is kept as they arrive.
 
@@ -330,18 +408,18 @@ When a Claude Code agent hands part of the work to a subagent (its `Agent` tool)
 gets one row of its own in the conversation, as quiet as a row of tool calls: ↳, the task it was
 given, and one glyph for how it stands at the right (a spinner while it works, ✓ done, ✗ error, …
 when it has no result). Hover the row for its type, the model it runs on and the tokens it has used,
-and for a failed one the first line of its error (a screen reader hears them in the row's name); the session panel shows the full detail. Click the
+and for a failed one the first line of its error (a screen reader hears them in the row's name); the workspace panel shows the full detail. Click the
 row to open it: a line says what it is doing (the command it runs, the file it reads, or the start of
 its latest message) or, once it is over, how it went, how many tool calls and messages it made, its
 tokens and how long it took, with the first line of its report; under it are the prompt it was given, its tool calls, thinking and
 messages (no longer shown as the main agent's), and at the foot the report it returned. A row you
 open stays open while you scroll. A subagent started in the
 background shows a muted spinner and ⏱ ("running in the background") until it really finishes,
-and its row is drawn with a dashed border until then (so is its row in the session panel). In a long session whose
+and its row is drawn with a dashed border until then (so is its row in the workspace panel). In a long workspace whose
 subagent started further back than what is loaded, its work is still gathered in one row, titled
 "Subagent · started earlier" and with no clock, that fills in once the earlier messages load. The subagent's own messages
 and thinking need a Claude Code recent enough to forward them (`--forward-subagent-text`); with an
-older one the row holds its tool calls and report. A session recorded by an older daemon shows its
+older one the row holds its tool calls and report. A workspace recorded by an older daemon shows its
 subagents' work as it always did. When the agent resumes a subagent that had finished (it sends it a
 new message), the new run is a row of its own at that point in the conversation, titled as the
 first with a muted "resumed" marker beside the title, running until it reports back; the panel's Running now marks it
@@ -352,32 +430,31 @@ desktop daemon). Not yet followed: a run Claude Code starts on its own, without 
 agent (a background subagent woken by its own background work reporting back); its work folds into
 the finished row.
 
-## The session panel
+## The workspace panel
 
-An agent session's page has a panel on its right with what is live in the session and what it has
+An agent workspace's page has a panel on its right with what is live in the workspace and what it has
 done. The panel has up to five tabs: **Live** (a one-line summary of the checklist, Needs you, Running now
-and Session, below), **Plan**, **History**, **Files** and **Capabilities** (below); the tab you chose is remembered per browser, and a new
-question shows Live without changing that choice. **Plan** holds the pinned tickets, the checklist (or the engine's own plan) and the diffs the session
-published, newest first; click a diff to open it in the viewer. It shows only when the session has one of
+and Workspace, below), **Plan**, **History**, **Shared** and **Capabilities** (below); the tab you chose is remembered per browser, and a new
+question shows Live without changing that choice. **Plan** holds the pinned tickets, the checklist (or the engine's own plan) and the diffs the workspace
+published, newest first; click a diff to open it in the viewer. It shows only when the workspace has one of
 them, and its label carries the progress ("Plan 18/23", or a count of tickets and diffs when there is
 no list). Live keeps one line at its top for the list ("Checklist · 18 of 23 · Next: ..."), as two controls: the pinned ticket
 (key and status, a chip that opens the ticket over the page) and the list (with a short bar beside the
 count; it goes to Plan). A long checklist therefore never pushes Needs you and Running now
-off Live. Stop sits in the session header beside End session while the agent works, not in the
+off Live. Stop sits in the workspace header beside End workspace while the agent works, not in the
 message box (Send still takes a message mid-turn). The model and effort
-pickers, and everything else that belongs to the session as a whole, are in the panel. On a wide
+pickers, and everything else that belongs to the workspace as a whole, are in the panel. On a wide
 screen (1024 px and up) it is a column beside the chat, and the chat makes room for it; on a narrower
 screen or a phone it is a drawer that slides over the chat, and Escape, the ✕ or a tap beside it
 closes it. The panel toggle on the tab bar opens and closes it. Its two small counts say the work
-running inside the session (🤖3, with the robot face Running now gives subagents: subagents, background commands and tasks) and the child sessions
+running inside the workspace (🤖3, with the robot face Running now gives subagents: subagents, background commands and tasks) and the workers
 at work (`↳4`); each hides at zero, its tooltip spells them out ("3 subagents and background tasks ·
-4 child sessions"), and they are the numbers Running now lists. What needs you is not counted on the
-toggle: the session's own questions are in the chat and on Needs you. On a wide screen the panel is open until you close it, and
+4 workers"), and they are the numbers Running now lists. What needs you is not counted on the
+toggle: the workspace's own questions are in the chat and on Needs you. On a wide screen the panel is open until you close it, and
 then it stays as you left it, in this browser. Once you have closed it, it opens by itself again
 only when the agent asks a new question, once.
-Tool changes waiting on you do not reopen it: their count is read when the session opens and again
+Tool changes waiting on you do not reopen it: their count is read when the workspace opens and again
 when you open the panel or its Capabilities tab. The drawer opens only when you ask for it.
-Terminal sessions have no panel.
 
 - **Ticket**: the tickets the agent pinned, at the very top when there are any
   ([tickets and checklists](#tickets-and-checklists), below): the current one with its key (a link
@@ -385,18 +462,18 @@ Terminal sessions have no panel.
   ticket over the page, with "Show in conversation" to its card.
 - **Checklist**: the agent's checklist, with "3 of 7 done" beside the title, a short progress bar beside the count (green when all are done) and the items
   (ticked ones struck through; you cannot tick them, only the agent does). When the agent set none, a
-  Claude Code or Codex session shows the engine's own plan here instead, titled **Plan**, its header saying
+  Claude Code or Codex workspace shows the engine's own plan here instead, titled **Plan**, its header saying
   what is in progress ("Writing tests · 3 of 7"). Hidden when there is neither. An item the agent
   ticked with commits (`--commit`) shows a chip ("2 commits") that opens to the short shas: a link to
-  the commit when the session's repository is known, otherwise a button that copies the sha.
-- **Permissions**: what this session may do without asking, in short: how many are active, a
+  the commit when the workspace's repository is known, otherwise a button that copies the sha.
+- **Permissions**: what this workspace may do without asking, in short: how many are active, a
   **Manage** button, and each active permission as a chip (↳ children, ▦ a board, ⚙ an MCP tool)
   with × to revoke it at once. A permission given from a card in the chat is one more chip. One that
   no longer approves (its sign-in ended, or the tool changed) shows apart with why. **Manage** opens
   the Permissions dialog (a full-screen sheet on a phone), with a search over everything in it:
-  - **Child sessions**: start sandboxed or unsandboxed children, or children on the cluster (a
-    desktop session gets all three where the install has a cluster, each saying where it runs),
-    without asking, with the engines each covers; a control the session cannot use says why.
+  - **workers**: start sandboxed or unsandboxed children, or children on the cluster (a
+    desktop workspace gets all three where the install has a cluster, each saying where it runs),
+    without asking, with the engines each covers; a control the workspace cannot use says why.
   - **Boards**: your boards, each with an access level and how many have one
     ([Board access](#board-access-from-the-permissions-dialog)); a chip reads "Product · Full".
   - **MCP write tools**: grouped by connection, each tool you set to approval mode checkable; a tool
@@ -411,8 +488,8 @@ Terminal sessions have no panel.
   Nothing changes until **Save**, which applies it and says what it did ("Grant 2, revoke 1");
   Cancel or Esc throws the changes away. Rows Save would change are marked. The dialog works from the
   keyboard: arrows, Home and End move in a list, Space ticks, Tab stays inside, Esc closes. See
-  [When the agent starts other sessions](#when-the-agent-starts-other-sessions) and
-  [Session permissions](proposals.md#session-permissions). The launch sheet's **Permissions…** opens
+  [When the agent starts other sessions](#when-the-agent-starts-workers) and
+  [Session permissions](proposals.md#workspace-permissions). The launch sheet's **Permissions…** opens
   the same dialog to choose them before the session starts (the button counts them); they are given
   as it starts, and one that cannot be given is reported after launch and the session asks as usual.
   The dialog grows with a large screen, and **Maximize** (⤢) gives it the whole window.
@@ -428,7 +505,7 @@ Terminal sessions have no panel.
   review requests too.
 - **Running now**: Main (the agent you talk to), the subagents at work, each with its task, type,
   model, tokens, what it is doing and how long it has run; the background tasks; and the started
-  sessions at work. Main, each subagent and each started session (any engine) carry a token chip
+  sessions at work. Main, each subagent and each worker (any engine) carry a token chip
   (`1.4M`, `180k`): the tokens that session has used so far, from the recorded turn usage Insights
   reads. Its tooltip breaks it down: the total, this turn (or the last finished one; for a subagent,
   its run so far), input against cached, what its subagents used, and the estimated cost when every
@@ -453,7 +530,7 @@ Terminal sessions have no panel.
   panel; they are in the **Settings** dialog (below).
 - **History** is the panel's second tab: the pieces of work the agent marked, newest first
   ([History](#history), below).
-- **Files** lists every file the session holds, as the Files dialog over the chat used to: published
+- **Shared** lists every file the session holds, as the Files dialog over the chat used to: published
   by the agent or attached by you (marked "you"), one compact row each with its kind, size, version and
   time. Click a row to open it in the chat's viewer (in the drawer, the drawer closes first); Download
   and Delete are icons on the row (hover or focus; always shown on touch), and a file's earlier
@@ -493,22 +570,22 @@ the runner and daemon to use this command; an older daemon times out with a clea
 than assigning an unknown caller to the session. The hook runs inside the engine's environment,
 changes no permissions, and is absent from restricted sessions, which have no shell.
 
-### What is live is read from the whole session
+### What is live is read from the whole workspace
 
 Live, the header badge and the panel opening by itself read what is live from the runner server,
-which goes through the session's whole history: open questions, subagents and background tasks
-still running, and your tool changes waiting on the session. So a page you refresh in the middle of
-a long session lists all of it at once, including a subagent or a task that started long before the
+which goes through the workspace's whole history: open questions, subagents and background tasks
+still running, and your tool changes waiting on the workspace. So a page you refresh in the middle of
+a long workspace lists all of it at once, including a subagent or a task that started long before the
 part of the conversation the chat has loaded, and Running now agrees with the sidebar's "⏱ N". The
 server is asked again when something starts, ends or asks (at most every five seconds), and what
 happens in between moves the list at once. A runner server older than this reads only what the chat
 has loaded, as before: the lists fill in as the history loads.
 
-### Add a plugin or skill during a session
+### Add a plugin or skill during a workspace
 
-Open **Session panel → Capabilities → Add plugin or skill**. Choose an allowed marketplace and
+Open **Workspace panel → Capabilities → Add plugin or skill**. Choose an allowed marketplace and
 enter its plugin name; skills are supplied by plugin bundles. The available marketplaces come
-from the install's policy. Choose **This session only** to leave account settings unchanged, or
+from the install's policy. Choose **This workspace only** to leave account settings unchanged, or
 **Always on** to add it to the account's engine-specific plugin list as Settings does.
 
 A supported host Claude session loads the plugin between turns, after foreground and background
@@ -532,7 +609,7 @@ other proposals. Declining or expiry changes nothing.
 
 Queued, applied, failed and new-session-only outcomes are shown from the server's
 state. A failed application is not shown as loaded. See the
-[desktop plugin notes](../install/desktop/DAEMON.md#adding-to-an-existing-session) for the daemon
+[desktop plugin notes](../install/desktop/DAEMON.md#adding-to-an-existing-workspace) for the daemon
 requirement and [proposal rules](proposals.md).
 
 ### Tickets and checklists
@@ -551,8 +628,8 @@ pinned the same way (source `blerg-board`), and its copy is filled from the Boar
 priority, tags, read with the session's board access; what the agent sent stays only where the Board has
 nothing, and all of it when the card cannot be read).
 
-Pinning copies the ticket's text into the session: whoever can see the session can read it, as
-they can read the rest of it (a private session is yours alone). The text is drawn as plain text and
+Pinning copies the ticket's text into the workspace: whoever can see the workspace can read it, as
+they can read the rest of it (a private workspace is yours alone). The text is drawn as plain text and
 markdown, never as a web page: no scripts, no images, no app cards, and a link only to http or https
 addresses. The tracker's name on the card is what the agent said; its tooltip says the agent pinned
 it.
@@ -573,7 +650,7 @@ those IDs in later events; long or malformed event IDs are hashed whole rather t
 First run `blerg-runner checklist workers` to list recorded worker IDs (current work first, at most
 100). These display IDs may differ from IDs returned by native engine tools. explicitly connect work with `doing <n> --agent <recorded-subagent-id>` or
 `assign <n> --child-session <owned-child-session-id>`; `unassign` removes that connection. The server
-accepts only native workers recorded in this session or its directly owned Blerg child sessions,
+accepts only native workers recorded in this session or its directly owned Blerg workers,
 canonicalizing an unambiguous native call ID to its child ID. Current live state follows a later
 canonical ID without changing the original event; unknown or ambiguous native references are omitted
 from live state and the next mutation rather than retargeted. Titles are never matched. An item can
@@ -605,11 +682,11 @@ Kept automatically:
   oldest pin whose card is done is unpinned first; when none is done, the card is not pinned and the
   agent is told at the end of the turn.
 - A card the session moves into a done column (the Board's terminal columns) is unpinned, and every
-  open checklist item naming it as `#N` (a whole token, as the chat's card chips read it, on the
+  open checklist item naming it as `#N` or with the bound board’s current key (whole tokens, on the
   session's one board) is ticked. The chat row says so: "ticked “Parser #12” (Blerg: #12 done)".
-- A board-started session pins the card it was started for.
-- A session the agent starts whose title or prompt names `#N` is assigned to the agent's open
-  checklist item naming `#N`.
+- A board-worker pins the card it was started for.
+- A session the agent starts whose title or prompt names `#N` or the bound board's current full
+  card key is assigned to the agent's open checklist item naming the same card.
 
 Checked at turn end and held until the next input, with each fact rechecked and told once: the agent gets a Blerg system message (marked, like a child's turn note) naming exactly
 what drifted and the commands that fix it, when
@@ -617,23 +694,33 @@ what drifted and the commands that fix it, when
 - every pinned ticket is done and your last turn ran tools;
 - every checklist item is ticked, or none is doing, and your last turn ran tools (`blerg-runner`
   commands alone do not count);
-- a child session or a background subagent started in the turn has no checklist item;
+- a worker or a background subagent started in the turn has no checklist item;
 - a pinned card was closed on the board;
 - a child looks finished: stopped or idle, and either nothing done since the agent read its result
-  (`blerg-runner session result`), or its `wip/<id>` branch, holding work beyond its recorded clone base, merged into the parent's branch (its own `wip/<parent>` for a sandboxed parent) (asked of the agent's daemon,
+  (`blerg-runner session result`), or its `<work-branch>` branch, holding work beyond its recorded clone base, merged into the parent's branch (its own `<work-branch>` for a sandboxed parent) (asked of the agent's daemon,
   which reinstalling brings). The notice suggests `blerg-runner session discard <id>`; nothing is
   discarded by itself.
 
+Main also gets an idle-work warning when its linked board has unassigned, unblocked Ready cards
+in its single release marked **in progress**, no workers are running, and worker capacity remains.
+When no Board release is in progress, the workspace blackboard’s first open milestone supplies
+the release name instead: cards must carry that exact tag (for example, `0.6.0`). Frozen and
+shipped milestones are skipped. With no current milestone, the check stays quiet and logs why.
+Stuck cards and cards waiting on an open person question are excluded. Free slots honor both the
+configured workers-at-once limit and the account's remaining capacity. This warning repeats on
+each completed idle turn, is rechecked before delivery, and logs one outcome per check; it never
+runs on a timer. Multiple in-progress releases are ambiguous and produce no warning.
+
 The notice shares one input with the next message; it never starts a turn or wakes a parent.
-Older daemons receive no notice. Interrupted or failed turns are not checked. **Nudge when the plan drifts**, in the session panel's
-Session section, turns the notices off for that session (the automatic pins and ticks go on); it is
-on by default and only the session's owner sees it. A cron session gets notices only when it keeps
-pins or a checklist. The checks read the pinned Board cards with the session's own board access, so
+Older daemons receive no notice. Interrupted or failed turns are not checked. **Nudge when the plan drifts**, in the workspace panel's
+Workspace section, turns the notices off for that workspace (the automatic pins and ticks go on); it is
+on by default and only the workspace's owner sees it. A cron workspace gets notices only when it keeps
+pins or a checklist. The checks read the pinned Board cards with the workspace's own board access, so
 an unreadable card is never treated as closed.
 
 ### Proposing a new Board ticket
 
-To file something discovered during a session, the agent first lists the Boards the session owner
+To file something discovered during a workspace, the agent first lists the Boards the workspace owner
 can access and searches the chosen board for duplicates:
 
 ```sh
@@ -646,26 +733,26 @@ blerg-runner ticket file --board "Example" --title "Show startup progress" \
 **Card references stay inside Blerg.** Whenever you mention a card, write `board:<board-id>#<number>` directly in prose or a table, for example `board:example-board#7`; copy the exact reference printed by `ticket create|get|list|search`. It renders as a chip with a hover preview and opens the card inside the session. Use the returned board id, including for a board this session just created; a title or board name is not an id. Do not wrap the reference in backticks or a Markdown link, and never use raw board URLs to mention cards. Bare `#N` (and ranges like `#7–9`) works only when the session has one unambiguous in-use board: its created or pinned board, otherwise its only accessible board. With several boards in use, always qualify each card.
 
 `--board` accepts a board name or ID. Repeat `--repo` for multiple target repositories; these are
-independent of the session's source repository. If a board requires a repository and has only one,
+independent of the workspace's source repository. If a board requires a repository and has only one,
 that repository can be its default; otherwise select the target repositories explicitly.
 Add `--sensitive` when the body should be readable only by that target board's administrators.
 Keep sensitive details out of the title: the title and source metadata remain visible, and this
-flag does not hide anything already in the session's conversation.
+flag does not hide anything already in the workspace's conversation.
 
 These commands do not need a Board selected at launch. The built-in `blerg_ticket_file` tool also
 offers `list_boards`, `search` and `propose` actions to Claude and Codex, including restricted
-sessions without a shell. It provides this approval-gated workflow without adding arbitrary tools
-or changing the session's existing MCP grants.
+workspaces without a shell. It provides this approval-gated workflow without adding arbitrary tools
+or changing the workspace's existing MCP grants.
 
 Filing queues a proposal for the person. On **Proposals**, review it, edit or retarget the pending
 draft if needed, then approve the current exact draft or reject it. Blerg records the source
-session, repository, verified commit when available, and engine. Nothing is written before
+workspace, repository, verified commit when available, and engine. Nothing is written before
 approval, and an ambiguous **unknown** result is never retried automatically. See
-[Board filing proposals](proposals.md#filing-a-board-card-from-a-session).
+[Board filing proposals](proposals.md#filing-a-board-card-from-a-workspace).
 
-### Asking a session to make a board
+### Asking a workspace to make a board
 
-The most natural way to get a new board is to ask a session for one ("make a board for the
+The most natural way to get a new board is to ask a workspace for one ("make a board for the
 launch, with the app and web repos"). The agent proposes it:
 
 ```sh
@@ -675,30 +762,30 @@ blerg-runner board create "Errands" --template focus-board --access read
 
 Nothing is created yet. The proposal waits in **Needs you** (and on **Proposals**, and as a card in
 the chat) with the board's name, description, repositories (the first is its primary repository),
-its columns or template, and the access the session asks for on the new board: **Full** by default,
+its columns or template, and the access the workspace asks for on the new board: **Full** by default,
 **File without asking**, or **Read**. When you approve, you can lower that access (or give none).
 Approving creates the board with your own authority, so only an administrator can approve one, and
-gives the proposing session, and no other, access to the new board at the level you approved. A
-session another session started is capped by its parent, which has no access to a board it did not
-create, so such a session gets none until you set it in its Permissions. Rejecting, or letting the
+gives the proposing workspace, and no other, access to the new board at the level you approved. A
+worker is capped by its parent, which has no access to a board it did not
+create, so that worker gets none until you set it in its Permissions. Rejecting, or letting the
 proposal expire, creates nothing. Approving twice creates one board.
 
-A board made this way starts no sessions of its own until someone chooses **Run as me** in its
-settings. Cron, restricted and board-started sessions cannot be given board access, so they cannot
+A board made this way starts no workspaces of its own until someone chooses **Run as me** in its
+settings. Cron, restricted and board-workers cannot be given board access, so they cannot
 propose a board. See [Proposing a new board](proposals.md#proposing-a-new-board).
 
 ### Board access from the Permissions dialog
 
-A session without a board can still search your boards and propose cards; each proposal asks you.
+A workspace without a board can still search your boards and propose cards; each proposal asks you.
 To let it do more, give a board a level under **Live → Permissions → Manage → Boards** (or in the
 launch sheet's **Permissions…**). Each level includes the ones below it:
 
-| Level | The session may |
+| Level | The workspace may |
 |---|---|
 | **Propose** (every board, the default) | search for duplicates and propose a card, which asks you |
 | **Read** | also list, get and search every card |
 | **File without asking** | also file its proposals at once (the 0.4.3 board filing permission) |
-| **Full** | also create, update, move, link and comment, and manage the board's columns (add, rename, set properties such as terminal, move, and remove an empty column or one whose cards move to another): what choosing the board at launch gives |
+| **Full** | also create, update, move, archive, link and comment, and manage the board's columns (add, rename, set properties such as terminal, move, and remove an empty column or one whose cards move to another): what choosing the board at launch gives |
 
 Session board access allows 600 HTTP requests per rolling minute by default. A CLI command can make
 several requests: a named card move uses one access lookup and six board-tool calls. Access is
@@ -717,9 +804,9 @@ runner reads the other three from core and uses a change within a minute, at eac
 board call. If core cannot be asked, the runner keeps the limits it read last (its defaults before
 the first read).
 
-Archiving and board settings are never available to an agent at any level. Column management is
-part of Full and needs a person behind the access: a level you set here, or a board you chose at
-launch signed in. A cron, or a session launched with an agent token, never manages columns. Below
+Board settings require approval. Archiving and column management are
+part of Full and need a person behind the access: a level you set here, or a board you chose at
+launch signed in. A cron, or a session launched with an agent token, never archives cards or manages columns. Below
 Full every column command is refused, like any other write; propose a card instead. Every column
 change is recorded on the board (who, and the session it came from). A board you chose at launch
 shows as Full; lower it, or set it to Propose to revoke it, like any other.
@@ -730,7 +817,7 @@ is told when you change a level: a short note from Blerg reaches it at its next 
 changed: board "Product" is now Full (was Propose)"), and it is asked to check `blerg_board` with
 `{"tool":"access"}` (or `blerg-runner board access`) before telling you it lacks access.
 `blerg-runner board access` lists the boards and levels the session has. The `blerg-runner board`,
-`column`, `ticket list|get|create|update|move` and `tag` commands reach a board given here through the runner
+`column`, `ticket list|get|create|update|move|archive` and `tag` commands reach a board given here through the runner
 with the session's own token: name it (`blerg-runner ticket list Product`), or, in a session without
 a board chosen at launch, it is their default when it is the only one. With a launch board, a command
 that names no board uses the launch board. Claude and Codex get the same through the `blerg_board`
@@ -743,13 +830,13 @@ engine may still list them until it restarts.
 Only you, signed in, can set a level; a level acts with the sign-in you set it from, so signing out
 stops it until you renew it (**Renew** on the board's row, or choose another level). A sign-in limited
 to one board changes only that board's level. The engine's own board tools of a launch board act with
-the sign-in you launched with. Restricted, cron and board-started sessions cannot be given board
-access this way; they keep exactly what their launch gave them. Like every session permission, the
-levels end with the session: one stopped for good and resumed starts again from its launch.
+the sign-in you launched with. Restricted, cron and board-workers cannot be given board
+access this way; they keep exactly what their launch gave them. Like every workspace permission, the
+levels end with the workspace: one stopped for good and resumed starts again from its launch.
 
-### Board access for sessions a session starts
+### Board access for child sessions
 
-A session a session starts (a child) has no board access of its own. The parent passes its own down
+A session another session starts (a child) has no board access of its own. The parent passes its own down
 with the start, one board at a time and never above its own level for that board:
 
     blerg-runner session start --engine codex --repo myrepo --board Blerg:full --board Ops:read "work cards 12-15"
@@ -774,7 +861,7 @@ again and renew the parent's level), or when the parent was stopped for good or 
 **Each child has its own limits.** A child's board calls count against its own limits, not its
 parent's: 8 board calls at once and 600 board requests a minute per session (the defaults; see above),
 and at most 20 filings an hour approved without asking per permission. By default a parent runs at most 3
-children at once and an account at most 6, so with children an account can have up to 48 more board
+children at once and an account at most 6 (or the administrator's workers-at-once setting, if that is higher), so with children an account can have up to 48 more board
 calls in flight, and a parent at **File without asking** and its children together up to 80 filings
 an hour without asking at the default child limit. The install administrator can change the
 parallel child limit in core Settings; the account cap still applies.
@@ -795,30 +882,32 @@ permission.
 
 ### The first message waits for MCP servers
 
-A new session holds its first message for up to 30 seconds while its MCP servers connect, so the
+A new workspace holds its first message for up to 30 seconds while its MCP servers connect, so the
 agent starts with its tools (`BLERG_RUNNER_MCP_PROMPT_WAIT_S`, 0 turns the wait off). While it waits the
 chat shows, above the message box, "Waiting for MCP servers before sending your first message · 0:12 /
-0:30 · Send now". **Send now** (the session's owner only; others see the wait without the button)
+0:30 · Send now". **Send now** (the workspace's owner only; others see the wait without the button)
 sends it at once. When it is let go, the panel's MCP line says why: the servers were ready, the wait
 ran out, or you chose to. Later messages never wait.
 
 ### History
 
-The panel's second tab is a compact feed of the session's major strokes, newest first, one line each:
+History and conversation authors name Main or the worker or channel responsible for the action.
+
+The panel's second tab is a compact feed of the workspace's major strokes, newest first, one line each:
 a glyph, a short text, chips and the time.
 
 - ◆ **Decision**: a ruling you marked yourself. ◇ is a decision line the agent wrote: one it made
   itself, which you can overrule, or its account of a ruling of yours (the tooltip says which).
 - ? **Attention**: what was asked of you and how it was resolved: questions (`ask`, `ask --no-wait`),
-  approvals of child sessions, proposals, review requests and the review rounds you sent, with their
+  approvals of workers, proposals, review requests and the review rounds you sent, with their
   decision ("→ Allowed once", "→ Changes requested: …", the answer you gave). One still waiting is
   drawn in amber; a question the agent did not wait on reads "unanswered", and so do a question or a
-  child-session start still pending when the session ended. A proposal or a review request can still
-  be decided after the session ends (a cron session ends right after it queues its proposals), so it
+  worker start still pending when the workspace ended. A proposal or a review request can still
+  be decided after the workspace ends (a run ends right after it queues its proposals), so it
   stays waiting until you decide it or it expires. A run of three or more consecutive strokes of one kind in a topic folds into one
   line: "Filed 26 cards → approved, 1 rejected", their cards as chips that wrap under it and their
   span (17:53–18:30); a tap on the words opens one line per stroke (the newest 50 and every waiting
-  one, then "and N earlier"). Proposals, command approvals, child-session starts, review requests and
+  one, then "and N earlier"). Proposals, command approvals, worker starts, review requests and
   review rounds fold this way; questions, decisions, milestones and findings never do. Any other
   stroke between them ends a run. A fold with something still waiting stays amber, and its time
   jumps to the waiting one.
@@ -832,7 +921,7 @@ it is: the item itself with its own words, never a fold's line. In its place in 
 100 lines show first; **Show earlier** adds more. A line's time
 jumps to its moment in the conversation; a line older than what the chat has loaded shows only its
 time. A card chip (#115) opens the card on its Board page in Blerg, with its hovercard, when the board
-is known: the chip's own, else the session's board when it has exactly one; otherwise the chip
+is known: the chip's own, else the workspace's board when it has exactly one; otherwise the chip
 stays the number and its hovercard says "board unknown". A commit chip shows the short sha and copies the full one.
 
 Questions, approvals, proposals, reviews and topics with commits come from what Blerg already
@@ -846,6 +935,15 @@ before anything is sent; if the server refuses a later chunk, the CLI names the 
 it. Importing a file again records nothing new. Only the session's own agent, or you as its owner, can mark it; a child session cannot
 mark its parent. Someone you share the session with sees the same feed, and nothing the transcript
 does not already show them.
+
+Structured code review verdicts, failures and rerun outcomes also use marks. See [Ticket and review data](ticket-review-data.md) for commands, import fields, card attribution and timing limits.
+
+Each session retains up to 50,000 marks, including reviews and failures. This keeps a hard
+storage bound while giving a long-lived Main about 400 days at 125 marks per day, rather than
+discarding records used by History and Insights. New marks crossing 80%, 90%, or 95% warn the
+agent and show the person an existing session notice. Duplicate imports do not repeat warnings.
+At capacity, new requests fail atomically with HTTP 409 and the CLI exits nonzero; retained marks
+and duplicate imports remain available.
 
 Live History mark requests from the CLI use an `Idempotency-Key`, retained across network retries,
 so a lost reply does not record the same mark twice. API callers may send one key of 1–128 characters
@@ -879,7 +977,7 @@ Each rename of the session is a row too, in the topic that was open (else under 
 "Renamed by the agent: …" when its own agent did (`blerg-runner title "<title>"`), and "Renamed: …"
 when you or an administrator renamed it in the app.
 
-Tokens follow the Insights rule: only the session's owner and an administrator see them. The tab
+Tokens follow the Insights rule: only the workspace's owner and an administrator see them. The tab
 asks the server only while it is on screen. A runner server older than the tab says "History needs a
 newer runner server".
 
@@ -901,6 +999,18 @@ panel's Running now lists that work and the panel toggle counts it. The panel's 
 the static facts: runtime and permission mode on one line with the sandbox sentence under it, the
 engine, then the start time and elapsed lifetime. Model and effort, which can change, share the
 next line, followed by Options.
+
+An evicted or OOM-killed cluster worker stays resumable and sends Main a failed worker
+notice when pod reconciliation records the interruption. Main reads
+`blerg-runner session result <child>` for the cause, recorded volume retention status,
+and the `session send` command to resume. A retained workspace may contain uncommitted
+files and unpublished commits. The resumed worker receives interruption context and
+checks that work before continuing. Failure logs record safe pod reason and resource
+pressure classes with the observed pod's CPU, memory, and ephemeral storage limits;
+raw Kubernetes messages are excluded.
+
+`session send` answers the newest blocking question when one is pending; otherwise it sends a
+message. Use `session answer <child> <question-id> "text"` to choose a question explicitly.
 
 Sidebar cards and collapsed session tiles share the same state rule: a parent shows a question
 mark when it or any descendant needs you, otherwise a spinner when any of them is working.
@@ -929,22 +1039,22 @@ message. Their cards show the waiting "?" (its tooltip says "paused by a restart
 message to pick it up. A
 message accepted for a paused session, from any tab, ends its pause everywhere. A
 message you send first, even while the daemon is down, takes the place of that continue
-([DAEMON.md](../install/desktop/DAEMON.md#what-a-daemon-restart-does-to-running-sessions)). Sessions
+([DAEMON.md](../install/desktop/DAEMON.md#what-a-daemon-restart-does-to-running-workspaces)). Sessions
 on an older daemon show none of this. The panel lists every task still running, however long ago
-it started ([what is live](#what-is-live-is-read-from-the-whole-session), above). The working line
+it started ([what is live](#what-is-live-is-read-from-the-whole-workspace), above). The working line
 knows only the ones in the part of the conversation you have loaded. The board's chat has no panel: there only the working line
 says what runs. A session that goes idle with tasks still running keeps its agent process alive for
 them, up to about an hour; after that the process is closed and the tasks are marked stopped.
 
-## When the agent starts other sessions
+## When the agent starts workers
 
-An agent on your desktop or on the cluster can ask another session to do part of its work. The approval card shows
+An agent on your desktop or on the cluster can start a worker to do part of its work. The approval card shows
 the engine, model, repository, runtime, prompt, and whether the child should keep running after its
 parent ends. A host request warns that it runs outside the sandbox. You can deny it, allow it once,
-allow matching starts for this parent session, or create a standing rule for that engine, runtime,
-and desktop. **Allow for this session** covers any repository, or no repository, for that engine,
-runtime and desktop while the parent session lives. The repository shown on the approval remains
-in the audit record; it does not restrict later starts. There is one live session permission per
+allow matching starts for this parent, or create a standing rule for that engine, runtime,
+and desktop. **Allow for this workspace** covers any repository, or no repository, for that engine,
+runtime and desktop while the parent is running. The repository shown on the approval remains
+in the audit record; it does not restrict later starts. There is one live workspace permission per
 engine, runtime and desktop, and Revoke removes it for future starts. Standing rules cover any
 repository too. Choices that would widen the parent's permissions always ask again.
 
@@ -957,13 +1067,13 @@ child's model resolves the name the same way.
 
 You can also allow child starts under **Live → Permissions → Manage** before the agent asks to start a
 child. It covers the engines currently available on this desktop for the selected runtime during
-this parent session's life. Sandboxed children and unsandboxed children are separate choices;
+this parent's life. Sandboxed children and unsandboxed children are separate choices;
 unsandboxed approval is unavailable to a sandboxed parent. Enabling this permission can use the
 selected engines' provider budgets. Newly installed engines do not acquire permission automatically.
-You can change or revoke the session permission later without rewriting earlier approval decisions
+You can change or revoke the workspace permission later without rewriting earlier approval decisions
 or stopping children already running. Turning it off does not remove standing desktop rules;
 the controls show those separately, and you can remove them in Settings. A partial state can come
-from an earlier **Allow for this session** for one engine. Only your own current browser login can
+from an earlier **Allow for this workspace** for one engine. Only your own current browser login can
 edit this permission; the agent cannot turn it on for you.
 
 Children are reusable workers, so a child's title can go stale when its parent hands it new work.
@@ -972,7 +1082,7 @@ another session), and an agent can rename its own session (`blerg-runner title "
 rename is in the session's History. In the app only the session's owner, or an administrator, can
 rename a session: someone it is shared with can read it but not rename it.
 
-Only sessions you launched directly can use preapproval. Board, cron, private, and agent-started
+Only workspaces you launched directly can use preapproval. Board, cron, private, and agent-started
 parents ask for each start; a child cannot start another generation of children. New child starts
 need an updated, connected desktop daemon.
 
@@ -1015,20 +1125,21 @@ could hold a provider key); otherwise a local-only Hermes rule asks you on the c
 cron session never gets operator-supplied credentials or the shared providers.
 
 The parent's Live tab lists its children and pending requests. Open a child to read its conversation;
-Started sessions shows the temporary permissions and their Revoke buttons. Revoking permission
+Workers shows the temporary permissions and their Revoke buttons. Revoking permission
 prevents future starts; it does not stop existing children. Settings lists standing rules and lets
 you add or remove them, desktop and cluster rules alike (the cluster runtime is offered where the
 install has one); a card's **Always allow** button adds one too. The sidebar groups children under their parent, and Insights shows child
 usage separately from the parent's own usage.
 
 By default a parent can run three children at once and start 120 per rolling hour, with no
-lifetime start cap. An administrator can change both under core Settings → Child session limits;
-changes apply on the next start request. Across your account, the limits remain six running
-children and sixty starts per rolling hour, which can be reached before the parent limit.
+lifetime start cap. An administrator can change both under core Settings → Worker limits;
+changes apply on the next start request. Across your account, the limits are six running
+children (or the configured worker limit, if higher) and sixty starts per rolling hour, which
+can be reached before the parent limit.
 Approval requests reserve rate budget too. A refusal names the limit and says to stop a child
 or gives the next available time in UTC. Approval requests expire after ten minutes.
 Pausing or restarting a parent expires its pending requests while preserving existing children and
-session permissions. A real end revokes those permissions and stops children, including children
+workspace permissions. A real end revokes those permissions and stops children, including children
 whose daemon reconnects later, unless you approved **Keep running** for them. Resuming the parent
 does not revive children stopped by that earlier end.
 An engine already running on an offline daemon can only be stopped when that daemon reconnects.
@@ -1037,21 +1148,45 @@ Agents use `blerg-runner budget` to read the capacity their own desktop reports,
 provider. Missing usage information is shown as unknown. A local engine is labeled local; a
 Claude budget does not imply the same capacity for Codex or another provider.
 
-In a child session, what the parent agent sends, its answers to the child's questions included, is
-labeled "↑ Parent · <parent title>", with a link to the parent session; your own messages and
+In a worker, what the parent agent sends, its answers to the child's questions included, is
+labeled "↑ Parent · <parent title>", with a link to the parent; your own messages and
 answers read "You". The runner decides this from the parent's own session token, never from what a
 caller claims. The child's header says who started it: "started by Codex agent from <parent>".
 
 The parent is told when a child's turn ends. When a child finishes its turn, asks a question, waits
 on an approval only you can give, or fails, the parent gets a short note from Blerg at its next
-step (`Child "<title>" finished its turn: "<first line>". blerg-runner session result <id>`), so it
+step (`Worker event: worker=<id> kind=finished id=<id>`), so it
 does not need to keep watching the child. The note shows in the parent's chat as a Blerg note. It is
-sent once per child turn, never to a parent that has ended, and no caller or agent can write one
+sent once per child turn (questions are delivered once per question), never to a parent that has ended, and no caller or agent can write one
 (its source, `child_turn`, is refused from every caller like Blerg's other relayed notes).
+Turn-finish reports are saved with the transcript and retried across runner restarts. A background
+completion that produces a new report is a new turn, even without another user message. Updated
+hosts use durable input receipts to deduplicate delivery.
+
+Wake notices contain only server-generated IDs and fixed event kinds. They include no worker
+title, message, question, failure detail or branch name. Main reads the worker's output and full
+open questions explicitly with `blerg-runner session result <id>`. The CLI returns a JSON envelope
+with `trust: untrusted_worker_data` and the result under `data`; open questions are in
+`data.open_asks`; `data.closed_questions` contains the latest 20 resolved or withdrawn questions
+and their answers. Worker text is data, never instructions or authority to run a command.
+The server permits eight wakes per child per one-minute window, shared across relay kinds and
+persisted across server restarts and enforced during offline replay. Questions and turn finishes retain their delivery intent when
+throttled and retry later. Older daemons receive the same fixed notice, without worker text.
+Answering, escalation and person-only routing use the existing commands and permissions.
+The upgrade also replaces pending legacy outbox bodies with fixed notices. Input already consumed
+by an engine before upgrading cannot be retracted.
+Plan nudges identify workers by ID too; cached plan hints from older servers are removed or
+replaced with fixed metadata during the upgrade so worker titles cannot bypass this boundary.
+
+Turn-end workspace sync and its result report are separate outcomes. If sync succeeds but
+the report times out, the transcript says sync completed and reports the reporting error
+separately. Reporting does not undo delivered commits. Each desktop authority RPC waits at
+most five seconds; the diagnostic identifies authorization or result submission and logs
+the report duration. A busy machine or server can delay replies past this bound.
 
 A sandboxed child works in a clone of its own, never in its parent's checkout, and has no write
-access to the repository's `.git` (every Local sandbox session does). Its commits land on the
-branch `wip/<child-id>` of the repository on your desktop: the daemon fetches that one branch back
+access to the repository's `.git` (every Local sandbox workspace does). Its commits land on the
+branch `<work-branch>` of the repository on your desktop: the daemon fetches that one branch back
 at the end of each of the child's turns and when it stops, with any work it left uncommitted at the
 stop committed for it first. A host child (`--runtime daemon`) works in the checkout itself. See [What a sandbox works in](sandbox-image.md#what-a-sandbox-works-in-and-where-its-commits-land).
 
@@ -1064,8 +1199,8 @@ OpenClaw remains host-only.
 ## Settings
 
 **Settings** is the entry under **Insights** in the left bar (a tab on a phone). It opens a dialog
-over the page you are on: you stay in your session, and **Esc**, the backdrop or **×** close it. On a
-phone it fills the screen. It holds what applies across all your sessions:
+over the page you are on: you stay in your workspace, and **Esc**, the backdrop or **×** close it. On a
+phone it fills the screen. It holds what applies across all your workspaces:
 
 - **Chat**: **Show thinking** draws the model's thinking in the transcript; **Compact tool calls**
   folds a run of tool calls into one summary row. Both act at once, are on until you untick them, and
@@ -1077,7 +1212,7 @@ phone it fills the screen. It holds what applies across all your sessions:
   the draft away.
 
 Account, tokens and connections are in Blerg's main Settings, which the dialog links to. Per-session
-choices, such as Resume when limit resets, stay in the session panel.
+choices, such as Resume when limit resets, stay in the workspace panel.
 
 ## Engine notes and the kill switch
 
@@ -1100,15 +1235,15 @@ turn it on after a refusal too, provided that interrupted turn is still current.
 A usage meter reaching 100% does not by itself schedule work. If the provider does
 not report a reliable reset time, the control asks you to continue manually.
 
-The setting is off by default and belongs to one session. A normal message
+The setting is off by default and belongs to one workspace. A normal message
 cancels its pending retry and starts a new retry budget; interrupting, pausing,
 stopping or disabling automatic resume cancels it. Up to three automatic attempts
-are allowed before manual continuation is required. Sessions resume one at a time,
+are allowed before manual continuation is required. Workspaces resume one at a time,
 at least 15 seconds apart across an install.
 
 The schedule is stored on the runner server, so it survives a server restart.
 A sleeping workstation waits until its daemon reconnects. A disconnected cluster
-session can recreate its pod, using your authorization retained when you enabled
+workspace can recreate its pod, using your authorization retained when you enabled
 the setting. Core still checks that authorization and MCP access; if your sign-in
 expired or was revoked, sign in and continue manually. Automatic pod resumes never
 fall back to an operator's provider credentials. Pending retries retain resumability
@@ -1116,13 +1251,13 @@ for at most eight days from the original refusal.
 
 A dispatch is attempted once. If the server crashes between recording the dispatch
 and delivering it, the control shows that manual continuation may be needed; it
-never silently sends the same attempt twice. Terminal sessions are not supported.
+never silently sends the same attempt twice.
 
-If a session hit its limit before its daemon or pod was upgraded, enable the
+If a workspace hit its limit before its daemon or pod was upgraded, enable the
 setting and send one continuation message so the updated driver can record the
 refusal and reset time. Older drivers did not publish this scheduling signal.
 
-Desktop sessions need an updated workstation daemon to report provider refusals.
+Desktop workspaces need an updated workstation daemon to report provider refusals.
 After updating your checkout, rebuild and restart it with
 `install/desktop/daemon/install.sh install`. A cluster deployment updates the runner
 server and the image for new pods; already running pods need replacement to use
@@ -1236,14 +1371,15 @@ be attached. SVG and Office files use file tiles rather than active document pre
 
 ### Discarding child workers
 
-A child is a reusable worker. Running, idle and stopped children stay together in Started
-sessions and in the parent's sidebar list; they do not collapse or move when their status
-changes. Use **Discard** on its panel row or in its sidebar card's Actions menu, then confirm.
-Discard stops and archives the child. History, Insights totals and its direct session URL stay
-available. A failed stop leaves the child listed so you can retry. The parent can also run
+A worker is reusable. Running, idle and stopped workers stay together in the dock’s
+Workers group, collapsed by default. A blocked or failed worker is named on the
+collapsed line; expand the group to open an individual worker. Use **Discard** on
+its panel row, or open the worker and use the command palette, then confirm.
+Discard stops and archives the worker. History, Insights totals and its direct URL stay
+available. A failed stop leaves the worker listed so you can retry. The parent can also run
 `blerg-runner session discard <child>`; `session stop` by itself keeps the worker listed.
 
-Automatic Board pin fill copies descriptions into the session; anyone allowed to view the session can see that copy. With one board, bare `#N` in checklist items means that board's card, including text that also mentions a PR. Items naming several cards tick only when every named card is done. Child assignment prefers a single title reference and requires one matching item.
+Automatic Board pin fill copies descriptions into the workspace; anyone allowed to view the workspace can see that copy. With one board, bare `#N` in checklist items means that board's card, including text that also mentions a PR. Items naming several cards tick only when every named card is done. Child assignment prefers a single title reference and requires one matching item.
 
 ### Where attached files go
 
@@ -1255,3 +1391,148 @@ again. An explicit `fetch --out DIR` inside a Git repository adds a local Git ex
 and reports it. Existing `attachments/` folders are left alone. See
 [private attachment storage](artifacts.md#private-attachment-storage) for retention
 and startup cleanup rules.
+
+### Long-running plans
+
+Checklists and pinned tickets keep their current state separately from the transcript.
+Checklist events contain changed items, with a checkpoint every 100 changes for historical
+reads. Earlier full-list events remain readable. Topics and pins have no lifetime event cap;
+new topic starts and pins allow 60 changes per minute per session. Closing a topic and
+unpinning remain available during a burst. Checklist writes also allow 60 changes per minute.
+
+### Workspace colors
+
+Choose **Color** in a workspace's sidebar menu or panel, or use **Set color**
+from Ctrl+K. Blue, Orange, Purple, Teal, and None are saved with the session
+and sync across devices. The sidebar and header show a distinct glyph and a
+named accessible label. Children start with None; each session keeps its own
+choice. Themes control the palette through `--session-color-*` variables.
+
+### A card's local Git panel
+
+The Board's Git panel reads commits and diffs through Runner from a workspace
+linked to the card. Board-started sessions are linked automatically. For work
+started elsewhere, add the workspace's session URL as a session link on the
+card. Choose a workspace and repository when more than one is linked. The
+panel uses its recorded work branch; Branch and Base let you inspect other
+local branches in that repository. The default base is the locally recorded
+remote default branch, then local main or master. Apply a base explicitly
+when the repository uses another default without a recorded remote default.
+
+The workspace must be open and connected. Only its owner (or a permitted
+administrator for cluster workspaces) can read its local Git. Board access
+alone does not grant repository access. Sandboxed work becomes available when
+its commits sync back to the source repository. These reads never fetch, call
+a Git hosting API, or need a hosting token; the same path works with private
+repositories and any Git host. PR state and reviews are separate provider
+features. A card without a linked workspace shows how to connect one.
+
+## Highlights and suggested reveals
+
+Changed checklist items, tickets added to Plan, and changed explorer status rows receive a
+brief highlight. Reduced motion uses a steady highlight instead of a fade.
+
+An agent can suggest `blerg-runner reveal src` to highlight a file or folder in the explorer,
+`blerg-runner show src/main.go` to preview a workspace file, `blerg-runner show <file-id>
+--kind attachment` to open a published file or attachment, or `blerg-runner show history --kind
+panel` to select Live, Plan, History, Files or Capabilities. Workspace paths are relative to
+the session's public workspace root. Every request stays in chat with a **Show** action;
+requests grant no file access and the normal viewers still check permission.
+
+**Follow the agent in this workspace** is off by default and lasts for the mounted workspace.
+It applies only newly arriving requests for the selected workspace, while the page is visible,
+with no focused input or open dialog. Switching workspaces, reloading, or losing the live
+connection ends follow. Blocked requests remain suggestions; they are never queued to interrupt
+you later. Explicit Show clicks may open a viewer or the mobile explorer sheet. Reveals use
+the existing file tabs; they never change another workspace. No account-wide preference is saved.
+
+An agent can acknowledge its own finished background command with
+`blerg-runner task clear <task-id>`. It leaves Running now and keeps its recorded
+result in History. Failed commands also leave the running list when a later turn
+starts; commands stopped by a restart use the usual brief finished-task display.
+
+## Inbox
+
+The explorer's icon tabs keep Channels, Questions and Inbox together. Questions
+are things to answer; Inbox is important material to read. The Inbox badge counts
+unread items. Its compact list shows the subject, read state and date. Select an
+item to open the full Inbox workspace tab. That single tab holds a list and reading
+pane; selecting another item reuses it. When the dock already shows Inbox, a wide
+reading tab uses that list instead of repeating it. Narrow panes keep their own list. On a narrow pane, Back returns to the list.
+Explicitly opening an item marks it read. The filled-dot action marks it unread
+again, including across reloads, restored tabs and devices; merely fetching or
+activating the reading pane does not mark it read.
+
+Only workspace Main can post. Workers send important updates through Main:
+
+```sh
+blerg-runner inbox post --subject "Morning summary" --body-file summary.md --kind summary
+```
+
+Kinds are `summary`, `release`, `failure`, `review` and `important` (the default).
+Subjects are one line, up to 200 characters; UTF-8 markdown bodies are up to 256 KiB.
+The CLI sends UTF-8 and a fresh `client_id` per invocation. API callers may provide
+an optional `client_id` of up to 128 characters: retries from that Main return the
+original item and do not send another arrival or push. Migration 154 adds the
+recipient-and-source-scoped uniqueness constraint. Relative workspace file links
+stay text in the reader; use the source-conversation arrow to reach their workspace.
+Keep the Inbox scarce: post material worth reading, rather than every status update.
+An arrival card in the source conversation opens the item. The server derives the
+recipient from Main's owner; posting cannot choose another account. Items and read
+state belong only to that person, including across devices. Inbox cards are rendered
+from private recipient data and never copied into a shared conversation's event log.
+Lists load 100 items at a time; the downward control loads older material. Unread
+counts include older pages. Deleting a source conversation does not delete its items.
+
+When the explorer is collapsed, separate question and Inbox count buttons open
+their respective destinations. The Inbox heading's arrow opens its workspace tab
+without selecting an item. “Open inbox” is also in the command palette;
+Ctrl/⌘+Alt+I opens it directly, outside terminals, editors and modal dialogs.
+Arrival pushes go only to the recipient's authenticated subscriptions and open
+the item in the same Inbox tab. Push requires the existing notification setup.
+Quiet hours are not available at this base; their integration awaits BLG-515.
+
+### Withdraw a pending plan proposal
+
+Workspace Main can run `blerg-runner plan withdraw <proposal-id>` (with
+`--blackboard ID` before the proposal ID when needed). This withdraws only Main's
+own pending proposal, removes it from the blackboard's proposal count, and records
+an audit event. Workers cannot withdraw proposals. Withdrawal changes no committed
+scope and a withdrawn proposal cannot be approved. If Main already raised a bound
+question about it, Main can also withdraw that question with `ask --resolve ID`.
+
+### Question threads
+
+A question stays open during discussion. Reply adds a message to its thread;
+Main responds with `blerg-runner ask --reply <question-id> "<text>"` and may
+revise an unbound question with `blerg-runner ask --revise <question-id> "<question>"`.
+Revisions retain their history. Person replies durably reach the asking session,
+and the question records whose turn it is. Only an explicit Answer,
+Approve/Decline, or Dismiss resolves a question. Composer messages and thread
+replies are conversation and never count as answers or decisions. An agent may still withdraw an obsolete question.
+Bound decision subjects cannot be revised: withdraw and replace them with a fresh
+bound question. Saying “yes” in a thread never commits a bound decision.
+
+The authenticated `GET /api/messages/{id}/thread?after=<seq>` returns the current
+question and up to 100 entries in sequence order, with `more` for pagination.
+`POST /api/messages/{id}/thread` accepts exactly one of `reply` or `revise`, plus
+an optional retry-stable `client_id`. The existing reply action also accepts these
+fields for browser callers. Only the signed-in owner replies as the person;
+only the asking session's own messaging token replies as Main or revises it.
+
+A person reply or composer message releases a blocking CLI `ask` with discussion
+a short pointer on stdout and exit 5, leaving the question open. The reply text
+arrives only as a durable message; after that handoff, the final answer or dismissal
+also arrives as a durable `question_answer` message. If a CLI stops polling for
+45 seconds during that handoff, the server treats its wait as released and delivers
+the final resolution through the same durable message path. CLI polls opt in with
+`waiter=cli` and the own-session credential. Native Codex, Hermes and loop waiters
+never receive a discussion outcome. Native command approvals and other owner-only
+blocking approvals refuse replies and revisions; the person must Approve or Decline.
+
+Browser Answer, Approve/Decline and Dismiss carry the last-seen `revision_seq`
+(initially 0). The comparison applies only when supplied; internal closes and
+parent answers without a revision retain their existing behavior.
+A stale revision returns 409 without resolving anything; the dialog loads the new
+text and says “Main revised this question.” Only asks created by the session
+itself can be revised; server-written asks cannot.

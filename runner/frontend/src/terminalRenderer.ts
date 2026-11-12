@@ -1,5 +1,17 @@
 // Pure rendering functions extracted from TerminalDOMView so they can be
 // unit-tested without React or a live WebSocket.
+//
+// themecheck:allow-file BLG-473: BG/FG/CURSOR_BG/ANSI16 (lines ~26-47) are the JS equivalent of a
+// var(--x, fallback) default — historyTheme() below reads the live --history-* custom properties
+// at render time and only falls back to these when the DOM has none. --history-* is now aliased to
+// --terminal-*/--basalt/--chalk/--blaze in every theme block in brand/tokens.css (it used to be a
+// fixed dark hex in the base block with no light-theme override — review finding, fixed), so the
+// fallback is the same already-exempt case the checker allows for a CSS var() call, not merely
+// "some value resolves" regardless of whether it's the right one for the active theme.
+// buildPalette()'s rgb(...) calls build the fixed xterm 256-color cube/grayscale ramp (a terminal
+// standard, not a brand choice), and the rgb(...) calls in renderRow pass an arbitrary 24-bit
+// truecolor value straight from the session's own terminal output (cell.getFgColor()/getBgColor()),
+// which has nothing to do with the app's theme at all.
 import { arrowSeq } from './terminalKeys'
 
 // ── Scrollback snapshot timing ─────────────────────────────────────────────────
@@ -20,10 +32,8 @@ export const SCROLLBACK_WINDOW_MS = { value: 30_000 }
 export const MAX_SCROLLBACK_LINES = { value: 4000 }
 
 // ── Color theme ───────────────────────────────────────────────────────────────
-// Kept as literal hex (not CSS var()) — these values get assigned straight to
-// element.style / read back and compared in tests and, via ANSI escape codes,
-// they must resolve to real colors independent of any stylesheet cascade.
-// Retheme by hand here to match brand/tokens.css instead of aliasing it.
+// Literal fallbacks retain saved-history appearance without a stylesheet.
+// TerminalHistory supplies the live shared palette from brand/tokens.css.
 
 export const BG = '#16181a'   // --basalt
 export const FG = '#e8ecef'   // --chalk
@@ -50,8 +60,8 @@ export const ANSI16: readonly string[] = [
 ]
 
 /** Build the full xterm 256-colour palette: 16 ANSI + 6³ colour cube + 24 grayscale. */
-export function buildPalette(): string[] {
-  const p: string[] = [...ANSI16]
+export function buildPalette(ansi: readonly string[] = ANSI16): string[] {
+  const p: string[] = [...ansi]
   // 6×6×6 colour cube (indices 16–231)
   for (let r = 0; r < 6; r++)
     for (let g = 0; g < 6; g++)
@@ -95,6 +105,22 @@ export interface BufferLine {
   getCell(x: number, reuse?: BufferCell): BufferCell | undefined
 }
 
+export interface HistoryTheme {
+  background: string
+  foreground: string
+  cursor: string
+  ansi: readonly string[]
+  palette?: readonly string[]
+}
+
+/** Resolve CSS at render time so stored ANSI output follows account theme changes. */
+export function historyTheme(element: Element): HistoryTheme {
+  const css = getComputedStyle(element)
+  const read = (key: string, fallback: string) => css.getPropertyValue('--history-' + key).trim() || fallback
+  const ansi = ANSI16.map((fallback, index) => read('ansi-' + index, fallback))
+  return {background: read('bg', BG), foreground: read('fg', FG), cursor: read('cursor', CURSOR_BG), ansi, palette: buildPalette(ansi)}
+}
+
 // ── renderRow ─────────────────────────────────────────────────────────────────
 
 /**
@@ -110,7 +136,10 @@ export function renderRow(
   cols: number,
   cell: BufferCell,
   cursorX: number | null,
+  theme: HistoryTheme = {background: BG, foreground: FG, cursor: CURSOR_BG, ansi: ANSI16},
 ): HTMLElement {
+  const {background, foreground, cursor, ansi} = theme
+  const palette = theme.palette ?? (theme.ansi === ANSI16 ? PAL : buildPalette(ansi))
   const row = document.createElement('div')
   row.style.cssText = 'min-height:1.2em;white-space:pre'
   if (!line) return row
@@ -148,7 +177,7 @@ export function renderRow(
     const isCursor = x === cursorX
 
     // ── foreground ────────────────────────────────────────────────────────────
-    let fg = FG
+    let fg = foreground
     if (!cell.isFgDefault()) {
       if (cell.isFgRGB()) {
         const c = cell.getFgColor()
@@ -156,7 +185,7 @@ export function renderRow(
       } else if (cell.isFgPalette()) {
         const idx = cell.getFgColor()
         // Bold + palette colour 0-7 → use the bright variant (colour intensification)
-        fg = (cell.isBold() && idx < 8) ? ANSI16[idx + 8] : (PAL[idx] ?? FG)
+        fg = (cell.isBold() && idx < 8) ? ansi[idx + 8] : (palette[idx] ?? foreground)
       }
     }
 
@@ -167,23 +196,23 @@ export function renderRow(
         const c = cell.getBgColor()
         bg = `rgb(${(c >> 16) & 0xff},${(c >> 8) & 0xff},${c & 0xff})`
       } else if (cell.isBgPalette()) {
-        bg = PAL[cell.getBgColor()] ?? null
+        bg = palette[cell.getBgColor()] ?? null
       }
     }
 
     if (cell.isInverse()) {
       const tmp = fg
-      fg = bg ?? BG
+      fg = bg ?? background
       bg = tmp
     }
 
     // ── build CSS string ──────────────────────────────────────────────────────
     let css: string
     if (isCursor) {
-      css = `color:${bg ?? BG};background:${CURSOR_BG}`
+      css = `color:${bg ?? background};background:${cursor}`
     } else {
       css = ''
-      if (fg !== FG)        css += `color:${fg};`
+      if (fg !== foreground)        css += `color:${fg};`
       if (bg)               css += `background:${bg};`
       if (cell.isBold())    css += 'font-weight:bold;'
       if (cell.isItalic())  css += 'font-style:italic;'

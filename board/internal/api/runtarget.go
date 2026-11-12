@@ -76,10 +76,11 @@ func (a *API) checkRunTarget(p auth.Principal, board db.Board, t runTarget) (int
 
 // runTargetOption is one entry of a card's run menu.
 type runTargetOption struct {
-	Runtime     string `json:"runtime"`
-	DaemonID    string `json:"daemon_id,omitempty"`
-	Label       string `json:"label"`
-	Unavailable string `json:"unavailable,omitempty"`
+	RuntimeTargetID string `json:"runtime_target_id,omitempty"`
+	Runtime         string `json:"runtime"`
+	DaemonID        string `json:"daemon_id,omitempty"`
+	Label           string `json:"label"`
+	Unavailable     string `json:"unavailable,omitempty"`
 	// DesktopName names a desktop target's machine, for the host acknowledgement's wording.
 	DesktopName string `json:"desktop_name,omitempty"`
 }
@@ -128,7 +129,7 @@ func (a *API) handleCardRunTargets(w http.ResponseWriter, r *http.Request, p aut
 // run. A single run is offered a desktop's host only where the board's own acknowledged target is
 // that host.
 func (a *API) writeBoardRunTargets(w http.ResponseWriter, r *http.Request, p auth.Principal, board db.Board, repo string, forCard bool) {
-	out := map[string]any{"default_runtime": board.RunRuntime, "default_daemon_id": board.RunDaemonID, "can_choose": false, "targets": []runTargetOption{}}
+	out := map[string]any{"default_runtime_target_id": board.RuntimeTargetID, "default_runtime": board.RunRuntime, "default_daemon_id": board.RunDaemonID, "can_choose": false, "targets": []runTargetOption{}}
 	if d, ok := a.runner.Driver.(interface{ DefaultRuntime() string }); ok && board.RunRuntime == "" {
 		out["default_runtime"] = d.DefaultRuntime()
 	}
@@ -181,7 +182,7 @@ func (a *API) writeBoardRunTargets(w http.ResponseWriter, r *http.Request, p aut
 		for _, rt := range t.Runtimes {
 			switch {
 			case rt == "cluster" && t.DaemonID == "":
-				targets = append(targets, runTargetOption{Runtime: rt, Label: runtimeLabel(rt), Unavailable: clusterBlocked})
+				targets = append(targets, runTargetOption{RuntimeTargetID: t.RuntimeTargetID, Runtime: rt, Label: runtimeLabel(rt), Unavailable: clusterBlocked})
 			case rt == "daemon" && forCard && !hostAcknowledged(board, t.DaemonID):
 				continue
 			case (rt == "docker" || rt == "daemon") && validDaemonID.MatchString(t.DaemonID):

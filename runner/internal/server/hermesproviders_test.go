@@ -296,6 +296,7 @@ func TestHermesLocalOnCluster(t *testing.T) {
 	// parent's copy.
 	pod := &DaemonConn{ID: "pod", Name: "runner-s", send: make(chan []byte, 1)}
 	pod.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	pod.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	pod.SetAvailableEngines([]string{"hermes"})
 	if hermesLocalOnCluster(context.Background(), jm, pod, "hermes", noPersonalHermes) {
 		t.Error("pod said not local, rule says local")

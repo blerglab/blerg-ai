@@ -3,9 +3,13 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -688,5 +692,287 @@ func TestCodexCapabilitiesReportApprovalAndSandbox(t *testing.T) {
 	restricted := (&codexRestrictedRuntime{Restricted: true}).capabilities("")
 	if restricted.PermissionMode != "restricted" || restricted.SandboxMode != "read-only" {
 		t.Fatalf("restricted permission=%q sandbox=%q", restricted.PermissionMode, restricted.SandboxMode)
+	}
+}
+
+// An interrupt ACK is not turn completion. A stuck background wait must not
+// strand the next inputs or allow them to steer the turn being stopped.
+func TestCodexStopWithoutCompletionDeliversQueuedInput(t *testing.T) {
+	shrink(t, &codexInterruptResultAfter, 100*time.Millisecond)
+	bin := fakeCodex(t)
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_STUCK_STOP", filepath.Join(bin, "stopped"))
+	log := filepath.Join(bin, "calls.log")
+	t.Setenv("FAKE_CODEX_LOG", log)
+	em := &collectEmitter{}
+	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
+	stop := startTestCodexDriver(t.Context(), t, d)
+	defer stop()
+	d.EnqueueInput(agent.Input{Text: "wait for the background run", ClientID: "first"})
+	waitUntil(t, "first input accepted", func() bool { return countKind(em, "user_message") == 1 })
+	d.Interrupt()
+	for _, id := range []string{"queued-one", "queued-two", "queued-three"} {
+		d.EnqueueInput(agent.Input{Text: id, ClientID: id})
+	}
+	waitUntil(t, "all inputs after Stop", func() bool { return countKind(em, "user_message") == 4 && countKind(em, "turn_done") >= 2 })
+	raw, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "thread/resume") {
+		t.Fatal("Stop left the stuck runtime running")
+	}
+	if strings.Contains(strings.SplitN(string(raw), "thread/resume", 2)[0], "turn/steer") {
+		t.Fatal("queued input steered the turn being stopped")
+	}
+	for _, id := range []string{"first", "queued-one", "queued-two", "queued-three"} {
+		n := 0
+		for _, ev := range em.snapshot() {
+			if p, ok := ev.Payload.(agent.UserMessagePayload); ok && p.ClientID == id {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("input %s delivered %d times", id, n)
+		}
+	}
+	if em.count("turn_done:interrupted") != 1 {
+		t.Fatal("Stop must end exactly one turn")
+	}
+	if countKind(em, "error") != 0 {
+		t.Fatalf("successful Stop emitted errors: %v", em.outline())
+	}
+}
+
+func TestCodexRepeatedStopFallbacksDoNotExhaustRestartBudget(t *testing.T) {
+	shrink(t, &codexInterruptResultAfter, 100*time.Millisecond)
+	bin := fakeCodex(t)
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_STUCK_STOP", filepath.Join(bin, "stopped"))
+	t.Setenv("FAKE_CODEX_STUCK_STOP_ALWAYS", "1")
+	em := &collectEmitter{}
+	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
+	stop := startTestCodexDriver(t.Context(), t, d)
+	defer stop()
+	for i := 1; i <= 4; i++ {
+		d.Enqueue("wait on background work", "chat")
+		waitUntil(t, "next turn accepted", func() bool { return countKind(em, "user_message") == i })
+		d.Interrupt()
+		d.Interrupt() // repeated Stop must neither extend the deadline nor end another turn
+		waitUntil(t, "turn stopped", func() bool { return countKind(em, "turn_done") == i })
+	}
+	if em.count("turn_done:interrupted") != 4 {
+		t.Fatal("each Stop must end one turn")
+	}
+}
+
+func TestCodexStopReportsWhyRuntimeCannotRestart(t *testing.T) {
+	shrink(t, &codexInterruptResultAfter, 100*time.Millisecond)
+	bin := fakeCodex(t)
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_STUCK_STOP", filepath.Join(bin, "stopped"))
+	em := &collectEmitter{}
+	attempts := 0
+	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
+	d.useCommandBoundary(func(cmd *exec.Cmd) error {
+		attempts++
+		if attempts > 1 {
+			return errors.New("fixture containment refusal")
+		}
+		return cmd.Start()
+	})
+	stop := startTestCodexDriver(t.Context(), t, d)
+	defer stop()
+	d.Enqueue("wait on background work", "chat")
+	waitUntil(t, "first input accepted", func() bool { return countKind(em, "user_message") == 1 })
+	d.Interrupt()
+	d.EnqueueInput(agent.Input{Text: "queued", ClientID: "queued-after-stop"})
+	waitUntil(t, "runtime refusal", func() bool {
+		for _, ev := range em.snapshot() {
+			if p, ok := ev.Payload.(agent.ErrorPayload); ok && p.Code == agent.ErrorCodeRuntimeStopped {
+				return true
+			}
+		}
+		return false
+	})
+	refused := 0
+	for _, ev := range em.snapshot() {
+		if p, ok := ev.Payload.(agent.ErrorPayload); ok {
+			if p.Code == agent.ErrorCodeRuntimeStopped && !strings.Contains(p.Message, "fixture containment refusal") {
+				t.Fatal("terminal error lost the restart refusal")
+			}
+			if p.ClientID == "queued-after-stop" {
+				refused++
+			}
+		}
+	}
+	if refused != 1 || countKind(em, "user_message") != 1 {
+		t.Fatal("undelivered input was lost or retried ambiguously")
+	}
+}
+
+func TestCodexStopReportsCancellationRefusalAndKeepsInputForRetry(t *testing.T) {
+	shrink(t, &codexInterruptResultAfter, 100*time.Millisecond)
+	bin := fakeCodex(t)
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_STUCK_STOP", filepath.Join(bin, "stopped"))
+	em := &collectEmitter{}
+	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
+	var refuse atomic.Bool
+	refuse.Store(true)
+	d.useCommandBoundary(func(cmd *exec.Cmd) error {
+		cmd.Cancel = func() error {
+			if refuse.CompareAndSwap(true, false) {
+				return errors.New("fixture stop refusal")
+			}
+			return cmd.Process.Kill()
+		}
+		return cmd.Start()
+	})
+	stop := startTestCodexDriver(t.Context(), t, d)
+	defer stop()
+	d.Enqueue("wait on background work", "chat")
+	waitUntil(t, "first input accepted", func() bool { return countKind(em, "user_message") == 1 })
+	d.Interrupt()
+	d.EnqueueInput(agent.Input{Text: "queued", ClientID: "queued-after-refusal"})
+	waitUntil(t, "visible Stop refusal", func() bool {
+		for _, ev := range em.snapshot() {
+			if p, ok := ev.Payload.(agent.ErrorPayload); ok && strings.Contains(p.Message, "fixture stop refusal") {
+				return true
+			}
+		}
+		return false
+	})
+	if countKind(em, "user_message") != 1 || countKind(em, "turn_done") != 0 {
+		t.Fatal("refused Stop pretended the turn ended or consumed its queued input")
+	}
+	d.Interrupt()
+	waitUntil(t, "queued input after retry", func() bool { return countKind(em, "user_message") == 2 && countKind(em, "turn_done") == 2 })
+	if em.count("turn_done:interrupted") != 1 {
+		t.Fatal("retry ended the stopped turn more than once")
+	}
+}
+
+func TestCodexStopAllowsSlowHealthyCompletion(t *testing.T) {
+	bin := fakeCodex(t)
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_HOLD_FIRST", "1")
+	t.Setenv("FAKE_CODEX_STOP_DELAY_MS", "2200")
+	logPath := filepath.Join(bin, "calls")
+	t.Setenv("FAKE_CODEX_LOG", logPath)
+	em := &collectEmitter{}
+	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
+	stop := startTestCodexDriver(t.Context(), t, d)
+	defer stop()
+	d.Enqueue("wait", "chat")
+	waitUntil(t, "first turn", func() bool { return countKind(em, "user_message") == 1 })
+	d.Interrupt()
+	waitIdle(t, em, 1)
+	raw, _ := os.ReadFile(logPath)
+	if strings.Count(string(raw), "codex app-server") != 1 || countKind(em, "error") != 0 {
+		t.Fatal("slow healthy unwind restarted the engine", em.outline())
+	}
+	d.mu.Lock()
+	same := d.app != nil && !d.app.stopFallback
+	d.mu.Unlock()
+	if !same || codexInterruptResultAfter != 30*time.Second {
+		t.Fatal("Stop must allow 30 seconds for completion")
+	}
+}
+
+func TestCodexStopDuringHeldInputGateDeliversOnce(t *testing.T) {
+	shrink(t, &codexInterruptResultAfter, 60*time.Millisecond)
+	for i := 0; i < 12; i++ {
+		if !t.Run(fmt.Sprint(i), func(t *testing.T) {
+			bin := fakeCodex(t)
+			t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+			t.Setenv("FAKE_CODEX_HOLD_ONCE", "1")
+			em := &collectEmitter{}
+			d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: em})
+			stop := startTestCodexDriver(t.Context(), t, d)
+			defer stop()
+			d.Enqueue("first", "chat")
+			waitUntil(t, "first input", func() bool { return countKind(em, "user_message") == 1 })
+			entered, release := make(chan struct{}), make(chan struct{})
+			var ready atomic.Bool
+			d.mu.Lock()
+			d.recoveryInputReady = ready.Load
+			d.recoveryInputGate = func(ctx context.Context) {
+				select {
+				case <-entered:
+				default:
+					close(entered)
+				}
+				select {
+				case <-release:
+				case <-ctx.Done():
+				}
+			}
+			d.mu.Unlock()
+			d.EnqueueInput(agent.Input{Text: "next", ClientID: "held"})
+			<-entered
+			// Let runApp wait on the held channel, then queue Stop ahead of the
+			// selected input's state check on the real app mutex.
+			time.Sleep(20 * time.Millisecond)
+			d.mu.Lock()
+			app := d.app
+			d.mu.Unlock()
+			app.mu.Lock()
+			interrupting, stopped := make(chan struct{}), make(chan struct{})
+			go func() { close(interrupting); d.Interrupt(); close(stopped) }()
+			<-interrupting
+			time.Sleep(20 * time.Millisecond)
+			ready.Store(true)
+			close(release)
+			time.Sleep(20 * time.Millisecond)
+			app.mu.Unlock()
+			<-stopped
+			waitUntil(t, "held input after Stop", func() bool { return countKind(em, "turn_done") == 2 && em.count("user:next") == 1 })
+			n := 0
+			for _, e := range em.snapshot() {
+				if p, ok := e.Payload.(agent.UserMessagePayload); ok && p.ClientID == "held" {
+					n++
+				}
+			}
+			if n != 1 || countKind(em, "error") != 0 {
+				t.Fatal("held input lost or repeated", em.outline())
+			}
+		}) {
+			return
+		}
+	}
+}
+
+func TestCodexStopWithoutAcknowledgmentDoesNotReportDisconnect(t *testing.T) {
+	shrink(t, &codexInterruptResultAfter, 60*time.Millisecond)
+	bin := fakeCodex(t)
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_CODEX_STUCK_STOP", filepath.Join(bin, "stopped"))
+	t.Setenv("FAKE_CODEX_STOP_NO_ACK", "1")
+	t.Setenv("FAKE_CODEX_STOP_LIVE_CHILD", "1")
+	em := &collectEmitter{}
+	d := newCodexDriver(AgentDriverOpts{Spec: engineRegistry["codex"], WorkDir: t.TempDir(), Emitter: limitResumeEmitter(func(e agent.Event) {
+		if p, ok := e.Payload.(agent.TurnDonePayload); ok && p.StopReason == "interrupted" {
+			time.Sleep(60 * time.Millisecond)
+		}
+		em.Emit(e)
+	})})
+	stop := startTestCodexDriver(t.Context(), t, d)
+	defer stop()
+	d.Enqueue("first", "chat")
+	waitUntil(t, "first turn", func() bool { return countKind(em, "user_message") == 1 })
+	waitUntil(t, "owned child turn", func() bool {
+		d.mu.Lock()
+		app := d.app
+		d.mu.Unlock()
+		app.mu.Lock()
+		defer app.mu.Unlock()
+		return app.childTurns["owned-child"] == "child-turn-live"
+	})
+	d.Interrupt()
+	d.Enqueue("next", "chat")
+	waitIdle(t, em, 2)
+	if countKind(em, "error") != 0 || em.count("user:next") != 1 {
+		t.Fatal("successful Stop reported a false failure", em.outline())
 	}
 }

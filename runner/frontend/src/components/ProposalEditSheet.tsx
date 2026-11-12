@@ -2,7 +2,7 @@
 // sheet over the session; saving files nothing, then the person reviews the saved draft and approves
 // exactly it from here (optionally allowing this board for the session).
 import { useEffect, useId, useState } from 'react'
-import { useBackdropClose } from '@blerglab/chat'
+import { useBackdropClose, proposalNeedsConfirmation } from '@blerglab/chat'
 import { apiFetch } from '../apiFetch'
 import type { ProposalInfo } from '../types'
 import BoardFileDraft from './BoardFileDraft'
@@ -15,6 +15,7 @@ export default function ProposalEditSheet({ proposalId, onClose, onDecided }: { 
   const titleId = useId()
   const [proposal, setProposal] = useState<ProposalInfo | null>(null)
   const [step, setStep] = useState<'loading' | 'edit' | 'review' | 'gone'>('loading')
+  const [confirming, setConfirming] = useState(false)
   const [allow, setAllow] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -56,6 +57,7 @@ export default function ProposalEditSheet({ proposalId, onClose, onDecided }: { 
 
   const args = proposal?.arguments ?? {}
   return (
+    // button-guard-ignore: useBackdropClose supplies pointer handlers only; this overlay is not a button
     <div className="launch-overlay proposal-sheet-overlay" {...backdrop}>
       <div className="launch-panel proposal-sheet" role="dialog" aria-modal="true" aria-labelledby={titleId} data-testid="proposal-edit-sheet">
         <div className="proposal-sheet-head">
@@ -65,7 +67,7 @@ export default function ProposalEditSheet({ proposalId, onClose, onDecided }: { 
         {step === 'loading' && <p role="status">Loading the draft…</p>}
         {step === 'gone' && <p role="status">This proposal is no longer waiting for a decision.</p>}
         {step === 'edit' && proposal && (
-          <BoardFileDraft proposal={proposal} onSaved={updated => { setProposal(updated); setStep('review') }} onCancel={onClose} />
+          <BoardFileDraft proposal={proposal} onSaved={updated => { setProposal(updated); setConfirming(false); setStep('review') }} onCancel={onClose} />
         )}
         {step === 'review' && proposal && (
           <div className="proposal-sheet-review" data-testid="proposal-edit-review">
@@ -76,9 +78,9 @@ export default function ProposalEditSheet({ proposalId, onClose, onDecided }: { 
               {text(args.type) && <><dt>Type</dt><dd>{text(args.type)}</dd></>}
               <dt>Details</dt><dd className="proposal-sheet-body">{text(args.body)}</dd>
             </dl>
-            <label className="rail-check"><input type="checkbox" checked={allow} onChange={e => setAllow(e.target.checked)} /> <span>Also file later cards on this board without asking (this session only)</span></label>
+            <label className="rail-check"><input type="checkbox" checked={allow} onChange={e => setAllow(e.target.checked)} /> <span>Also file later cards on this board without asking (this workspace only)</span></label>
             <div className="proposal-sheet-actions">
-              <button type="button" className="proposal-sheet-primary" disabled={busy} onClick={() => void approve()}>{busy ? 'Approving…' : 'Approve this draft'}</button>
+              <button type="button" className="proposal-sheet-primary" disabled={busy} onClick={() => proposalNeedsConfirmation(proposal) && !confirming ? setConfirming(true) : void approve()}>{busy ? 'Approving…' : confirming ? 'Confirm approve' : 'Approve this draft'}</button>
               <button type="button" disabled={busy} onClick={() => setStep('edit')}>Edit again</button>
               <button type="button" disabled={busy} onClick={onClose}>Cancel</button>
             </div>

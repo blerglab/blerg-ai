@@ -75,7 +75,7 @@ describe('review requests', () => {
     mount({ canDecide: false })
     fireEvent.click(within(await screen.findByTestId('review-request-card')).getByRole('button', { name: 'Open' }))
     const bar = await screen.findByTestId('review-request-bar')
-    expect(bar.textContent).toContain("Waiting for the session owner's decision")
+    expect(bar.textContent).toContain("Waiting for the workspace owner's decision")
     expect(within(bar).queryByRole('button', { name: 'Approve' })).toBeNull()
   })
 

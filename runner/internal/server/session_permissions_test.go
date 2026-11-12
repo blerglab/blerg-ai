@@ -201,7 +201,7 @@ func TestRestrictedAndCronSessionsCannotHoldPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := filingRequest(fx, "POST", "/api/sessions/"+fx.sess+"/proposal-grants", human, map[string]any{"kind": "board_file", "board_id": "board-a"})
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "restricted") {
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), msgPermRestricted) {
 		t.Fatalf("restricted: %d %s", rec.Code, rec.Body.String())
 	}
 	get := filingRequest(fx, "GET", "/api/sessions/"+fx.sess+"/permissions", human, nil)
@@ -591,5 +591,13 @@ func TestPermissionPanelCachesSignInAndInvalidatesOnLevelChange(t *testing.T) {
 	get()
 	if got := core.calls.Load(); got != 4 {
 		t.Fatalf("expired cache did not refresh: calls=%d", got)
+	}
+}
+
+func TestPermissionMessagesUsePersonFacingNouns(t *testing.T) {
+	for _, message := range []string{msgPermNotActive, msgPermCron, msgPermRestricted, msgPermBoardRun, msgPermStarter, msgPermKind, msgPermSignIn, msgPermPlugin, msgPermBoardCreate, msgPermMCPTool, msgPermBuiltin} {
+		if strings.Contains(strings.ToLower(message), "session") {
+			t.Errorf("permission wording: %s", message)
+		}
 	}
 }

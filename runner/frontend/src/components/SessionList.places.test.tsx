@@ -77,7 +77,7 @@ describe('SessionList — where sessions run', () => {
     renderList()
     const pill = await screen.findByTestId('focus-pill-cluster')
     expect(pill).toHaveTextContent('Cluster 2/5')
-    expect(pill.title).toContain('2 of 5 cluster sessions running')
+    expect(pill.title).toContain('2 of 5 cluster workspaces running')
     expect(screen.queryByText(/No daemon connected/)).not.toBeInTheDocument()
   })
 
@@ -125,9 +125,9 @@ describe('SessionList — where sessions run', () => {
     renderList()
     await screen.findByTestId('focus-pill-cluster')
     const row = screen.getByTestId('place-pills')
-    expect(row).toHaveAttribute('aria-label', 'Where sessions run')
+    expect(row).toHaveAttribute('aria-label', 'Where workspaces run')
     expect([...row.children].map(c => c.getAttribute('data-testid'))).toEqual(['focus-pill-all', 'focus-pill-cluster', 'focus-pill-d1', 'focus-pill-d2'])
-    expect(screen.queryByText(/where sessions run/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/where workspaces run/i)).not.toBeInTheDocument()
     expect(screen.queryByTestId('focus-pill-row')).not.toBeInTheDocument()
     expect(screen.getByTestId('focus-pill-all')).toHaveAttribute('aria-pressed', 'true')
     // A machine that is away shows its muted dot and is not a filter.

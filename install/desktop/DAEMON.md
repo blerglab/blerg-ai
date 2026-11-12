@@ -1,8 +1,38 @@
 # The runner daemon
 
-The runner **daemon** drives your local `claude` CLI + tmux to actually run agent
-sessions. It can't be containerized — it needs your own Claude auth and your own
-tmux — so it always runs directly on the host, alongside the containerized
+For 0.6.0, arbitrary host processes running as your own UID are outside the
+shell keeper's security boundary. Such a process can read keeper identity/key
+files (including legacy `identity.json`), kill the keeper, or read its memory.
+Sandbox sessions, cluster sessions, and other host UIDs remain in scope; they
+must not receive keeper files, sockets, or host process access. Keeper failure
+costs shells only: the daemon and agents keep running.
+
+Host shell availability is independent of agent turns and daemon installation.
+A busy keeper tolerates several heartbeat misses; a disconnected keeper reports
+shell state as unknown, so membership changes wait instead of discarding custody.
+A fresh workspace's signed never-opened record allows repository changes after
+a five-second observation wait even if its keeper never starts. Old or possibly
+used custody requires proof. The repository panel can withdraw the host-shell
+consents you authorized in this workspace; other sign-ins must withdraw theirs.
+It retries the change while physical cleanup remains pending. This does not
+end the agent or shells in other workspaces.
+Stop and Kill still proceed. Retirement is written to disk first; a failed write
+is logged and retried from memory, and malformed records are quarantined. Memory
+intent can be lost in a daemon crash before a successful retry.
+
+A short reconnect needs no service restart. Only the separate incompatibility
+notice gives a restart remedy. If an incompatible keeper is holding shells, it asks you to
+restart the shell keeper service and reopen shells. This ends those old shells;
+agents keep running. Alternatively close the old shells normally: empty old
+keepers are replaced automatically, without delaying installation.
+
+Get a session's recorded branch with `blerg-runner session result <id>` and use
+its `branch` value wherever `<work-branch>` appears below. For a child, pass the
+child's ID. Branch names stay fixed after a rename; never derive them from IDs
+or titles. Workspace results also report each member's branch.
+
+The runner **daemon** runs agent workspaces through your local engine CLIs.
+It needs your engine logins and settings — so it always runs directly on the host, alongside the containerized
 `blerg-core` / `blerg-board` / `blerg-runner` stack from `blerg-up.sh`.
 
 `./blerg-up.sh` installs it automatically as a host service. Before touching
@@ -15,7 +45,7 @@ Docker checks still run either way). `./daemon/install.sh install` also
 builds the local-sandbox image the first time.
 
 **Desktop daemon:** being in the `docker` group is root-equivalent on this
-machine — a Local-sandbox session can start any container with any mount.
+machine — a Local-sandbox workspace can start any container with any mount.
 Only add accounts to the `docker` group that you'd trust with root.
 
 ## Files and permissions
@@ -94,7 +124,7 @@ prompt) now fails with an actionable message instead of silently guessing
 
 `BLERG_RUNNER_REPOS_ROOT` is only the **first-run default**. To move it
 without touching `.env` or restarting anything, open the launch sheet (New
-session), and under **Where it runs** use **Repos folder → Change** for the
+workspace), and under **Where it runs** use **Repos folder → Change** for the
 daemon. The daemon checks the folder itself — an absolute path, not `/` or
 `/proc`/`/sys`/`/dev`, a folder (created if missing) it can write to — and
 refuses with the reason otherwise, changing nothing.
@@ -117,7 +147,7 @@ ignored with a warning in the daemon log, and the env var is used. The
 startup log line says which one is in effect (`repos_root=… from settings`
 or `from env`).
 
-Sessions already running keep the folder they started in; only new sessions
+Workspaces already running keep the folder they started in; only new workspaces
 (and the repo list in the launch sheet) use the new one. Their recovery
 records (`<repos root>/.blerg-runner/sessions/`) move with the root, so a
 daemon restart still recovers them.
@@ -128,19 +158,18 @@ An administrator manages trusted sources in Core's **Settings → Plugin marketp
 Official Anthropic and OpenAI Codex marketplaces ship on. A connected desktop daemon
 receives changes from its runner server without restarting and checks that policy locally.
 Turning a source off keeps existing plugin installations and running snapshots; lists flag
-them, while new sessions skip them. `BLERG_RUNNER_PLUGIN_MARKETPLACES` is the daemon's
+them, while new workspaces skip them. `BLERG_RUNNER_PLUGIN_MARKETPLACES` is the daemon's
 initial fallback only until the first Core policy is accepted. The daemon saves
 that policy, its Core-generated ID, and its revision locally. A changed ID resets
 revision tracking; stale or replayed revisions within one ID are rejected. Saved
 permissions survive disconnections, Core outages, lease expiry, and restarts.
 See [Core's precedence and upgrade rules](../../core/docs/CONFIG.md#plugin-marketplace-policy).
 
-### What a daemon restart does to running sessions
+### What a daemon restart does to running workspaces
 
 Restarting the daemon (an update with `install.sh install`, a crash, a reboot of the service)
-does not end the sessions it hosts:
+does not end the workspaces it hosts:
 
-- **Terminal sessions** live in tmux and are reattached.
 - **Agent sessions on Claude Code** are hosted again from a recovery record in the daemon's state
   directory (`~/.blerg-runner-daemon/agents/`, one 0600 file per session, holding the session's
   token and environment). The same session continues, with the same Claude conversation
@@ -186,7 +215,7 @@ daemon's state directory (`$BLERG_RUNNER_DAEMON_STATE_DIR`, default `~/.blerg-ru
 holding `update` (the new build differs from the running one) or `reinstall` (the same build).
 The daemon itself writes `stopped-cleanly` there when it is told to stop (SIGTERM from systemd or
 launchd, Ctrl-C). The next daemon reads and removes both at start, and its log says which cause it
-found. With either, a session the restart cut off hears "The daemon was updated and restarted.
+found. With either, a workspace the restart cut off hears "The daemon was updated and restarted.
 Nothing you ran caused it. Continue where you left off; check the state of anything that was
 mid-run first — never re-run anything destructive without checking." ("reinstalled and
 restarted" for a reinstall, "restarted" for a stop with no installer marker, such as a
@@ -200,11 +229,11 @@ was mid-run first." An installer marker older than 15 minutes (its restart never
 removed without being believed.
 
 The server gives a daemon 20 seconds to come back before it marks anything: within that, its
-sessions look as they did, a message you type is kept and delivered when the daemon returns, and
-a board following one of them notices nothing. A daemon away for longer has its sessions shown
-as errored ("daemon disconnected") until it reconnects. A session you stop in the app while the
+workspaces look as they did, a message you type is kept and delivered when the daemon returns, and
+a board following one of them notices nothing. A daemon away for longer has its workspaces shown
+as errored ("daemon disconnected") until it reconnects. A workspace you stop in the app while the
 daemon is down stays stopped. A daemon that stays away for more than 30 minutes still gets its
-sessions back, but their `blerg-runner` tokens have been revoked by then.
+workspaces back, but their `blerg-runner` tokens have been revoked by then.
 
 Only one daemon process uses the recovery records: a second daemon started by the same user
 while the first is running (a build run by hand, say) keeps none and recovers nothing, and says
@@ -213,7 +242,7 @@ so in its log.
 #### Commands a restart never continues
 
 The agent's own tool calls are recorded as they start, and each Bash command is matched, whole
-and case-insensitively, against a fixed list. A session cut off in a matching command is paused
+and case-insensitively, against a fixed list. A workspace cut off in a matching command is paused
 (the notice says it "looked destructive"), and the agent is told not to run it again unless you
 ask; your message picks it up. The list:
 
@@ -237,26 +266,44 @@ pauses too. Background tasks and subagents are not matched (their record keeps a
 not the command).
 
 The restart that first installs recovery support over a daemon without it still ends
-agent sessions: the old daemon kept no records. Ordinary nondestructive work continues
+agent workspaces: the old daemon kept no records. Ordinary nondestructive work continues
 under the usual conversation, waiting-for-you and once-per-turn guards.
 
-A planned successful update continues the session that started it when its **only**
-cut-off tool call is the one the running daemon observed. This works with the plain
-installer, `make restart-daemon`, and detached `setsid nohup … &` launches followed
-by a wait loop. The wait must stay in the **same tool call**, with a Bash timeout long
-enough to cover the build and restart (120 seconds by default, 600 seconds maximum);
-if that call finishes or times out first, ordinary recovery applies. The installer asks
+A planned successful update continues the workspace that started it when its **only**
+cut-off tool call is the one the running daemon observed. For a delayed Linux reinstall,
+arm a uniquely named timer using literal options, for example
+`systemd-run --user --unit=reinstall-unique --on-active=5s install/desktop/daemon/install.sh install`.
+The repository installer's begin/prepare handoff must run.
+The development `make install-daemon` and `make restart-daemon` recipes also
+replace the daemon binary and install/enable its unit. Keeper state never blocks
+installation or restart. A compatible protocol adopts the running keeper even
+on a different build. Its old executable stays usable until its shells close;
+background authenticated maintenance then replaces the empty keeper. An incompatible
+protocol leaves agents running and reports that shells need reconnecting or restarting.
+Keeper startup is queued without waiting for readiness, and the daemon unit starts
+independently of it.
+End the tool step immediately after arming the timer; do not poll a done file or block
+across the restart. The daemon retains that observed arming call until the next tool
+or new turn. The installer must run in the exact observed unit's cgroup, with the
+original engine still alive, within 45 minutes. An older arm-and-wait call is also
+recoverable with this proof. A done file containing `rc=0` and a reconnect alone never
+authorize continuation. Dynamic unit names, unnamed timers and nested cgroups remain
+unverified and use ordinary recovery. Both the unified cgroup hierarchy and the named
+systemd hierarchy are supported; conflicting unit identities fail closed. Direct installer and detached
+`setsid nohup … &` launches retain their existing live-call attribution. The installer asks
 the running daemon to record the planned target;
 only the daemon writes update evidence. The replacement checks its executable digest
 and embedded commit, consumes the record once, and resumes the matching conversation.
 The person sees `↻ Updated to <commit> · continued`; the agent gets the detailed
-instructions and is told not to repeat the update. Idle sessions get no restart row;
+instructions and is told not to repeat the update. Idle workspaces get no restart row;
 a paused row expands to list the interrupted calls, background tasks and subagents.
 
-Other sessions, two interrupted calls, other destructive work in the same shell call,
+Other workspaces, two interrupted calls, other destructive work in the same shell call,
 failed or rolled-back updates, expired evidence, missing conversation history and the
 usual person-wait and once-per-turn guards retain the normal pause. Paused children
 also tell their live parent, using a deduplicated child-turn note with the pause reason.
+An unattended restart pause creates a durable Needs you alert and sends a push to
+the person's registered subscription; duplicate pause reports do not repeat the push.
 The ordinary user service handles updates; no root service or special sudo policy is
 installed. A daemon that predates this protocol cannot observe an update, so its first
 update to this version still uses the ordinary recovery rules.
@@ -272,16 +319,16 @@ environment against the live engine. No session-written receipts are used. Evide
 expires after five minutes and is consumed even on rejection. Legacy
 `restart-update.json`, `note-update` and `note-update-failed` remain unsupported.
 
-(A daemon older than the background-work records cannot list what its sessions run in the
+(A daemon older than the background-work records cannot list what its workspaces run in the
 background, so the first update past it marks none of it stopped.)
 
-Before `install.sh install` restarts a running daemon, it asks the new build which agent sessions
+Before `install.sh install` restarts a running daemon, it asks the new build which agent workspaces
 the restart would cut off (`blerg-runner-daemon status --open-work`, read from the recovery
 records): a turn running, background tasks, subagents. If there are any it lists them and asks
 "Reinstall anyway? [y/N]"; a no leaves the daemon and its binary as they were. `--yes` reinstalls
 without asking (`./blerg-up.sh --yes` passes it on); with no terminal to ask (an agent running
-the installer, a script), the install stops with exit code 5 and says to re-run it with `--yes`. Run from inside an agent session, the list leaves out
-that session's own running turn. Sessions that keep no record (sandboxed, with MCP connections)
+the installer, a script), the install stops with exit code 5 and says to re-run it with `--yes`. Run from inside an agent workspace, the list leaves out
+that workspace's own running turn. Workspaces that keep no record (sandboxed, with MCP connections)
 are not listed.
 
 ### Cloning a repository you name
@@ -289,7 +336,7 @@ are not listed.
 In the launch sheet's Repository box you can type any `owner/name` (GitHub,
 or GitLab from the picker under it) or paste a repository URL
 (`https://gitlab.com/grp/tool`, `git@github.com:owner/name.git`). The
-daemon clones it into the repos folder before the session starts, as
+daemon clones it into the repos folder before the workspace starts, as
 `<name>`, or as `<owner>-<name>` when a `<name>` folder there is some other
 repository. A folder that already is that repository is used as it is, and
 an unrelated folder is never cloned into or over. If both names are taken,
@@ -308,14 +355,14 @@ own token for that provider from **Settings**, but only in these cases:
   `BLERG_RUNNER_ALLOW_HOST_CREDENTIAL_CLONE=true` (see *Setting a daemon
   option* above for how to set it). Otherwise the launch is
   refused with the reason. On the bare host, git's environment holds the
-  token while it clones, and any other session running unsandboxed on the
+  token while it clones, and any other workspace running unsandboxed on the
   same machine as the same user could read it. **Only set this on a daemon
   nobody else uses.** git on the host then receives it as an
   `Authorization` header limited to that host, through its environment
   (this needs git 2.31 or newer; an older git is refused with that reason).
 
 In both cases the token is used for that one clone only. It never lands in
-the clone's `.git/config`, in a session record or in the daemon log. If
+the clone's `.git/config`, in a workspace record or in the daemon log. If
 HTTPS fails for any reason other than its own timeout, the daemon tries the
 provider's ssh address with this machine's own keys. The clone's `origin` is
 the HTTPS URL without the token, so later pushes use this machine's own git
@@ -323,43 +370,75 @@ credentials.
 
 A clone never waits for input. A password prompt, an unknown ssh host key or
 a passphrase fails it instead. A transfer that stalls for a minute is
-aborted, and one attempt may take up to 30 minutes. Stopping the session
-stops its clone at once. Other session starts on this daemon wait in line
+aborted, and one attempt may take up to 30 minutes. Stopping the workspace
+stops its clone at once. Other workspace starts on this daemon wait in line
 behind a running clone. If the daemon is killed mid-clone, it removes the
 hidden `.blerg-clone-*` folder that clone left behind at its next start.
 
+## Keep interactive work responsive
+
+Desktop agent work yields CPU and disk access to your apps by default. In
+**Settings → Engines**, each connected desktop has **Give your interactive work
+priority**. Changes are saved in the daemon's existing `settings.json` as
+`yield_to_person` and apply to new sessions. Restart existing sessions to change
+their priority. Reinstall the daemon and rebuild the local sandbox image when
+upgrading to this feature. The daemon's connection, request handlers, owner
+shells and your browser retain normal priority.
+
+All desktop agent sessions use the same policy: engines, their tool commands,
+gates, test runners and test browsers inherit it. This is a scheduling preference,
+not a CPU quota or a sleep between commands. Idle capacity remains available.
+Workloads competing with your apps may take longer; compare the measurements for
+your machine before assuming a fixed wall-time cost.
+
+| Platform | Controls | Fallback |
+| --- | --- | --- |
+| Linux / WSL | A user systemd scope with `CPUWeight=10` and `IOWeight=10`, plus `nice -n 5` and `ionice -c 3` | Without a working user systemd manager (including WSL without systemd), use nice and ionice. If ionice is unavailable or refused, retain CPU priority alone. Missing controls are logged with safe causes and shown in Settings. |
+| macOS | `taskpolicy -b` and `nice -n 5` | If taskpolicy is unavailable or refused, use nice. Native macOS workspace restrictions still apply; this does not enable unsupported runtimes. |
+| Local Docker sandbox | Container CPU shares 128 and block I/O weight 100; every agent exec uses nice 5 and idle ionice inside the container | Docker Desktop schedules within its Linux VM; host apps depend on the VM's existing resource limits. Block I/O weights require a supporting host scheduler and may have no effect on unsupported storage. Per-process nice and ionice still apply inside the VM. |
+| Cluster | Existing pod resource limits, unchanged | Continue using cluster CPU/memory requests and limits; no desktop scheduler wrappers or new pod controls. |
+
+At daemon startup, harmless probes select available host controls. A later command
+failure is logged and reported by the engine; commands are never retried at normal
+priority because that could execute a tool twice. If no control is available,
+Settings says so and new sessions keep the OS default. Disabling the setting
+restores ordinary launch behavior for new sessions, including Docker weights.
+
+CPU and I/O priorities are advisory. I/O scheduling depends on the kernel,
+filesystem, device and scheduler; these settings do not cap memory or guarantee
+latency when the machine is swapping.
+
 ## Local sandbox runtime
 
-**Both** session kinds — Terminal ("classic tmux") **and** Agent (the headless
-kind the Board and the API start) — default to the **Local sandbox** runtime
-on a daemon: each session runs in a throwaway Docker container with **a clone
+Agent workspaces default to the **Local sandbox** runtime
+on a daemon: each workspace runs in a throwaway Docker container with **a clone
 of its own** of the repo mounted at `/workspace`, never your checkout and
-never your `.git`. Its commits land on the branch `wip/<session-id>` in your
+never your `.git`. Its commits land on the branch `<work-branch>` in your
 repository at the end of each turn and when it stops (work it left
 uncommitted is committed for it at the stop); nothing is merged or pushed.
 What the sandbox can and cannot touch, and how the commits come back:
 [`docs/sandbox-image.md`](../../docs/sandbox-image.md#what-a-sandbox-works-in-and-where-its-commits-land).
 Your engine directories are not mounted: each
-sandboxed session gets a home of its own with the current sign-in of the
+sandboxed workspace gets a home of its own with the current sign-in of the
 engine it runs (it cannot renew it or change yours) and your settings,
 without their secrets, read-only, so nothing it does there runs on your
 machine later. Your own Claude hooks and status line do not run in a Local
-sandbox session (see
+sandbox workspace (see
 [the sandbox home](../../docs/sandbox-image.md#what-a-sandbox-works-in-and-where-its-commits-land)).
-The session can use that sign-in until it expires. Network is open. "This machine,
+The workspace can use that sign-in until it expires. Network is open. "This machine,
 unsandboxed" (bare host, full filesystem access) is one click away in the
 launch sheet's Run column for anyone who wants it, behind an explicit
 acknowledgement — it is never a default while a sandbox is available.
 
-A session started through the v1 contract (`POST /api/runner/start` — Board
-session, card spawn, **Run board**, the MCP `start_session` tool) gets the same
+A workspace started through the v1 contract (`POST /api/runner/start` — Board
+workspace, card spawn, **Run board**, the MCP `start_session` tool) gets the same
 default: with no `runtime` in the request it runs in the **local sandbox**
 whenever the chosen daemon reports the sandbox image available, and on the
 bare host only when it doesn't. `runtime: daemon` is still an explicit choice,
 and a board runs on the host only where its owner chose and acknowledged it in
 Where it runs (`BLERG_BOARD_RUNNER_RUNTIME=daemon` no longer puts board starts on the host). That contract has no "bypass
 permission prompts" field, so a v1 start never asks for one — though an Agent
-session runs non-interactively and its engine bypasses the prompts anyway, on
+workspace runs non-interactively and its engine bypasses the prompts anyway, on
 either runtime.
 
 The Board makes those starts with the board's **automation token** (a
@@ -377,7 +456,7 @@ container. So the desktop compose declares a dedicated network named
 sandboxed spawn the daemon checks whether that network exists; if it does, the
 container joins it and the daemon rewrites a loopback `BLERG_BOARD_URL` to
 `http://blerg-board:8080` and `BLERG_RUNNER_SERVER_HTTP` to
-`http://blerg-runner:8080`. From inside, a sandboxed session can reach:
+`http://blerg-runner:8080`. From inside, a sandboxed workspace can reach:
 
 - the **board and runner APIs**, by service name (both still require a token);
 - **other sandbox containers** on the same network;
@@ -403,19 +482,17 @@ pick it up.
 
 **No git credentials in the sandbox.** `~/.ssh` and `~/.gitconfig` are not
 mounted, so an agent in the sandbox can commit into `/workspace` but cannot
-push. Its commits reach your repo on `wip/<session-id>`; review and push them
-from the host yourself, or choose **This machine** for a session that must
+push. Its commits reach your repo on `<work-branch>`; review and push them
+from the host yourself, or choose **This machine** for a workspace that must
 push on its own.
 
 **Upgrading an older stack.** A stack brought up from a compose file that
 predates the network has no `blerg-sandbox`. Re-run `./blerg-up.sh`: it
 creates the network and reattaches board and runner to it. Until you do,
-sandboxed sessions still start and run, but cannot reach the board; the daemon
+sandboxed workspaces still start and run, but cannot reach the board; the daemon
 logs one warning saying the network is missing.
 
-The two kinds get the identical container; only what runs inside it differs.
-A Terminal session gets a tmux server and a PTY you attach to. An Agent
-session has no tmux at all: the daemon runs the engine process inside the
+The daemon runs the agent engine process inside the
 container with `docker exec -i -w /workspace`, so the engine's cwd is the
 mount point and the host path it came from means nothing to it. The driver's
 stdin/stdout/exit handling is the same code as on the host — only the command
@@ -426,34 +503,28 @@ Started with `--cap-drop ALL --security-opt no-new-privileges --init --pids-limi
 exited children do not accumulate as zombies and exhaust the process limit.
 The limit also counts threads; live processes and threads can still reach it.
 No `--restart` — a sandbox stopped by a reboot is recreated by the daemon from
-its session record on the next launch.
+its workspace record on the next launch.
 
-**Orphan cleanup.** A container is named after its session, so one left behind
+**Orphan cleanup.** A container is named after its workspace, so one left behind
 by a killed daemon, a reboot or a crash still owns that name and would make
 the next `docker run` fail on the collision. The daemon therefore does a
-`docker rm -f <name>` before creating a session's container (and again if the
+`docker rm -f <name>` before creating a workspace's container (and again if the
 run itself fails, so a half-created container can't block the next attempt) —
-the old container belongs to a session that is being recreated right now
-either way. Agent-kind containers are also skipped when the daemon scans for
-sandboxes to reattach to on restart: it only reattaches to containers that
-actually have a tmux server inside, so an agent container is never mistaken
-for a resumable terminal session — which is also why an agent container needs
-cleaning up rather than adopting: nothing will ever reattach to it, and the
-engine process inside it died with the daemon that started it. So on every
-(re)connection, after reattaching and recovering everything it can, the daemon
-sweeps its own sandbox containers: any that is not a session it is managing,
-and has no tmux server inside it, is `docker rm -f`'d. "Its own" means the
+the old container belongs to a workspace that is being recreated right now
+either way. On every reconnect, after agent and workspace recovery, the daemon
+sweeps its own sandbox containers and removes those with no managed session or live registration.
+"Its own" means the
 container carries the daemon's `blerg.runner.owner` label (set on every
 container it starts), or, for a container from before that label, that the
-daemon has a record of the session (its clone, sandbox home or session
+daemon has a record of the workspace (its clone, sandbox home or workspace
 record). A container whose name merely starts with `blerg-sandbox-` (another
 daemon's on the same Docker, a test's) is never reattached or removed; it is
 logged once per daemon run. To find unlabeled ones left from older daemons:
 `docker ps -a --filter name=^/blerg-sandbox- --filter label!=blerg.runner.owner`.
 
-**A container that stops.** While a sandboxed agent session runs, the daemon
+**A container that stops.** While a sandboxed agent workspace runs, the daemon
 looks at its container every few seconds (one `docker ps` of its own
-containers for all sessions, then `docker inspect` only for one that is not
+containers for all workspaces, then `docker inspect` only for one that is not
 running) and whenever the engine fails. Every look goes to the docker context
 the container was started on, so switching your docker CLI to another context
 does not make it look removed. The `blerg.runner.docker-context` container label
@@ -462,13 +533,13 @@ the current context at rediscovery, logged once per container. A slow listing
 does not block other watchers; while a listing is in flight, peers on that
 context defer judgment until a later check. When Docker reports it stopped (a paused
 container, as during the turn-end sync, is alive), or reports it missing twice
-a few seconds apart, the session ends as failed with the container's exit
-code, OOM flag and time, recorded in the session's events; no engine is
-restarted in it. When a session ends —
+a few seconds apart, the workspace ends as failed with the container's exit
+code, OOM flag and time, recorded in the workspace's events; no engine is
+restarted in it. When a workspace ends —
 either kind — its container is `docker rm -f`'d and unregistered, by name even
 when the in-memory registry has been emptied by a restart. Note that the engine's own
 in-container conversation state does not survive that recreation; a resumed
-sandboxed agent session starts the engine fresh, the same way a cluster pod
+sandboxed agent workspace starts the engine fresh, the same way a cluster pod
 coming back does.
 
 **Interrupt.** Killing the host side of a `docker exec` does not signal the
@@ -504,7 +575,7 @@ the daemon, pick Codex/Hermes, or choose This machine"*.
 - **The native API-key agent loop** (the daemon's own in-process tool-calling
   loop) is never used in the sandbox. Its filesystem and shell tools act on
   host paths in-process, so "sandboxed" would be a lie; a sandboxed Claude
-  agent session drives Claude Code in the container instead, whichever
+  agent workspace drives Claude Code in the container instead, whichever
   credential it found.
 
 **This machine + Agent + Claude.** The session runs your own Claude Code
@@ -543,7 +614,7 @@ docker build -f runner/sandbox/Dockerfile --build-arg UID=$(id -u) -t blerg-runn
 ```
 
 (`runner/sandbox/Dockerfile` — debian + git/node/python/build tools + all
-three engine CLIs (`claude`, `codex`, `hermes`) + tmux, non-root `agent` user.
+three engine CLIs (`claude`, `codex`, `hermes`), non-root `agent` user.
 Keep the `--build-arg UID=$(id -u)`: without it the `agent` user gets UID
 1000, and if yours differs, files the sandbox writes into your repo come out
 owned by the wrong user. Built a different tag, or pulling from
@@ -558,7 +629,7 @@ lockfile); `hermes` is the release named in `runner/sandbox/install-hermes.sh`,
 which also lists what it cannot pin. To move to a newer engine, change the
 version there (for the first two, then run `npm install --package-lock-only`
 in `runner/sandbox/engines` to refresh the lockfile) and rebuild the image.
-The cluster session image (`runner/Dockerfile.devcontainer`) uses the same
+The cluster workspace image (`runner/Dockerfile.devcontainer`) uses the same
 two files.
 
 **What's shared with the container:** the target repo (read-write, at
@@ -575,17 +646,17 @@ claude). Hermes is mounted differently: only its two config/credential files,
 not the whole `~/.hermes` directory, since that directory also holds the
 hermes-agent code checkout the installer manages — mounting all of it would
 silently replace the image's own install with whatever's on the host.
-Practically, this means a sandboxed session has the same visibility into your
+Practically, this means a sandboxed workspace has the same visibility into your
 engine account state (chat history across all your other projects, settings)
 that the bare-host daemon already has — the isolation this runtime buys you
-is your **filesystem** (nothing outside `/workspace`, which is the session's
+is your **filesystem** (nothing outside `/workspace`, which is the workspace's
 own clone, and the mounted account dirs is reachable; your checkout and its
 `.git` are not) and **process boundary**, not your account data.
 
 **Network**: full outbound access (v1) — nothing is blocked. This means
 package installs, anonymous git fetches, and the engine's own API calls all
 just work (a push needs credentials the sandbox doesn't have — see above),
-but a sandboxed session is not isolated from exfiltrating data over the
+but a sandboxed workspace is not isolated from exfiltrating data over the
 network or hitting other services reachable from your machine. Revisit if
 that tradeoff stops being acceptable for your use case.
 
@@ -621,20 +692,20 @@ Nothing needs deleting; do not remove the volume, it holds your published files 
 If you changed `BLERG_RUNNER_DATA_DIR` or mounted another folder in place of the volume, make that
 folder writable by user id 65532.
 
-### Container sessions or the stack fail behind a corporate proxy
+### Container workspaces or the stack fail behind a corporate proxy
 
 Docker copies the `proxies` of `~/.docker/config.json` (your corporate `HTTP_PROXY`,
 `HTTPS_PROXY` and `NO_PROXY`) into every container it starts. A proxy cannot reach Blerg's own
 service names (`blerg-runner`, `blerg-board`), so before 0.2.1 the messaging CLI inside a
-container session sent `http://blerg-runner:8080` to the proxy and failed with a
+container workspace sent `http://blerg-runner:8080` to the proxy and failed with a
 "connection reset by peer", and the services calling each other could fail the same way.
 
 What Blerg does now:
 
-- A session in the local sandbox gets `NO_PROXY` and `no_proxy` set to: the values in the
+- A workspace in the local sandbox gets `NO_PROXY` and `no_proxy` set to: the values in the
   daemon's own environment, the `noProxy` of your Docker client config (the entry for
   `DOCKER_HOST`, else `default`), and `blerg-runner,blerg-board,localhost,127.0.0.1`. Your own
-  exceptions are kept. Blerg never adds, changes or removes the proxy itself, so the session
+  exceptions are kept. Blerg never adds, changes or removes the proxy itself, so the workspace
   still uses the proxy for everything else.
 - In the compose file, `blerg-core`, `blerg-board` and `blerg-runner` list the service names
   (and `postgres`, `localhost`, `127.0.0.1`) in `NO_PROXY` and `no_proxy`, plus the `NO_PROXY` /
@@ -646,14 +717,14 @@ What Blerg does now:
 What to check:
 
 - This needs the 0.2.1 daemon: reinstall it with `./daemon/install.sh install` (or run
-  `./blerg-up.sh`), then start a new session. A session that was already running keeps the
+  `./blerg-up.sh`), then start a new workspace. A workspace that was already running keeps the
   environment it started with. Inside the new one, `env | grep -i proxy` should show `NO_PROXY`
   containing `blerg-runner`.
 - After changing `NO_PROXY` for the services, run `./blerg-up.sh` again so the containers are
   recreated with it.
 - If the daemon itself needs a proxy to reach Blerg's runner, that is separate: set it in the
   service's environment (see [Files and permissions](#files-and-permissions)), and keep `localhost` in its `NO_PROXY`.
-- Only the exceptions are added. If your proxy blocks the sites a session needs (git, package
+- Only the exceptions are added. If your proxy blocks the sites a workspace needs (git, package
   registries, the model API), ask whoever runs it; Blerg cannot fix that.
 
 ### Claude Code or Codex run with their own sandbox
@@ -667,16 +738,16 @@ example `http://localhost:8083`) and a read of its token file
 writes only into the working folder. Without the address, Claude asks every time to run
 `blerg-runner` outside the sandbox.
 
-What Blerg does: when it starts a Claude session on this machine and your settings (user, project
+What Blerg does: when it starts a Claude workspace on this machine and your settings (user, project
 or managed) turn the sandbox on, the daemon adds the runner's host and port (and the board's, for
-a board session) to `sandbox.network.allowedDomains` in **that session's own** settings (Claude's
+a board channel) to `sandbox.network.allowedDomains` in **that workspace's own** settings (Claude's
 `--settings`), always with the port. Your settings files are never changed, and no command is
 taken out of the sandbox. Inside the sandbox, `blerg-runner` dials the runner directly first and,
 when the sandbox refuses that, sends the request through the sandbox's proxy, only for the
-session's own runner and board addresses. If your organization's managed settings allow only
+workspace's own runner and board addresses. If your organization's managed settings allow only
 managed domains (`sandbox.network.allowManagedDomainsOnly`), Blerg does not override that: the
-session says so and names the address your administrator has to add to the managed
-`sandbox.network.allowedDomains`. A Local sandbox session is not changed: Claude Code's sandbox
+workspace says so and names the address your administrator has to add to the managed
+`sandbox.network.allowedDomains`. A Local sandbox workspace is not changed: Claude Code's sandbox
 does not run in the image.
 
 To run `blerg-runner` from a Claude Code you started yourself, add the same to your
@@ -693,8 +764,8 @@ To run `blerg-runner` from a Claude Code you started yourself, add the same to y
 
 **Codex.** Codex's `workspace-write` sandbox blocks the network for the commands it runs, so
 `blerg-runner` fails there with a connection error. Blerg does not change that for you: Codex agent
-sessions run without Codex's sandbox and need nothing; for a Codex terminal (or a Codex you started
-yourself) that should reach the runner, allow the network in `~/.codex/config.toml` (this opens the
+workspaces run without Codex's sandbox and need nothing; for a Codex CLI you started
+yourself that should reach the runner, allow the network in `~/.codex/config.toml` (this opens the
 network for all of its sandboxed commands, not only the runner):
 
 ```toml
@@ -706,8 +777,7 @@ network_access = true
 
 The plugin list a person keeps in core **Settings → Always-on plugins** reaches their desktop
 sessions too: every Claude **agent-kind** session (Local sandbox or This machine) starts with
-those plugins loaded. Terminal sessions do not (run `/plugin` there yourself), and neither does a
-restricted session (an MCP grant, a cron).
+those plugins loaded. Restricted sessions (an MCP grant, a cron) do not.
 
 Codex also accepts native `codex:<marketplace>` identities. The official
 `codex:openai-curated` and `codex:openai-curated-remote` identities ship enabled,
@@ -715,8 +785,8 @@ alongside Anthropic's official marketplace. An admin manages these sources in
 Core **Settings → Plugin marketplaces**; the server delivers changes to this
 daemon without a restart. Enter the native identity under Codex in Settings or
 in **Capabilities → Add → Enter a plugin by name**. Local sandboxes without a
-catalog can save it as **Always on** for new sessions; host sessions also support
-**This session only**. Claude does not accept native Codex identities. The wildcard
+catalog can save it as **Always on** for new workspaces; host workspaces also support
+**This workspace only**. Claude does not accept native Codex identities. The wildcard
 permits both kinds of source. [Precedence and fallback](../../core/docs/CONFIG.md#plugin-marketplace-policy)
 apply to desktops too.
 
@@ -762,8 +832,8 @@ How, and what it touches:
   one state dir (two people on one host) may race each other over it; give each its own
   `BLERG_RUNNER_DAEMON_STATE_DIR`.
 
-A plugin runs with the session's full access once loaded, on the host or in the container; the
-marketplace allow-list is the control. When a plugin does not show up in the session's **Skills &
+A plugin runs with the workspace's full access once loaded, on the host or in the container; the
+marketplace allow-list is the control. When a plugin does not show up in the workspace's **Skills &
 plugins** panel, check the daemon log (`journalctl --user -u blerg-runner-daemon` on Linux) for
 `daemon: plugins:` lines.
 
@@ -771,8 +841,8 @@ plugins** panel, check the daemon log (`journalctl --user -u blerg-runner-daemon
 
 The launch sheet's Run column has an Engine picker: **Claude** (default),
 **Codex**, **Hermes** (Nous Research's Hermes Agent CLI), or **OpenClaw**.
-Claude/Codex/Hermes work with any of the three runtimes and either session
-kind (Terminal or Agent); OpenClaw currently only runs Agent-kind sessions on
+Claude/Codex/Hermes agent sessions work with any of the three runtimes;
+OpenClaw currently only runs on
 **This machine** (see its own subsection below — the launch UI disables the
 other combinations). A few things differ underneath:
 
@@ -795,14 +865,7 @@ OpenClaw's `openclaw onboard`).
   the toggle rather than showing one that does nothing.
 - **Resuming after a crash**: Claude sessions can pin a session id upfront
   (`--session-id`) and resume it later (`--resume <id>`) after a hard daemon
-  restart. New Codex **Terminal** sessions keep native conversations in a private
-  per-session Codex home, preserving the existing login and settings. After tmux
-  loss the daemon resumes that terminal's latest interactive thread by exact ID;
-  subagent conversations cannot replace it. Missing or older untracked terminal
-  history is refused explicitly, without replaying the initial task. Docker
-  terminal sessions bind the same persistent home into their replacement container.
-  Hermes terminals still start fresh with the stored initial prompt; Hermes's
-  `-c/--continue` option belongs to its `chat` subcommand. Codex and Hermes **Agent** sessions
+  restart. Codex and Hermes agent sessions
   track their own conversation identity between turns. Host Codex agent sessions
   persist their thread ID in private daemon recovery records and are reclaimed
   before reconnecting to the server. Eligible interrupted work is continued once,
@@ -825,7 +888,6 @@ OpenClaw's `openclaw onboard`).
   message) to stdout, nothing else. So a Hermes Agent session only ever emits
   `assistant_text` and `turn_done`; unlike Claude/Codex it never surfaces
   `tool_call`/`tool_result` events, and turn token-usage isn't tracked either.
-  Terminal-kind Hermes sessions are unaffected (real TUI, same as claude/codex).
 - **Model picker**: shows the engine's own model list (and an Effort choice
   for models that take one). Codex's account-aware list is probed from its CLI;
   the running app-server confirms its initial model and effort. Changes are
@@ -869,18 +931,19 @@ right away.
    same list for each of your desktops.
 3. If the engine is installed but the daemon can't find it ("isn't on the daemon's PATH"),
    select **Re-detect PATH**. The daemon reads your login shell's PATH (the PATH your terminal
-   gets, including what nvm, a custom npm prefix, Volta, asdf or Homebrew add), puts it ahead of
-   its own and keeps it for later restarts. No restart is needed. When the reason names the
-   folder ("Codex is installed at ~/.nvm/versions/node/v22.11.0/bin/codex …") and Re-detect
-   PATH doesn't help, that folder isn't on your login shell's PATH either: add it in your shell
-   profile (`~/.zprofile`, `~/.bash_profile` or `~/.profile`), then Re-detect PATH.
+   gets, which may include a custom npm prefix, Volta, asdf or Homebrew), puts it ahead of
+   its own and keeps it for later restarts. No restart is needed. If Re-detect PATH does not help, compare the captured, saved and running PATH before
+   editing your shell profile. If the folder is missing, add it to PATH in your shell profile,
+   then select **Re-detect PATH** again. Interactive shell setup such as nvm may still be missed;
+   BLG-330 tracks that unresolved detection gap. A working terminal alone does not establish which PATH the
+   daemon captured or whether the refreshed daemon is running.
 
 Without the app, the installer does the same:
 
 - **Linux (systemd)**: `./daemon/install.sh refresh-path` reads your login shell's PATH again,
   writes it into `~/.config/systemd/user/blerg-runner-daemon.service` as `Environment=PATH=…`
   and restarts the daemon. It doesn't rebuild anything. If agent work is running it lists it and
-  asks first (`--yes` goes ahead). Sessions it interrupts are continued after the restart, the
+  asks first (`--yes` goes ahead). Workspaces it interrupts are continued after the restart, the
   same as after an install.
 - **macOS (launchd)**: the same command writes `PATH` into the `EnvironmentVariables` of
   `~/Library/LaunchAgents/dev.blerg.runner-daemon.plist` and reloads the agent.
@@ -890,8 +953,10 @@ plain; 10 seconds each, enforced without `timeout(1)` so a hanging profile can't
 install on stock macOS, with no input and none of the installer's tokens), keeps only absolute
 folders made of plain path characters, puts them ahead of the defaults
 (`~/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`, plus `/opt/homebrew/bin` on
-macOS), drops duplicates and stops at 64. When the shell can't be read it says so and uses the
-defaults.
+macOS), normalizes repeated interior slashes, drops duplicates and stops at 64. A valid entry
+such as `$HOME//.nvm/versions/node/v22.12.0/bin` is retained with single slashes. Leading `//`
+and parent-directory (`..`) components are still rejected. When the shell can't be read it says
+so and uses the defaults.
 
 **Which PATH wins.** Re-detect PATH (the app) saves what it read in the daemon's state folder
 (`~/.blerg-runner-daemon/login-path.json`), and the daemon puts that ahead of its service PATH
@@ -899,6 +964,25 @@ at every start. `install` and `refresh-path` rewrite the same file with what the
 the most recent capture wins, from the app or from the installer. When the installer can't read
 your login shell it leaves the file alone. If the app can apply a PATH but can't save it (a
 read-only or full state folder), it says so: the PATH works until the daemon restarts.
+
+If a tool is still missing after refresh, keep the “Service PATH from …” message and compare
+these sources. They contain folder names; do not share the complete service environment or
+process environment, which can contain credentials.
+
+```bash
+# Saved capture and service configuration (Linux).
+cat "${BLERG_RUNNER_DAEMON_STATE_DIR:-$HOME/.blerg-runner-daemon}/login-path.json"
+sed -n 's/^Environment=PATH=//p' "$HOME/.config/systemd/user/blerg-runner-daemon.service"
+# Only PATH from the running daemon, not its other environment variables.
+daemon_pid="$(systemctl --user show blerg-runner-daemon.service -p MainPID --value)"
+tr '\0' '\n' < "/proc/$daemon_pid/environ" | sed -n 's/^PATH=//p'
+```
+
+A mismatch separates shell capture, persistence, service configuration and restart problems.
+On Linux, `/proc` shows the environment at process start; a later in-process Re-detect PATH
+can change the PATH used for new sessions without changing that view. On macOS, compare the
+saved capture with the plist's PATH instead. A successful fake-nvm test does not establish
+which of these boundaries failed on another desktop.
 
 What each status means:
 
@@ -908,7 +992,7 @@ What each status means:
 | Not logged in | the CLI is there, its login isn't (`~/.codex/auth.json`, `~/.claude/.credentials.json`) | log in, then Check again |
 | Not set up | logged in or installed, but not ready to run: Hermes has no provider, OpenClaw isn't onboarded | `hermes setup` / `openclaw onboard`, then Check again |
 | Too old | the CLI is older than the oldest version Blerg supports | update it, then Check again |
-| Not offered here | this runtime or session kind never runs it (OpenClaw in the Local sandbox or on the Cluster) | choose another runtime |
+| Not offered here | this runtime or workspace kind never runs it (OpenClaw in the Local sandbox or on the Cluster) | choose another runtime |
 | Not connected | Cluster only: no credential for this engine | connect it in Settings |
 
 The daemon reports facts only: a status, where a CLI is and the PATH it searched, with your home
@@ -1162,6 +1246,25 @@ there — it's saved to `.env` for next time. In a non-interactive context
 macOS logins typically live in the system Keychain rather than a file, so this
 detection only runs on Linux — see the macOS section above for that flow.
 
+### sudo in host shells (opt-in)
+
+By default `sudo` fails in a host shell with "no new privileges": the process tracer that contains a shell
+blocks setuid programs. To offer explicitly privileged host shells, add this to the unit, then
+`systemctl --user daemon-reload` and restart the daemon:
+
+```ini
+[Service]
+Delegate=yes
+Environment=BLERG_HOST_SHELL_CGROUP=1
+```
+
+Choose **New privileged host shell** in the command palette and confirm for each shell. Ordinary shells
+keep the tracer. A privileged shell is marked on its tab and is not frozen at turn end; the turn's copy
+carries a note that it may include in-flight writes. Agent credentials cannot request this mode.
+Process limits still apply except to root processes, and anyone signed in to Blerg as you can use whatever `sudo` allows
+without a password. A host without a writable cgroup v2 refuses the privileged choice.
+[The design](../../docs/design/host-shell-cgroup.md) lists what else changes.
+
 ## macOS (launchd)
 
 Installed automatically by `blerg-up.sh`. Same commands as above — `install.sh`
@@ -1207,7 +1310,7 @@ the service's own status:
 
 The file holds the server's address, the time the state began, a short reason and the daemon's
 process id; never a token. Only the daemon that owns the state directory writes it (a second one
-started by hand does not), and a session pod in a cluster never writes one.
+started by hand does not), and a workspace pod in a cluster never writes one.
 
 **What the installer checks.** `install.sh install` (and `blerg-up.sh`, which runs it) asks the
 server whether it accepts the enrolled credential before it replaces the running
@@ -1283,30 +1386,49 @@ export BLERG_RUNNER_SERVER_URL=ws://localhost:8083/ws/daemon   # your BLERG_PORT
 export BLERG_RUNNER_REPOS_ROOT=<the directory your repos live in — required>
 # either already logged into claude, or:
 export CLAUDE_CODE_OAUTH_TOKEN=<from `claude setup-token`>
+# Linux/WSL only; skip these keeper commands on macOS:
+( cd ../../runner && GOWORK=off go run ./cmd/daemon shell-keeper init )
+# Keep this running in a separate terminal before starting the daemon:
+( cd ../../runner && GOWORK=off go run ./cmd/daemon shell-keeper serve )
 ( cd ../../runner && GOWORK=off go run ./cmd/daemon )     # needs Go >= 1.26; or ./daemon/install.sh install builds it in Docker
 ```
 
 It has to keep running (in that terminal, in `tmux`/`screen`, whatever you use) for
-agent sessions to work — killing it just means no new sessions can spawn until you
+agent workspaces to work — killing it just means no new workspaces can spawn until you
 start it again.
+
+On Linux and WSL, host shells require an independently running keeper with
+authenticated inventory. Missing keeper state or a keeper failure refuses host
+shells with a reason while the daemon and agents keep running. The daemon
+reconnects the keeper in the background; shell adoption never gates agent recovery.
+When keeper state needs repair, reinstalling still
+updates the daemon and starts agents. The installer warns and preserves the
+keeper files; host shells stay unavailable until repair. A busy keeper, hung socket,
+unsafe state directory or different build cannot prevent daemon replacement.
+An incomplete or old keeper state format is refused with repair instructions:
+preserve live custody and private keys, and restore a verified
+backup. Only after proving no keeper or shells exist may an operator quarantine
+incomplete state and initialize again. Prefer the service installer, which
+performs provisioning, independent startup and failure cleanup. macOS supervision
+is deferred; its shells still end on daemon restart.
 
 Running Blerg on a Kubernetes cluster instead? See [`install/k8s/README.md`](../k8s/README.md).
 
 ### Automatic continuation after usage limits
 
 The server schedules **Resume when limit resets**, but the workstation daemon
-must report the session's provider refusal and reset time. After upgrading Blerg,
+must report the workspace's provider refusal and reset time. After upgrading Blerg,
 run `install/desktop/daemon/install.sh install` from the updated checkout to rebuild
 and restart the daemon. Restarting an old binary alone does not install the new
 behavior. The option is in each owned Claude or Codex agent chat; see
 [Resume after a usage limit](../../docs/talking-to-an-agent.md#resume-after-a-usage-limit).
 
-### Adding to an existing session
+### Adding to an existing workspace
 
-The session panel's **Capabilities → Add plugin or skill** uses the same marketplace policy and
-account settings as always-on plugins. **This session only** adds to that session's private
+The workspace panel's **Capabilities → Add plugin or skill** uses the same marketplace policy and
+account settings as always-on plugins. **This workspace only** adds to that workspace's private
 snapshot without changing the account list. **Always on** saves the engine-specific account entry;
-on a compatible live session it can load there too.
+on a compatible live workspace it can load there too.
 
 Live application currently requires an updated desktop daemon and an unrestricted host Claude
 agent session. The daemon waits until foreground turns and owned background work are idle,
@@ -1318,8 +1440,8 @@ for new sessions and says so. Installing the updated daemon enables this path fo
 sessions; no separate change to the person's interactive CLI configuration is needed.
 
 An agent's `request-plugin` command only asks the person. Approval is required before installing
-or saving an account setting, including for cron and board-started sessions. Rejection or expiry
-leaves both the running session and settings unchanged.
+or saving an account setting, including for cron and board-workers. Rejection or expiry
+leaves both the running workspace and settings unchanged.
 
 ### Person-owned desktop credentials (0.5 upgrade)
 
@@ -1346,7 +1468,7 @@ expired, revoked or already used) stops with exit code 7 and changes nothing.
 
 **A desktop that already connects** (upgrade-era): update the daemon with
 `daemon/install.sh install`, then open **Settings → Account → Your desktops** (a
-session on that desktop links there) and select **Enroll**.
+workspace on that desktop links there) and select **Enroll**.
 Review the hostname, OS user, connected-since time and server-observed source
 address, then select **Confirm enrollment**. If the connection changes, review
 its details and confirm again. The server delivers the credential over the existing authenticated connection;
@@ -1382,7 +1504,7 @@ Core migrations 026/027 add desktop credentials and shell policy; runner migrati
 The installer builds the contained Linux workspace worker (protocol 3). Sandbox
 builds use the repository root as their Docker build context.
 
-Workspace v2 and owner shells remain gated off. Existing single-repository sessions
+Workspace v2 and owner shells remain gated off. Existing single-repository workspaces
 retain scalar contracts. A discovery-capable peer without workspace v2 refuses
 checked-out selections, including a single repository, rather than losing source
 identity through a bare-name downgrade. Sandbox file viewing requires an in-container
@@ -1391,3 +1513,35 @@ capability from discovery availability or a successful image build. See
 [workspace integration](../../docs/workspace-integration.md) for remaining gates,
 including physical Mac and Docker engine restart acceptance. Reinstalling does
 not authorize deleting retained workspace allocations.
+
+
+## Scratch folder cleanup
+
+A workspace launched with **No repository** gets its own `.scratch-*` folder under the
+repos root. When the workspace ends for good, the daemon removes the folder if it is
+empty, or contains only unchanged metadata from a fresh Git repository. An idle
+workspace is still live. Ending a turn or restarting the daemon does not authorize
+removal. Cleanup waits for the workspace driver and sandbox settlement to finish.
+
+Any files, commits (including other branches and unreachable objects), staged work,
+ignored files, custom Git metadata, changed folder identity or uncertain teardown
+cause the folder to be kept. The workspace's end message and daemon log report its
+path and why it was kept. Recover work from that path before removing it yourself.
+
+To inspect older leftovers, end all workspaces and stop the daemon, then run the
+installed daemon binary with its usual repos root and state directory settings:
+
+```sh
+blerg-runner-daemon cleanup-scratch
+blerg-runner-daemon cleanup-scratch --apply
+```
+
+The first command previews; the second removes only folders proven safe by the
+same content checks. Neither uses age as evidence. Maintenance takes the daemon's
+records lock and refuses to run while recovery records or unresolved workspace
+allocations remain, including corrupt records. It also checks Docker and uses
+`lsof` to retain folders still used by processes.
+Docker and `lsof` must be available; failed or incomplete inspection retains the
+folder. Run with the daemon's usual user and runtime environment. Maintenance is
+intentionally conservative: it does not stop workspaces, erase recovery records or
+force-remove a folder whose safety it cannot establish.

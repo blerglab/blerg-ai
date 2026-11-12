@@ -315,7 +315,7 @@ describe('scrolling up into older history', () => {
     for (let i = 0; i < 100 && timeline.scrollTop > 0; i++) await scrollUp(timeline, step)
     await frames(3)
     const start = timeline.querySelector('[data-testid="history-start"]')
-    expect(start?.textContent).toContain('Beginning of the session')
+    expect(start?.textContent).toContain('Beginning of the workspace')
     expect(inView(timeline, start)).toBe(true)
     expect(timeline.querySelector('[data-testid="older-loading"]')).toBeNull()
     // Exactly the session's messages, in order: no page boundary drew one twice or lost one.
@@ -435,11 +435,13 @@ describe('scrolling up into older history', () => {
     await sized(timeline)
     const asked = o.requests.length
     expect(timeline.scrollTop).toBeGreaterThan(1.5 * timeline.clientHeight)
-    // Up by the scrollbar: scroll events, no wheel, key or touch.
+    // Up by the scrollbar: pointer input and scroll events, no wheel, key or touch.
+    timeline.dispatchEvent(new PointerEvent('pointerdown', { button: 0 }))
     for (let i = 0; i < 200 && o.requests.length === asked; i++) {
       timeline.scrollTop = Math.max(0, timeline.scrollTop - 200)
       await frames(2)
     }
+    window.dispatchEvent(new PointerEvent('pointerup'))
     expect(o.requests.length).toBe(asked + 1)
   }, 120_000)
 

@@ -49,6 +49,7 @@ describe('ChatView transcript replay', () => {
     expect(screen.getByRole('status', { name: 'Loading conversation' })).toBeTruthy()
     expect(container.querySelectorAll('.sk-bubble').length).toBeGreaterThan(3)
     expect(timeline()?.classList.contains('loading')).toBe(true)
+    expect(scroll).not.toHaveBeenCalled()
 
     // First page arrives, more to come: still the skeleton, no scrolling.
     act(() => {

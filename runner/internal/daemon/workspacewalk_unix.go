@@ -31,24 +31,27 @@ func workspaceWalkOpenOptions(root *os.Root, name string, afterOpen func(int), s
 	}
 	infos := []os.FileInfo{info}
 	parts := strings.Split(name, "/")
-	check := func() bool {
+	check := func() error {
 		for i, f := range chain {
 			now, err := f.Stat()
-			if err != nil || (!os.SameFile(now, infos[i]) || sameDevice && workspaceMetadataFingerprint(now) != workspaceMetadataFingerprint(infos[i])) {
-				return false
+			if err != nil || !os.SameFile(now, infos[i]) {
+				return os.ErrPermission
+			}
+			if sameDevice && workspaceMetadataFingerprint(now) != workspaceMetadataFingerprint(infos[i]) {
+				return errWorkspaceMetadataChanged
 			}
 			if i == 0 {
 				continue
 			}
 			var child, parent unix.Stat_t
 			if unix.Fstatat(int(chain[i-1].Fd()), parts[i-1], &child, unix.AT_SYMLINK_NOFOLLOW) != nil || workspaceUnixIdentity(child) != workspaceRootIdentity(infos[i]) {
-				return false
+				return os.ErrPermission
 			}
 			if unix.Fstatat(int(f.Fd()), "..", &parent, unix.AT_SYMLINK_NOFOLLOW) != nil || workspaceUnixIdentity(parent) != workspaceRootIdentity(infos[i-1]) {
-				return false
+				return os.ErrPermission
 			}
 		}
-		return true
+		return nil
 	}
 	for i, part := range parts {
 		flags := unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_CLOEXEC
@@ -68,9 +71,9 @@ func workspaceWalkOpenOptions(root *os.Root, name string, afterOpen func(int), s
 		if afterOpen != nil {
 			afterOpen(i)
 		}
-		if !check() {
+		if err := check(); err != nil {
 			_ = file.Close()
-			return nil, os.ErrPermission
+			return nil, err
 		}
 		var named unix.Stat_t
 		if unix.Fstatat(int(chain[len(chain)-1].Fd()), part, &named, unix.AT_SYMLINK_NOFOLLOW) != nil || workspaceUnixIdentity(named) != workspaceRootIdentity(current) {

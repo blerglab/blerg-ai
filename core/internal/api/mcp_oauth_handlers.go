@@ -134,7 +134,7 @@ func (d Deps) beginMCPOAuth(w http.ResponseWriter, r *http.Request, in mcpconn.O
 		return
 	}
 	if _, live, err := svc.HumanSessionLive(r.Context(), principal.Sub, principal.Sid); err != nil {
-		log.Printf("mcp oauth start: session liveness: %v", err)
+		log.Printf("mcp oauth start: stage=session_liveness cause=%s", mcpconn.FailureCause(err))
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	} else if !live {
@@ -218,6 +218,10 @@ func (d Deps) handleReconnectMCPConnection(w http.ResponseWriter, r *http.Reques
 // ends in a redirect to the settings page with a fixed-vocabulary hint; provider error text is
 // never reflected.
 func (d Deps) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	if mcpconn.IsSessionOAuthState(r.URL.Query().Get("state")) {
+		d.handleSessionMCPOAuthCallback(w, r)
+		return
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	if d.MCPConnections == nil {
@@ -272,7 +276,7 @@ func (d Deps) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		}
 		if reason == "internal" || reason == "exchange" {
 			// Fixed words only: the wrapped error carries no token, code or provider text.
-			log.Printf("mcp oauth callback: %v", err)
+			log.Printf("mcp oauth callback: reason=%s cause=%s", reason, mcpconn.FailureCause(err))
 		}
 		hint = url.Values{"mcp_oauth": {"error"}, "reason": {reason}}
 	}

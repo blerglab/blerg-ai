@@ -121,7 +121,7 @@ describe("Conversation (a card's session)", () => {
     };
     render(<Conversation cardId="c1" />);
     const cta = await screen.findByRole("button", { name: "Run as me" });
-    expect(screen.getByTestId("run-as-me-cta")).toHaveTextContent("This board can't start sessions yet");
+    expect(screen.getByTestId("run-as-me-cta")).toHaveTextContent("This board can't start workspaces yet");
     // The owner-only note is beside the point until the board has a token at all.
     expect(screen.queryByTestId("run-where-reason")).not.toBeInTheDocument();
     // After Run as me the targets are asked for again, and the person (now the owner) may choose.
@@ -148,7 +148,7 @@ describe("Conversation (a card's session)", () => {
 
   it("shows the session in the shared chat, through the board's proxy with the board's token", async () => {
     const jwt = signIn();
-    responses["/api/cards/c1/runner-sessions"] = [session()];
+    responses["/api/cards/c1/runner-sessions"] = [session({ id: "previous", lifecycle: "stopped" }), session()];
     const seen = chatServer([
       userMsg(1, "You are the worker for card #7. **Rules:** many.", "chat"),
       userMsg(2, "the reviewer found two problems", "blerg-board"),
@@ -158,8 +158,10 @@ describe("Conversation (a card's session)", () => {
 
     // the board's own chrome
     expect(await screen.findByText("running")).toBeInTheDocument();
-    expect(screen.getByText(/blerg-runner · ext-1234/)).toBeInTheDocument();
-    expect(within(screen.getByText(/blerg-runner · ext-1234/)).getByTitle("claude-sonnet-5")).toHaveTextContent("sonnet-5");
+    expect(container.querySelector('.convo-head')).not.toHaveTextContent('blerg-runner');
+    expect(container.querySelector('.convo-head')).not.toHaveTextContent('ext-1234');
+    expect(container.querySelector('.convo-head')).not.toHaveTextContent('attempt');
+    expect(within(container.querySelector('.convo-head') as HTMLElement).getByTitle("claude-sonnet-5")).toHaveTextContent("sonnet-5");
 
     // the shared chat, fed by the board's proxy
     await waitFor(() => expect(screen.getByText("also fix the title")).toBeInTheDocument());
@@ -169,7 +171,7 @@ describe("Conversation (a card's session)", () => {
     expect(live.headers.Authorization).toBe(`Bearer ${jwt}`);
 
     // the kickoff prompt is a collapsed brief, the board's relay is the board's, a person's is theirs
-    expect(screen.getByTestId("message-brief").textContent).toMatch(/session brief/);
+    expect(screen.getByTestId("message-brief").textContent).toMatch(/workspace brief/);
     expect(screen.queryByText(/You are the worker/)).toBeNull();
     const authors = [...container.querySelectorAll(".agent-card.user .card-author")].map((n) => n.textContent);
     expect(authors).toEqual(["blerg-board", "You"]);
@@ -180,7 +182,7 @@ describe("Conversation (a card's session)", () => {
     responses["/api/cards/c1/runner-sessions"] = [session({ lifecycle: "idle" })];
     const seen = chatServer([userMsg(1, "hello", "human")]);
     render(<Conversation cardId="c1" />);
-    const box = await screen.findByPlaceholderText(/steer the session/);
+    const box = await screen.findByPlaceholderText(/steer the workspace/);
     fireEvent.change(box, { target: { value: "ship it" } });
     await act(async () => { fireEvent.keyDown(box, { key: "Enter" }); });
     await waitFor(() => expect(seen.some((c) => c.url.endsWith("/messages"))).toBe(true));
@@ -201,7 +203,7 @@ describe("Conversation (a card's session)", () => {
     responses["/api/cards/c1/runner-sessions"] = [session({ id: "rs2", role: "discuss", lifecycle: "idle" })];
     render(<Conversation cardId="c1" />);
     // wait for the session's own line: before it loads, the no-session panel has a Run button too
-    expect(await screen.findByText(/discussion · /)).toBeInTheDocument();
+    expect(await screen.findByText(/Discussion/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Run this card/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Discuss first/ })).toBeNull();
   });
@@ -248,6 +250,6 @@ describe("BoardChat (the board session drawer)", () => {
     fireEvent.click(await screen.findByTitle(/minimize/));
     expect(screen.queryByRole("dialog")).toBeNull();
     fireEvent.click(screen.getByTitle(/click to restore/));
-    expect(screen.getByRole("dialog", { name: "Board session" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Board channel" })).toBeInTheDocument();
   });
 });

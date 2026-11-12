@@ -36,7 +36,10 @@ let reads: string[] = []
 function serve() {
   apiFetch.mockImplementation((url: string) => {
     if (url.endsWith('/permissions')) return json({ can_grant: true, reason: '', grants: [], mcp_tools: [], boards: [{ board_id: 'b1', board_name: 'Blerg', level: 'full' }] })
-    const m = url.match(/^\/api\/board-cards\/b1\/(\d+)/)
+    // Anchored so a sibling route under the same card (e.g. BLG-444's .../card-time) is never
+    // counted as a second read of the card itself.
+    if (url.includes('/card-time')) return json({})
+    const m = url.match(/^\/api\/board-cards\/b1\/(\d+)(?:\?|$)/)
     if (m) {
       reads.push(m[1])
       const c = CARDS[m[1]]

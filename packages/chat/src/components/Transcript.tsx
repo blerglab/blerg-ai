@@ -1,9 +1,11 @@
-import type { Reasoning } from '../model/reasoning'
 // The timeline: start progress, the ready card, every event (folded into tool groups or as full
 // cards), the streaming reply, sent-but-unrecorded messages, the working and waiting lines. It
 // draws the newest WINDOW rows and reveals more as the reader scrolls up, follows new output until
 // the reader scrolls up (and again once they are back at the very end), and holds their place while
 // rows are put in above them.
+import type { Reasoning } from '../model/reasoning'
+import { ChatPaneContext } from './chatPaneContext'
+import { TIMELINE_JUMP } from './scrollToCall'
 import { Component, Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { CardRegistry } from '../cards/registry'
 import { parseTs, dayKey } from '../model/timeLabel'
@@ -54,19 +56,9 @@ const LOADED_SAY_MS = 1000
 // How close to the end of the timeline counts as at the end, where following new output resumes.
 const AT_END_PX = 8
 
-// How long after a scroll of our own a scroll event is still taken as that scroll's (a few frames).
-const OURS_MS = 50
-const markOurs = (r: { current: number }) => { r.current = performance.now() }
-const isOurs = (r: { current: number }) => r.current !== 0 && performance.now() - r.current < OURS_MS
-
-// How long after the reader's finger lifts the view is still left where they put it (a flick goes on
-// scrolling after the lift), and how long after they asked to go up a scroll landing near the end
-// is still theirs (not a reason to resume following).
+// How long after a touch ends to hold the view while its scrolling settles.
 const SETTLE_MS = 300
-// How far a finger moves down the screen (the content up), more than sideways, before it reads as
-// scrolling up: a tap wobbles a few px, and a sideways swipe on a code block is not a scroll up.
-const TOUCH_UP_PX = 10
-// How long a finger may go without a move reaching the timeline before it no longer counts as down.
+// How long a detached touch target may go without a move before its press is released.
 // The row under it can be taken out mid-touch (a streaming reply finished, the working line gone,
 // the window trimmed); its touchmove and touchend then go to a detached node and never reach us.
 const TOUCH_LOST_MS = 1500
@@ -175,6 +167,7 @@ export function TurnClock({ since, clockOffset, waitingOn, background, activity,
 /** The background tasks running, for the working line: how many, the description of the only one,
  *  and when the oldest started (server time; null when unknown). */
 export interface BackgroundLine {
+  stopped?: boolean
   count: number
   description: string
   command?: string
@@ -258,6 +251,10 @@ export function dayBreaksOf(stamps: Array<[string, number | null]>): Map<string,
   return out
 }
 
+// A revisit uses the same immutable shared timeline. Keep its calendar boundaries too: only
+// WINDOW rows mount, but formatting a date for every held event can dominate switch-in.
+const dayBreakCache = new WeakMap<readonly unknown[], Map<string, number>>()
+
 /** Where the reader was in a transcript: following its end, or reading, with the first row drawn
  *  (the window's start) and the scroll offset from the top of the content. New output below never
  *  moves what is above, so the offset keeps the same place on return (#281). */
@@ -289,6 +286,9 @@ export interface TranscriptProps {
   cards?: CardRegistry
   messageFooter?: MessageFooter
   describeUserMessage?: DescribeUserMessage
+  /** A popped-out message's fallback tab name when it has no heading of its own: "<chatName> ·
+   *  <time>" (BLG-449). Absent: "Chat". */
+  chatName?: string
   /** Call ids in flight in the turn now running. */
   liveIds: ReadonlySet<string>
   // ── loading ──
@@ -349,8 +349,8 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
   if (foldSet.session !== p.sessionId) setFoldSet({ session: p.sessionId, folds: new Map() })
   const subagentFolds = foldSet.folds
   const options = useMemo(
-    () => ({ cards, messageFooter, describeUserMessage, firstUserMessage, subagentFolds }),
-    [cards, messageFooter, describeUserMessage, firstUserMessage, subagentFolds],
+    () => ({ cards, messageFooter, describeUserMessage, firstUserMessage, subagentFolds, chatName: p.chatName }),
+    [cards, messageFooter, describeUserMessage, firstUserMessage, subagentFolds, p.chatName],
   )
   const bottomRef = useRef<HTMLDivElement | null>(null)
   const timelineRef = useRef<HTMLDivElement | null>(null)
@@ -409,6 +409,9 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
   // Where the local date changes between consecutive visible items: the
   // divider goes before the item, keyed like it, carrying that item's time.
   const dayBreaks = useMemo(() => {
+    const sequence = compact ? timelineItems : fullSeq
+    const cached = dayBreakCache.get(sequence)
+    if (cached) return cached
     const stamps: Array<[string, number | null]> = compact
       ? timelineItems.map(item => item.type === 'tools'
           ? [`tools:${item.key}`, parseTs(item.entries[0].ev.ts)]
@@ -418,7 +421,9 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
               ? [item.entry.ev.client_event_id, parseTs(item.entry.ev.ts)]
               : [item.ev.client_event_id, parseTs(item.ev.ts)])
       : fullSeq.filter(ev => isVisibleEvent(ev) || fullSubs.anchors.has(ev.client_event_id)).map(ev => [ev.client_event_id, parseTs(ev.ts)])
-    return dayBreaksOf(stamps)
+    const breaks = dayBreaksOf(stamps)
+    dayBreakCache.set(sequence, breaks)
+    return breaks
   }, [fullSeq, fullSubs, timelineItems, compact])
   // The full-card view's rows: every event drawn, less the turn ends folded into a reply and the
   // events a subagent card holds.
@@ -492,31 +497,45 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
   // Every row is drawn and the server has nothing older: the very top of the session.
   const atBeginning = !loadingHistory && rowCount > 0 && start === 0 && !hasOlder && !p.loadingOlder
 
-  // Follow new output until the reader scrolls up. Any upward scroll stops it, even a short one
-  // inside the newest card (on a phone that card is often taller than the screen, so "near the
-  // bottom" would still be following and every event would pull the view away from what they read);
-  // it resumes only at the very end (within AT_END_PX) or when they send something (pin).
+  // Follow at the end; only reader input can relinquish following.
+  // Sending (pin) and returning to the end resume it; deliberate jumps stop it explicitly.
   const stick = useRef(!reading)
   // Why following last stopped, and when (BLG-327): shown on the "New output" pill so an unexpected
-  // stop names its cause (the reader's wheel, finger or key, or a scroll no input explains).
+  // stop distinguishes a measured move away from an explicit jump.
   const unfollow = useRef<{ why: string; at: number } | null>(null)
-  const stopFollowing = (why: string) => {
+  const stopFollowing = useCallback((why: string) => {
     if (stick.current) unfollow.current = { why, at: Date.now() }
     stick.current = false
-  }
+  }, [])
   // The reader's last scroll position, to tell an upward scroll from a downward one.
   const lastTop = useRef(0)
-  // Set (to when) just before every scroll we make ourselves (following, the pill, keeping the
-  // reader's place, trimming the window), so it does not read as the reader scrolling up. The next
-  // scroll event clears it; a move that scrolled nothing fires none, so it also lapses after
-  // OURS_MS (a few frames) without a timer of its own.
-  const programmatic = useRef(0)
-  const ours = () => markOurs(programmatic)
-  // Busy output scrolls to the end on almost every event, so the reader's first upward scroll event
-  // often lands inside that window and reads as ours. What they do with the wheel, a finger or the
-  // keyboard says they are going up before any scroll event does: upAt is when they last did.
-  const upAt = useRef(0)
-  // A finger is on the timeline (until it lifts, or TOUCH_LOST_MS pass with no move from it), or
+  // Geometry at the last observed or assigned position. A clamp accounts for only the
+  // reduction in the maximum; movement beyond it belongs to the reader.
+  const lastMax = useRef(0)
+  const cancelPlacement = useRef(() => {})
+  const measure = useCallback((root: HTMLElement) => {
+    lastTop.current = root.scrollTop
+    lastMax.current = Math.max(0, root.scrollHeight - root.clientHeight)
+  }, [])
+  const readerMoved = useCallback((root: HTMLElement) => {
+    const max = Math.max(0, root.scrollHeight - root.clientHeight)
+    return max - root.scrollTop > AT_END_PX
+      && lastTop.current - root.scrollTop > Math.max(0, lastMax.current - max) + 0.5
+  }, [])
+  // Layout can clamp and regrow between observations. Geometry alone cannot identify input.
+  const readerInputUntil = useRef(-Infinity)
+  const focusInputUntil = useRef(-Infinity)
+  const readerPress = useRef(false)
+  const checkReader = useCallback((root: HTMLElement) => {
+    const now = inputClock.now()
+    const input = readerPress.current || now < readerInputUntil.current
+      || (now < focusInputUntil.current && root.contains(root.ownerDocument.activeElement))
+    if (!input || !readerMoved(root)) return false
+    cancelPlacement.current()
+    stopFollowing('a scroll away from the end')
+    return true
+  }, [readerMoved, stopFollowing])
+  // A selection press is held (a detached touch expires after TOUCH_LOST_MS), or
   // lifted less than SETTLE_MS ago: the view is theirs, and
   // following does not move it (missed: it would have, and does once the touch has settled).
   const touching = useRef(false)
@@ -539,27 +558,34 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
   }, [sessionId, pin])
 
   const toEnd = useCallback(() => {
-    markOurs(programmatic)
     bottomRef.current?.scrollIntoView?.({ block: 'end' })
     const root = timelineRef.current
     if (root) {
       // The marker ends before the timeline's bottom padding. Include that space too.
       root.scrollTop = Math.max(0, root.scrollHeight - root.clientHeight)
-      lastTop.current = root.scrollTop
+      measure(root)
     }
-  }, [])
+  }, [measure])
+
+  // Activity reconnects layout effects on return. Hidden layout can clamp without an
+  // observable intermediate size; re-establish a retained follow before judging movement.
+  useLayoutEffect(() => {
+    if (!loadingHistory && stick.current && !touching.current) toEnd()
+  }, [loadingHistory, toEnd])
 
   // The transcript arrives in pages. While it is still loading, do not paint or scroll it page by
   // page (that is a visible storm of jumps); show it once, already at the bottom.
   useLayoutEffect(() => {
     if (loadingHistory) return
+    const root = timelineRef.current
+    if (root) checkReader(root)
     if (!stick.current) return
     if (touching.current) missed.current = true
     else toEnd()
     // queued.length: a message sent mid-turn shows as a queued bubble before any event arrives,
     // and the send just pinned the view to the bottom for it. start: rows revealed above a
     // transcript shorter than the view keep it at its end.
-  }, [sessionId, events.length, p.queued.length, streaming, p.working, p.waiting, loadingHistory, pin, start, toEnd])
+  }, [sessionId, events.length, p.queued.length, streaming, p.working, p.waiting, loadingHistory, pin, start, toEnd, checkReader])
 
   // ── keeping the reader's place ──
   // The first rows in view when the reader last scrolled (or the view was last put right), by their
@@ -571,32 +597,34 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
   // Where the view was when they were taken (a view moved since, whose scroll event is still to come,
   // may have other rows in it).
   const anchoredAt = useRef(0)
-  const capture = useCallback(() => {
+  const capture = useCallback((remainder = 0) => {
     const root = timelineRef.current
-    anchors.current = root ? anchorsIn(root, bottomRef.current) : []
+    // Keep the part a rounded scrollTop could not apply. Recapturing its actual
+    // position would otherwise accumulate a new subpixel drift on every resize.
+    anchors.current = root ? anchorsIn(root, bottomRef.current).map(anchor => ({...anchor, at: anchor.at - remainder})) : []
     anchoredAt.current = root?.scrollTop ?? 0
   }, [])
   // force: also while following (a finger is down, and following waits for it to lift).
-  const restore = useCallback((force = false) => {
+  const restore = useCallback((force = false): number => {
     const root = timelineRef.current
-    if (!root || (stick.current && !force)) return
+    if (!root || (stick.current && !force)) return 0
     // The view jumped more than a screen since the rows were taken (Home, a scrollbar drag) and its
     // scroll event is still to come: they were not in view, and say nothing of what the reader sees.
-    if (Math.abs(root.scrollTop - anchoredAt.current) > root.clientHeight) return
+    if (Math.abs(root.scrollTop - anchoredAt.current) > root.clientHeight) return 0
     const a = anchors.current.find(x => x.el.isConnected && x.el.parentElement === root)
-    if (!a) return
+    if (!a) return 0
     // How far the row moved within the content: what changed above it, never the reader's own scroll.
     const moved = viewTop(root, a.el) + root.scrollTop - a.at
-    if (Math.abs(moved) < 0.5) return
-    markOurs(programmatic)
+    if (Math.abs(moved) < 0.5) return moved
+    const before = root.scrollTop
     root.scrollTop += moved
-    lastTop.current = root.scrollTop
+    measure(root)
     anchoredAt.current = root.scrollTop
-  }, [])
+    return moved - (root.scrollTop - before)
+  }, [measure])
   // Puts the reader's place right, then takes it again from what is now in view.
   const keepPlace = useCallback(() => {
-    restore()
-    capture()
+    capture(restore(touching.current))
   }, [restore, capture])
 
   // A reader's place from their last visit, put back before the first paint (once: a hidden view
@@ -619,10 +647,9 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
     if (rowIndex.at.get(reading.first) === undefined) { stick.current = true; toEnd(); return }
     const row = reading.row != null ? root.children[reading.row] : undefined
     const put = () => {
-      markOurs(programmatic)
       const target = row?.isConnected ? viewTop(root, row) + root.scrollTop - (reading.offset ?? 0) : reading.top
       root.scrollTop = target
-      lastTop.current = root.scrollTop
+      measure(root)
       capture()
       return Math.abs(root.scrollTop - target) <= 1
     }
@@ -636,7 +663,8 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
     const until = performance.now() + 2000
     const resize = new ResizeObserver(() => { put() })
     resize.observe(root)
-    const stop = () => { placing.current = false; cancelAnimationFrame(frame); resize.disconnect(); root.removeEventListener('wheel', stop); root.removeEventListener('touchstart', stop); root.removeEventListener('keydown', stop) }
+    const stop = () => { placing.current = false; cancelAnimationFrame(frame); resize.disconnect(); root.removeEventListener('pointerdown', stop); root.removeEventListener('wheel', stop); root.removeEventListener('touchstart', stop); root.removeEventListener('keydown', stop) }
+    cancelPlacement.current = stop
     const again = () => {
       if (stick.current || performance.now() > until) { stop(); return }
       const now = `${root.clientWidth}:${root.clientHeight}:${root.scrollHeight}`
@@ -645,8 +673,9 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
       if (put() && still >= 3) { stop(); return }
       frame = requestAnimationFrame(again)
     }
-    root.addEventListener('wheel', stop, { passive: true }); root.addEventListener('touchstart', stop, { passive: true }); root.addEventListener('keydown', stop)
+    root.addEventListener('pointerdown', stop, { passive: true }); root.addEventListener('wheel', stop, { passive: true }); root.addEventListener('touchstart', stop, { passive: true }); root.addEventListener('keydown', stop)
     frame = requestAnimationFrame(again)
+    return stop
     // rowIndex and the rest are read once, at the first paint with the transcript in.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadingHistory])
@@ -674,12 +703,12 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
     const ro = new ResizeObserver(() => {
       // Still loading: the timeline is hidden and has no layout to keep.
       if (root.classList.contains('loading')) return
+      checkReader(root)
       if (stick.current) {
         if (touching.current) {
           // Following waits for the finger to lift; meanwhile the text under it stays put.
           missed.current = true
-          restore(true)
-          capture()
+          capture(restore(true))
         } else {
           toEnd()
         }
@@ -699,7 +728,7 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
       state.mo?.disconnect()
       if (observed.current === state) observed.current = null
     }
-  }, [toEnd, keepPlace, capture, restore])
+  }, [toEnd, keepPlace, capture, restore, checkReader])
 
   // New output below while the reader is not following puts up the pill: a new last row drawn, or
   // the streaming reply growing. Events that draw no row of their own (hidden kinds, a subagent's
@@ -739,7 +768,6 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
   const firstIds = rowIndex.firstIds
   useLayoutEffect(() => {
     if (loadingHistory || !stick.current || rowCount - start <= 2 * WINDOW) return
-    ours()
     setWin({ session: winKey, anchor: firstIds[rowCount - WINDOW], top: false })
   }, [loadingHistory, rowCount, start, firstIds, winKey])
 
@@ -1000,10 +1028,8 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
     if (!root || !win) return
     // When the wheel gesture now going on began (the first event after a pause).
     let gestureAt = -Infinity
-    const up = (target: EventTarget | null, why: string, wheel?: WheelEvent) => {
+    const pageUp = (target: EventTarget | null, wheel?: WheelEvent) => {
       if (innerCanGoUp(target, root)) return
-      stopFollowing(why)
-      upAt.current = performance.now()
       // A wheel event held back (a momentum stream after a page landed) scrolled nothing: it is
       // known only once every listener has seen it.
       if (wheel) {
@@ -1013,24 +1039,23 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
         intent('input')
       }
     }
-    // Per finger: where its current run down the screen began (reset when it goes back up the
-    // screen, so down, up and down again still counts) and where it was last.
-    const runs = new Map<number, { x: number; y: number; lastY: number }>()
-    const fingers = (l: TouchList | undefined) => (l ? Array.from(l) : [])
     let settle: ReturnType<typeof setTimeout> | undefined
     let lost: ReturnType<typeof setTimeout> | undefined
+    let touchTarget: Node | null = null
     const release = () => {
       clearTimeout(settle)
       clearTimeout(lost)
       touching.current = false
+      readerPress.current = false
       if (missed.current && stick.current) toEnd()
       missed.current = false
     }
     const stillDown = () => {
       clearTimeout(lost)
       lost = setTimeout(() => {
-        runs.clear()
-        release()
+        // A held selection can stay still indefinitely. Only a detached target loses its end.
+        if (touchTarget?.isConnected) stillDown()
+        else release()
       }, TOUCH_LOST_MS)
     }
     const onWheel = (e: WheelEvent) => {
@@ -1038,87 +1063,115 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
       if (t - Math.max(lastWheel.current, landEnd.current) > WHEEL_GESTURE_GAP_MS) gestureAt = t
       lastWheel.current = t
       if (e.deltaMode === 0 && Math.abs(e.deltaY) < FINE_WHEEL_PX) lastFineWheel.current = inputClock.now()
-      if (e.deltaY < 0) up(e.target, `a wheel or trackpad scroll up (${Math.round(e.deltaY)})`, e)
+      if (e.deltaY < 0 && !innerCanGoUp(e.target, root)) {
+        readerInputUntil.current = t + SETTLE_MS
+        pageUp(e.target, e)
+      }
     }
     const onTouchStart = (e: TouchEvent) => {
+      readerPress.current = true
+      touchTarget = e.target instanceof Node ? e.target : null
       touching.current = true
       // While following, the rows under the finger hold their place until it lifts.
       if (stick.current) capture()
       clearTimeout(settle)
       stillDown()
-      for (const t of fingers(e.changedTouches)) runs.set(t.identifier, { x: t.clientX, y: t.clientY, lastY: t.clientY })
     }
-    const onTouchMove = (e: TouchEvent) => {
-      stillDown()
-      for (const t of fingers(e.changedTouches)) {
-        const run = runs.get(t.identifier)
-        if (!run) continue
-        if (t.clientY < run.lastY) {
-          run.x = t.clientX
-          run.y = t.clientY
-        }
-        run.lastY = t.clientY
-        const dy = t.clientY - run.y
-        if (dy > TOUCH_UP_PX && dy > Math.abs(t.clientX - run.x)) up(e.target, 'a finger scrolling up')
-      }
-    }
+    // Direction comes from scroll geometry; movement only keeps the press alive.
+    const onTouchMove = () => { stillDown() }
     const onTouchEnd = (e: TouchEvent) => {
       if (!touching.current) return
-      for (const t of fingers(e.changedTouches)) runs.delete(t.identifier)
       if (e.touches && e.touches.length > 0) return
       lastTouch.current = inputClock.now()
-      runs.clear()
+      readerInputUntil.current = lastTouch.current + TOUCH_GLIDE_MS
       clearTimeout(lost)
       clearTimeout(settle)
       settle = setTimeout(release, SETTLE_MS)
     }
     const onKey = (e: KeyboardEvent) => {
       if (typing(e.target)) return
-      if (UP_KEYS.has(e.key) || (e.key === ' ' && e.shiftKey)) up(e.target, `the ${e.key === ' ' ? 'Shift+Space' : e.key} key`)
+      if (UP_KEYS.has(e.key) || (e.key === ' ' && e.shiftKey)) {
+        if (!innerCanGoUp(e.target, root)) readerInputUntil.current = inputClock.now() + SETTLE_MS
+        pageUp(e.target)
+      }
     }
+    // Chromium sends PageUp to body after clicking a non-focusable scroll container.
+    // Route those keys by the last pointer target, without borrowing keys from other panels.
+    let keyboardHere = false
+    const onDocumentPointer = (e: PointerEvent) => {
+      keyboardHere = e.target instanceof Node && root.contains(e.target)
+    }
+    // Tab may start outside the timeline and focus a row inside it.
+    const onFocusKey = (e: KeyboardEvent) => {
+      if (e.key === 'Tab') focusInputUntil.current = inputClock.now() + SETTLE_MS
+      else if (keyboardHere && e.target === root.ownerDocument.body) onKey(e)
+    }
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.button !== 0 || e.pointerType === 'touch') return
+      readerPress.current = true
+      touching.current = true
+      capture()
+    }
+    const onPointerUp = () => {
+      checkReader(root)
+      release()
+    }
+    const onJump = () => {
+      cancelPlacement.current()
+      stopFollowing('a jump to an earlier row')
+      intent('input')
+    }
+    root.addEventListener(TIMELINE_JUMP, onJump)
     const passive = { passive: true }
+    root.addEventListener('pointerdown', onPointerDown, passive)
+    win.addEventListener('pointerup', onPointerUp, passive)
+    win.addEventListener('pointercancel', onPointerUp, passive)
     root.addEventListener('wheel', onWheel, passive)
     root.addEventListener('touchstart', onTouchStart, passive)
     root.addEventListener('touchmove', onTouchMove, passive)
     win.addEventListener('touchend', onTouchEnd, passive)
     win.addEventListener('touchcancel', onTouchEnd, passive)
     root.addEventListener('keydown', onKey)
+    root.ownerDocument.addEventListener('keydown', onFocusKey, true)
+    root.ownerDocument.addEventListener('pointerdown', onDocumentPointer, true)
     return () => {
       clearTimeout(settle)
       clearTimeout(lost)
       touching.current = false
+      root.removeEventListener('pointerdown', onPointerDown)
+      win.removeEventListener('pointerup', onPointerUp)
+      win.removeEventListener('pointercancel', onPointerUp)
       root.removeEventListener('wheel', onWheel)
       root.removeEventListener('touchstart', onTouchStart)
       root.removeEventListener('touchmove', onTouchMove)
       win.removeEventListener('touchend', onTouchEnd)
       win.removeEventListener('touchcancel', onTouchEnd)
       root.removeEventListener('keydown', onKey)
+      root.ownerDocument.removeEventListener('keydown', onFocusKey, true)
+      root.ownerDocument.removeEventListener('pointerdown', onDocumentPointer, true)
+      readerPress.current = false
+      readerInputUntil.current = -Infinity
+      focusInputUntil.current = -Infinity
+      root.removeEventListener(TIMELINE_JUMP, onJump)
       wheelHold.current?.()
     }
-  }, [toEnd, capture, intent])
+  }, [toEnd, capture, intent, checkReader, stopFollowing])
 
-  // Scroll events: the end resumes following; an upward scroll with no input seen (the scrollbar
-  // dragged, say) stops it, unless it is ours.
+  // Only input-associated movement is reading; content reflow can also move scrollTop.
   function onScroll(e: React.UIEvent<HTMLDivElement>) {
     const el = e.currentTarget
     const top = el.scrollTop
-    if (placing.current) { lastTop.current = top; return }
-    // Going up just after the reader asked to (or with a finger down) is not a return to the end,
-    // even when the first step of it still lands within AT_END_PX of it.
-    const leaving = top < lastTop.current
-      && (touching.current || (upAt.current !== 0 && performance.now() - upAt.current < SETTLE_MS))
-    if (!leaving && el.scrollHeight - top - el.clientHeight <= AT_END_PX) {
-      // At the very end (also where the browser puts the view when the content under it shrinks).
+    const left = checkReader(el)
+    if (placing.current) return
+    if (!left && el.scrollHeight - top - el.clientHeight <= AT_END_PX
+      && (stick.current || lastMax.current - lastTop.current > AT_END_PX)) {
       stick.current = true
       setUnseenAt(null)
-    } else if (top < lastTop.current && !isOurs(programmatic)) {
-      stopFollowing(`an upward scroll with no wheel, finger or key (${Math.round(lastTop.current)} → ${Math.round(top)} px of ${el.scrollHeight}, view ${el.clientHeight})`)
-      // Up by the scrollbar (or any way the input listeners do not see).
-      // (A scroll a wheel made is the wheel's to judge: its gesture rule leaves momentum out.)
+    } else if (top < lastTop.current) {
+      // Input-specific timing here controls pagination only, never following.
       if (inputClock.now() - lastWheel.current > WHEEL_GESTURE_GAP_MS) intent('scroll')
     }
-    programmatic.current = 0
-    lastTop.current = top
+    measure(el)
     // The view moved: the rows now first in view hold the reader's place from here on. A size that
     // changed since the last frame (a late image above) is made up for first: the reader's scroll
     // does not move the rows within the content, so this only undoes what the layout did.
@@ -1147,6 +1200,7 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
       <BeforeDomUpdate when={`${oldest}\n${start}`} on={beforeInsert} />
       <span className="chat-sr-only" aria-live="polite" aria-atomic="true" data-testid="older-status">{announce}</span>
       <div ref={timelineRef} className={`agent-timeline${p.showSkeleton ? ' loading' : ''}${p.loadingOlder ? ' backfilling' : ''}`} onScroll={onScroll}>
+        <ChatPaneContext.Provider value={timelineRef}>
         {/* Over the top of the view, taking no room: rows never move for it. */}
         {showPill && (
           <div className="older-loading-dock" data-no-anchor="">
@@ -1156,7 +1210,7 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
           </div>
         )}
         {atBeginning && (
-          <div className="history-start" data-testid="history-start">Beginning of the session</div>
+          <div className="history-start" data-testid="history-start">Beginning of the workspace</div>
         )}
         {!resuming && startPanel}
         {/* The ready card heads the transcript: only once its start is drawn. */}
@@ -1270,6 +1324,7 @@ const Transcript = memo(function Transcript(p: TranscriptProps) {
             </button>
           </div>
         )}
+        </ChatPaneContext.Provider>
       </div>
     </ReviewRoundsContext.Provider>
   )

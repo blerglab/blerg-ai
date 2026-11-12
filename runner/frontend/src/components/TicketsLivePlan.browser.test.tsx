@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 // Card #134 in real Chromium, at 390 and 3840 px: Live's Tickets list only the cards in progress;
 // Plan's Tickets list every pin as the same compact line with one state glyph (✓ ◐ ○, one weight,
 // no status chips, no live orb), "N of M done" in the header and the checklist right under it; the
@@ -26,7 +27,10 @@ const columns = [{ id: 'c-in', name: 'Inbox' }, { id: 'c-doing', name: 'In progr
 const board = vi.hoisted(() => ({ held: null as null | Array<() => void> }))
 vi.mock('../apiFetch', () => ({
   apiFetch: vi.fn(async (url: string) => {
-    const m = /\/api\/board-cards\/b1\/(\d+)/.exec(url)
+    // Anchored so BLG-444's sibling .../card-time route is never caught in the held-reads queue
+    // below (it would inflate board.held's count and answer it the live-card JSON shape).
+    if (url.includes('/card-time')) return { ok: true, status: 200, json: async () => ({}) }
+    const m = /\/api\/board-cards\/b1\/(\d+)(?:\?|$)/.exec(url)
     if (!m) return { ok: false, status: 404, json: async () => ({}) }
     const n = Number(m[1])
     if (board.held) await new Promise<void>(res => board.held!.push(res))
@@ -67,7 +71,7 @@ afterEach(() => clock.uninstall())
 const state = (row: HTMLElement) => row.querySelector<HTMLElement>('[data-testid="rail-pin-state"]')!
 
 describe('Tickets on Live and Plan, in Chromium', () => {
-  it.each([390, 3840])('at %i px: the header counts an archived pin as done', async width => {
+  it.each(browserWidths([390, 3840]))('at %i px: the header counts an archived pin as done', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 844)
     render(<MemoryRouter><div style={{ display: 'flex', height: '100vh', width }}><div style={{ flex: 1 }} />
       <SessionRail id="rail" session={makeSession({ status: 'running' })} toolChanges={0} mode={width < 700 ? 'drawer' : 'panel'} open onClose={() => {}} onOpenArtifact={() => {}}
@@ -81,7 +85,7 @@ describe('Tickets on Live and Plan, in Chromium', () => {
     expect(within(archived).getByTestId('rail-ticket-open').getAttribute('aria-label')).toContain('Done (Archived)')
   })
 
-  it.each([390, 3840])('at %i px: Live waits for a board card\'s read, so a card already done never flashes; Plan shows the pinned state muted meanwhile', async width => {
+  it.each(browserWidths([390, 3840]))('at %i px: Live waits for a board card\'s read, so a card already done never flashes; Plan shows the pinned state muted meanwhile', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 844)
     board.held = []
     render(<MemoryRouter><div style={{ display: 'flex', height: '100vh', width }}><div style={{ flex: 1 }} />
@@ -120,7 +124,7 @@ describe('Tickets on Live and Plan, in Chromium', () => {
     await expect.poll(() => screen.queryByTestId('rail-pin')?.dataset.ticketKey).toBe('#12')
   })
 
-  it.each([390, 3840])('at %i px: Live lists only the cards in progress, from the board\'s column', async width => {
+  it.each(browserWidths([390, 3840]))('at %i px: Live lists only the cards in progress, from the board\'s column', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 844)
     show(width)
     const live = screen.getByTestId('rail-pins')
@@ -134,7 +138,7 @@ describe('Tickets on Live and Plan, in Chromium', () => {
     expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
   })
 
-  it.each([390, 3840])('at %i px: Plan lists every pin in one line with one glyph of one weight; "N of M done"; the checklist right under it', async width => {
+  it.each(browserWidths([390, 3840]))('at %i px: Plan lists every pin in one line with one glyph of one weight; "N of M done"; the checklist right under it', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 844)
     show(width)
     await userEvent.click(screen.getByRole('tab', { name: /Plan/ }))

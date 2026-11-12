@@ -1,0 +1,582 @@
+{
+  "format": "blerg-dashboard",
+  "version": 1,
+  "title": "Blerg telemetry \u00b7 sample snapshot",
+  "cards": [
+    {
+      "id": "workers",
+      "kind": "stat",
+      "title": "Workers running",
+      "span": 1,
+      "data": {
+        "kind": "inline",
+        "rows": [
+          {
+            "n": 3,
+            "delta": "2 idle"
+          },
+          {
+            "n": 5,
+            "delta": "2 idle"
+          },
+          {
+            "n": 4,
+            "delta": "2 idle"
+          }
+        ]
+      },
+      "view": {
+        "value": "n",
+        "selection": "latest",
+        "delta": "delta",
+        "sparkline": "n"
+      }
+    },
+    {
+      "id": "disk",
+      "kind": "stat",
+      "title": "C: free",
+      "span": 1,
+      "data": {
+        "kind": "inline",
+        "rows": [
+          {
+            "n": 19.3,
+            "delta": "Alert below 12 GB"
+          }
+        ]
+      },
+      "view": {
+        "value": "n",
+        "selection": "single",
+        "unit": "GB",
+        "delta": "delta"
+      }
+    },
+    {
+      "id": "merged",
+      "kind": "stat",
+      "title": "Merged today",
+      "span": 1,
+      "data": {
+        "kind": "inline",
+        "rows": [
+          {
+            "n": 28,
+            "delta": "+9 versus yesterday"
+          }
+        ]
+      },
+      "view": {
+        "value": "n",
+        "selection": "single",
+        "delta": "delta"
+      }
+    },
+    {
+      "id": "coverage",
+      "kind": "text",
+      "title": "Observation coverage",
+      "span": 1,
+      "data": {
+        "kind": "inline",
+        "rows": [
+          {
+            "text": "Local snapshot \u00b7 14:32 ET. Last 120 observations; unknown readings stay unknown."
+          }
+        ]
+      },
+      "view": {
+        "value": "text",
+        "selection": "single"
+      }
+    },
+    {
+      "id": "claude",
+      "kind": "gauge",
+      "title": "Claude weekly usage",
+      "span": 2,
+      "data": {
+        "kind": "inline",
+        "rows": [
+          {
+            "n": 71
+          }
+        ]
+      },
+      "view": {
+        "value": "n",
+        "selection": "single",
+        "unit": "%",
+        "min": 0,
+        "max": 100,
+        "thresholds": [
+          80,
+          90,
+          95
+        ]
+      }
+    },
+    {
+      "id": "codex",
+      "kind": "gauge",
+      "title": "Codex weekly usage",
+      "span": 2,
+      "data": {
+        "kind": "inline",
+        "rows": [
+          {
+            "n": 8
+          }
+        ]
+      },
+      "view": {
+        "value": "n",
+        "selection": "single",
+        "unit": "%",
+        "min": 0,
+        "max": 100,
+        "thresholds": [
+          80,
+          90,
+          95
+        ]
+      }
+    },
+    {
+      "id": "load",
+      "kind": "chart",
+      "title": "Machine load",
+      "span": 2,
+      "data": {
+        "kind": "inline",
+        "rows": [
+          {
+            "t": "2026-11-04T14:00:00",
+            "load": 4.0,
+            "free": 21.0
+          },
+          {
+            "t": "2026-11-04T14:01:00",
+            "load": 4.7,
+            "free": 20.9
+          },
+          {
+            "t": "2026-11-04T14:02:00",
+            "load": 5.4,
+            "free": 20.9
+          },
+          {
+            "t": "2026-11-04T14:03:00",
+            "load": 6.1,
+            "free": 20.9
+          },
+          {
+            "t": "2026-11-04T14:04:00",
+            "load": 6.8,
+            "free": 20.8
+          },
+          {
+            "t": "2026-11-04T14:05:00",
+            "load": 7.5,
+            "free": 20.8
+          },
+          {
+            "t": "2026-11-04T14:06:00",
+            "load": 8.2,
+            "free": 20.7
+          },
+          {
+            "t": "2026-11-04T14:07:00",
+            "load": 4.0,
+            "free": 20.6
+          },
+          {
+            "t": "2026-11-04T14:08:00",
+            "load": 4.7,
+            "free": 20.6
+          },
+          {
+            "t": "2026-11-04T14:09:00",
+            "load": 5.4,
+            "free": 20.6
+          },
+          {
+            "t": "2026-11-04T14:10:00",
+            "load": 6.1,
+            "free": 20.5
+          },
+          {
+            "t": "2026-11-04T14:11:00",
+            "load": 6.8,
+            "free": 20.4
+          },
+          {
+            "t": "2026-11-04T14:12:00",
+            "load": 7.5,
+            "free": 20.4
+          },
+          {
+            "t": "2026-11-04T14:13:00",
+            "load": 8.2,
+            "free": 20.4
+          },
+          {
+            "t": "2026-11-04T14:14:00",
+            "load": 4.0,
+            "free": 20.3
+          },
+          {
+            "t": "2026-11-04T14:15:00",
+            "load": 4.7,
+            "free": 20.2
+          },
+          {
+            "t": "2026-11-04T14:16:00",
+            "load": 5.4,
+            "free": 20.2
+          },
+          {
+            "t": "2026-11-04T14:17:00",
+            "load": 6.1,
+            "free": 20.1
+          },
+          {
+            "t": "2026-11-04T14:18:00",
+            "load": 6.8,
+            "free": 20.1
+          },
+          {
+            "t": "2026-11-04T14:19:00",
+            "load": 7.5,
+            "free": 20.1
+          },
+          {
+            "t": "2026-11-04T14:20:00",
+            "load": 8.2,
+            "free": 20.0
+          },
+          {
+            "t": "2026-11-04T14:21:00",
+            "load": 4.0,
+            "free": 19.9
+          },
+          {
+            "t": "2026-11-04T14:22:00",
+            "load": 4.7,
+            "free": 19.9
+          },
+          {
+            "t": "2026-11-04T14:23:00",
+            "load": 5.4,
+            "free": 19.9
+          },
+          {
+            "t": "2026-11-04T14:24:00",
+            "load": 6.1,
+            "free": 19.8
+          },
+          {
+            "t": "2026-11-04T14:25:00",
+            "load": 6.8,
+            "free": 19.8
+          },
+          {
+            "t": "2026-11-04T14:26:00",
+            "load": 7.5,
+            "free": 19.7
+          },
+          {
+            "t": "2026-11-04T14:27:00",
+            "load": 8.2,
+            "free": 19.6
+          },
+          {
+            "t": "2026-11-04T14:28:00",
+            "load": 4.0,
+            "free": 19.6
+          },
+          {
+            "t": "2026-11-04T14:29:00",
+            "load": 4.7,
+            "free": 19.6
+          }
+        ]
+      },
+      "spec": {
+        "mark": "line",
+        "height": 220,
+        "encoding": {
+          "x": {
+            "field": "t",
+            "type": "temporal",
+            "title": "Time (ET)"
+          },
+          "y": {
+            "field": "load",
+            "type": "quantitative",
+            "title": "Load (1 min)"
+          },
+          "tooltip": [
+            {
+              "field": "load",
+              "type": "quantitative",
+              "title": "Load (1 min)"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "free",
+      "kind": "chart",
+      "title": "C: free space",
+      "span": 2,
+      "data": {
+        "kind": "inline",
+        "rows": [
+          {
+            "t": "2026-11-04T14:00:00",
+            "load": 4.0,
+            "free": 21.0
+          },
+          {
+            "t": "2026-11-04T14:01:00",
+            "load": 4.7,
+            "free": 20.9
+          },
+          {
+            "t": "2026-11-04T14:02:00",
+            "load": 5.4,
+            "free": 20.9
+          },
+          {
+            "t": "2026-11-04T14:03:00",
+            "load": 6.1,
+            "free": 20.9
+          },
+          {
+            "t": "2026-11-04T14:04:00",
+            "load": 6.8,
+            "free": 20.8
+          },
+          {
+            "t": "2026-11-04T14:05:00",
+            "load": 7.5,
+            "free": 20.8
+          },
+          {
+            "t": "2026-11-04T14:06:00",
+            "load": 8.2,
+            "free": 20.7
+          },
+          {
+            "t": "2026-11-04T14:07:00",
+            "load": 4.0,
+            "free": 20.6
+          },
+          {
+            "t": "2026-11-04T14:08:00",
+            "load": 4.7,
+            "free": 20.6
+          },
+          {
+            "t": "2026-11-04T14:09:00",
+            "load": 5.4,
+            "free": 20.6
+          },
+          {
+            "t": "2026-11-04T14:10:00",
+            "load": 6.1,
+            "free": 20.5
+          },
+          {
+            "t": "2026-11-04T14:11:00",
+            "load": 6.8,
+            "free": 20.4
+          },
+          {
+            "t": "2026-11-04T14:12:00",
+            "load": 7.5,
+            "free": 20.4
+          },
+          {
+            "t": "2026-11-04T14:13:00",
+            "load": 8.2,
+            "free": 20.4
+          },
+          {
+            "t": "2026-11-04T14:14:00",
+            "load": 4.0,
+            "free": 20.3
+          },
+          {
+            "t": "2026-11-04T14:15:00",
+            "load": 4.7,
+            "free": 20.2
+          },
+          {
+            "t": "2026-11-04T14:16:00",
+            "load": 5.4,
+            "free": 20.2
+          },
+          {
+            "t": "2026-11-04T14:17:00",
+            "load": 6.1,
+            "free": 20.1
+          },
+          {
+            "t": "2026-11-04T14:18:00",
+            "load": 6.8,
+            "free": 20.1
+          },
+          {
+            "t": "2026-11-04T14:19:00",
+            "load": 7.5,
+            "free": 20.1
+          },
+          {
+            "t": "2026-11-04T14:20:00",
+            "load": 8.2,
+            "free": 20.0
+          },
+          {
+            "t": "2026-11-04T14:21:00",
+            "load": 4.0,
+            "free": 19.9
+          },
+          {
+            "t": "2026-11-04T14:22:00",
+            "load": 4.7,
+            "free": 19.9
+          },
+          {
+            "t": "2026-11-04T14:23:00",
+            "load": 5.4,
+            "free": 19.9
+          },
+          {
+            "t": "2026-11-04T14:24:00",
+            "load": 6.1,
+            "free": 19.8
+          },
+          {
+            "t": "2026-11-04T14:25:00",
+            "load": 6.8,
+            "free": 19.8
+          },
+          {
+            "t": "2026-11-04T14:26:00",
+            "load": 7.5,
+            "free": 19.7
+          },
+          {
+            "t": "2026-11-04T14:27:00",
+            "load": 8.2,
+            "free": 19.6
+          },
+          {
+            "t": "2026-11-04T14:28:00",
+            "load": 4.0,
+            "free": 19.6
+          },
+          {
+            "t": "2026-11-04T14:29:00",
+            "load": 4.7,
+            "free": 19.6
+          }
+        ]
+      },
+      "spec": {
+        "mark": "line",
+        "height": 220,
+        "encoding": {
+          "x": {
+            "field": "t",
+            "type": "temporal",
+            "title": "Time (ET)"
+          },
+          "y": {
+            "field": "free",
+            "type": "quantitative",
+            "title": "GB free"
+          },
+          "tooltip": [
+            {
+              "field": "free",
+              "type": "quantitative",
+              "title": "GB free"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "merges",
+      "kind": "chart",
+      "title": "0.6.0 merges into main, per day",
+      "span": 4,
+      "data": {
+        "kind": "inline",
+        "rows": [
+          {
+            "day": "Oct 29",
+            "n": 1
+          },
+          {
+            "day": "Oct 30",
+            "n": 19
+          },
+          {
+            "day": "Oct 31",
+            "n": 30
+          },
+          {
+            "day": "Nov 1",
+            "n": 87
+          },
+          {
+            "day": "Nov 2",
+            "n": 19
+          },
+          {
+            "day": "Nov 3",
+            "n": 29
+          },
+          {
+            "day": "Nov 4",
+            "n": 28
+          }
+        ]
+      },
+      "spec": {
+        "mark": "bar",
+        "height": 220,
+        "encoding": {
+          "x": {
+            "field": "day",
+            "type": "ordinal",
+            "sort": null,
+            "title": "Day (ET)"
+          },
+          "y": {
+            "field": "n",
+            "type": "quantitative",
+            "title": "Merges"
+          },
+          "tooltip": [
+            {
+              "field": "day",
+              "type": "ordinal"
+            },
+            {
+              "field": "n",
+              "type": "quantitative",
+              "title": "Merges"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

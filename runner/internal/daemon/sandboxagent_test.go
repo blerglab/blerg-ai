@@ -10,8 +10,12 @@ package daemon
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,6 +37,7 @@ func fakeDocker(t *testing.T) (binDir, logPath string) {
 	t.Helper()
 	dir := t.TempDir()
 	script := `#!/bin/bash
+FAKE_DOCKER_LOG=${FAKE_DOCKER_LOG:-` + packShellQuote(filepath.Join(dir, "docker-calls.log")) + `}
 echo "$@" >> "$FAKE_DOCKER_LOG"
 if [ "$1" = "--context" ]; then shift 2; fi
 if [ "$1" = "ps" ] && [ -n "$FAKE_DOCKER_PS_OUTPUT" ]; then
@@ -56,6 +61,13 @@ fi
 if [ "$1" = "network" ] && [ -n "$FAKE_DOCKER_NETWORK_MISSING" ]; then
   echo "Error: No such network: $3" >&2
   exit 1
+fi
+# The pack server is an ordinary real Git peer in these unit fixtures. Its production
+# container flags are asserted separately and exercised by opt-in Docker tests.
+if [ "$1" = "run" ] && [[ " $* " == *" blerg.runner.pack-server=1 "* ]]; then
+  while [ "$1" != "--entrypoint" ]; do shift; done
+  shift; entry="$1"; shift; shift # entrypoint and image
+  exec "$entry" "$@"
 fi
 if [ "$1" != "exec" ]; then exit 0; fi
 if [ -n "$FAKE_DOCKER_EXEC_NOOP" ]; then exit 0; fi
@@ -130,6 +142,7 @@ func writeClaudeLogin(t *testing.T, home string) {
 // reaches a docker argument. The returned home is that throwaway HOME.
 func sandboxHost(t *testing.T, engineBinDir string, cfg AgentHostConfig) (host *AgentHost, sender *agentTestSender, logPath, home string) {
 	t.Helper()
+	t.Setenv(DaemonStateDirEnv, t.TempDir())
 	dockerDir, logPath := fakeDocker(t)
 	useScratchTurnPIDFile(t)
 	// The stop-time step runs in a container; the fake docker would run it on the host. A test
@@ -521,28 +534,106 @@ func TestUnsandboxedAgentSpawnTouchesNoDocker(t *testing.T) {
 // `docker exec` client does not signal the engine in the container, so
 // Interrupt must send the signal in there, to the PID the turn recorded.
 func TestSandboxedInterruptSignalsInsideTheContainer(t *testing.T) {
-	dockerDir, logPath := fakeDocker(t)
-	pidFile := useScratchTurnPIDFile(t)
-	t.Setenv("PATH", dockerDir+":"+os.Getenv("PATH"))
-	t.Setenv("FAKE_DOCKER_LOG", logPath)
-
-	d := newClaudeCodeDriver(t.TempDir(), "", "", &collectEmitter{}, nil)
-	d.useSandbox(sandboxExecPrefix("blerg-sandbox-s-int"))
-	d.Interrupt()
-
-	want := "exec blerg-sandbox-s-int sh -c kill -TERM $(cat " + pidFile + ")"
-	if calls := dockerCalls(t, logPath); !strings.Contains(calls, want) {
-		t.Errorf("interrupt did not signal inside the container (want %q); calls:\n%s", want, calls)
-	}
-	// The fake records the signal but must never deliver one: nothing outside a
-	// container is a legitimate target. It reports success without running
-	// anything — a kill actually executed here would have exited non-zero,
-	// there being no such PID file on this side.
-	if _, err := os.Stat(pidFile); err == nil {
-		t.Errorf("the test wrote a real PID file at %s", pidFile)
-	}
-	if err := d.prefix.interrupt(); err != nil {
-		t.Errorf("fake docker executed the kill instead of recording it: %v", err)
+	for _, phase := range []string{"before-start", "after-start", "running"} {
+		t.Run(phase, func(t *testing.T) {
+			dockerDir, logPath := fakeDocker(t)
+			pidFile := useScratchTurnPIDFile(t)
+			t.Setenv("PATH", dockerDir+":"+os.Getenv("PATH"))
+			t.Setenv("FAKE_DOCKER_LOG", logPath)
+			d := newClaudeCodeDriver(t.TempDir(), "", "", &collectEmitter{}, nil)
+			d.useSandbox(sandboxExecPrefix("blerg-sandbox-s-int"))
+			defer d.promptFile.Remove()
+			oldHelp := ccHelpText
+			ccHelpText = func(context.Context, sandboxExec, string, []string) ([]byte, error) { return nil, nil }
+			defer func() { ccHelpText = oldHelp }()
+			ready, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			var hostCancels atomic.Int32
+			d.useCommandBoundary(func(cmd *exec.Cmd) error {
+				// A real host client stays alive until cleanup: fake docker only records
+				// the in-container signal and must never deliver it to a host PID.
+				cmd.Path, cmd.Args = "/bin/sleep", []string{"sleep", "30"}
+				cmd.Cancel = func() error { hostCancels.Add(1); return cmd.Process.Kill() }
+				if phase == "before-start" {
+					close(ready)
+					<-release
+				}
+				err := cmd.Start()
+				if phase == "after-start" {
+					close(ready)
+					<-release
+				}
+				return err
+			})
+			if phase == "running" {
+				d.onEngine = func(_ int, running bool) {
+					if running {
+						close(ready)
+					}
+				}
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer func() {
+				unblock()
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Error("turn did not join")
+				}
+			}()
+			go func() { d.runTurn(ctx, "hello"); close(done) }()
+			select {
+			case <-ready:
+			case <-time.After(5 * time.Second):
+				t.Fatal("start barrier not reached")
+			}
+			d.mu.Lock()
+			turn := d.legacyTurn
+			d.mu.Unlock()
+			d.Interrupt()
+			d.Interrupt()
+			d.mu.Lock()
+			if phase != "running" && turn.interruptDone != nil {
+				t.Error("interrupt delivered before process publication")
+			}
+			d.mu.Unlock()
+			if phase != "running" {
+				if calls, _ := os.ReadFile(logPath); strings.Contains(string(calls), "sh -c kill -TERM") {
+					t.Error("container signaled before process publication")
+				}
+			}
+			unblock()
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				d.mu.Lock()
+				delivery := turn.interruptDone
+				d.mu.Unlock()
+				if delivery != nil {
+					select {
+					case <-delivery:
+					case <-time.After(5 * time.Second):
+						t.Fatal("interrupt did not finish")
+					}
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("interrupt not claimed after publication")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			want := "exec blerg-sandbox-s-int sh -c kill -TERM $(cat " + pidFile + ")"
+			if calls, _ := os.ReadFile(logPath); strings.Count(string(calls), want) != 1 {
+				t.Errorf("want exactly one in-container signal %q; calls:\n%s", want, calls)
+			}
+			if hostCancels.Load() != 0 {
+				t.Error("Stop cancelled the host client instead of the container engine")
+			}
+			if _, err := os.Stat(pidFile); err == nil {
+				t.Error("the fake wrote a real PID file")
+			}
+		})
 	}
 }
 
@@ -639,38 +730,6 @@ func TestStartSandboxContainerClearsAStaleContainerFirst(t *testing.T) {
 	}
 	if got := strings.Join(calls[1], " "); !strings.HasPrefix(got, "run -d --name "+name) {
 		t.Errorf("second call = %q, want the docker run", got)
-	}
-}
-
-// TestListSandboxedTmuxSessionsSkipsAgentContainers: an agent sandbox has no
-// tmux server inside it, so the reconnect pass must not treat it as a
-// reattachable terminal session.
-func TestListSandboxedTmuxSessionsSkipsAgentContainers(t *testing.T) {
-	origOut, origRun := dockerOutput, dockerRun
-	dockerOutput = func(args ...string) ([]byte, error) {
-		own := "\t" + sandboxOwner()
-		return []byte(sandboxContainerPrefix + "term-1" + own + "\n" + sandboxContainerPrefix + "agent-1" + own + "\n"), nil
-	}
-	origProbe := dockerProbe
-	dockerProbe = func(_ time.Duration, args ...string) (bool, error) {
-		// `docker exec <container> tmux ls` fails for the agent container.
-		if len(args) > 1 && args[1] == sandboxContainerPrefix+"agent-1" {
-			return false, errNotInImage
-		}
-		return false, nil
-	}
-	t.Cleanup(func() {
-		dockerOutput, dockerRun, dockerProbe = origOut, origRun, origProbe
-		unregisterSandbox("term-1")
-		unregisterSandbox("agent-1")
-	})
-
-	got := listSandboxedTmuxSessions(nil)
-	if len(got) != 1 || got[0] != "term-1" {
-		t.Fatalf("listSandboxedTmuxSessions() = %v, want [term-1]", got)
-	}
-	if _, ok := sandboxContainer("agent-1"); ok {
-		t.Error("an agent container was registered as a reattachable tmux sandbox")
 	}
 }
 
@@ -828,15 +887,6 @@ func TestSweepOrphanSandboxContainers(t *testing.T) {
 		}
 		return []byte(out), nil
 	}
-	origProbe := dockerProbe
-	dockerProbe = func(_ time.Duration, args ...string) (bool, error) {
-		// Only the terminal sandbox has a tmux server inside it.
-		if args[1] == sandboxContainerPrefix+term {
-			return false, nil
-		}
-		return false, errNotInImage
-	}
-	t.Cleanup(func() { dockerProbe = origProbe })
 	dockerRun = func(args ...string) error {
 		if len(args) == 3 && args[0] == "rm" {
 			removed = append(removed, args[2])
@@ -851,7 +901,7 @@ func TestSweepOrphanSandboxContainers(t *testing.T) {
 
 	sweepOrphanSandboxContainers(func(id string) bool { return id == managed }, nil)
 
-	if len(removed) != 1 || removed[0] != sandboxContainerPrefix+orphan {
-		t.Fatalf("removed = %v, want just the orphaned agent container", removed)
+	if !slices.Equal(removed, []string{sandboxContainerPrefix + orphan, sandboxContainerPrefix + term}) {
+		t.Fatalf("removed = %v, want both orphaned containers", removed)
 	}
 }

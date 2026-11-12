@@ -33,6 +33,9 @@ func (a *API) requestLocalWorkspaceStop(ctx context.Context, id string, end db.S
 			return fmt.Errorf("desktop cleanup queue full; stop retained")
 		}
 	}
+	if strict && a.hub.FindDaemonForSession(id) == nil {
+		return fmt.Errorf("workspace cleanup is pending and its daemon is unavailable; all work is retained")
+	}
 	if strict {
 		// Stop admission is already closed, but a stop request is not a final
 		// receipt. Wait outside the runtime launch fence so the daemon can

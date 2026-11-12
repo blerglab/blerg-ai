@@ -318,7 +318,7 @@ func scanBoardGrantState(row pgx.Row) (*BoardGrantState, error) {
 // revoked one), else the newest revoked row, or nil when there is none (its level is then propose, or full for the board the session's
 // launch gave it a connection to: the caller decides). Read on every board call, so a change of
 // level holds at the next call.
-func LatestBoardGrant(ctx context.Context, pool *pgxpool.Pool, sessionID, boardID string) (*BoardGrantState, error) {
+func LatestBoardGrant(ctx context.Context, pool DBTX, sessionID, boardID string) (*BoardGrantState, error) {
 	if !proposalUUID.MatchString(sessionID) || boardID == "" {
 		return nil, nil
 	}

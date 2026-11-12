@@ -32,13 +32,13 @@ const (
 // wantBoardTools is the exact set spec 10.2 names. It is written out here on purpose: the
 // constant in board.go must equal it, not merely agree with itself.
 var wantBoardTools = []string{
-	"blerg_board_get", "blerg_board_list", "blerg_board_schema", "blerg_column_list",
+	"blerg_board_get", "blerg_board_list", "blerg_board_schema", "blerg_column_list", "blerg_release_list", "blerg_release_get",
 	"blerg_card_search", "blerg_card_get", "blerg_card_create", "blerg_card_update",
 	"blerg_card_move", "blerg_card_comment", "blerg_card_link",
 }
 
-// wantColumnTools manage columns (0.5.0): offered at level full where a person launched the session.
-var wantColumnTools = []string{"blerg_column_create", "blerg_column_update", "blerg_column_move", "blerg_column_delete"}
+// wantPersonTools manage columns (0.5.0): offered at level full where a person launched the session.
+var wantPersonTools = []string{"blerg_card_archive", "blerg_column_create", "blerg_column_update", "blerg_column_move", "blerg_column_delete"}
 
 // boardUpstreamTools is what the board's MCP serves: the eleven allowed tools and five it must
 // not hand a cron.
@@ -47,7 +47,7 @@ func boardUpstreamTools() []fakeTool {
 	for _, n := range wantBoardTools {
 		out = append(out, fakeTool{Name: n, Description: "the board's own " + n, Schema: `{"type":"object"}`})
 	}
-	for _, n := range []string{"blerg_card_archive", "blerg_column_create", "blerg_column_update", "blerg_column_move", "blerg_column_delete", "blerg_board_create", "blerg_board_update"} {
+	for _, n := range []string{"blerg_release_save", "blerg_release_close", "blerg_release_delete", "blerg_card_archive", "blerg_column_create", "blerg_column_update", "blerg_column_move", "blerg_column_delete", "blerg_board_create", "blerg_board_update"} {
 		out = append(out, fakeTool{Name: n, Description: "dangerous " + n, Schema: `{"type":"object"}`})
 	}
 	return out
@@ -166,7 +166,7 @@ func (b *boardHarness) authHeader() string {
 
 func TestBoardToolNamesAreExact(t *testing.T) {
 	got := BoardToolNames()
-	want := append(append([]string(nil), wantBoardTools...), wantColumnTools...)
+	want := append(append([]string(nil), wantBoardTools...), wantPersonTools...)
 	sort.Strings(got)
 	sort.Strings(want)
 	if !slices.Equal(got, want) {
@@ -285,7 +285,7 @@ func TestBoardExposesExactlyTheFixedTools(t *testing.T) {
 		t.Fatalf("listed = %v\nwant    %v", got, want)
 	}
 	_, _, callsBefore := b.up.snapshot()
-	for _, n := range []string{"blerg_card_archive", "blerg_column_create", "blerg_column_move", "blerg_board_create", "blerg_board_update", "no_such"} {
+	for _, n := range []string{"blerg_release_save", "blerg_release_close", "blerg_release_delete", "blerg_card_archive", "blerg_column_create", "blerg_column_move", "blerg_board_create", "blerg_board_update", "no_such"} {
 		r := b.callTool(gh, n, map[string]any{})
 		if r.errMessage() != "unknown tool" {
 			t.Errorf("%s: %s, want refused as unknown", n, r.raw)
@@ -559,5 +559,17 @@ func TestBoardObserverHearsSuccessfulCalls(t *testing.T) {
 	defer o.mu.Unlock()
 	if len(o.calls) != 1 || !strings.HasPrefix(o.calls[0], gh.sessionID+"|"+boardTestID+"|blerg_card_move|") || !strings.Contains(o.calls[0], "ok:blerg_card_move") {
 		t.Fatalf("observed = %v", o.calls)
+	}
+}
+
+func TestReleaseReadsRemainAndWritesAreNotSessionTools(t *testing.T) {
+	for _, name := range []string{"blerg_release_list", "blerg_release_get", "blerg_release_save", "blerg_release_close", "blerg_release_delete"} {
+		read := name == "blerg_release_list" || name == "blerg_release_get"
+		if builtinToolOffered(name) != read {
+			t.Errorf("session release surface: %s", name)
+		}
+		if BoardToolNeedsPerson(name) {
+			t.Errorf("release write should not be offered: %s", name)
+		}
 	}
 }

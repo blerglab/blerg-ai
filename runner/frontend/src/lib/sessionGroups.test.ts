@@ -33,8 +33,8 @@ it('restores valid identities and ratios, prunes closed views and repairs corrup
   expect(new Set(repaired.map(g => g.id)).size).toBe(repaired.length)
   expect(groups(normalizeLayout({ type: 'split', first: null }, ['chat'], 'chat'))).toHaveLength(1)
 })
-it('keeps Chat first in its destination so numbered shortcuts and visual tab order agree', () => {
+it('places Main at its drop position like other tabs', () => {
   const split = moveToGroup(initial, 'a', 'main', 'right', 'new')
   const moved = moveToGroup(split, 'chat', 'new', 'center', 'unused')
-  expect(groups(moved).find(g => g.id === 'new')?.tabs).toEqual(['chat', 'a'])
+  expect(groups(moved).find(g => g.id === 'new')?.tabs).toEqual(['a', 'chat'])
 })

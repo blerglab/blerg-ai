@@ -69,7 +69,7 @@ describe('CronsPage', () => {
     expect(row).toHaveTextContent('Every day at 08:30')
     expect(row).toHaveTextContent(/next run/i)
     expect(row).toHaveTextContent(/last run/i)
-    expect(within(row).getByTestId('cron-status-c1')).toHaveTextContent('active')
+    expect(within(row).queryByTestId('cron-status-c1')).toBeNull()
     expect(row).toHaveTextContent(/access expires/i)
     for (const name of [/run now/i, /edit/i, /delete/i, /renew/i]) {
       expect(within(row).getByRole('button', { name })).toBeInTheDocument()
@@ -103,7 +103,8 @@ describe('CronsPage', () => {
     crons = [cron({ status: 'disabled', enabled: false })]
     renderPage()
     const row = await screen.findByTestId('cron-c1')
-    expect(within(row).getByTestId('cron-status-c1')).toHaveTextContent('disabled')
+    expect(within(row).queryByTestId('cron-status-c1')).toBeNull()
+    expect(row.textContent?.match(/disabled/gi)).toHaveLength(1)
     expect(row).toHaveTextContent('Next run: not scheduled')
     const toggle = within(row).getByRole('switch', { name: /enabled/i })
     expect(toggle).toHaveAttribute('aria-checked', 'false')

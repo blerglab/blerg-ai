@@ -19,24 +19,26 @@
 </tr></table>
 
 Blerg is a self-hosted, open-source home for coding agents. It starts the agent CLIs you already
-use, streams what each one does into a chat you can talk back to, and puts every session, and every
-session those sessions start, in one live view.
+use, streams what each one does into a chat you can talk back to, and puts every workspace and its workers in one live view.
 
-- **Agents share the load.** A Claude session can hand a task to Codex or to a model on your own
+- **Agents share the load.** Main can hand a task to Codex or to a model on your own
   GPU, with your approval, check whose usage limit has room, and collect the result.
-- **See every agent at once.** A live panel shows sub-agents, child sessions, background work,
-  progress and token spend; the sidebar nests the sessions an agent started under it.
-- **Plan on a board.** Agents draft cards, you curate them, and a card starts a session that pins
-  its ticket and keeps a checklist.
+- **Main and channels.** Keep the main task with Main and open named channels alongside it.
+  Save workspace layouts and restore tabs, splits and panel sizes.
+- **See every agent at once.** A live panel shows sub-agents, workers, background work,
+  progress and token spend; the dock groups workers beneath Main.
+- **Plan on a board.** Agents draft cards, you curate them, and a card starts a workspace that pins
+  its ticket and keeps a checklist. The blackboard tracks milestones and linked cards;
+  decisions that need your answer stay in Needs you.
 - **Review anything an agent makes:** code diffs line by line, documents, PDFs and images, with
   requests the agent answers one by one. Agents can answer with diagrams and charts, too.
-- **Your machines, your rules.** Sessions run sandboxed by default, on your laptop or in a
+- **Your machines, your rules.** Workspaces run sandboxed by default, on your laptop or in a
   throwaway pod on your cluster. One login covers everything, and each person's credentials stay
   their own.
 
 <p align="center">
-  <img src="docs/media/ui/hero-crew.jpg" alt="A real Blerg session: NVIDIA Nemotron 3.5 Super VL, running locally, reports back after starting a Claude Fable session and two Codex sessions, listed with their token use in the session panel." width="100%">
-  <br><sub>A real session: NVIDIA Nemotron 3.5 Super VL, running locally, started Claude and Codex as its crew.</sub>
+  <img src="docs/media/ui/hero-crew.jpg" alt="A real Blerg workspace: NVIDIA Nemotron 3.5 Super VL, running locally, reports back after starting a Claude Fable workspace and two Codex workers, listed with their token use in the workspace panel." width="100%">
+  <br><sub>A real workspace: NVIDIA Nemotron 3.5 Super VL, running locally, started Claude and Codex as its crew.</sub>
 </p>
 
 <table><tr>
@@ -52,8 +54,8 @@ and run a shell, in the browser, while the agent works.
 <td width="50%"><img src="docs/media/loops/explorer.gif" alt="Browsing a project in the file explorer and opening a Python file with syntax highlighting."><br><sub><b>Browse the project</b> while the agent works.</sub></td>
 <td width="50%"><img src="docs/media/loops/split.gif" alt="A design document and the code it describes, open side by side in a split view."><br><sub><b>Code and docs side by side.</b></sub></td>
 </tr><tr>
-<td width="50%"><img src="docs/media/loops/palette.gif" alt="The command palette: Ctrl+K for actions, sessions and cards, and quick open finding a file by name."><br><sub><b>Ctrl+K for everything,</b> Ctrl+P to open a file.</sub></td>
-<td width="50%"><img src="docs/media/loops/switch.gif" alt="Switching between sessions: each one's chat, shell and open files are back at once."><br><sub><b>Switch sessions instantly:</b> chat, shell and files come back at once.</sub></td>
+<td width="50%"><img src="docs/media/loops/palette.gif" alt="The command palette: Ctrl+K for actions, workers and cards, and quick open finding a file by name."><br><sub><b>Ctrl+K for everything,</b> Ctrl+P to open a file.</sub></td>
+<td width="50%"><img src="docs/media/loops/switch.gif" alt="Switching between workers: each one's chat, shell and open files are back at once."><br><sub><b>Switch workspaces instantly:</b> chat, shell and files come back at once.</sub></td>
 </tr></table>
 
 It is for one developer who wants agents working on real repositories without handing a laptop
@@ -79,7 +81,7 @@ username and password there to create your (admin) account, and you are signed i
 [`install/desktop/README.md`](install/desktop/README.md). For a team, use the
 [Kubernetes install](install/k8s/README.md).
 
-## What a session looks like
+## What a workspace looks like
 
 ```
 you    › Add a --dry-run flag to scripts/deploy.sh and document it.
@@ -95,7 +97,7 @@ you    › Also refuse --dry-run together with --force.
 
 Everything in that exchange happened inside a sandbox: the agent saw the repository and its own
 login, and nothing else of the machine. The messages, files and tool calls are stored, so a
-session can be reopened later and a cluster session resumed, and a session the board started can
+workspace can be reopened later and a cluster workspace resumed, and a workspace the board started can
 attach its results to its card.
 
 ## What you can do
@@ -123,13 +125,21 @@ attach its results to its card.
   session, or always for an engine in your desktop sandbox. The sessions it started show in its
   panel like subagents, with their status and token spend, and nest under it in the sidebar. It
   can also check how much of each provider's usage limit is left and hand work to the engine
-  with room. [`docs/talking-to-an-agent.md`](docs/talking-to-an-agent.md#when-the-agent-starts-other-sessions)
+  with room. [`docs/talking-to-an-agent.md`](docs/talking-to-an-agent.md#when-the-agent-starts-workers)
+- **Closed-loop coordination.** Every turn is measured, and Main uses the measurements to run the
+  next one better. Blerg records deterministic telemetry for each turn and card: time by phase
+  (building, gates, reviews, waiting on you), test runs and failures, review rounds and findings,
+  cost, and hours per card. That's measured, not the model grading itself. Main reads it live: it
+  narrows a worker's testing when gates eat its time, redesigns rather than patches when reviews keep
+  finding the same problem, and brings you a choice when a card runs long. What it learns goes back
+  into the skills every session loads. [Insights](docs/telemetry.md),
+  [skills](docs/layered-skills.md)
 - **A board agents write to.** Cards are drafted by agents and curated by people; an admission
   step rejects duplicates and vague cards; a card can start a session. [`board/README.md`](board/README.md)
 - **Files in and out:** attach files to a message, have the agent publish results (including a
   diff of its changes, shown in a diff viewer you can review line by line), preview HTML live,
   review and mark up markdown, PDFs and images from the chat, and see Mermaid diagrams and
-  Vega-Lite charts drawn in place. [`docs/artifacts.md`](docs/artifacts.md)
+  Vega-Lite charts drawn in place. Print viewer content or download messages as Markdown. [`docs/artifacts.md`](docs/artifacts.md)
 - **Code you can read:** code blocks are highlighted (ten color themes, yours to pick), long ones
   fold into a viewer, files get inline previews, and a file the agent names opens from the
   session's folder. Copy and paste keep their structure: a copy button on every message, copied
@@ -168,7 +178,7 @@ attach its results to its card.
 
 ## Safety in short
 
-Agents run code, as somebody. A sandboxed session sees the repository and its engine login and
+Agents run code, as somebody. A sandboxed workspace sees the repository and its engine login and
 nothing else; the sandbox is not a credential vault, and a hostile repository or message can still
 misuse the tools you allowed. Credentials are per person and encrypted; plugins, board automation
 tokens and MCP connections all act with a person's credentials, so connect only what you would
@@ -183,8 +193,9 @@ full model, and how to report a problem, is in [`SECURITY.md`](SECURITY.md).
 | [Desktop install](install/desktop/README.md) | [Talking to a running agent](docs/talking-to-an-agent.md) | [Architecture](docs/architecture.md) |
 | [Kubernetes install](install/k8s/README.md) | [Files and attachments](docs/artifacts.md) | [Runner API and MCP server](runner/README.md) |
 | [The workstation daemon](install/desktop/DAEMON.md) | [MCP connections](docs/mcp-connections.md) | [Core configuration](core/docs/CONFIG.md) |
-| [Cluster sessions](install/k8s/CLUSTER-RUNTIME.md) | [Crons](docs/crons.md) | [Board configuration](board/docs/CONFIG.md) |
-| [Your own session image](docs/sandbox-image.md) | [Proposals](docs/proposals.md) | [The chat package](packages/chat/README.md) |
+| [Cluster workspaces](install/k8s/CLUSTER-RUNTIME.md) | [Crons](docs/crons.md) | [Board configuration](board/docs/CONFIG.md) |
+| [Your own workspace image](docs/sandbox-image.md) | [Proposals](docs/proposals.md) | [The chat package](packages/chat/README.md) |
+| [Workspace tabs and layouts](docs/session-tabs.md) | [Blackboard plan](docs/blackboard.md) | [Feature inventory](docs/features.md) |
 | [Backup and restore](docs/backup-and-restore.md) | [Telemetry](docs/telemetry.md) | [Design notes](docs/design/) |
 | [Install with an AI agent](install/k8s/AGENT-INSTALL.md) | | [Runner configuration](runner/README.md#configuration-env) |
 | | | [Changelog](CHANGELOG.md) · [Roadmap](ROADMAP.md) |

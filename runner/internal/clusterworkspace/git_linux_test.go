@@ -319,6 +319,14 @@ func TestDiskGitTLSIsolationRecoveryAndTampering(t *testing.T) {
 	if wrongHost.Load() != 0 {
 		t.Fatal("credential crossed scopes on push")
 	}
+	// Uncommitted agent work must survive the failed publication and reopening
+	// the retained allocation; it must not enter either published snapshot.
+	for i := range p.Members {
+		dirty := filepath.Join(public, p.Manifest.Members[i].Path, "uncommitted-work")
+		if err := os.WriteFile(dirty, []byte("retained dirty work"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	p.PreviousResults = results
 	p.Identities = disk.Identities()
 	p.Runtime.Generation++
@@ -340,10 +348,22 @@ func TestDiskGitTLSIsolationRecoveryAndTampering(t *testing.T) {
 	if results[0].Pending || results[1].Pending {
 		t.Fatal("failed push did not resume", results)
 	}
-	for _, m := range p.Members {
+	for i, m := range p.Members {
 		head := fixtureGit(t, filepath.Join(repos, m.ID+".git"), "rev-parse", "refs/heads/wip/"+p.SessionID)
-		if len(head) != 40 {
-			t.Fatal(head)
+		if head != results[i].Head || head != p.PreviousResults[i].Head {
+			t.Fatal("resume changed the committed publication", head, results[i])
+		}
+		checkout := filepath.Join(public, p.Manifest.Members[i].Path)
+		dirty, err := os.ReadFile(filepath.Join(checkout, "uncommitted-work"))
+		if err != nil || string(dirty) != "retained dirty work" {
+			t.Fatal("resume lost uncommitted work", err)
+		}
+		index, err := os.ReadFile(filepath.Join(checkout, ".git", "index"))
+		if err != nil || string(index) != "hostile-index" {
+			t.Fatal("resume rewrote the retained agent index", err)
+		}
+		if got := fixtureGit(t, filepath.Join(repos, m.ID+".git"), "ls-tree", "--name-only", head); strings.Contains(got, "uncommitted-work") {
+			t.Fatal("publication included uncommitted work")
 		}
 	}
 	t.Run("deep member refusal preserves unrelated push", func(t *testing.T) {

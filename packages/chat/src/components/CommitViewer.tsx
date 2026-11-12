@@ -18,7 +18,7 @@ import { useSelectAllIn } from '../hooks/useSelectAllIn'
 import { MAXIMIZED_KEY, isMaximizeShortcut, localStorageChatStorage } from '../model/storage'
 import type { TransportFiles, WorkspaceGitRef } from '../transport/types'
 import DiffView from './DiffView'
-import ViewerToolbar, { ViewerAction } from './ViewerToolbar'
+import ViewerToolbar, { ViewerActionsContext, ViewerAction } from './ViewerToolbar'
 import { WrapScopeContext, isWrapShortcut, toggleWrapIn } from '../model/lineWrap'
 import { saveBlob } from '../transport/files'
 import { repoName } from './Hovercard'
@@ -51,6 +51,7 @@ export default function CommitViewer(props: CommitViewerProps) {
 }
 function CommitViewerBody({ sessionId, sha, files, repo, member, onClose, embedded = false, headerActions }: CommitViewerProps) {
   const viewerHost = useViewerHost()
+  const [utilityHost, setUtilityHost] = useState<HTMLSpanElement | null>(null)
   const titleId = useId()
   const dialogRef = useRef<HTMLDivElement | null>(null)
   useSelectAllIn(dialogRef)
@@ -58,7 +59,6 @@ function CommitViewerBody({ sessionId, sha, files, repo, member, onClose, embedd
   // A host remounts the viewer for another commit (its key), so the first state is this commit's.
   const [state, setState] = useState<State>(() => (files.commitDiff ? peekContent<State>(files, sessionId, commitIdentity(sha, member)) ?? { kind: 'loading' } : { kind: 'none' }))
   const kept = useRef(state.kind === 'ready' || state.kind === 'large')
-  const [copied, setCopied] = useState(false)
   const [maximized, setMaximized] = useState(() => localStorageChatStorage.get(MAXIMIZED_KEY('diff')) === '1')
   const short = sha.slice(0, 7)
   const name = visibleText(repoName(repo))
@@ -91,12 +91,8 @@ function CommitViewerBody({ sessionId, sha, files, repo, member, onClose, embedd
     localStorageChatStorage.set(MAXIMIZED_KEY('diff'), next ? '1' : null)
   }
 
-  function copySha() {
-    if (typeof navigator === 'undefined' || !navigator.clipboard) return
-    void navigator.clipboard.writeText(sha).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200) }, () => {})
-  }
-
   const body = (
+    // button-guard-ignore: useBackdropClose supplies pointer handlers only; this overlay is not a button
     <div className={embedded ? "embedded-viewer" : `artifact-overlay artifact-overlay-viewer${maximized ? ' is-maximized' : ''}`} data-testid="commit-viewer-overlay" {...(embedded ? {} : backdrop)}>
       <div
         ref={dialogRef}
@@ -111,27 +107,17 @@ function CommitViewerBody({ sessionId, sha, files, repo, member, onClose, embedd
           else if (isWrapShortcut(e) && toggleWrapIn(e.currentTarget)) { e.preventDefault(); e.stopPropagation() }
         }}
       >
-        {embedded ? <ViewerToolbar titleId={titleId} title={`Commit ${short}`} copyValue={sha} copyLabel="Copy sha" meta={[sha, 'From the session’s workspace', name].filter(Boolean).join(' · ')}>
+        <ViewerToolbar exports={<>
           {state.kind === 'ready' && <ViewerAction icon="download" label="Download" onClick={() => saveBlob(new Blob([state.text], { type: 'text/x-diff' }), `${short}.diff`)} />}
-        </ViewerToolbar> : <header className="artifact-header">
-          <div className="artifact-header-text">
-            <h2 id={titleId}>Commit {short}</h2>
-            <p className="artifact-meta" title={sha}>{['From the session’s workspace', name].filter(Boolean).join(' · ')}</p>
-          </div>
-          <button type="button" className="artifact-btn" onClick={copySha}>{copied ? 'Copied' : 'Copy sha'}</button>
-          <button
-            type="button"
-            className="artifact-close artifact-maximize"
-            aria-label={maximized ? 'Restore size' : 'Maximize'}
-            aria-pressed={maximized}
-            title={`${maximized ? 'Restore size' : 'Maximize'} (Ctrl+Alt+F)`}
-            onClick={toggleMaximized}
-          >
-            <span aria-hidden="true">{maximized ? '⤡' : '⤢'}</span>
-          </button>
+        </>} titleId={titleId} title={`Commit ${short}`} copyValue={sha} copyLabel="Copy sha" meta={[sha, 'From the workspace', name].filter(Boolean).join(' · ')}>
+
+          <span className="viewer-control-slot" ref={setUtilityHost} />
           {headerActions}
-          <button type="button" className="artifact-close" aria-label="Close" onClick={onClose}>✕</button>
-        </header>}
+          {!embedded && <>
+            <ViewerAction icon={maximized ? 'restore' : 'maximize'} label={maximized ? 'Restore size' : 'Maximize'} title={`${maximized ? 'Restore size' : 'Maximize'} (Ctrl+Alt+F)`} pressed={maximized} onClick={toggleMaximized} />
+            <ViewerAction icon="close" label="Close" onClick={onClose} />
+          </>}
+        </ViewerToolbar>
         <div className="artifact-body">
           {state.kind === 'loading' ? (
             <div className="artifact-status workspace-loading" role="status" data-testid="commit-loading">
@@ -140,15 +126,15 @@ function CommitViewerBody({ sessionId, sha, files, repo, member, onClose, embedd
           ) : state.kind === 'large' ? (
             <p className="artifact-status" role="status" data-testid="commit-large">This commit’s diff is too large to open here.</p>
           ) : state.kind === 'none' ? (
-            <p className="artifact-status" role="status" data-testid="commit-none">This commit can’t be read from the session’s workspace right now.</p>
+            <p className="artifact-status" role="status" data-testid="commit-none">This commit can’t be read from the workspace right now.</p>
           ) : (
-            <DiffView text={shownHeader(state.text)} commit={sha} collapseLarge />
+            <DiffView text={shownHeader(state.text)} commit={sha} collapseLarge fileContext={{ sessionId, files, member }} />
           )}
         </div>
       </div>
     </div>
   )
-  const scoped = <WrapScopeContext.Provider value={files.queueScope?.() ?? ''}>{body}</WrapScopeContext.Provider>
+  const scoped = <WrapScopeContext.Provider value={files.queueScope?.() ?? ''}><ViewerActionsContext.Provider value={utilityHost}>{body}</ViewerActionsContext.Provider></WrapScopeContext.Provider>
   return embedded ? scoped : createPortal(scoped, document.body)
 }
 

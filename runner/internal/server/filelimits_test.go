@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"io/fs"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,6 +40,9 @@ func captureLog(t *testing.T) *bytes.Buffer {
 	var buf bytes.Buffer
 	prev, flags := log.Writer(), log.Flags()
 	log.SetOutput(&buf)
+	oldFailureLogger := failurelog.Default
+	failurelog.Default = failurelog.New(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { failurelog.Default = oldFailureLogger })
 	log.SetFlags(0)
 	t.Cleanup(func() { log.SetOutput(prev); log.SetFlags(flags) })
 	return &buf
@@ -116,7 +121,10 @@ func TestStorageKindSentences(t *testing.T) {
 	} {
 		rec := httptest.NewRecorder()
 		buf := captureLog(t)
-		id := writeStorageFailure(rec, "save the file", accessWrite, "test ctx", c.err)
+		var id string
+		failurelog.Default.HTTP("runner", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			id = writeStorageFailure(w, "save the file", accessWrite, "CANARY_SECRET", c.err)
+		})).ServeHTTP(rec, httptest.NewRequest("GET", "/api/files", nil))
 		var body struct {
 			Error   string `json:"error"`
 			ErrorID string `json:"error_id"`
@@ -133,7 +141,7 @@ func TestStorageKindSentences(t *testing.T) {
 		if strings.Contains(body.Error, "/data") {
 			t.Errorf("the reply carries a path: %q", body.Error)
 		}
-		if !strings.Contains(buf.String(), "error_id="+id) || !strings.Contains(buf.String(), "test ctx") {
+		if !strings.Contains(buf.String(), `"error_id":"`+id+`"`) || !strings.Contains(buf.String(), `"cause":`) || strings.Contains(buf.String(), "CANARY_SECRET") {
 			t.Errorf("log = %q, want the context and the id", buf.String())
 		}
 	}
@@ -271,7 +279,7 @@ func TestUploadStorageFailureSaysWhatHappened(t *testing.T) {
 	if strings.Contains(body.Error, fx.dir) || strings.Contains(rec.Body.String(), fx.dir) {
 		t.Errorf("the reply carries the data directory: %s", rec.Body.String())
 	}
-	if !strings.Contains(buf.String(), fmt.Sprintf("error_id=%s", body.ErrorID)) {
+	if !strings.Contains(buf.String(), fmt.Sprintf(`"error_id":"%s"`, body.ErrorID)) {
 		t.Errorf("log = %q, want error_id=%s", buf.String(), body.ErrorID)
 	}
 }

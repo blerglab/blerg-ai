@@ -1,0 +1,1 @@
+ALTER TABLE sessions ADD COLUMN emoji text NOT NULL DEFAULT '';

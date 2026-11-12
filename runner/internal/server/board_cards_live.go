@@ -1,6 +1,6 @@
 package server
 
-// The live Blerg Board card behind a pinned ticket.
+// Live Blerg Board cards for pinned tickets and native workspace tabs.
 //
 // An agent pins a board card (`blerg-runner pin` with source "blerg-board", its board_id and key
 // "#<number>"); what it pinned is its own copy, which goes stale as soon as the card moves. The
@@ -9,7 +9,8 @@ package server
 // person (as the session board tools do for an agent, mcpgw.CallBoard) and calls blerg_card_get
 // with_trail, so the card's column, tags, origin, repos and trail come back in one call. POST
 // /api/board-cards/{board}/{number}/move moves it, with a credential the person's own role allows
-// (core and the board refuse a move they may not make). Nothing is stored; the agent never sees
+// (core and the board refuse a move they may not make). Native tab calls also check the workspace
+// grant. Pinned-card calls use session only for auditing. Nothing is stored; the agent never sees
 // these calls. The card's page in the Board app is boardCardURL, inside Blerg.
 
 import (
@@ -41,25 +42,35 @@ func (a *API) boardCardURL(ctx context.Context, board string, number int) string
 
 // liveBoardCard is the card as the panel shows it: the fields it draws, never the whole record.
 type liveBoardCard struct {
-	Reference  string          `json:"reference,omitempty"`
-	ID         string          `json:"id"`
-	BoardID    string          `json:"board_id"`
-	Number     int             `json:"number"`
-	Title      string          `json:"title"`
-	Body       *string         `json:"body"`
-	Type       string          `json:"type"`
-	Priority   string          `json:"priority"`
-	Size       *string         `json:"size"`
-	ColumnID   *string         `json:"column_id"`
-	ColumnName string          `json:"column_name"`
-	Tags       []string        `json:"tags"`
-	Repos      []string        `json:"repos"`
-	ArchivedAt *string         `json:"archived_at"`
-	Sensitive  bool            `json:"sensitive"`
-	Origin     json.RawMessage `json:"origin,omitempty"`
-	Version    int             `json:"version"`
-	UpdatedAt  string          `json:"updated_at"`
-	Columns    []struct {
+	HasHumanDoneReason   *bool           `json:"has_human_done_reason,omitempty"`
+	DoneMovedAt          *string         `json:"done_moved_at,omitempty"`
+	ToTestAddedAt        *string         `json:"to_test_added_at,omitempty"`
+	ReleaseID            *string         `json:"release_id"`
+	Reference            string          `json:"reference,omitempty"`
+	ID                   string          `json:"id"`
+	BoardID              string          `json:"board_id"`
+	Number               int             `json:"number"`
+	Title                string          `json:"title"`
+	Body                 *string         `json:"body"`
+	Type                 string          `json:"type"`
+	Priority             string          `json:"priority"`
+	Size                 *string         `json:"size"`
+	Risk                 *string         `json:"risk"`
+	Complexity           *string         `json:"complexity"`
+	SizeFirstSetAt       *string         `json:"size_first_set_at"`
+	RiskFirstSetAt       *string         `json:"risk_first_set_at"`
+	ComplexityFirstSetAt *string         `json:"complexity_first_set_at"`
+	Flow                 json.RawMessage `json:"flow"`
+	ColumnID             *string         `json:"column_id"`
+	ColumnName           string          `json:"column_name"`
+	Tags                 []string        `json:"tags"`
+	Repos                []string        `json:"repos"`
+	ArchivedAt           *string         `json:"archived_at"`
+	Sensitive            bool            `json:"sensitive"`
+	Origin               json.RawMessage `json:"origin,omitempty"`
+	Version              int             `json:"version"`
+	UpdatedAt            string          `json:"updated_at"`
+	Columns              []struct {
 		ID         string `json:"id"`
 		Name       string `json:"name"`
 		IsTerminal bool   `json:"is_terminal"`
@@ -95,9 +106,13 @@ func boardToolResult(raw json.RawMessage, out any) *APIError {
 	if res.IsError {
 		msg := capText(strings.TrimSpace(text.String()), 300)
 		status := http.StatusBadGateway
-		if strings.Contains(strings.ToLower(msg), "not found") {
+		lower := strings.ToLower(msg)
+		switch {
+		case strings.Contains(lower, "stale"), strings.Contains(lower, "conflict"):
+			status = http.StatusConflict
+		case strings.Contains(lower, "not found"):
 			status = http.StatusNotFound
-		} else if strings.Contains(strings.ToLower(msg), "forbidden") || strings.Contains(strings.ToLower(msg), "permission") {
+		case strings.Contains(lower, "forbidden"), strings.Contains(lower, "permission"):
 			status = http.StatusForbidden
 		}
 		return apiErrorf(status, "the board refused: %s", msg)
@@ -180,7 +195,11 @@ func readLiveBoardCard(ctx context.Context, caller sessionBoardCaller, proof mcp
 }
 
 // boardCallError is a failed exchange or call, in the gateway's words.
-func boardCallError(err error) *APIError {
+func boardCallError(err error) (result *APIError) {
+	defer func() {
+		log.Printf("board call: status=%d class=%s cause=%T", result.Status, boardFailureClass(result.Status), err)
+	}()
+
 	switch {
 	case errors.Is(err, mcpgw.ErrConnectionGone):
 		return apiErrorf(http.StatusForbidden, "%s", "you cannot read this board with your sign-in")
@@ -189,9 +208,7 @@ func boardCallError(err error) *APIError {
 	}
 	msg := mcpgw.UpstreamMessage(err)
 	if strings.Contains(msg, "could not grant access") {
-		// Core or the board refused the person a credential: no role on this board, or it is
-		// unavailable. Either way the card cannot be shown with this sign-in now.
-		return apiErrorf(http.StatusForbidden, "%s", "the board did not give your sign-in access to this card")
+		msg = "The board is temporarily unavailable. Try again shortly."
 	}
 	return apiErrorf(http.StatusBadGateway, "%s", msg)
 }
@@ -201,6 +218,9 @@ func boardCallError(err error) *APIError {
 func (a *API) HandleGetLiveBoardCard(w http.ResponseWriter, r *http.Request) {
 	proof, board, number, caller, ok := a.boardCardRequest(w, r)
 	if !ok {
+		return
+	}
+	if r.URL.Query().Get("tab") == "1" && !a.allowBrowserBoardTool(w, r, proof.AccountID, board, "blerg_card_get") {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -220,15 +240,23 @@ func (a *API) HandleMoveLiveBoardCard(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if r.URL.Query().Get("tab") == "1" && !a.allowBrowserBoardTool(w, r, proof.AccountID, board, "blerg_card_move") {
+		return
+	}
 	var req struct {
 		ColumnID string `json:"column_id"`
+		IfMatch  *int   `json:"if_match"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil || !gatewayServerName.MatchString(req.ColumnID) {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil || !gatewayServerName.MatchString(req.ColumnID) || (req.IfMatch != nil && *req.IfMatch < 0) || (r.URL.Query().Get("tab") == "1" && req.IfMatch == nil) {
 		writeError(w, http.StatusBadRequest, `the body is {"column_id": "<column id>"}`)
 		return
 	}
 	ctx := r.Context()
-	args, _ := json.Marshal(map[string]any{"board_id": board, "number": number, "column_id": req.ColumnID})
+	moveArgs := map[string]any{"board_id": board, "number": number, "column_id": req.ColumnID}
+	if req.IfMatch != nil {
+		moveArgs["if_match"] = *req.IfMatch
+	}
+	args, _ := json.Marshal(moveArgs)
 	raw, err := caller.CallBoard(ctx, mcpgw.BoardCall{Proof: proof, BoardID: board, SessionRef: a.auditRef(r, proof.AccountID), Tool: "blerg_card_move", Arguments: args})
 	if err != nil {
 		writeAPIError(w, boardCallError(err))

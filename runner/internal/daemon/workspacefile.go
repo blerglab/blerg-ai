@@ -77,6 +77,7 @@ func workspaceFileTooLarge(path string, size int64) protocol.WorkspaceFileResult
 	return res
 }
 func workspaceFileError(path string, err error) protocol.WorkspaceFileResult {
+	logDaemonFailure("workspace file read", err)
 	if errors.Is(err, errWorkspaceSecret) {
 		return workspaceFileFailure(path, "forbidden", workspaceProtectedNameMessage)
 	}

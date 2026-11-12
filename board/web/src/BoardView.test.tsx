@@ -19,6 +19,7 @@ vi.mock("./api", async (importOriginal) => {
     boardSocket: vi.fn(() => () => {}),
     api: vi.fn((path: string) => {
       if (failures[path]) return Promise.reject(failures[path]);
+      if (path.includes("/cards/view")) return Promise.resolve({ cards: responses[path.split("?")[0].replace("/cards/view", "/cards")] ?? [], older: {} });
       return Promise.resolve(responses[path] ?? []);
     }),
   };
@@ -92,7 +93,7 @@ describe("BoardView live refresh", () => {
     const answers: ((v: unknown) => void)[] = [];
     const base = vi.mocked(api).getMockImplementation()!;
     vi.mocked(api).mockImplementation(((path: string) => {
-      if (path === "/api/boards/b1/cards") return new Promise((resolve) => answers.push(resolve as (v: unknown) => void));
+      if (path === "/api/boards/b1/cards/view") return new Promise<unknown>((resolve) => answers.push((cards: unknown) => resolve({ cards, older: {} })));
       return base(path);
     }) as typeof api);
     render(
@@ -322,9 +323,9 @@ describe("BoardView in-place filter (#124)", () => {
     type("#12");
     expect(status.textContent).toBe("");
     expect(status.getAttribute("aria-live")).toBe("polite");
-    await vi.waitFor(() => expect(status.textContent).toBe("1 of 38 cards shown"), { timeout: 3000 });
+    await vi.waitFor(() => expect(status.textContent).toBe("1 of 38 cards match"), { timeout: 3000 });
     fireEvent.click(screen.getByRole("button", { name: "Clear" }));
-    await vi.waitFor(() => expect(status.textContent).toBe("All 38 cards shown"), { timeout: 3000 });
+    await vi.waitFor(() => expect(status.textContent).toBe("Filter cleared. 38 cards total."), { timeout: 3000 });
   });
 
   it("forgets a remembered column that was deleted", async () => {
@@ -540,4 +541,11 @@ describe("BoardView in-place filter (#124)", () => {
     await screen.findByText("Card 37");
     expect(tab(/Done/).getAttribute("aria-selected")).toBe("true");
   });
+});
+
+it("hides release forms for a read-only member", async () => {
+ responses['/api/me']={is_human:true,is_admin:false,capabilities:['card.read']};
+ renderBoard();
+ fireEvent.click(await screen.findByRole('button',{name:'Releases'}));
+ expect(screen.queryByLabelText('Release name')).not.toBeInTheDocument();
 });

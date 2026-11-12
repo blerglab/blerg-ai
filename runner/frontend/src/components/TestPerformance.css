@@ -1,0 +1,64 @@
+.test-performance { container-type: inline-size; height: 100%; overflow: auto; padding: clamp(16px, 1.5%, 40px); color: var(--text); background: var(--bg); box-sizing: border-box; }
+.test-performance-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 24px; }
+.test-performance-toolbar p { font-size: 1.25rem; margin: 0; font-weight: 600; }
+.test-performance-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.test-performance-filters label { display: flex; align-items: center; gap: 6px; font-size: .85rem; color: var(--ash); }
+.test-performance-filters select { max-width: 220px; }
+.test-performance-chart { border-bottom: 1px solid var(--border); padding-bottom: 12px; }
+.test-performance-chart .visual-block { max-width: none; margin: 0; display: flex; flex-direction: column; height: 100%; }
+.test-performance-caption { color: var(--ash); font-size: .8rem; margin: 16px 0; }
+.test-performance-details { margin-top: 24px; border-top: 1px solid var(--border); padding-top: 16px; }
+.test-performance-details summary { cursor: pointer; font-weight: 600; }
+.test-performance-table { overflow: auto; margin-top: 16px; }
+.test-performance table { width: 100%; border-collapse: collapse; font-size: .85rem; text-align: left; }
+.test-performance th,.test-performance td { padding: 10px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.test-performance th { color: var(--ash); font-weight: 500; }
+.test-performance-empty { padding: 64px 16px; text-align: center; border-block: 1px solid var(--border); }
+.test-performance-empty > span { font-size: 2rem; color: var(--accent); }
+.test-performance-empty h2 { font-size: 1.25rem; }
+.test-performance-empty p { color: var(--ash); }
+.test-performance-empty code { display: inline-block; max-width: 100%; overflow-wrap: anywhere; font-size: .8rem; }
+.test-performance-skeleton { padding: 20px 0; }
+.test-performance-skeleton-chart { display: flex; height: clamp(320px, 42cqw, 55dvh); align-items: end; gap: 5%; padding: 24px 8%; }
+.test-performance-skeleton-chart span { height: 60%; flex: 1; }
+.test-performance-skeleton-chart span:nth-child(2n) { height: 80%; }
+@container (max-width: 560px) { .test-performance-toolbar { align-items: start; } .test-performance-filters { gap: 10px; } .test-performance-filters label { flex-direction: column; align-items: start; } .test-performance-filters select { max-width: 140px; } }
+
+.test-performance-pagination { display: flex; gap: 12px; align-items: center; margin-top: 12px; font-size: .85rem; }
+
+.test-performance-finding { font-size: clamp(1.25rem, 1.2cqw, 2rem); line-height: 1.25; font-weight: 600; margin: 0; max-width: 65ch; text-wrap: balance; }
+.test-performance-overview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: clamp(16px, 3cqw, 80px); row-gap: 16px; margin: 0 0 24px; padding-block: 20px; border-block: 1px solid var(--border); }
+.test-performance-overview dt { color: var(--ash); font-size: .8rem; margin-bottom: 8px; }
+.test-performance-overview dd { margin: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; overflow-wrap: anywhere; font-size: clamp(1.25rem, 1cqw, 1.75rem); font-variant-numeric: tabular-nums; }
+.test-performance-overview small { font-size: .8rem; color: var(--ash); }
+.test-performance-chart .visual-block > .visual-surface-wrap > .visual-surface { max-height: none; }
+@container (max-width: 560px) { .test-performance-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+.test-performance-skeleton-overview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 24px; margin-bottom: 24px; }
+.test-performance-skeleton-overview span { height: 56px; }
+@container (max-width: 560px) { .test-performance-skeleton-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+.test-performance-chart { height: clamp(320px, 42cqw, 55dvh); box-sizing: border-box; }
+.test-performance-chart .visual-surface-wrap { flex: 1; min-height: 0; }
+
+.test-performance-findings { margin-top: 24px; }
+.test-performance-findings > h2 { font-size: 1rem; margin: 0; }
+.test-performance-suite-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 16px; }
+.test-performance-suite { min-width: 0; border-top: 1px solid var(--border); padding-top: 16px; }
+.test-performance-suite h3 { font-size: .95rem; margin: 0; overflow-wrap: anywhere; }
+.test-performance-suite .test-performance-caption { margin: 8px 0 16px; overflow-wrap: anywhere; }
+.test-performance-suite dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 0; font-variant-numeric: tabular-nums; }
+.test-performance-suite dt { color: var(--ash); font-size: .8rem; margin-bottom: 6px; }
+.test-performance-suite dd { margin: 0; overflow-wrap: anywhere; }
+
+.test-performance-budget { display: flex; align-items: center; gap: 12px; margin-top: 20px; font-size: .85rem; }
+.test-performance-budget > span { white-space: nowrap; }
+.test-performance-overrun { color: var(--amber); }
+.test-performance-meter-track { position: relative; min-width: 64px; flex: 1; }
+.test-performance-budget meter { display: block; width: 100%; height: 16px; appearance: none; transform-origin: left center; }
+.test-performance-budget meter::-webkit-meter-bar { background: var(--border); border: none; height: 8px; border-radius: 4px; }
+.test-performance-budget meter::-webkit-meter-optimum-value,
+.test-performance-budget meter::-webkit-meter-suboptimum-value,
+.test-performance-budget meter::-webkit-meter-even-less-good-value { background: linear-gradient(to right, var(--accent) 0%, var(--accent) var(--within-fill), var(--amber) var(--within-fill), var(--amber) 100%); }
+.test-performance-budget meter::-moz-meter-bar { background: linear-gradient(to right, var(--accent) 0%, var(--accent) var(--within-fill), var(--amber) var(--within-fill), var(--amber) 100%); }
+.test-performance-budget-marker { position: absolute; left: var(--budget-position); top: 1px; height: 14px; border-left: 2px solid var(--text); pointer-events: none; }

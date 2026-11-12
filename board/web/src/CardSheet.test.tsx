@@ -58,3 +58,27 @@ describe("ReviewSection Accept/Reject gating", () => {
     expect(screen.getByText("Reject with feedback")).toBeInTheDocument();
   });
 });
+
+it('explains why an ended workspace has no local diff and keeps the branch and PR', async () => {
+ responses['/api/cards/c1/runner-sessions'] = [{id:'ended',external_session_id:'session-ended',lifecycle:'stopped',role:'worker'}];
+ const reviewCard = {...card, fields:{branch:"work/review-card"}, links:[{kind:'pr',url:'https://example.com/pull/1',label:'Review PR'}]};
+ render(<MemoryRouter><MeProvider><ReviewSection card={reviewCard} events={events} columns={columns} deployURL={null} checks={checks} onDone={() => {}} /></MeProvider></MemoryRouter>);
+ expect(await screen.findByText(/Local diffs are unavailable because the workspace has ended/)).toBeInTheDocument();
+ expect(screen.queryByRole('link',{name:'View diff in blerg-board'})).toBeNull();
+ expect(screen.getByText('work/review-card')).toBeInTheDocument();
+ expect(screen.getByRole('link',{name:'Review PR'})).toHaveAttribute('href','https://example.com/pull/1');
+});
+
+it('does not invent a branch name for an ended workspace', async () => {
+ responses['/api/cards/c1/runner-sessions'] = [{id:'ended',external_session_id:'session-ended',lifecycle:'error',role:'worker'}];
+ renderSection({kind:'service',is_admin:false,is_human:true});
+ expect(await screen.findByText(/The work branch was not recorded on this card/)).toBeInTheDocument();
+ expect(screen.queryByText('wip/session-ended')).toBeNull();
+});
+
+it('keeps an ended workspace branch link without repository reads', async () => {
+ responses['/api/cards/c1/runner-sessions'] = [{id:'ended',external_session_id:'session-ended',lifecycle:'stopped',role:'worker'}];
+ render(<MemoryRouter><MeProvider><ReviewSection card={{...card,links:[{kind:'branch',url:'https://example.com/tree/work/review',label:'work/review'}]}} events={events} columns={columns} deployURL={null} checks={checks} onDone={() => {}} /></MeProvider></MemoryRouter>);
+ expect(await screen.findByRole('link',{name:'work/review'})).toHaveAttribute('href','https://example.com/tree/work/review');
+ expect(screen.queryByText(/work branch was not recorded/)).toBeNull();
+});

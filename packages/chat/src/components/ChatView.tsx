@@ -8,10 +8,11 @@ import { modelDisplayName } from '../model/modelDisplay'
 // composer, the Files panel and viewer. The host adds what is its own through slots (a model
 // picker, a rules panel) and themes it through the --chat-* tokens.
 import { handleChatCopy } from '../model/richCopy'
+import { useChatSelectAll } from '../hooks/useChatSelectAll'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { CardRegistry } from '../cards/registry'
 import { useAttachments } from '../hooks/useAttachments'
-import { useSession, type PendingTurn, type SessionHandle } from '../hooks/useSession'
+import { useSession, deliveredClientIds, echoedClientIds, type PendingTurn, type SessionHandle } from '../hooks/useSession'
 import { useBackgroundLiveStore } from '../hooks/useBackgroundTasks'
 import { useWorkingLineStore } from '../hooks/useWorkingLine'
 import { useChatReportStore, type ChatFiles } from '../hooks/useLiveState'
@@ -19,12 +20,12 @@ import { useMinuteClock } from '../hooks/useTicker'
 import { attachmentAt, findLatest, groupArtifacts, fileCount } from '../model/artifacts'
 import { resolveArtifactLink } from '../model/artifactLinks'
 import { MAX_ATTACHMENT_BYTES, type MessageAttachment } from '../model/attachments'
-import { backgroundTasks, runningTasks } from '../model/backgroundTasks'
+import { backgroundTasks, runningTasks, backgroundWaitStopped } from '../model/backgroundTasks'
 import { ClockOffsetContext } from '../model/clockOffset'
 import { liveTurn, oldestLive } from '../model/liveCalls'
 import { activityLabel, modelRetry } from '../model/workingActivity'
 import { liveSubagents } from '../model/liveState'
-import { checklistFromEvents, readChecklist, safeChecklistAssignments } from '../model/worklist'
+import { createChecklistReader, safeChecklistAssignments } from '../model/worklist'
 import { sharedTimeline } from '../model/toolGroups'
 import { subagentWaitingOn } from '../model/waitingOnSubagent'
 import { askStates } from '../model/asks'
@@ -81,6 +82,8 @@ export interface ChatSlots {
 }
 
 export interface ChatViewProps {
+  /** The host's person-facing role; standalone consumers retain workspace wording. */
+  conversationNoun?: 'workspace' | 'channel' | 'worker'
   /** Current checklist from an authoritative host live read. Absent: use the loaded transcript. */
   checklistItems?: readonly ChecklistItem[]
   /** Opens a stable checklist target in the host's Plan panel, when available. */
@@ -90,6 +93,9 @@ export interface ChatViewProps {
    *  shows the child's short id. */
   onManageChildApproval?: () => void
   onOpenSession?: (sessionId: string) => void
+  /** Opens the workspace's blackboard tab, empty-state or not (the blackboard recommendation
+   *  card's "View blackboard"). Absent: that action is left out of the card. */
+  onOpenBlackboard?: () => void
   /** Opens the host's editor for a board-card proposal's draft (approved from there). Absent: the
    *  proposal card has no Edit. */
   onEditProposal?: (proposalId: string) => void
@@ -106,6 +112,8 @@ export interface ChatViewProps {
    *  diff at the commit, or copy the sha). Accepted so a host that passes it still compiles. */
   commitUrl?: (sha: string) => string | null | undefined
   transport: Transport
+  /** Recipient-scoped notices supplied by the host; never written to the shared event store. */
+  privateEvents?: readonly AgentEvent[]
   cards?: CardRegistry
   /** Token values set on the chat's root, over whatever the stylesheets say. */
   theme?: ThemeTokens
@@ -149,6 +157,12 @@ export interface ChatViewProps {
   /** No composer: the transcript, files and viewer only (a session the host will not let the
    *  person message, whatever its status). */
   readOnly?: boolean
+  /** A host recovery pause overrides stale transcript activity until recovery runs. */
+  recoveryPaused?: boolean
+  /** This conversation's own name (a channel or workspace title): a popped-out message with no
+   *  heading of its own names its tab from this and when it was sent. Absent: conversationNoun,
+   *  capitalized. */
+  chatName?: string
   /** The composer's placeholder for a session that can take a message, in place of the default. */
   placeholder?: string
   /** The person may open a file the agent's text names (a relative link, a path in inline code)
@@ -228,14 +242,14 @@ export function ReadyCard({ meta, readyAt, reportedModel: reported, children }: 
     <div className="agent-card ready-card" data-testid="ready-card">
       <div className="ready-title">
         <span className="ready-dot" aria-hidden="true" />
-        Session ready
+        Workspace ready
         <time className="ready-time" dateTime={new Date(readyAt).toISOString()}>
           {new Date(readyAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}
         </time>
       </div>
       <dl className="ready-facts">
         <div><dt>Engine</dt><dd>{meta.engine || 'claude'}</dd></div>
-        <div><dt>Model</dt><dd><span title={shown || undefined}>{model}</span>{onDefault && <span className="model-effort" title="No model was chosen for this session: the engine's default">engine default</span>}{meta.effort && <span className="model-effort" title="Configured effort">{meta.effort}</span>}</dd></div>
+        <div><dt>Model</dt><dd><span title={shown || undefined}>{model}</span>{onDefault && <span className="model-effort" title="No model was chosen for this workspace: the engine's default">engine default</span>}{meta.effort && <span className="model-effort" title="Configured effort">{meta.effort}</span>}</dd></div>
         {children}
         {meta.runtime && <div><dt>Runs on</dt><dd>{meta.runtime}</dd></div>}
       </dl>
@@ -252,12 +266,47 @@ function ownerOnlyAnswer(can: boolean | null | undefined): OwnerOnlyAnswer {
 export default function ChatView(props: ChatViewProps) {
   const { transport, cards, slots = {}, storage = localStorageChatStorage } = props
   const sessionId = props.session
+  const conversationNoun = props.conversationNoun ?? 'workspace'
   const s: SessionHandle = useSession(transport, sessionId, { meta: props.meta, noTurnCommands: props.noTurnCommands })
   const { events, streaming, status, meta } = s
   // Opening a session whose transcript is already held (a revisit) draws it in the first paint: the
   // transcript draws at most its newest WINDOW rows, and the person sees the conversation at once,
   // never a placeholder (#281; was a skeleton for one frame since chat 0.5.0).
-  const shownEvents = events
+  //
+  // A live file (BLG-470) redraws its one card in place: every republish still appends an
+  // `artifact` event (so the Files list and an open tab stay fresh, and a reconnecting client
+  // picks up the latest from replay), but only the first such event for a given live id is shown
+  // here, at its original position. Later ones update `artifacts.items` (useArtifacts reads the
+  // full, unfiltered `events`) without adding another card.
+  //
+  // With no repeat to drop this is `events` itself, not a copy: the per-transcript readers below
+  // (asks, restart, delegation and proposal states) cache by array identity, and a fresh copy on
+  // every mount made a session switch re-read all of a long transcript (50,600 date formats a
+  // switch instead of 600 in SessionSwitch.performance).
+  const shownEvents = useMemo(() => {
+    const seenLive = new Set<string>()
+    let dropped = false
+    const kept = events.filter(e => {
+      if (e.kind !== 'artifact') return true
+      const p = e.payload as ArtifactPayload
+      if (!p?.live) return true
+      if (seenLive.has(p.id)) { dropped = true; return false }
+      seenLive.add(p.id)
+      return true
+    })
+    const base = dropped ? kept : events
+    if (!props.privateEvents?.length) return base
+    const notices = props.privateEvents.filter(e => e.session_id === sessionId).toSorted((a,b) => Date.parse(a.ts) - Date.parse(b.ts))
+    // Merge from the tail: recent notices do not reparse a retained transcript's old timestamps.
+    const tail: AgentEvent[] = []
+    let eventIndex = base.length - 1, noticeIndex = notices.length - 1
+    while (eventIndex >= 0 && noticeIndex >= 0) {
+      if (Date.parse(base[eventIndex].ts) > Date.parse(notices[noticeIndex].ts)) tail.push(base[eventIndex--])
+      else tail.push(notices[noticeIndex--])
+    }
+    while (noticeIndex >= 0) tail.push(notices[noticeIndex--])
+    return base.slice(0, eventIndex + 1).concat(tail.reverse())
+  }, [events, props.privateEvents, sessionId])
   const viewerHost = useViewerHost()
   const outputSignature = useMemo(() => JSON.stringify([events.filter(e => e.kind === 'assistant_text' && !(e.payload as { parent_call_id?: string })?.parent_call_id).at(-1), streaming]), [events, streaming])
   useEffect(() => { if (s.replayDone) viewerHost?.agentOutput?.(outputSignature) }, [viewerHost, outputSignature, s.replayDone])
@@ -281,6 +330,8 @@ export default function ChatView(props: ChatViewProps) {
   // A stopped or ended session takes no more files: waiting ones stop checking for room.
   const attachments = useAttachments(sessionId, files, maxFileBytes, {ended: status === 'stopped' || status === 'ended'})
   const attachInput = useRef<HTMLInputElement | null>(null)
+  const chatRootRef = useRef<HTMLDivElement | null>(null)
+  useChatSelectAll(chatRootRef)
   const [dragging, setDragging] = useState(false)
   const dragDepth = useRef(0)
   const [showFiles, setShowFiles] = useState(false)
@@ -316,6 +367,28 @@ export default function ChatView(props: ChatViewProps) {
     refreshArtifacts()
   }, [doneCount, showFiles, refreshArtifacts])
 
+  useEffect(() => {
+    const show = (event: Event) => {
+      const request = (event as CustomEvent).detail
+      if (event.defaultPrevented || request?.session !== sessionId) return
+      if (request.action === 'attachment' && typeof request.target === 'string') {
+        setLinked(request.target)
+        event.preventDefault()
+      } else if (['open', 'reveal'].includes(request.action) && typeof request.target === 'string' &&
+        request.target.length <= 2048 && ![...request.target].some(character => character.charCodeAt(0) < 32 || (character.charCodeAt(0) >= 127 && character.charCodeAt(0) <= 159)) && !/[\\:\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(request.target) &&
+        request.target.split('/').every((part: string) => part && part !== '.' && part !== '..')) {
+        if (props.canOpenWorkspaceFiles && files?.workspaceFile) setWorkspaceFile({path: request.target})
+        else setNotice('Workspace files are unavailable in this conversation.')
+        event.preventDefault()
+      } else if (request.action === 'panel') {
+        setNotice('Open the workspace to view its panel.')
+        event.preventDefault()
+      }
+    }
+    window.addEventListener('blerg-ui-reveal', show)
+    return () => window.removeEventListener('blerg-ui-reveal', show)
+  }, [sessionId, props.canOpenWorkspaceFiles, files])
+
   const linkedArtifact = linked ? artifacts.items.find(a => a.id === linked) ?? null : null
   const linkMissing = linked !== null && artifacts.status === 'ready' && !linkedArtifact
   // Whether the viewer was opened from a preview click: a video or audio file then plays at once.
@@ -327,28 +400,40 @@ export default function ChatView(props: ChatViewProps) {
   // own version, the list also knows how many versions the file has now.
   const openArtifact = picked ? artifacts.items.find(a => a.id === picked.id) ?? picked : null
   const openLatest = openArtifact ? findLatest(artifacts.items, openArtifact) : undefined
-  const latestVersions = useMemo(
-    () => new Map(groupArtifacts(artifacts.items).map(g => [`${g.origin}\0${g.name}`, g.latest.version ?? 1])),
-    [artifacts.items],
-  )
+  // Historical publish events know their own version even before the Files list arrives.
+  // Keep the signature stable while unrelated conversation events stream.
+  const publishedVersions = useMemo(() => JSON.stringify(events.filter(e => e.kind === 'artifact').map(e => {
+    const a = e.payload as ArtifactPayload
+    return [`${a.origin === 'user' ? 'user' : 'agent'}\0${a.name}`, Math.max(a.version ?? 1, a.latest_version ?? 1)]
+  })), [events])
+  const latestVersions = useMemo(() => {
+    const versions = new Map(groupArtifacts(artifacts.items).map(g => [`${g.origin}\0${g.name}`, g.latest.version ?? 1]))
+    for (const [key, version] of JSON.parse(publishedVersions) as [string, number][]) {
+      versions.set(key, Math.max(versions.get(key) ?? 1, version))
+    }
+    return versions
+  }, [artifacts.items, publishedVersions])
   const send = s.send
   const sessionOver = status === 'error' || status === 'stopped' || status === 'ended'
   const publishedSessionUrl = props.transport.publishedSessionUrl?.(sessionId)
   const canOpenWorkspace = props.canOpenWorkspaceFiles === true && !!files?.workspaceFile
-  // Keep the shared context stable while unrelated text/tools stream: a checklist changes only
-  // when its newest valid full snapshot changes, not on every event in a long transcript.
-  const checklistEvent = useMemo(() => {
-    for (let i = events.length - 1; i >= 0; i--) {
-      if (events[i].kind === 'checklist' && readChecklist(events[i].payload)) return events[i]
-    }
-    return undefined
-  }, [events])
-  const checklist = useMemo(() => checklistEvent ? checklistFromEvents([checklistEvent]) : null, [checklistEvent])
+  // Hosts can supply current state. Standalone chat folds replay pages over their baseline.
+  const readChecklistHistory = useMemo(() => createChecklistReader(), [])
+  const checklist = useMemo(() => props.checklistItems ? null : readChecklistHistory(events), [events, props.checklistItems, readChecklistHistory])
   const checklistItems = props.checklistItems ?? checklist?.items ?? NO_CHECKLIST_ITEMS
   const currentChecklistItems = useMemo(() => safeChecklistAssignments(checklistItems, events), [checklistItems, events])
   const onOpenChecklistItem = props.onOpenChecklistItem
   const sessionEffort = meta?.effort || undefined
+  const channelRecommendationRevision = events.filter(e => e.kind === 'channel_recommendation').at(-1)?.seq
+  const blackboardRecommendationRevision = events.filter(e => e.kind === 'blackboard_recommendation').at(-1)?.seq
   const chatContext = useMemo<ChatContextValue>(() => ({
+    channelRecommendationRevision,
+    channelRecommendation: transport.channelRecommendation,
+    decideChannelRecommendation: props.readOnly ? undefined : transport.decideChannelRecommendation,
+    blackboardRecommendationRevision,
+    blackboardRecommendation: transport.blackboardRecommendation,
+    decideBlackboardRecommendation: props.readOnly ? undefined : transport.decideBlackboardRecommendation,
+    openBlackboard: props.onOpenBlackboard,
     sessionId,
     sessionOver,
     sessionEffort,
@@ -360,7 +445,7 @@ export default function ChatView(props: ChatViewProps) {
       const a = files ? artifacts.items.find(x => x.id === id) : undefined
       return a ? (commit?: string) => { setAutoplay(false); setDiffAnchor(commit ?? null); setViewing(a) } : null
     },
-    diffSummary: files ? (id: string) => loadDiffSummary(sessionId, id, x => files.raw(sessionId, x)) : undefined,
+    diffSummary: files ? (id: string) => loadDiffSummary(sessionId, id, x => files.raw(sessionId, x), artifacts.items.find(a => a.id === id)?.updated_at) : undefined,
     files,
     view: (a: ArtifactInfo, opts?: { autoplay?: boolean }) => { setAutoplay(!!opts?.autoplay); setDiffAnchor(null); setViewing(a) },
     // A bare name (no folder) that is a file published in this session opens that file: an agent that
@@ -374,6 +459,7 @@ export default function ChatView(props: ChatViewProps) {
     } : undefined,
     artifactLink: href => files ? resolveArtifactLink(href, publishedSessionUrl, artifacts.items) : null,
     latestVersion: (a: ArtifactPayload) => latestVersions.get(`${a.origin === 'user' ? 'user' : 'agent'}\0${a.name}`),
+    liveArtifact: (id: string) => artifacts.items.find(a => a.id === id && a.live === true),
     attachmentById: (id: string) => artifacts.items.find(a => a.id === id && a.origin === 'user'),
     attachmentAt: (name: string, at: string | undefined) => attachmentAt(artifacts.items, name, at),
     byName: (name: string) => findLatest(artifacts.items, { name, origin: 'user' }),
@@ -419,7 +505,7 @@ export default function ChatView(props: ChatViewProps) {
       if (!a) return
       setAutoplay(false); setDiffAnchor(null); setReviewing(a.id); setViewing(a)
     } : undefined,
-  }), [sessionId, sessionOver, sessionEffort, currentChecklistItems, onOpenChecklistItem, canOpenWorkspace, files, latestVersions, artifacts.items, send, refreshArtifacts, publishedSessionUrl])
+  }), [channelRecommendationRevision, blackboardRecommendationRevision, transport, props.readOnly, props.onOpenBlackboard, sessionId, sessionOver, sessionEffort, currentChecklistItems, onOpenChecklistItem, canOpenWorkspace, files, latestVersions, artifacts.items, send, refreshArtifacts, publishedSessionUrl])
   const consumeLink = props.onLinkedArtifactConsumed
   function closeViewer() {
     setAutoplay(false)
@@ -447,12 +533,12 @@ export default function ChatView(props: ChatViewProps) {
   const inputLocked = status === null || status === 'starting' || ended
   const endLine = ended && meta ? describeSessionEnd(meta) : null
   const pending = s.pending
-  const pendingActive = pending !== null && !terminal && !pendingSettled(pending, events)
+  const pendingActive = !props.recoveryPaused && pending !== null && !terminal && !pendingSettled(pending, events)
   // Neither while the history is still coming in: the session is at its final state by then, and what
   // the replay passes through (running, waiting, idle again) would flash in the line.
   const replayed = s.replayDone && !s.hasMore
-  const waiting = replayed && status === 'waiting' && !pendingActive
-  const working = replayed && !waiting && (pendingActive || status === 'running')
+  const waiting = replayed && !props.recoveryPaused && status === 'waiting' && !pendingActive
+  const working = replayed && !props.recoveryPaused && !waiting && (pendingActive || status === 'running')
   // Times below are server time: event ts values are the server's clock, and
   // clockOffset (from the replay's server_time) maps the browser's onto it.
   const clockOffset = s.clockOffset
@@ -500,9 +586,11 @@ export default function ChatView(props: ChatViewProps) {
   const bgDescription = bgCount === 1 ? bgRunning[0].description : ''
   const bgCommand = bgCount === 1 ? bgRunning[0].command : ''
   const bgSince = bgRunning.reduce<number | null>((min, t) => (t.startedAt !== null && (min === null || t.startedAt < min) ? t.startedAt : min), null)
+  const stoppedWait = useMemo(() => backgroundWaitStopped(events), [events])
+  const stoppedBackground = !working && !waiting && stoppedWait
   const backgroundNow = useMemo<BackgroundLine | null>(
-    () => (bgCount > 0 ? { count: bgCount, description: bgDescription, command: bgCommand, since: bgSince } : null),
-    [bgCount, bgDescription, bgCommand, bgSince],
+    () => (bgCount > 0 ? { count: bgCount, description: bgDescription, command: bgCommand, since: bgSince, stopped: stoppedBackground } : null),
+    [bgCount, bgDescription, bgCommand, bgSince, stoppedBackground],
   )
   // The working line's suffix and background words are read from the events held, so while a
   // history is still coming in (the replay's pages, an older page) a call whose result, or a task
@@ -539,17 +627,38 @@ export default function ChatView(props: ChatViewProps) {
     events.some(ev => (ev.seq ?? 0) > pending.afterSeq) ||
     status !== 'idle'
   )
+  // Delivery, proven: the server's own receipt of the input (input_accepted), or the event that
+  // echoes it having arrived. Distinct from answered: a long step after delivery is a wait, not a
+  // failure, however long PENDING_ACK_MS has been exceeded. Kept in refs so the timeout below reads
+  // what is true when it fires, not what was true when it was scheduled.
+  const deliveredIds = useMemo(() => deliveredClientIds(events), [events])
+  const echoedIds = useMemo(() => echoedClientIds(events), [events])
+  const deliveredRef = useRef(deliveredIds)
+  const echoedRef = useRef(echoedIds)
+  useEffect(() => { deliveredRef.current = deliveredIds }, [deliveredIds])
+  useEffect(() => { echoedRef.current = echoedIds }, [echoedIds])
   const clearPending = s.clearPending
   const giveUpQueued = s.giveUpQueued
+  // The message a timeout gave up on, as long as nothing has since proven it delivered: read fresh
+  // every render, so a late acknowledgment (the daemon was just busy with a long step) retracts the
+  // warning instead of outliving the thing it warned of. Giving up itself (clearing pending,
+  // staling the queued bubble, logging the cause) happens once per send, in the timeout itself; the
+  // clientId is kept afterwards so the warning's fate no longer depends on pending still being set.
+  const [gaveUpOn, setGaveUpOn] = useState<string | null>(null)
   useEffect(() => {
     if (!pending || answered) return
+    const { clientId, afterSeq } = pending
     const t = setTimeout(() => {
+      if (deliveredRef.current.has(clientId) || echoedRef.current.has(clientId)) return
       clearPending()
       giveUpQueued()
-      setNotice('No response from the session — it may not have received your message. Try sending it again.')
+      console.error('chat: message unacknowledged by the workspace past the timeout', { sessionId, afterSeq })
+      setGaveUpOn(clientId)
     }, PENDING_ACK_MS)
     return () => clearTimeout(t)
-  }, [pending, answered, clearPending, giveUpQueued])
+  }, [pending, answered, clearPending, giveUpQueued, sessionId])
+  const lost = gaveUpOn !== null && !deliveredIds.has(gaveUpOn) && !echoedIds.has(gaveUpOn)
+  const sendNotice = notice ?? (lost ? 'No response from the workspace — it may not have received your message. Try sending it again.' : null)
 
   // Sent messages the transcript has not recorded yet: each is replaced by its
   // real event, in order. If the session ended or failed first, the message is
@@ -588,6 +697,7 @@ export default function ChatView(props: ChatViewProps) {
       return false
     }
     setNotice(null)
+    setGaveUpOn(null)
     attachments.clear()
     setPin(n => n + 1)
     return true
@@ -644,12 +754,12 @@ export default function ChatView(props: ChatViewProps) {
   const resumeRow = useMemo(() => canResume
     ? async (eventId: string) => {
         if (!transport.connected()) {
-          setNotice('Not connected — the session was not resumed. Try again once reconnected.')
+          setNotice('Not connected — the workspace was not resumed. Try again once reconnected.')
           return false
         }
         const r = await send(RESUME_PROMPT)
         if (!r.queued) {
-          setNotice('Not connected — the session was not resumed. Try again once reconnected.')
+          setNotice('Not connected — the workspace was not resumed. Try again once reconnected.')
           return false
         }
         setNotice(null)
@@ -705,14 +815,13 @@ export default function ChatView(props: ChatViewProps) {
       } : undefined,
     }
   }, [shownEvents, reviewList, sessionId, transport, props.readOnly, files, artifacts.items])
-  const askOpen = asks.open !== null && !!transport.answersAsks && (!(asks.open.payload as { owner_only?: boolean })?.owner_only || props.canAnswerApprovals === true)
 
   // What a view beside the chat (useLiveState: the host's side panel) reads about this session:
   // whether a call can be in flight, whether it can run or ask anything, the asks the server
   // closed, how to answer one or open the Files panel, and the Files list as last read.
   const setReport = useChatReportStore(st => st.setReport)
   const clearReport = useChatReportStore(st => st.clearReport)
-  const inFlightNow = status === 'running' || status === 'waiting'
+  const inFlightNow = !props.recoveryPaused && (status === 'running' || status === 'waiting')
   const over = terminal || ended
   // With the Files button off there is no dialog to open: a caller must not be able to set showFiles.
   const filesButton = props.filesButton !== false
@@ -723,9 +832,9 @@ export default function ChatView(props: ChatViewProps) {
   const filesReport = useMemo<ChatFiles | undefined>(() => (files
     ? { ops: files, items: artifacts.items, status: artifacts.status, refresh: refreshArtifacts, attach: readOnly ? undefined : attachFiles }
     : undefined), [files, artifacts.items, artifacts.status, refreshArtifacts, readOnly, attachFiles])
-  // The agent is working (a turn runs or waits, or a message just sent has not settled): the host's
+  // A turn, an unacknowledged message, or a background wait keeps the host's
   // Stop shows (the runner's is in the session header, far from Send) and calls interrupt.
-  const busy = status === 'running' || status === 'waiting' || pendingActive
+  const busy = !props.recoveryPaused && (status === 'running' || status === 'waiting' || pendingActive || (live && background !== null && !background.stopped))
   const interrupt = readOnly ? undefined : s.interrupt
   useEffect(() => {
     setReport(sessionId, { inFlight: inFlightNow, live, ended: over, closedAsks, answer: answerAsk, openFiles, compact, filesKey, files: filesReport, busy, interrupt })
@@ -735,11 +844,9 @@ export default function ChatView(props: ChatViewProps) {
 
 
   const placeholder = ended
-    ? 'This session has ended — start a new session to keep working'
+    ? `This ${conversationNoun} has ended — start a new ${conversationNoun} to keep working`
     : status === 'starting' || status === null
-    ? 'The session is starting — you can message it once it is ready'
-    : askOpen
-      ? 'Answer the agent’s question…'
+    ? `The ${conversationNoun} is starting — you can message it once it is ready`
     : props.placeholder
       ? props.placeholder
       : live && !hasUserMessage
@@ -767,6 +874,7 @@ export default function ChatView(props: ChatViewProps) {
   const scrollScope: object = transport.files ?? transport
   const [scrollFrom] = useState(() => peekContent<TranscriptScroll>(scrollScope, sessionId, 'scroll:transcript') ?? null)
   const keepScroll = useCallback((scroll: TranscriptScroll) => contentKeeper<TranscriptScroll>(scrollScope, sessionId, 'scroll:transcript')(scroll, 64), [scrollScope, sessionId])
+  const chatName = props.chatName || conversationNoun.charAt(0).toUpperCase() + conversationNoun.slice(1)
   const transcript = (
     <Transcript
       scrollFrom={scrollFrom}
@@ -777,6 +885,7 @@ export default function ChatView(props: ChatViewProps) {
       compact={compact}
       thinking={props.thinking}
       cards={cards}
+      chatName={chatName}
       messageFooter={slots.messageFooter}
       describeUserMessage={props.describeUserMessage}
       liveIds={liveIds}
@@ -811,7 +920,7 @@ export default function ChatView(props: ChatViewProps) {
     <WrapScopeContext.Provider value={files?.queueScope?.() ?? ''}>
     <ChatContext.Provider value={chatContext}>
     <RefContext.Provider value={refContext}>
-    {placeChat(<div className={`agent-chat${props.className ? ` ${props.className}` : ''}`} data-testid="agent-chat" style={props.theme ? themeStyle(props.theme) : undefined} onCopy={e => handleChatCopy(e.nativeEvent, e.currentTarget)} {...dropProps}>
+    {placeChat(<div ref={chatRootRef} className={`agent-chat${props.className ? ` ${props.className}` : ''}`} data-testid="agent-chat" style={props.theme ? themeStyle(props.theme) : undefined} onCopy={e => handleChatCopy(e.nativeEvent, e.currentTarget)} {...dropProps}>
       {dragging && <div className="drop-zone" role="status" data-testid="drop-zone">Drop files to attach</div>}
       <div className="agent-toolbar">
         {slots.header}
@@ -858,7 +967,7 @@ export default function ChatView(props: ChatViewProps) {
           publishHint={props.publishHint}
         />
       )}
-      {files && <ReviewRequestContext.Provider value={reviewContext}><HostedViewers sessionId={sessionId} files={files} artifacts={artifacts.items} onSaved={refreshArtifacts} /></ReviewRequestContext.Provider>}
+      {files && <ReviewRequestContext.Provider value={reviewContext}><HostedViewers sessionId={sessionId} files={files} artifacts={artifacts.items} onSaved={refreshArtifacts} cards={cards} /></ReviewRequestContext.Provider>}
       {openArtifact && files && (
         <ReviewRequestContext.Provider value={reviewContext}>
         <ArtifactViewer
@@ -910,8 +1019,8 @@ export default function ChatView(props: ChatViewProps) {
         <div className="agent-offline ended" role="status" data-testid="ended-banner">
           <span className="agent-offline-dot" aria-hidden="true" />
           <span>
-            <strong>This session has ended.</strong>{' '}
-            {endLine ? `${endLine.text}. ` : ''}It can’t be resumed — start a new session to keep working.
+            <strong>This {conversationNoun} has ended.</strong>{' '}
+            {endLine ? `${endLine.text}. ` : ''}It can’t be resumed — start a new {conversationNoun} to keep working.
           </span>
         </div>
       )}
@@ -920,20 +1029,15 @@ export default function ChatView(props: ChatViewProps) {
           <span className="agent-offline-dot" aria-hidden="true" />
           <span>
             {meta?.runtime === 'cluster' || !meta?.runtime
-              ? <><strong>No pod is running for this session.</strong> It timed out or was stopped. Send a message and a new pod will start and pick up where it left off. Work that was committed is restored; uncommitted changes are not.</>
-              : <><strong>This session is disconnected from its machine.</strong> Messages are delivered when it reconnects.</>}
+              ? <><strong>No pod is running for this workspace.</strong> It timed out or was stopped. Send a message and a new pod will start and pick up where it left off. Work that was committed is restored; uncommitted changes are not.</>
+              : <><strong>This workspace is disconnected from its machine.</strong> Messages are delivered when it reconnects.</>}
           </span>
         </div>
       )}
-      {notice && (
-        <div className="agent-notice" role="status" data-testid="send-notice">{notice}</div>
+      {sendNotice && (
+        <div className="agent-notice" role="status" data-testid="send-notice">{sendNotice}</div>
       )}
-      {askOpen && !props.readOnly && !inputLocked && (
-        <div className="agent-composer-hint ask-open" data-testid="ask-composer-hint">
-          The agent asked a question — what you send now answers it
-        </div>
-      )}
-      {working && !askOpen && !props.readOnly && (
+      {working && !props.readOnly && (
         <div className="agent-composer-hint" data-testid="composer-hint">
           {steers ? 'Working — Enter sends it to the agent' : 'Working — Enter queues your message'}
         </div>
@@ -959,6 +1063,7 @@ export default function ChatView(props: ChatViewProps) {
         key={sessionId}
         sessionId={sessionId}
         storage={storage}
+        heightScope={files?.queueScope?.()}
         placeholder={placeholder}
         locked={inputLocked}
         onSubmit={submit}

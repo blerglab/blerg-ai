@@ -47,15 +47,24 @@ func (a *API) coreDesktopCall(ctx context.Context, path string, body, out any) e
 	req.Header.Set("X-Internal-Key", a.coreInternalKey)
 	res, err := coreHTTPClient(nil).Do(req)
 	if err != nil {
-		return errDesktopCredential
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return errDesktopUnavailable
 	}
 	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusOK {
-		return errDesktopCredential
+		if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
+			return errDesktopCredential
+		}
+		return errDesktopUnavailable
 	}
 	raw, err = io.ReadAll(io.LimitReader(res.Body, 64<<10))
 	if err != nil {
-		return errDesktopCredential
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return errDesktopUnavailable
 	}
 	if json.Unmarshal(raw, out) != nil {
 		return errDesktopCredential
@@ -68,7 +77,10 @@ func (a *API) authenticateDesktop(ctx context.Context, token string) (desktopaut
 		return b, errDesktopCredential
 	}
 	err := a.coreDesktopCall(ctx, "/internal/desktop-tokens/validate", map[string]string{"token": token}, &b)
-	if err != nil || b.DesktopID == "" || b.OwnerID == "" || b.Revision < 1 || b.TokenID == "" || !b.ExpiresAt.After(time.Now()) {
+	if err != nil {
+		return desktopauth.Binding{}, err
+	}
+	if b.DesktopID == "" || b.OwnerID == "" || b.Revision < 1 || b.TokenID == "" || !b.ExpiresAt.After(time.Now()) {
 		return desktopauth.Binding{}, errDesktopCredential
 	}
 	return b, nil
@@ -145,15 +157,16 @@ func (a *API) HandleDesktopOwnership(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) HandleAssignDesktop(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	if _, ok := a.desktopAdmin(w, r); !ok {
+	actor, ok := a.desktopAdmin(w, r)
+	if !ok {
 		return
 	}
-	a.assignDesktopFor(w, r)
+	a.assignDesktopFor(w, r, actor)
 }
 
 // assignDesktopFor assigns the desktop for an administrator already authenticated by the
 // browser route or by core on the internal route.
-func (a *API) assignDesktopFor(w http.ResponseWriter, r *http.Request) {
+func (a *API) assignDesktopFor(w http.ResponseWriter, r *http.Request, actor string) {
 	var body struct {
 		Owner    string `json:"owner_id"`
 		Revision int64  `json:"ownership_revision"`
@@ -186,7 +199,7 @@ func (a *API) assignDesktopFor(w http.ResponseWriter, r *http.Request) {
 		if err != nil || before == nil {
 			return db.ErrDesktopAuthority
 		}
-		assigned, err = db.AssignDesktop(ctx, a.dbPool, id, body.Owner, body.Revision)
+		assigned, err = db.AssignDesktopAuditedBy(ctx, a.dbPool, id, body.Owner, actor, body.Revision, "assigned")
 		if err != nil {
 			return err
 		}

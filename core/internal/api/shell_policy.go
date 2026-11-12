@@ -90,26 +90,52 @@ func (d Deps) handleAuthorizeShell(w http.ResponseWriter, r *http.Request) {
 	if !d.shellInternal(w, r) {
 		return
 	}
-	var body struct {
-		Owner string `json:"owner_id"`
-		Login string `json:"login_id"`
-	}
+	var body wire.AuthorizationRequest
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2048))
 	dec.DisallowUnknownFields()
-	if dec.Decode(&body) != nil || body.Owner == "" || body.Login == "" || dec.Decode(new(any)) != io.EOF {
+	if dec.Decode(&body) != nil || body.Owner == "" || body.Login == "" || len(body.Nonce) > 128 || dec.Decode(new(any)) != io.EOF {
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
-	_, _, live, err := d.principalLiveness(r.Context(), body.Owner, "", body.Login)
+	var live bool
+	var err error
+	var deadline time.Time
+	if body.Nonce != "" {
+		svc, ok := d.identitySvc()
+		if !ok {
+			http.Error(w, "identity unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		_, deadline, live, err = svc.HumanSessionDeadline(r.Context(), body.Owner, body.Login)
+	} else {
+		_, _, live, err = d.principalLiveness(r.Context(), body.Owner, "", body.Login)
+	}
 	if err != nil {
 		http.Error(w, "identity unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	if !live {
-		http.Error(w, "sign-in unavailable", http.StatusForbidden)
+		if body.Nonce == "" {
+			http.Error(w, "sign-in unavailable", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(wire.AuthorizationDenial{Version: 1, Outcome: "deny", Owner: body.Owner, Login: body.Login, Nonce: body.Nonce, Reason: "login_unavailable"})
 		return
 	}
-	d.handleGetShellPolicy(w, r)
+	if body.Nonce == "" {
+		d.handleGetShellPolicy(w, r)
+		return
+	}
+	policy, readErr := d.ShellPolicy.Read(r.Context())
+	if readErr != nil {
+		http.Error(w, "shell policy unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, wire.AuthorizationAllowed{ShellPolicy: policy, AuthorizationVersion: 2, Outcome: "allow", Owner: body.Owner, Login: body.Login, Nonce: body.Nonce, LoginExpiresAt: deadline.Unix()})
 }
 
 // The authenticated stream contains policy and identity IDs only. Dropped/stalled streams

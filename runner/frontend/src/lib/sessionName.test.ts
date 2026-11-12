@@ -11,8 +11,8 @@ describe('the default session name', () => {
     expect(defaultSessionName('blerglab/blerg', [])).toBe('blerg')
   })
   it('is "Session" without a repository', () => {
-    expect(defaultSessionName('', [])).toBe('Session')
-    expect(defaultSessionName(null, ['Session'])).toBe('Session 2')
+    expect(defaultSessionName('', [])).toBe('Workspace')
+    expect(defaultSessionName(null, ['Workspace'])).toBe('Workspace 2')
   })
   it('is numbered past the names running sessions have', () => {
     expect(defaultSessionName('blerg', ['blerg'])).toBe('blerg 2')

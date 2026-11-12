@@ -19,6 +19,7 @@ func ProcessStart(pid int) string {
 	}
 	return strings.TrimSpace(string(b))
 }
+func processUnit(int) string { return "" }
 func ancestors(pid int) map[int]string {
 	out := make(map[int]string)
 	for n := 0; pid > 1 && n < 128; n++ {

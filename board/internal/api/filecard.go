@@ -21,7 +21,7 @@ func validFilingDraft(d boardfiling.Draft) bool {
 	clean := func(s string, n int) bool {
 		return utf8.ValidString(s) && utf8.RuneCountInString(s) <= n && !strings.ContainsFunc(s, unicode.IsControl)
 	}
-	if strings.TrimSpace(d.Title) == "" || !clean(d.Title, 200) || len(d.Body) > 256<<10 || !utf8.ValidString(d.Body) || strings.ContainsRune(d.Body, 0) || !clean(d.Type, 64) || len(d.Repos) > 100 {
+	if !d.ValidEstimates() || strings.TrimSpace(d.Title) == "" || !clean(d.Title, 200) || len(d.Body) > 256<<10 || !utf8.ValidString(d.Body) || strings.ContainsRune(d.Body, 0) || !clean(d.Type, 64) || len(d.Repos) > 100 {
 		return false
 	}
 	for _, repo := range d.Repos {

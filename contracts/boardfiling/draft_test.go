@@ -46,3 +46,25 @@ func TestDigestIgnoresJSONKeyOrderButPreservesApprovedText(t *testing.T) {
 		t.Fatal("digest normalized approved text")
 	}
 }
+
+func TestDraftDigestBindsEstimates(t *testing.T) {
+	var a, b Draft
+	_ = json.Unmarshal([]byte(`{"title":"Estimate","size":"M","risk":"high","complexity":"low"}`), &a)
+	_ = json.Unmarshal([]byte(`{"title":"Estimate","size":"M","risk":"low","complexity":"low"}`), &b)
+	if Digest("board-a", a) == Digest("board-a", b) {
+		t.Fatal("approval digest ignores risk")
+	}
+}
+
+func TestDraftEstimateValidation(t *testing.T) {
+	for _, d := range []Draft{{}, {Size: "M", Risk: "high", Complexity: "low"}} {
+		if !d.ValidEstimates() {
+			t.Fatal("valid estimate rejected")
+		}
+	}
+	for _, d := range []Draft{{Size: "XS"}, {Risk: "extreme"}, {Complexity: "huge"}} {
+		if d.ValidEstimates() {
+			t.Fatal("invalid estimate accepted")
+		}
+	}
+}

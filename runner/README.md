@@ -1,8 +1,24 @@
 # blerg-runner
 
+The 0.6.0 shell keeper does not protect against arbitrary same-UID host
+processes: they can read its identity/key files, kill it, or read its memory.
+Sandbox and cluster sessions and other host UIDs remain inside the security
+boundary. Keeper failure costs shells only; agents continue running.
+
+Get a session's recorded branch with `blerg-runner session result <id>` and use
+its `branch` value wherever `<work-branch>` appears below. For a child, pass the
+child's ID. Branch names stay fixed after a rename; never derive them from IDs
+or titles. Workspace results also report each member's branch.
+
 The session runner for Blerg — it spawns and supervises coding-agent sessions and streams their
 work back as structured JSON events. Part of the Blerg monorepo; the control plane is `blerg-core`
 and the board is `blerg-board`.
+
+Workspaces group Main, named channels and workers in a shared dock. Needs you keeps
+person-required decisions visible; the [blackboard](../docs/blackboard.md) holds the plan.
+Save and restore [workspace layouts](../docs/session-tabs.md#recovering-and-saving-layouts),
+open live board and ticket views (including on phones), and read charts and diagrams
+alongside files. Viewer content can be printed and messages downloaded as Markdown.
 
 ## Components
 
@@ -11,7 +27,7 @@ and the board is `blerg-board`.
   sessions (one status glyph per card, in an order that does not move when a state changes, with
   the usage meters at its top and the version and commit at its foot) and, per session, the chat
   with a side panel (Live, History, Files, Capabilities): see
-  [`docs/talking-to-an-agent.md`](../docs/talking-to-an-agent.md#the-session-panel).
+  [`docs/talking-to-an-agent.md`](../docs/talking-to-an-agent.md#the-workspace-panel).
 - **daemon** (`cmd/daemon`) — runs on a workstation, dials the server, and spawns/supervises the
   actual agent sessions using the host's engine CLIs (`claude`, `codex`, …). This is where sessions
   really run, so it needs the operator's engine login (for Claude a subscription via
@@ -29,28 +45,38 @@ out loud, every time: the **Run** column shows all three as radio cards with not
 There is no implicit fallback onto the least sandboxed one — running unsandboxed is always a
 choice someone made and acknowledged.
 
+The cluster has a named target, `cluster`, returned as `runtime_target_id` by
+launch discovery and session metadata. Cluster starts and discovery accept this
+ID; omitting it selects the default, and an unknown ID returns 422 before launch.
+Copy the discovered ID on `POST /api/sessions`, `POST /api/runner/start`, or MCP
+`start_session`. `discover_launch_options` accepts the same field. The launch
+sheet displays its name and omits the sole default ID for rolling-upgrade compatibility; only one cluster target is offered in
+0.6.0. Desktop placement continues to use `daemon_id`. Older clients and daemons
+can keep omitting the new field. Cron APIs also accept and return it. A target on create or PATCH pins the cron to cluster, including when runtime is auto; automatic placement without a target stays unpinned. Adding the
+explicit default target to an explicit cluster start preserves its legacy request
+hash, so a migrated cron can retry an existing idempotent start without creating
+another session.
+
 The wire spelling is the `runtime` field on `POST /api/sessions`: `cluster` | `docker` | `daemon`,
-for both session kinds. Anything else is `422 invalid runtime` (an unrecognized value is refused
+for agent sessions. Anything else is `422 invalid runtime` (an unrecognized value is refused
 rather than defaulted, because defaulting would land the session on the *least* sandboxed
 runtime). An empty value means `daemon`, for callers older than the Run column. The value is
 recorded on the session row and returned, with `kind`, by `GET /api/sessions` — that is what the
-`Cluster` / `Sandbox` / `Host` and `Agent` / `Terminal` chips on each session card read.
+`Cluster` / `Sandbox` / `Host` and legacy `Terminal history` chips on each session card read.
 
 | | **Cluster pod** — `cluster` | **Local sandbox** — `docker` | **This machine** — `daemon` |
 |---|---|---|---|
 | What it is | a throwaway Job pod in the cluster's session namespace | a hardened container on the connected daemon's host | the daemon host itself, as the user the daemon runs as |
 | Agent session | the pod runs the engine | the daemon runs the engine **inside** the container (`docker exec -i -w /workspace`) | the daemon runs the engine on the host, as you, with no permission prompts |
-| Existing Terminal session (deprecated; removal in 0.5.0) | unavailable | tmux inside the same container | tmux on the host |
 | Needs | a configured cluster runtime (`BLERG_RUNNER_AGENT_IMAGE`; see below) | a connected daemon reporting `sandbox_available` — i.e. the sandbox image is built | a connected daemon |
 | Credentials | a per-session Secret holding the launching account's own engine + git credentials, falling back to the operator Secret | a sandbox home of the session's own with the current sign-in of the engine it runs (the refresh token replaced by a placeholder; re-copied from the host every 15 s, never read back) and that engine's configuration read-only, settings copied without their secrets, never the engine directories themselves (`docs/sandbox-image.md`); for Claude with no such login, `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` is passed into the container | your own logins on that machine, directly |
-| Refuses | terminal sessions | OpenClaw (`OpenClaw runs only on the host`); Claude with no credential the container can see | — |
-| "Bypass permission prompts" toggle | not offered | terminal sessions only (`dangerously_skip_permissions` is docker-only) | not offered |
+| Refuses | — | OpenClaw (`OpenClaw runs only on the host`); Claude with no credential the container can see | — |
 | Acknowledgement | none | none | required |
 
-A sandboxed **agent-kind** session gets exactly the same container the terminal sandbox gets —
+A sandboxed agent session runs in a hardened container with
 `--cap-drop ALL`, `--security-opt no-new-privileges`, `--pids-limit 512`, `--memory 4g`, a clone
 of its own of the repo at `/workspace` (never the checkout or its `.git`; its commits come back on
-`wip/<session_id>`, see [`docs/sandbox-image.md`](../docs/sandbox-image.md#what-a-sandbox-works-in-and-where-its-commits-land)),
+`<work-branch>`, see [`docs/sandbox-image.md`](../docs/sandbox-image.md#what-a-sandbox-works-in-and-where-its-commits-land)),
 the credential mounts above, and a `BLERG_RUNNER_*`-only environment — and the
 engine process runs inside it rather than on the host. The daemon master token never enters it.
 Preflight for such a spawn checks the image and looks for the engine binary *inside the image*,
@@ -61,12 +87,10 @@ never on the host PATH. The engine versions in the image are pinned (`sandbox/en
 **Launch-sheet defaults.** Where it runs = **Cluster pod** when the install has a cluster runtime
 configured (even if a daemon is connected), else **Local sandbox** when a connected daemon has the
 sandbox image, else **This machine** — which then cannot be launched until the acknowledgement is
-ticked. Session type = **Agent**. New Terminal sessions are refused with "Terminal sessions are deprecated and will be removed in 0.5.0"; existing Terminal sessions keep working. Engine, model and effort are whichever were used last (Claude
+ticked. Session type = **Agent**. Terminal sessions have been removed. Existing Terminal history stays readable, with no resume or runtime discovery. Engine, model and effort are whichever were used last (Claude
 first time; the model then defaults to Sonnet at its default effort). The Model picker lists what
 Claude Code's own `/model` offers, fetched live — see [Model lists](#model-lists). Unsandboxed is never a default, and a runtime or type the user picked is never overwritten
-by a later data refresh. Choosing OpenClaw forces **This machine**. A board's **Assist**
-still starts a Terminal session (exempt from the deprecation until it moves to an agent session in
-0.5.0). A start that names no `kind` is refused with `kind "agent" is required`.
+by a later data refresh. Choosing OpenClaw forces **This machine**. Board sessions use agents. A start that names no `kind` is refused with `kind "agent" is required`.
 
 The agent-facing contract, [`POST /api/runner/start`](#starting-a-session), takes the same three
 values and, with `runtime` omitted, the same defaults: cluster where one is configured, else the
@@ -96,6 +120,11 @@ that lands on **This machine** (no sandbox image, or `runtime: "daemon"`) runs u
 host as you.
 
 ## API contract v1
+
+Start sessions through `POST /api/sessions`, which records the selected runtime.
+The browser WebSocket no longer accepts `spawn_session` requests. The unused
+runner `POST /api/boards/{id}/assist` endpoint was also removed in 0.6.0; the
+Board app starts agent sessions through the runner contract.
 
 The agent-facing half of blerg-runner: start a coding-agent session, drive it, follow it, collect
 its result — over REST or MCP, with a credential a user mints in a browser. Everything below is
@@ -162,6 +191,11 @@ Paths are relative to the runner's `base_url`.
 | `GET` | `/packages/{file}` | a package tarball | public, immutable |
 | `POST` | `/mcp` | MCP server (JSON-RPC 2.0) | the REST session and discovery operations as tools |
 
+Interrupt stops the work running now. Older clients may send `target_event_id`; it is
+accepted and ignored. Every request reports stopping, stopped, nothing running, or a refusal.
+Repeated requests during Stop repeat its progress. A 500 ms guard after completion absorbs
+late double-clicks before another Stop can interrupt the next turn.
+
 Every `/api/runner/sessions/{id}` route answers `404 session not found` for an id that does not
 exist — and for one the calling credential may not see (see
 [What "runs as you" means](#what-runs-as-you-means)).
@@ -185,6 +219,7 @@ exist — and for one the calling credential may not see (see
 | `callback_url` | no | where to POST the result when the session ends |
 | `callback_secret` | no | HMAC key signing that callback. Stored to sign with; never returned by any endpoint, never logged |
 | `auto_stop` | no | one-shot: end the session as soon as its first turn is done. `false` by default |
+| `verbosity` | no | `narrated`, `standard`, or `terse`, independent of interaction mode. Uses the account default (Standard when unset); children default to Terse. |
 | `interaction` | no | `interactive` or `unattended`: whether a person is reading the session's chat as it works. `unattended` by default on this contract. See [Interactive and unattended](#interactive-and-unattended) |
 
 Validation, and the status each failure answers with:
@@ -360,7 +395,7 @@ tried again at the next heartbeat). Only the messaging token is re-issued: delet
 
 ### Why a session ended
 
-A terminal session also says **why** it ended (`end_reason`) and, when an actor ended it, **what
+An ended session also says **why** it ended (`end_reason`) and, when an actor ended it, **what
 kind of actor** (`ended_by: {kind}` — `human`, `agent`, `service` or `runner_key`; `null` when
 nobody did). Both are in the status, the result, the SSE `end` event and the webhook; the session
 page in the browser shows them as one line ("Ended by you", "Stopped automatically when its task
@@ -422,7 +457,13 @@ soon as its engine is up — no "waiting for you" notification for that (see
 ### Notifications
 
 The runner tells a person when a session needs them, as a toast in every open runner page and, when
-nobody has used one for three minutes, an OS push (never for a private session). The server decides
+nobody has used one for three minutes, an OS push for ordinary shared-session notices. Child
+questions stay with Main without a time limit. Only Main explicitly escalating a
+question makes it notify the person and appear in Needs you. If Main is gone,
+waiting stops without an answer and a plain notice names the worker. A child's command approval
+also waits for Main's next step before Main escalates it to the person. Person-directed
+`ask --no-wait` questions also push to the owner's registered browsers, including for private
+sessions. The server decides
 when and words it (`internal/server/notices.go`) and sends browsers a `session_notice`
 (`{session_id, status, title, body, url}`), which they show as given:
 
@@ -450,8 +491,7 @@ makes interactive) and its Assist sessions, which a person drives, keep their no
 What an agent session has loaded — skills, plugins, MCP servers, slash commands, tools and
 subagents — is reported as a transcript event of kind `capabilities`. It persists and replays like
 any other event, appears in `…/events`, the SSE stream and MCP `get_events`, and is what the
-session panel's **Capabilities** tab shows (a terminal session's Skills & plugins dialog says it has
-none). Only the latest one describes the session. Payload:
+session panel's **Capabilities** tab shows. Only the latest one describes the session. Payload:
 `{engine, engine_name?, model?, version?, cwd?, permission_mode?, sandbox_mode?, note?, groups: [{id, label,
 note?, total?, items: [{name, description?, detail?, status?, source?}]}]}`, with group `id` one of
 `skills`, `plugins`, `mcp`, `commands`, `tools`, `agents` (in that order). A group the engine does
@@ -465,7 +505,7 @@ report with `GET /api/sessions/{id}/capabilities` (`{capabilities, seq, ts}`, or
 | native loop | the skills, subagent types and tools it discovered | once at start |
 | Codex | skills under `$CODEX_HOME/skills` (`.system` = built in) | once at start |
 | Hermes | skills under `~/.hermes/skills` (not for a sandboxed session: the sandbox does not mount it) | once at start |
-| OpenClaw, terminal (tmux) sessions | nothing — the panel says so; the terminal is never scraped | — |
+| OpenClaw | nothing — the panel says so | — |
 
 Claude Code's init lists skill names only; a name matching a `SKILL.md` the daemon found for the
 session (project, user or plugin) gets that skill's description and scope. MCP servers are reported
@@ -566,6 +606,11 @@ derived from what it says so an import sent twice records it once. Each mark is 
 `mark`, payload `{id, kind, by, text, commits?, card?, board_id?, at?, posted_by}`; a session holds at
 most 500, counted after the request so a duplicate never counts (over the cap, the request records nothing: `409`). A back-dated mark's id covers its kind, by, at, text, card, board and commits.
 
+**Channel emoji.** Main and channels can have one optional emoji. An agent sets its own with
+`blerg-runner title --emoji "🔎"`; use `--emoji ""` to clear it. The person can choose
+**Change emoji** from the channel row menu. The server accepts one Unicode emoji sequence
+and refuses other text, bidi controls and control characters. Workers keep their subdued rows.
+
 **Renames.** `blerg-runner title "<title>"` posts `POST /api/sessions/{id}/title` (`{"title"}`,
 trimmed, 1 to 200 characters; the session's own token, as topics; `200 {session_id,title}`), and a
 parent renames a child through `POST /api/sessions/{id}/children/{child}/title`. `PATCH
@@ -583,9 +628,11 @@ case-sensitive; of several matches the first not yet in that state), `{"op":"rem
 ticks, commits and diffs; the event's `changed` is the item removed), `{"op":"clear"}`. At most 50
 items of 200 characters, cleaned of control characters. The read of the current list and the append
 run in one transaction under a per-session advisory lock. Recorded as an event of kind `checklist`
-holding the full list after the change: `{items:[{text, done}], op, changed?:{index, text, done}}`;
-the reply is that payload (`201`). A refusal is a `400` with a sentence, an ended session a `409`,
-the 501st checklist event of a session a `429`.
+holding only the change: `{delta:true, op, changed, updates:[item], removed:[id], total, completed}`.
+`set` and `clear` events contain full replacement lists. The current state is stored separately,
+with checkpoints every 100 writes for historical replay; older full-list events remain readable.
+The reply still contains the full resulting list (`201`). A refusal is a `400` with a sentence,
+an ended session a `409`, and more than 60 changes per minute a `429` (`Retry-After: 60`).
 
 `GET /api/sessions/{id}/checklist/workers` uses that same own-session credential and active-session
 restriction, returns `{workers:[{kind,id,title,status}],truncated}`, and never reads another session's
@@ -622,7 +669,7 @@ cut (key 64, title 300, status/type/priority 64, people 120, labels 20 × 64, de
 fields 30 × (80, 500), comments the last 5 × (120, 40, 2 000), acceptance 30 × 500) and cleaned of
 control characters; `url` must be an http(s) address; unknown fields are dropped; a value of the
 wrong type is a `400` naming it (`null` reads as absent). A pin is identified by `(source, key)`; at
-most 5 at once (`409`), at most 100 ticket events per session (`429`; an unpin is always allowed).
+most 5 at once (`409`), 60 pin changes per minute (`429`; an unpin is always allowed), with no lifetime cap.
 Recorded as an event of kind `ticket`: `{ticket, action: "pin"|"update"|"unpin", previous?:{status,
 title}}` (an update is a re-pin of a ticket already pinned; an unpin's ticket holds only source, key,
 title, status and url). The reply is that payload with `pinned`, the summaries after it, current
@@ -634,6 +681,9 @@ id on the item (`diff`). See [Diffs](../docs/artifacts.md#diffs).
 
 **Code colors.** `GET`/`PUT /api/me/preferences` keep the person's chat code color choice
 (migration 057); an app's chat proxy reads it with `GET /api/runner/preferences?account=<id>`.
+
+**Work branches.** Settings saves an account's `branch_template` through the same preferences endpoint.
+See [Work branches](../docs/work-branches.md) for placeholders, collision handling, and compatibility.
 
 **Live state.** `GET /api/sessions/{id}/live` (the same people as `/topics`; `ETag`/`If-None-Match`,
 `Cache-Control: private, no-store`) answers what the session panel's Live tab shows, read from the
@@ -804,15 +854,15 @@ return the same object, with every field always present:
 {
   "session_id": "…", "lifecycle": "ended", "terminal": true, "runtime": "cluster",
   "repo": "example-repo", "git_url": "https://example.com/org/example-repo.git",
-  "branch": "wip/<session_id>", "last_assistant_message": "…", "error_reason": "",
+  "branch": "<work-branch>", "last_assistant_message": "…", "error_reason": "",
   "end_reason": "stopped_by_agent", "ended_by": {"kind": "agent"}, "auto_stop": false,
   "started_at": "2026-09-25T12:00:00Z", "ended_at": "2026-09-25T12:31:00Z", "artifacts": []
 }
 ```
 
 `branch` is the convention the session runtime names its work after, derived from the session id: a
-cluster session pushes `wip/<session_id>`, and every sandboxed session in a repository (a child or
-not) commits on `wip/<session_id>` in its own clone, which the daemon fetches into that repository on
+cluster session pushes `<work-branch>`, and every sandboxed session in a repository (a child or
+not) commits on `<work-branch>` in its own clone, which the daemon fetches into that repository on
 its desktop. It is empty for a host session and a session with no repository, neither of which
 makes one.
 `last_assistant_message` is the main agent's last text in the session's **last turn** only
@@ -840,7 +890,7 @@ the bytes, the server-classified content type, the hardening headers (`nosniff`,
 | `GET …/artifacts/{aid}/download` | the bytes as an attachment, named after the file (an older version as `<stem>-v<N><ext>`) |
 | `DELETE …/artifacts/{aid}` | `204`. The session owner or an administrator may delete any file, and a person the attachments they attached; visibility is checked first. `403` with a sentence otherwise |
 | `POST …/storage` | an administrator raises the session's attachment total by 500 MiB, up to the install maximum; `200` `{limits, can_increase}`, `403` for anyone else, `409` (`code: "storage_at_maximum"`) at the maximum. Each raise is recorded (`session_storage_audit`) |
-| `POST …/uploads` | the body is the file, `X-Artifact-Name` (percent-encoded) or `?name=` its name; stored with `origin: user` and attributed to the account the credential acts for. `201` with the stored file (`previous` is the version it follows). 100 MiB per file and 500 MiB of attachments per session (no lifetime file-count cap), 20 versions per name (the sizes are configurable, see below, and the status above reports them); `409` on an ended session or a reached cap, `413` for a file over the limit (the message names both sizes; send `Content-Length` and it is refused before the body is read) |
+| `POST …/uploads` | the body is the file, `X-Artifact-Name` (percent-encoded) or `?name=` its name; stored with `origin: user` and attributed to the account the credential acts for. `201` with the stored file (`previous` is the version it follows). 100 MiB per file and 500 MiB of attachments per session (no lifetime file-count cap), 500 versions per name (the sizes are configurable, see below, and the status above reports them); `409` on an ended session or a reached cap, `413` for a file over the limit (the message names both sizes; send `Content-Length` and it is refused before the body is read) |
 
 The artifact list also returns `limits` (with this session's own `max_session_upload_bytes` and
 the install's `max_session_upload_cap_bytes`), `can_delete` (the owner or an administrator) and
@@ -858,10 +908,22 @@ Core administrator settings (`GET`/`PUT /api/settings/session-storage`), read by
 applies until one is saved. A total-size refusal is a `409` with
 `code: "file_space_required"`; version-count refusals remain ordinary `409` errors. The browser
 saves waiting attachment bytes locally, checks space before sending large bodies, and retries
-after deletion, refocus, or a five-second space check. See [freeing file space](../docs/artifacts.md#uploading-files-to-a-session).
+after deletion, refocus, or a five-second space check. See [freeing file space](../docs/artifacts.md#uploading-files-to-a-workspace).
 
 An `artifact` event in the transcript announces each file the agent publishes, with the same
 fields as a list entry minus `latest_version` and `created_at`.
+
+### Launch permissions and command policies
+
+The `permissions` object on `POST /api/sessions` is a closed schema for existing
+child, board, and MCP permission grants. Unknown fields, including fields inside
+board levels and MCP tool selections, return `422` before the session starts.
+Top-level unknown request fields return `400`.
+
+Command, Git, and path policies are not supported yet. Permission grants and MCP
+proposal approvals do not enforce shell restrictions. Do not send task rules as
+permission fields or rely on prompt text to enforce them. See the
+[policy design and remaining enforcement work](../docs/design/command-git-policies.md).
 
 ### Sessions starting sessions (session-token routes)
 
@@ -887,7 +949,8 @@ sessions all return the same `404`.
 | `PUT /api/sessions/{id}/child-approval` | Same owner login only: `{runtime:"docker"|"daemon"|"cluster",enabled:boolean,revision}` atomically sets or revokes exact session grants of that runtime (the current desktop's, or the cluster's). A stale revision returns `409`; reload before explicitly trying again. |
 | `POST /api/delegation-grants/{id}/revoke` | Owner revokes a session grant; existing children continue. |
 | `GET /api/sessions/{id}/children` | `{children:[...]}` with status, lifecycle, model, effort, runtime, asking, delegation and keep-running fields. |
-| `GET /api/sessions/{id}/children/{child}` | Session status plus authoritative `open_asks:[{message_id,body}]`. |
+| `GET /api/sessions/{id}/children/{child}` | Session status plus authoritative `open_asks:[{message_id,body,escalated,no_wait,waiter_ended}]`. |
+| `POST /api/sessions/{id}/children/{child}/questions/{question}/escalate` | Parent token only; requires nonempty `{summary,recommendation}`. The person sees Main's explanation followed by the original worker question. Flagged questions reach Main first; only a person may answer after escalation. |
 | `POST /api/sessions/{id}/children/{child}/message` | `{text,client_id?}`; `202`, including `answered_ask` when it answers an open question. An idle cluster child is resumed with the sign-in it was started with (a desktop parent's) or the parent's newest (a cluster parent's); with none live, `409` says to ask the person to send it from their browser. |
 | `POST /api/sessions/{id}/children/{child}/model` | `{model?,effort?}`; `202`. |
 | `POST /api/sessions/{id}/children/{child}/title` | `{title}` (trimmed, 1 to 200 characters); `200 {session_id,title}`. Renames that child (this parent's own children only) and records a `session_renamed` event `{from,to,by:"parent"}` in its History. |
@@ -929,11 +992,13 @@ by an upgrade or by reading this endpoint.
 | `blerg-runner budget [--json]` | Read provider capacity before selecting an engine. |
 | `blerg-runner session start ...` | Start a child or wait for its approval. |
 | `blerg-runner session wait <request>` | Resume waiting on a pending request. |
-| `blerg-runner session list` / `watch <child>` | List children or follow completed messages, tools and open questions. |
+| `blerg-runner session list` / `watch <child>` | List children or follow completed messages, tools and open questions. An already idle child with a completed turn returns its last answer immediately; queued new work keeps the watch waiting; `--after` replays from an explicit cursor. Results include `status` (as listed) alongside the broader `lifecycle`. |
 | `blerg-runner session discard <child>` | Stop and archive a worker; retain its history, Insights totals and direct URL. |
 | `blerg-runner session send <child> <text>` | Send a message; agents must leave destructive approval questions to the person. |
 | `blerg-runner session upload <child> <file>` / `files <child>` / `download <child> <artifact>` | Exchange files through the artifact service. |
 | `blerg-runner session model <child> ...` / `interrupt <child>` / `stop <child>` / `result <child>` | Change settings, interrupt, stop or read results. Model changes confirm the model and any supplied effort. |
+
+Discarding a child marks its unanswered questions `withdrawn`, keeps them in the child’s history, and tells the parent they went unanswered. An answer poll returns `withdrawn: true`, `answered: false`; `ask` exits 4.
 
 Waiting commands default to 100 seconds and exit with code 3 when still waiting, printing a command
 to continue. The request remains pending until answered, canceled, or its ten-minute server expiry.
@@ -1151,7 +1216,7 @@ tail of the CLI's stderr when it exited non-zero).
 The launch sheet asks for the list of the daemon it is about to launch on, shows the `main` models
 as pills and the rest under **More models**, then an **Effort** row for the selected model (its
 default preselected, or **Auto** when it has none), and sends the full model id plus `effort` for
-both terminal and agent sessions. It does not ask until the daemon is known, and a daemon-reported
+agent sessions. It does not ask until the daemon is known, and a daemon-reported
 list asked for without a daemon is never shown (neither in the sheet nor in a session's chat). When
 no list was reported for Codex or Hermes (an older daemon, a probe that found nothing) it shows an
 optional free-text **Model name** instead — checked against the engine's model rule before it can
@@ -1162,11 +1227,9 @@ never offered for one (the free-text box is). For a model
 the list knows, the start is refused (`422`) unless the effort is one of that model's own levels;
 an alias such as `sonnet`, a typed name, or a daemon-reported list when the daemon is not known
 (`POST /api/runner/start`, a cluster session) gets the engine's allowlist only. The daemon passes
-model and effort through each engine's own flags (table above) — in tmux, in agent-kind turns, and
+model and effort through each engine's own flags (table above) in agent turns and
 inside the sandbox; the cluster pod gets them as `BLERG_RUNNER_MODEL` / `BLERG_RUNNER_EFFORT`. The
-launch effort is recorded on the session. A tmux session's command is passed to tmux as separate
-arguments, which tmux ≥ 3.0 runs without a shell — required for a bracketed alias such as
-`sonnet[1m]` to reach the CLI intact.
+launch effort is recorded on the session.
 
 **Hermes in the Local sandbox.** A sandboxed Hermes session reaches a model server on the LAN: the
 container joins the `blerg-sandbox` network when it exists (else Docker's default bridge), and both
@@ -1228,7 +1291,7 @@ Hermes, the Docker runtime, and that desktop; Settings lists the rule and lets y
 Standing rules cover repositories on that desktop, not only the repository in the first request.
 Hermes standing rules default to local-only, so the desktop must still report Hermes as local
 (the local-status cache lasts up to five minutes). A later matching request can start without
-another card, subject to the parent's permissions and account limits. See [child-session permissions](../docs/talking-to-an-agent.md#when-the-agent-starts-other-sessions).
+another card, subject to the parent's permissions and account limits. See [child-session permissions](../docs/talking-to-an-agent.md#when-the-agent-starts-workers).
 
 In-session changes (`/model`, `/effort` in the chat, or the chat's Model/Effort selectors) are
 checked against the session engine's rules by the daemon before any engine sees them; a refused
@@ -1245,7 +1308,7 @@ effort that fails those rules (and logs it) rather than starting a pod that woul
    has no row.
 2. **Flags** — the engine's `EngineSpec` in `internal/daemon/engines.go` declares `ModelFlag`
    (`AgentModelFlag` if its headless agent invocation spells it differently) and, if it takes
-   effort, an `EffortArgs(effort) []string` hook. Every invocation — tmux, agent-kind turns,
+   effort, an `EffortArgs(effort) []string` hook. Every invocation — agent turns,
    sandboxed or not — renders model/effort through `modelEffortArgs`, which drops anything that
    fails the engine's rules; `NewAgentDriver` receives the spec, model and effort in
    `AgentDriverOpts`. Without the hook, effort is never passed.
@@ -1372,7 +1435,7 @@ credential; lookup failures and revoked authority refuse startup. On a
 launcher — in the **Local sandbox** (the default for the launch sheet and for board-started
 sessions alike when there is no cluster and the daemon has the image) the engine runs inside a
 container that can see `/workspace` (a clone of its own of the repository, whose commits the daemon
-brings back to `wip/<session_id>`), a sandbox home with the engine's current sign-in and its
+brings back to `<work-branch>`), a sandbox home with the engine's current sign-in and its
 configuration read-only, and nothing else of the machine, with no git credentials (it can commit but not push) and, of the stack's services, a route to the
 board and runner only (via `blerg-sandbox`); on **This machine** it runs on the host with full filesystem
 access, which the launch sheet asks the launcher to acknowledge and a v1 start gets with
@@ -1471,7 +1534,7 @@ before you launch. What happens depends on where the session runs:
   disk. The session gets a new, empty folder directly under the daemon's repos root, named
   `.scratch-<suffix>`. The Local sandbox makes that folder an empty Git repository and works in a
   clone of it, like every sandbox: what it commits (and what it left uncommitted at the stop) lands
-  on `wip/<session_id>` in the scratch folder's repository, not in its working tree. The
+  on `<work-branch>` in the scratch folder's repository, not in its working tree. The
   sheet generates a name such as `.scratch-granite-3f9a`, shows it with the repos folder, and
   offers a Rename. The daemon creates it on the new-folder path and never clones into it.
   Because the name starts with a dot, the folder never appears in the repos list (the daemon
@@ -1522,7 +1585,7 @@ selected. What happens:
    error). The session starts either way.
 3. The pod gets `BLERG_RUNNER_NEW_REPO=1`. It retries the clone a few times (a repository created
    seconds ago may not be clonable yet). When the clone keeps failing it runs `git init` on the
-   session's `wip/<id>` branch with `origin` set to the clone URL (the person's token included,
+   session's `<work-branch>` branch with `origin` set to the clone URL (the person's token included,
    as in a normal clone), marks the `clone` stage as a warning ("Initialized an empty repository
    — no remote yet"), prepends a note to the agent's first prompt saying the remote does not
    exist and must be created before pushing, and reports the first failed push as an `error`
@@ -1653,6 +1716,67 @@ Adding one (Bitbucket, a self-managed GitLab via `NewGitLabAt`, GitHub Enterpris
 `NewGitHubAt`) is an implementation plus a `Register` call, plus its id in core's
 `gitCredentialKinds` and a Settings entry so people can store a token for it.
 
+## Reading repository branch graphs
+
+`GET /api/sessions/{id}/git/graph` reads the selected authorized member's local
+branch refs and topologically ordered commits with parents. Supply `member_id`,
+`generation`, and `launch_generation` from the current workspace status reply.
+`depth` defaults to 50 and accepts 1–200. The response has `commits` (sha,
+parents, subject, date), `refs` (name, sha), `default_branch`, `more`, and the
+member/runtime reference. At most 64 refs are returned by descending committer
+date, reserving main and the default branch when present. The default comes from
+origin’s symbolic HEAD, then main, master, or the checked-out branch.
+`refs_limited` indicates omitted older or unreadable refs. A damaged ref falls
+back to a bounded healthy subset. Git walks a window bounded by depth and ref
+count; only that window is sorted topologically, without requiring a commit graph.
+
+Only the signed-in session owner can read a graph, with desktop ownership and
+runtime/member fences checked again at delivery. The daemon pins the repository
+and uses the isolated, bounded Git reader. It never writes, fetches, reads worker
+checkouts, or asks workers for state. Sandbox commits appear after turn-end sync.
+The Repositories dock lists names only, with the Channels heading and plain add
+control. Click a repository to open its graph tab; use its context menu (right
+click, long press, or Shift+F10) for removal. Pending changes remain on the row.
+The full tab starts with quiet commit/branch/tag counts and meaningful repository
+status, followed by one collapsed summary per tag and the continuous colored
+commit graph. Branch chips stay compact; subjects follow the fitted lane column.
+The tab uses the existing in-app diff viewer. Phones scroll horizontally.
+More history extends the same graph, up to 200 rows. No graph polling timer runs.
+One graph per person or desktop leaves capacity for plan sync and commit diffs.
+
+The same read discovers up to 16 recent local commit tags (including annotated
+tags), returning `tags` (name, peeled sha, contains, previous, complete) and
+`tags_limited`. Tags seed the same bounded Git walk. Ancestry is proven only
+within the displayed window: `contains` lists reachable visible commits,
+`previous` is the nearest reachable older tag in that window, and `complete`
+is false when a parent or tagged commit lies outside it. Missing inclusion is
+unknown, never a claim of exclusion. Release chips show branches and merges
+between that tag and its predecessor; partial ranges are labeled. These are Git
+tag landmarks, not provider release metadata. No caller supplies a ref or runs
+an unbounded ancestry query. Commit subjects reuse the existing confirmed card
+references for #N and BLG-N, opening the card inside Blerg.
+
+## Reading local branch history
+
+`GET /api/sessions/{id}/git` returns the recorded work branch, comparison base,
+and up to 30 commits beyond their merge base. `/git/diff` returns the unified
+comparison (at most 2 MiB). Optional `branch` and `base` query parameters name
+local branches; no path or revision expression is accepted. Multi-repository
+workspaces require `member_id`, `generation`, and `launch_generation`; an
+unqualified history read lists the available members instead of choosing one.
+The same live human ownership, desktop authority, runtime fences, concurrency,
+and output limits used by commit lookup below apply. The Board brokers its
+current human's independently verified viewer proof; a stored automation token
+never substitutes for that person. No Git hosting API or network fetch is used.
+
+## Workspace colors
+
+`PATCH /api/sessions/{id}` accepts a `color` edit separately from a title edit:
+`""` (None), `blue`, `orange`, `purple`, `teal`, `silver`, `indigo`, `gold`,
+`coral`, `cyan`, `violet`, `lime`, or `rose`. Only the human owner or an
+administrator may edit it. Session responses include `color`, and the privacy
+filtered `session_color_changed` broadcast carries `session_id` and `color`.
+
 ## Reading a commit from a session's workspace
 
 A commit chip's hovercard and its on-demand diff read the commit from the session's own workspace:
@@ -1779,7 +1903,7 @@ requires reading Go source to discover.
 | `BLERG_RUNNER_MCP_GW_URL` | no | — | the address **sessions dial** to reach the gateway: an in-cluster Service URL for pods, the runner's address on the sandbox network for desktop sandbox containers. Sent to a session in its config. A daemon that reports `mcp_gateway_via_server` is told to dial the gateway through its own server address instead (`BLERG_RUNNER_SERVER_HTTP`, else derived from its WebSocket URL), where the runner serves it on the web port under `/mcp-gw/` for grants issued to daemon sessions for that route only (`BLERG_RUNNER_MCP_GW_PUBLIC`). A launch with MCP connections is refused with a specific message while it is unset |
 | `BLERG_RUNNER_BOARD_URL` | no | — | the board's base address **as the runner reaches it** (absolute `http(s)`, no credentials, query or fragment; for example `http://blerg-board:8080`). A cron's failure card is posted to the board's API there, and the built-in `board` connection's MCP endpoint defaults to `<this>/mcp`. Unset or invalid: crons get no board connection and no failure card. See [`docs/crons.md`](../docs/crons.md) |
 | `BLERG_RUNNER_SANDBOX_CLUSTER_CHILDREN` | no | `once` | whether a **sandboxed** desktop session's cluster children may start without a card: `once` (a card per child, the default; any other value means the same) or `any` (session permissions and standing cluster rules apply, as for an unsandboxed desktop session). Only matters with a cluster runtime. See [`install/k8s/CLUSTER-RUNTIME.md`](../install/k8s/CLUSTER-RUNTIME.md#desktop-sessions-cluster-children) |
-| `BLERG_RUNNER_GRANT_HOURLY_CAP` | no | `20` | how many proposals one session permission may approve on its own in an hour; past it, proposals wait for the person and say why. See [`docs/proposals.md`](../docs/proposals.md#session-permissions) |
+| `BLERG_RUNNER_GRANT_HOURLY_CAP` | no | `20` | how many proposals one session permission may approve on its own in an hour; past it, proposals wait for the person and say why. See [`docs/proposals.md`](../docs/proposals.md#workspace-permissions) |
 | `BLERG_RUNNER_BOARD_MCP_URL` | no | `<BLERG_RUNNER_BOARD_URL>/mcp` | overrides the built-in `board` connection's MCP endpoint alone (same validation as above). Usually a private address: it is fetched by the runner's gateway, never by a session |
 | `BLERG_RUNNER_MCP_ALLOW_HTTP_HOSTS` | no | empty | comma-separated hostnames for which an MCP connection URL may use plain `http://` (otherwise `https` only). Applies to the gateway and to the launch sheet's tool listing. Core has its own list, `BLERG_CORE_MCP_ALLOW_HTTP_HOSTS` |
 | `BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS` | no | empty | comma-separated hostnames an MCP connection may reach although they resolve to a loopback, link-local, private, carrier-grade NAT or metadata address. Every other host is checked on the address actually dialled. Core has its own list, `BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS` |
@@ -1831,6 +1955,14 @@ the hello field; the daemon then takes a connection that stays open for 5 second
 logs that the server did not confirm it. A 0.2.0 daemon never asks for a welcome, so it gets none.
 For the reconnect backoff (2 s doubling to 60 s), only a confirmed connection, or one open for those
 5 seconds, starts the ladder over; a `4401` never does.
+
+After a runner restart, workspace authority is recovered for the same persisted launch,
+runtime generation and root on the authenticated desktop connection. A turn ending before
+background recovery completes can perform that recovery inline; it never allocates a new
+runtime. Failed `local_workspace_control_result` replies carry a typed `cause`, also logged
+with rate limiting. `connection_recovery_required` is retryable; `refused` remains the separate,
+definitive instruction to stop retrying a superseded or ended launch. Older peers that omit
+`cause` retain the existing transient-failure behavior.
 
 The daemon (not a session pod) writes its connection state to `<state dir>/connection.json`, mode
 0600, through a temporary file and a rename:
@@ -2044,7 +2176,7 @@ support these settings too. Sidebar meter colors retain their fixed 80/90/95 lev
 A daemon usage report sends an authenticated `usage_limit` relay to working top-level agent
 sessions on that desktop using the reported engine. Working means a running turn or running
 managed child sessions. Idle sessions with no running children, child sessions (including kept
-children whose parent has gone), native subagents, terminal sessions and ended sessions receive
+children whose parent has gone), native subagents, legacy Terminal sessions and ended sessions receive
 none. A turn starting above unreported thresholds gets one current-state notice, covering the
 lower levels. Each threshold is remembered per session, desktop, engine and window instance, across
 runner restarts (migration 094). A report jumping past several thresholds sends one notice at
@@ -2067,3 +2199,255 @@ toast or push to the person. The sidebar uses amber from 80%, red from 90%, and 
 pulse on the fill and percentage from 95%. With reduced motion, the warning is solid bold red
 with a labeled `!` marker. Tiers follow the rounded percentage shown by the label; the capped
 chip also pulses and respects reduced motion. Meter tooltips include known reset times.
+
+### Workspace telemetry
+
+`blerg-runner workspace metrics` prints a short table for the current session and
+its owned descendants. Add `--json`, `--session ID`, `--turn SEQ` (the ending
+`turn_done` event sequence, or `0` for the open turn), or `--card BOARD#N`.
+The authenticated read is `GET /api/sessions/{id}/workspace/metrics`; query
+parameters are `format=table`, `session`, `turn`, and `card`. A child's credential
+cannot read its parent's tree. Human reads require ownership. Card filtering
+reports only work already visible within that tree, without fetching card text.
+Session insights include `turn_metrics`; owner-scoped card data includes `turns`.
+Turn detail in aggregate reads is capped at the latest 100 turns, with a full
+count and an explicit truncation flag. Select `--session ID --turn SEQ` to read
+an older stored turn; gate fractions cover all stored completed turns.
+
+Each turn excludes idle gaps and partitions elapsed time using the existing
+activity interval sweep: parallel tools and background tasks count once.
+Model time is residual running time, including uninstrumented engine work.
+Unknown usage remains null. Outcomes distinguish completion, Stop, failure,
+and an unfinished turn at session end. Lifecycle instrumentation records sync,
+freeze, and thaw separately; their interval counts once as `turn_end` time.
+Absent instrumentation stays unknown (`turn_end_basis: "unknown"` and an empty lifecycle map). Compact derived
+turn counters are stored separately from the canonical events and can be rebuilt.
+
+A long gate outside the session's process tree can register explicitly:
+
+```
+blerg-runner workspace run --id run-a --suite runner-unit --commit abcdef1 --full-suite
+blerg-runner workspace run --id run-a --suite runner-unit --commit abcdef1 --full-suite --progress 10
+blerg-runner workspace run --id run-a --suite runner-unit --commit abcdef1 --full-suite --progress 10 --state finished
+```
+
+Use the same ID to update one run. Progress is completed work units; an unchanged
+heartbeat does not reset its progress clock. States are `running`, `finished`,
+`failed`, and `stopped`. Optional `--started-at` and `--ended-at` accept RFC3339
+for externally observed intervals, and `--card BOARD#N` adds explicit attribution.
+Registration is `POST /api/sessions/{id}/workspace/metrics/runs` and accepts the
+same fields as JSON, with snake_case names. Registrations are metadata claims
+from the owning session, not proof that a suite passed. Each session can register
+32 runs. A running registration expires after an hour without a heartbeat;
+heartbeats renew that lease without resetting the progress clock.
+
+Import BLG-368's existing gate recorder JSONL with
+`blerg-runner workspace metrics --import-gates .superpowers/gate-runs.jsonl`.
+The importer retains suite intervals and commits, ignores commands and captured
+output, and is idempotent. Explicit gate intervals participate in the same union
+as tools. Register live runs at start when Main needs progress during execution;
+importing a completed record alone cannot describe a running gate.
+
+Main's next existing input carries a one-line workspace snapshot through
+`plan_drift`, capped below 600 bytes by a test. It reports worker states, longest
+running work, gate state, and a recent runtime machine sample when available.
+Linux samples contain load, allocated Go CPU concurrency, and free disk space;
+other platforms and stale samples remain unknown. No hostname, address or path
+is collected. Telemetry never starts an extra model turn and respects plan nudges.
+A root without workers gets no snapshot. Telemetry uses a separate 250 ms
+budget, reads compact turn rows in batches, and never holds the next input or
+prevents plan facts from being delivered. Stable fact keys suppress repeated
+threshold notices; Main and stopped workers are excluded from worker nudges.
+Static actions flag more than half of a worker's time in gates, a running turn
+past 30 minutes, idle past 15 minutes, three full runs of a suite at one commit,
+registered work without progress for 15 minutes, undelivered child turn notices
+past five minutes, turn-end work above 30 seconds and twice its recent average,
+load above 1.5 times CPU concurrency, and less than 2 GiB free disk.
+
+The process exec barrier publishes bounded PID/time evidence without I/O,
+allocation, or waiting on the exec path. Its observer keeps only known program
+names, classes and intervals, correlated with tool calls when ownership is
+unambiguous. Asynchronous image reads and the cheap Linux `/proc` sampler are
+marked approximate. Where process observation is unavailable, command text
+provides an approximate fallback. Generated literal shell scripts can be
+followed through explicit interpreter calls; writing a heredoc alone is not
+execution. No argv, paths, environment, or arbitrary program names are retained
+in process evidence. Local sandbox images include a Go metrics helper.
+Helpers push evidence down a nonblocking pipe of their own, never the control
+stream, so it cannot delay a freeze, a stop or an empty receipt. The session merges
+it into at most one row per 30 seconds plus one ahead of each `turn_done`, and those
+rows stay out of transcript tails.
+
+For a private offline audit, use
+`blerg-runner workspace metrics --events events.json`. Its gate/model fractions
+use recorded session wall time; `turn_seconds` and `turn_gate_fraction` separately
+report active turns, excluding idle gaps. Historical script inference is
+approximate; an observed process interval or explicit suite record is stronger
+evidence. Completed rows are written once, newest first on legacy histories;
+older uncached turns remain unavailable rather than replaying full histories
+on the input-delivery path.
+
+### Session verbosity
+
+Set the account default under Settings → Session verbosity. The launch sheet offers
+Narrated, Standard, Terse, or Account default. Narrated explains progress and reasoning;
+Standard gives concise milestone updates; Terse keeps routine progress quiet and replies
+brief. This setting does not change permissions, required questions, or whether the
+session is interactive or unattended. Children default to Terse, including when the
+parent or account uses Narrated. A child launch can explicitly choose another style.
+
+The session's Verbosity control changes the guidance for its next input turn without
+interrupting work. The current turn keeps its existing guidance. The setting is saved
+with the session for recovery and resume; changing the account default affects new
+sessions only. All engines receive the style through the shared session guidance.
+
+Browser clients can use `POST /api/sessions/{id}/verbosity` with
+`{"verbosity":"terse"}`. Only the signed-in owner or an administrator who can see the
+session may change it; agent credentials cannot. The response includes
+`applies_to: "next_turn"`. Session list and status responses report `verbosity`.
+The account default uses the existing `GET/PUT /api/me/preferences` key `verbosity`.
+
+Local Git review requires an open, connected workspace and a current daemon. Ended
+workspaces do not fall back to provider or repository reads; use the recorded PR
+and work branch. History shows at most 30 recent commits and shortens long subjects
+and author names. Diffs use local objects only; blobless cluster clones can lack
+objects needed for a diff, in which case the viewer explains why it cannot open it.
+
+## Automatic card commit summaries
+
+When a workspace delivers commits at turn end or session end, the daemon collects
+commit subjects, authors, dates and file line counts from the delivered objects.
+Sandbox collection happens only after the existing hardened import into the
+trusted source repository. It never executes host Git in the sandbox's metadata.
+No patches, commit bodies, checkout paths or credentials are published.
+
+The runner snapshots the accepted results and card context in the same database
+transaction. Pinned cards, an unambiguous board's `#N` title references, and the
+pin created by a run from a card are candidates for `commit_summary`, including
+after the workspace closes. Later unpinning or renaming cannot redirect a saved
+delivery. A cumulative snapshot updates the same session/member/launch entry;
+repository/commit identities are deduplicated across entries. Limits are 100
+commits and 300 files per member, 96 KiB per delivered summary, and 20 entries
+within 120 KiB per published card summary. Omitted metadata sets `truncated`.
+
+Publication is a server completion effect using the retained owner's sign-in
+proof (the originating same-owner ancestor for a child), rather than an agent's
+revoked session grants. Core validates that proof and the board authorizes each
+read/write; a scoped proof cannot publish another project's results. Linking a
+private session to a card does not itself authorize publication. At publication
+time, the target must be the exact server-recorded launch card, or its board must
+have file or full permission granted to this session by the person. Automatic
+permission cleanup at session end preserves that permission for completion;
+lowered or explicitly revoked permission does not. Agent pins and title changes
+cannot grant publication access. Skipped targets leave a visible session update.
+No new session route or transcript access is introduced. Existing sessions without
+a recorded launch card need a retained file or full board permission.
+
+A background sweep runs every 15 seconds, with at most 32 deliveries per sweep
+and ten seconds per board attempt. Board failures never block a turn. Results
+and retry state survive server restart; writes use the card version guard and
+safe retries after lost replies. A delivery retries at one-minute intervals up
+to five attempts, then records `commit_publication_failed` in session events and
+marks its durable delivery row failed and leaves a visible session update.
+Sessions without a card or delivered
+commits publish nothing. Older daemons that do not send metadata cannot backfill
+summaries after their checkout has gone.
+
+### Built-in workflow skill defaults
+
+Settings → Skills controls the built-in test-driven-development, ux-design and
+visualizing skills for the install (administrators), your account, or an owned
+workspace. All three default on. Any install, account, or workspace disable
+wins; enabling a narrower scope cannot undo it. Coordinating has no off switch
+and is applied only to Main, never a worker or a person-created channel.
+
+Settings apply to new sessions. Each launch records its applied skill inventory
+in `session_skill_policy`; recovery retains that inventory. The session panel's
+Capabilities → Skills list shows it alongside the engine's discovered skills.
+Historical sessions without a recorded inventory continue to show only their
+engine report.
+
+The browser-only `GET/PUT /api/skills/settings` resource reads and changes these
+switches. PUT takes `scope` (`install`, `account`, or `workspace`) and a `skills`
+object with boolean `test-driven-development`, `ux-design` and/or `visualizing`
+properties.
+Workspace requests also name the owned Main session in `?workspace=…`.
+`GET /api/sessions/{id}/skills` returns the recorded inventory and uses the same
+visibility boundary as the session panel. Agent credentials cannot change the
+person's settings.
+
+Scoped guidance travels in each engine's session prompt, not the workstation's
+shared skill discovery directories. Provisioning removes Blerg's old scoped
+links and refreshes an existing Blerg-managed instructions block; unrelated user
+instructions and skills are preserved. This keeps a disabled skill from being
+silently rediscovered through Blerg's previous global installation.
+
+Worker starts accept `kind`: `card`, `role`, `review` or `research` (CLI: `session start --kind`). The stored `worker_kind` is independent of the agent/terminal session kind. Omission infers card only from a ticket key in the creation title; other titles stay unset.
+
+
+### Board reconciliation from code (BLG-528)
+
+At each successful Main turn end, the runner reads each linked workspace repository's
+local `main` through its existing daemon binding. It does not fetch or run a model.
+Only commits reachable from local `main` with multiple parents and titles beginning `Merge BLG-N`
+qualify, including merges brought onto main by another merge. Multiple cards use `Merge BLG-12, BLG-34: description`. Ordinary follow-up
+commits do not move cards. Reverting an integration merge also deactivates the
+card merges it introduced, while preserving merges already on its first parent. Card references must use BLG and the card's repository
+name must exactly match the workspace member name (not its opaque ID or directory).
+Legacy scalar sessions use their recorded repository name and existing legacy daemon
+binding. A failed current workspace binding never falls back to that legacy path.
+Reconciliation runs even when conversational plan nudges are disabled.
+
+Every turn-end check logs a structured `board_code` outcome, including skipped gates,
+repository and card counts, successful writes, unmatched repositories, elapsed milliseconds,
+and busy retry counts. Transient daemon/commit-reader admission pressure gets one
+100 ms, cancellation-aware retry and a `daemon_busy_retried` diagnostic. Lookup
+failures distinguish binding/authority checks, capacity, dispatch, connection changes
+and reply timeouts. Daemon refusals name the safety check without private details. These run
+summaries are not rate limited; repeated failure diagnostics are. Failures and repository
+name mismatches also produce a held `plan_drift` fact when nudges are enabled. Diagnostics
+contain typed causes and counts, never repository paths, card contents, or credentials.
+
+Only first-parent merge commits qualify. The subject must be exactly `Merge BLG-N`
+or start with `Merge BLG-N:` (multiple keys such as `Merge BLG-N, BLG-M:` are allowed).
+Titles such as `Merge BLG-N chunk 4:` and `Merge fixes (BLG-N, partial):`,
+merge-body references and nested side-branch merges do not close cards or add deployment
+tags. Reconciliation leaves a preservation comment for partial or nonstandard merge
+activity, deduplicated against the card trail.
+
+A qualifying merge moves its card to the board's one terminal column, using the
+current card version. Automatic attempts record their merge SHA and cause in a
+card comment. The session needs existing Full board access; Read access only
+reports drift. Current access is checked again for each call. A human or curator
+move at or after the merge is preserved; deployment tags can still be added. Archived cards are untouched. If the
+bounded card trail cannot prove that no later manual move occurred, reconciliation
+reports incomplete history and makes no write.
+
+After a successful deploy, record the existing milestone mark with the explicit
+text prefix `Deployed:` and exactly one deployed commit, for example:
+`blerg-runner mark milestone "Deployed: staging" --commit <full-sha>`.
+The latest such mark on Main supplies deploy evidence. Git containment, rather
+than commit dates or mentioned card numbers, determines which merges receive the
+`to-test` tag. Existing tags are retained. A deployment whose SHA is absent from a
+member's repository does not supply deployment evidence for that member.
+
+Drift reaches Main through `plan_drift`: merged cards outside done, done cards
+without an active main merge only when their trail proves a move into Done after
+this server activation, reverted merges, preserved manual moves and
+incomplete card history. Historical fast-forwards, squashes and pre-convention Done
+cards stay quiet. Set `BLERG_RUNNER_BOARD_CODE_CUTOVER` to an RFC 3339 timestamp or
+UTC `YYYY-MM-DD` date for a stable boundary across restarts; an invalid value logs
+`invalid_cutover` and disables absence-based Done warnings. A recent comment or tag
+is never completion-date evidence. Recorded merge/deploy milestone marks naming a
+card and merge bodies naming it suppress this warning. Body mentions do not authorize
+moves; only bounded card numbers cross the daemon boundary. Explicit board-scoped
+milestones from the same owner's other sessions count; unscoped milestones require
+this Main and exactly one linked board. Drift text omits the commit label when no
+commit is known. An in-progress card with no running/starting linked
+worker and no update or explicit BLG commit for four hours is flagged, never
+moved back automatically. Git revert trailers cancel the referenced merge; a
+revert of the revert restores it. Disabling conversational nudges does not disable
+automatic reconciliation. Missing repositories, stale bindings, denied access,
+conflicts and bounded-history limits fail closed and log typed causes. Reads are
+local snapshots: changes made while Main is idle are reconciled on its next
+successful turn, and only recorded successful deployments supply tag evidence.

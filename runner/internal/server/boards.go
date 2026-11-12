@@ -37,22 +37,27 @@ type columnInfo struct {
 }
 
 type ticketInfo struct {
-	ID         string   `json:"id"`
-	BoardID    string   `json:"board_id"`
-	ColumnID   *string  `json:"column_id"`
-	Title      string   `json:"title"`
-	Body       *string  `json:"body"`
-	Priority   string   `json:"priority"`
-	Size       *string  `json:"size"`
-	Rank       string   `json:"rank"`
-	ArchivedAt *string  `json:"archived_at"`
-	SessionID  *string  `json:"session_id"`
-	Version    int      `json:"version"`
-	CreatedAt  string   `json:"created_at"`
-	UpdatedAt  string   `json:"updated_at"`
-	Tags       []string `json:"tags"`
-	Repos      []string `json:"repos"`
-	Blocked    bool     `json:"blocked"`
+	ID                   string     `json:"id"`
+	BoardID              string     `json:"board_id"`
+	ColumnID             *string    `json:"column_id"`
+	Title                string     `json:"title"`
+	Body                 *string    `json:"body"`
+	Priority             string     `json:"priority"`
+	Size                 *string    `json:"size"`
+	Risk                 *string    `json:"risk"`
+	Complexity           *string    `json:"complexity"`
+	SizeFirstSetAt       *time.Time `json:"size_first_set_at"`
+	RiskFirstSetAt       *time.Time `json:"risk_first_set_at"`
+	ComplexityFirstSetAt *time.Time `json:"complexity_first_set_at"`
+	Rank                 string     `json:"rank"`
+	ArchivedAt           *string    `json:"archived_at"`
+	SessionID            *string    `json:"session_id"`
+	Version              int        `json:"version"`
+	CreatedAt            string     `json:"created_at"`
+	UpdatedAt            string     `json:"updated_at"`
+	Tags                 []string   `json:"tags"`
+	Repos                []string   `json:"repos"`
+	Blocked              bool       `json:"blocked"`
 }
 
 // postBoardRequest is the body for POST /api/boards.
@@ -142,13 +147,13 @@ func ticketRowToInfo(r db.TicketRow) ticketInfo {
 		repos = []string{}
 	}
 	info := ticketInfo{
-		ID:        r.ID,
-		BoardID:   r.BoardID,
-		ColumnID:  r.ColumnID,
-		Title:     r.Title,
-		Body:      r.Body,
-		Priority:  r.Priority,
-		Size:      r.Size,
+		ID:       r.ID,
+		BoardID:  r.BoardID,
+		ColumnID: r.ColumnID,
+		Title:    r.Title,
+		Body:     r.Body,
+		Priority: r.Priority,
+		Size:     r.Size, Risk: r.Risk, Complexity: r.Complexity, SizeFirstSetAt: r.SizeFirstSetAt, RiskFirstSetAt: r.RiskFirstSetAt, ComplexityFirstSetAt: r.ComplexityFirstSetAt,
 		Rank:      r.Rank,
 		SessionID: r.SessionID,
 		Version:   r.Version,
@@ -411,7 +416,7 @@ func (a *API) HandleGetBoardOrder(w http.ResponseWriter, r *http.Request) {
 	// Sort: ready DESC, priority (urgent→low), rank ASC, id ASC (stable).
 	rows, err := a.dbPool.Query(ctx, `
 		SELECT id, board_id, column_id, title, body, priority, size, rank,
-		       archived_at, session_id, version, created_at, updated_at
+		       archived_at, session_id, version, created_at, updated_at, risk, complexity, size_first_set_at, risk_first_set_at, complexity_first_set_at
 		  FROM tickets t
 		 WHERE t.board_id = $1
 		   AND t.archived_at IS NULL
@@ -448,7 +453,7 @@ func (a *API) HandleGetBoardOrder(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(
 			&row.ID, &row.BoardID, &row.ColumnID, &row.Title, &row.Body,
 			&row.Priority, &row.Size, &row.Rank, &row.ArchivedAt, &row.SessionID,
-			&row.Version, &row.CreatedAt, &row.UpdatedAt,
+			&row.Version, &row.CreatedAt, &row.UpdatedAt, &row.Risk, &row.Complexity, &row.SizeFirstSetAt, &row.RiskFirstSetAt, &row.ComplexityFirstSetAt,
 		); err != nil {
 			log.Printf("api board order scan %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "scan failed")

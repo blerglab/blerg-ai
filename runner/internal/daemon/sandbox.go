@@ -87,7 +87,37 @@ var dockerRun = func(args ...string) error {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "docker", args...) //nolint:gosec // literal docker binary, args assembled by the daemon (no shell)
 	cmd.WaitDelay = time.Second
-	return cmd.Run()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	return dockerError(cmd.Run(), stderr.Bytes())
+}
+
+// dockerError adds the last line of docker's stderr (with the line before a usage hint) to a failed call's error, so a failure reads
+// "exit status 125: docker: Error response from daemon: …" instead of a bare exit status. Docker
+// prints no secret values there: the daemon passes secrets as `-e NAME`, never NAME=value.
+func dockerError(err error, stderr []byte) error {
+	if err == nil {
+		return nil
+	}
+	var lines []string
+	for _, l := range strings.Split(string(stderr), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) == 0 {
+		return err
+	}
+	// The docker CLI ends a usage error with a hint ("Run 'docker run --help' …"): the cause is
+	// the line before it, so keep both.
+	last := lines[len(lines)-1]
+	if len(lines) > 1 && (strings.HasPrefix(last, "Run '") || strings.HasPrefix(last, "See '")) {
+		last = lines[len(lines)-2] + " (" + last + ")"
+	}
+	if len(last) > 300 {
+		last = last[:300] + "…"
+	}
+	return fmt.Errorf("%w: %s", err, last)
 }
 
 // dockerCallTimeout bounds every dockerRun and dockerOutput call: no docker call may hold a
@@ -115,7 +145,9 @@ var dockerRunEnv = func(env []string, args ...string) error {
 	cmd := exec.CommandContext(ctx, "docker", args...) //nolint:gosec // literal docker binary, argv assembled by the daemon (no shell); container name is generated, remote and image come from validated config
 	cmd.Env = append(os.Environ(), env...)
 	cmd.WaitDelay = time.Second
-	return cmd.Run()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	return dockerError(cmd.Run(), stderr.Bytes())
 }
 
 // dockerOutput is dockerRun's sibling for the calls whose stdout matters

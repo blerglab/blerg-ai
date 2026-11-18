@@ -745,3 +745,25 @@ func TestSandboxRestrictedEngineMountsOnlySelectedLogin(t *testing.T) {
 		t.Fatal("unknown restricted engine broadened login mounts")
 	}
 }
+
+func TestDockerErrorAddsTheLastStderrLine(t *testing.T) {
+	base := errors.New("exit status 125")
+	if got := dockerError(nil, []byte("noise")); got != nil {
+		t.Fatalf("nil error: %v", got)
+	}
+	if got := dockerError(base, nil); got != base {
+		t.Fatalf("no stderr: %v", got)
+	}
+	got := dockerError(base, []byte("Unable to find image\ndocker: Error response from daemon: invalid mount config\n"))
+	if !errors.Is(got, base) || got.Error() != "exit status 125: docker: Error response from daemon: invalid mount config" {
+		t.Fatalf("got %q", got)
+	}
+	usage := dockerError(base, []byte("docker: invalid argument \"x\" for \"--mount\" flag: bad\n\nRun 'docker run --help' for more information\n"))
+	if usage.Error() != `exit status 125: docker: invalid argument "x" for "--mount" flag: bad (Run 'docker run --help' for more information)` {
+		t.Fatalf("usage: %q", usage)
+	}
+	long := dockerError(base, []byte(strings.Repeat("x", 400)))
+	if len(long.Error()) > len("exit status 125: ")+300+len("…") {
+		t.Fatalf("not capped: %d", len(long.Error()))
+	}
+}

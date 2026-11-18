@@ -385,3 +385,32 @@ func TestEngineCheckHandlerAnswersAndKicks(t *testing.T) {
 		t.Fatalf("%+v", res)
 	}
 }
+
+// Claude's entry in availableEngines must follow its status, whatever the
+// login source: a token in the environment, a credentials file, or (on macOS)
+// the Keychain, which leaves no file behind.
+func TestAvailableEnginesClaudeAgreesWithStatus(t *testing.T) {
+	home, bin := fakeEngineHost(t)
+	writeExe(t, filepath.Join(bin, "claude"), `echo "2.1.0 (Claude Code)"`)
+	agrees := func(when string) {
+		t.Helper()
+		st := statusOf(t, "claude")
+		if listed := slices.Contains(availableEngines(), "claude"); listed != (st.Status == protocol.EngineAvailable) {
+			t.Fatalf("%s: status %s but listed=%v", when, st.Status, listed)
+		}
+	}
+	agrees("installed, no file, no token") // not_logged_in on Linux; Keychain-backed available on macOS
+
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
+	if !slices.Contains(availableEngines(), "claude") {
+		t.Fatal("token in the environment: claude missing from availableEngines")
+	}
+	agrees("token")
+
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+	writeEngineFile(t, filepath.Join(home, ".claude", ".credentials.json"), `{"claudeAiOauth":{"accessToken":"tok"}}`)
+	if !slices.Contains(availableEngines(), "claude") {
+		t.Fatal("credentials file: claude missing from availableEngines")
+	}
+	agrees("credentials file")
+}

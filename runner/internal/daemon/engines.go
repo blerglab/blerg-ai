@@ -443,9 +443,15 @@ func openclawAlreadyConfigured() bool {
 // underlying DetectAvailable/claudeAvailable checks: reported to the server
 // in DaemonHello/DaemonHeartbeat so the launch UI can default its Engine
 // picker to something that will actually work, instead of guessing.
+//
+// Claude's entry follows claudeStatus, so the list agrees with the engine
+// status report: on macOS the CLI keeps its login in the Keychain rather than
+// ~/.claude/.credentials.json, and a daemon started with a token or API key
+// has no file either. Checking the file alone dropped Claude from this list
+// on every such host, which blocked Claude child sessions and crons there.
 func availableEngines() []string {
 	var found []string
-	if claudeAvailable() {
+	if claudeStatus(homeDir()).Status == protocol.EngineAvailable {
 		found = append(found, "claude")
 	}
 	for _, id := range engineOrder {

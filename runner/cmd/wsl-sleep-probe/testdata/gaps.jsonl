@@ -1,0 +1,6 @@
+{"version": 1, "sequence": 1, "wall": "2026-01-01T00:00:00Z", "boottime_ns": 1000000000, "monotonic_ns": 1000000000}
+{"version": 1, "sequence": 2, "wall": "2026-01-01T00:00:01Z", "boottime_ns": 2000000000, "monotonic_ns": 2000000000}
+{"version": 1, "sequence": 3, "wall": "2026-01-01T00:01:02Z", "boottime_ns": 63000000000, "monotonic_ns": 3000000000}
+{"version": 1, "sequence": 4, "wall": "2026-01-01T00:02:03Z", "boottime_ns": 64000000000, "monotonic_ns": 4000000000}
+{"version": 1, "sequence": 5, "wall": "2026-01-01T00:03:04Z", "boottime_ns": 125000000000, "monotonic_ns": 65000000000}
+{"version": 1, "sequence": 6, "wall": "2026-01-01T00:03:03Z", "boottime_ns": 126000000000, "monotonic_ns": 66000000000}

@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 // Card #229 in a real browser: buttons the button guard found bare now draw in the app style (no
 // browser default look) on a phone and on a 4K screen. The static guard is in SettingsPrimitives.test.ts.
 import { describe, expect, it } from 'vitest'
@@ -5,25 +6,34 @@ import { render, screen } from '@testing-library/react'
 import { page } from 'vitest/browser'
 import '../index.css'
 import './SessionRail.css'
+import { IconButton } from '@blerglab/chat'
 import ModelCatalogNotice from './ModelCatalogNotice'
 import { StartPluginSession } from './SessionPlugins'
 
 describe('buttons the guard fixed', () => {
-  it.each([390, 3840])('draw in the app style at %i px', async width => {
+  it.each(browserWidths([390, 3840]))('draw in the app style at %i px', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 844)
     render(<div style={{ display: 'grid', gap: 12, padding: 16, background: 'var(--basalt)', color: 'var(--chalk)' }} data-testid="shots">
       <ModelCatalogNotice state={{ models: [], error: 'Could not list models: the engine is not signed in.', retry: () => {}, refreshing: false } as never} />
+      <span><IconButton label="Retry permissions" labeled onClick={() => {}} /></span>
       <p role="status">Plugin added. <StartPluginSession /></p>
       <span className="reel-chips"><button type="button" className="reel-chip stroke-card">#42</button> <button type="button" className="reel-chip reel-card-chip">Board #7 Fix the build</button></span>
     </div>)
     const app = document.createElement('button')
     app.className = 'btn small'
     document.body.append(app)
-    for (const name of ['Retry models', 'Start a new session with it']) {
+    for (const name of ['Retry models', 'Retry permissions', 'Start a new workspace with it']) {
       const button = screen.getByRole('button', { name })
       const cs = getComputedStyle(button), ref = getComputedStyle(app)
-      expect(cs.backgroundColor).toBe(ref.backgroundColor)
-      expect(cs.borderTopWidth).toBe('1px')
+      expect(cs.backgroundColor).toBe(name === 'Start a new workspace with it' ? ref.backgroundColor : 'rgba(0, 0, 0, 0)')
+      if (name === 'Retry models') {
+        expect(button).toHaveAttribute('title', name)
+        expect(button.textContent).toBe('')
+        expect(button.getBoundingClientRect().width).toBeGreaterThanOrEqual(width === 390 ? 44 : 32)
+        expect(button.getBoundingClientRect().height).toBeGreaterThanOrEqual(width === 390 ? 44 : 32)
+      }
+      // Only the unlabeled refresh is quiet; labeled refresh and action buttons keep their outline.
+      expect(cs.borderTopWidth).toBe(name === 'Retry models' ? '0px' : '1px')
       expect(cs.borderTopLeftRadius).toBe('6px')
       expect(cs.fontFamily).toBe(getComputedStyle(document.body).fontFamily)
       expect(button.getBoundingClientRect().right).toBeLessThanOrEqual(width)

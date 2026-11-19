@@ -303,13 +303,14 @@ func (a *API) spawnStandingSession(ctx context.Context, agent db.StandingAgent, 
 	// one place.
 	model := boardRoleModel(board, "standing")
 	extID, configured, err := a.startOnRunnerConfigured(ctx, board.ID, runner.StartRequest{
-		Repo:        triggerCard.Repos[0],
-		Title:       title,
-		Prompt:      prompt,
-		Model:       model,
-		Effort:      boardRoleEffort(board, "standing"),
-		GitURL:      boardGitURL(board, triggerCard.Repos[0]),
-		Interaction: interactionForRole("standing"),
+		Repo:         triggerCard.Repos[0],
+		Repositories: cardRepositories(board, triggerCard.Repos),
+		Title:        title,
+		Prompt:       prompt,
+		Model:        model,
+		Effort:       boardRoleEffort(board, "standing"),
+		GitURL:       boardGitURL(board, triggerCard.Repos[0]),
+		Interaction:  interactionForRole("standing"),
 		Env: map[string]string{
 			"BLERG_BOARD_URL":   a.runner.AgentURL,
 			"BLERG_BOARD_TOKEN": rawTok,

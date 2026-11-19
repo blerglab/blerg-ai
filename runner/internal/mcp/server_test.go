@@ -226,7 +226,7 @@ func TestMCPToolsList(t *testing.T) {
 	tools, _ := res["tools"].([]any)
 	want := map[string][]string{
 		"discover_launch_options": {"runtime", "daemon_id", "repo", "restricted", "refresh"},
-		"start_session":           {"repo", "prompt", "title", "model", "effort", "engine", "runtime", "idempotency_key", "callback_url", "callback_secret", "git_url", "provider", "env", "auto_stop", "no_repo", "interaction"},
+		"start_session":           {"kind", "runtime_target_id", "repo", "prompt", "title", "model", "effort", "engine", "runtime", "idempotency_key", "callback_url", "callback_secret", "git_url", "provider", "env", "auto_stop", "no_repo", "interaction"},
 		"get_session":             {"session_id"},
 		"send_message":            {"session_id", "text", "client_id"},
 		"set_session_model":       {"session_id", "model", "effort"},
@@ -296,7 +296,7 @@ func TestMCPToolsList(t *testing.T) {
 // the REST contract's Idempotency-Key behaviour, reported in the tool result.
 func TestMCPStartSessionIdempotent(t *testing.T) {
 	srv := clusterMCPServer(t)
-	args := map[string]any{"repo": "org/proj", "prompt": "build it", "idempotency_key": "key-1"}
+	args := map[string]any{"runtime_target_id": "cluster", "repo": "org/proj", "prompt": "build it", "idempotency_key": "key-1"}
 
 	first := toolJSON(t, call(t, srv, "start_session", args))
 	id, _ := first["session_id"].(string)
@@ -540,4 +540,19 @@ func TestMCPIdempotencyKeySchema(t *testing.T) {
 		return
 	}
 	t.Fatal("start_session tool missing")
+}
+
+func TestMCPStartWorkerKind(t *testing.T) {
+	srv := clusterMCPServer(t)
+	for _, kind := range []string{"card", "role", "review", "research"} {
+		started := toolJSON(t, call(t, srv, "start_session", map[string]any{"repo": "org/proj", "prompt": "go", "kind": kind}))
+		id, _ := started["session_id"].(string)
+		if id == "" {
+			t.Fatalf("start: %v", started)
+		}
+		status := toolJSON(t, call(t, srv, "get_session", map[string]any{"session_id": id}))
+		if status["worker_kind"] != kind {
+			t.Fatalf("get_session worker_kind=%v want %s", status["worker_kind"], kind)
+		}
+	}
 }

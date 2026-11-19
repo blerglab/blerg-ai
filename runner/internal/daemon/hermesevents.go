@@ -64,6 +64,9 @@ func newHermesRun(ctx context.Context, d *hermesDriver, rpc *hermesRPC) *hermesR
 	return &hermesRun{d: d, rpc: rpc, ctx: ctx, tools: map[string]bool{}, children: map[string]agent.SubagentPayload{}, childDone: map[string]bool{}, childStarted: map[string]bool{}, questions: map[string]context.CancelFunc{}, questionTokens: map[string]string{}}
 }
 func (r *hermesRun) begin() {
+	r.d.mu.Lock()
+	r.d.turnEpoch++
+	r.d.mu.Unlock()
 	r.usagePublished = false
 	r.d.emit(protocol.UsageUpdatedKind, protocol.UsageUpdatedPayload{Scope: "turn"})
 	r.active = true
@@ -279,6 +282,11 @@ func (r *hermesRun) finish(stop, text string) {
 	r.d.mu.Lock()
 	r.d.active = false
 	r.d.interruptRequested = false
+	r.d.stopInFlight = false
+	if r.d.stopTimer != nil {
+		r.d.stopTimer.Stop()
+		r.d.stopTimer = nil
+	}
 	r.d.mu.Unlock()
 	if r.thought.Len() > 0 {
 		r.d.emit("assistant_thinking", agent.AssistantThinkingPayload{Text: r.thought.String()})

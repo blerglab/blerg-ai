@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { formatDuration, formatTokens, formatUSD, formatPercent, stepLabel, outcomeLabel, shortDay, formatTick, timeAxis } from './insights'
+import { formatDuration, formatTokens, formatUSD, formatPercent, stepLabel, outcomeLabel, shortDay, formatTick, timeAxis, partialReportNote } from './insights'
 
 describe('formatDuration', () => {
   it('reads naturally at every scale', () => {
@@ -95,5 +95,31 @@ describe('timeAxis', () => {
 describe('formatTick', () => {
   it('labels ticks compactly', () => {
     expect([0, 0.5, 15, 60, 90, 300, 3600, 5400].map(formatTick)).toEqual(['0', '500 ms', '15 s', '1 min', '1.5 min', '5 min', '1 h', '1.5 h'])
+  })
+})
+
+// BLG-466: a partial-report notice must say exactly what was left out and how many, never a bare
+// "0 cards could not be read", and never suggest opening a workspace when already inside one.
+describe('partialReportNote', () => {
+  it('is null when nothing was actually omitted', () => {
+    expect(partialReportNote(false, 0)).toBeNull()
+  })
+  it('never says "0 cards": truncation alone omits the card count entirely', () => {
+    const note = partialReportNote(true, 0)
+    expect(note).not.toContain('0 cards')
+    expect(note).not.toMatch(/\b0\b.*card/)
+  })
+  it('names the omitted cards and the count when cards alone were omitted', () => {
+    expect(partialReportNote(false, 3)).toBe('3 linked cards could not be read with your board access.')
+    expect(partialReportNote(false, 1)).toBe('1 linked card could not be read with your board access.')
+  })
+  it('suggests opening a workspace only when the report is not already scoped to one', () => {
+    expect(partialReportNote(true, 0)).toContain('open a workspace for a smaller report')
+    expect(partialReportNote(true, 0, 'workspace-a')).not.toContain('open a workspace')
+  })
+  it('combines both causes when both happened', () => {
+    const note = partialReportNote(true, 2)!
+    expect(note).toContain('2 linked cards could not be read')
+    expect(note).toContain('Some conversations were left out')
   })
 })

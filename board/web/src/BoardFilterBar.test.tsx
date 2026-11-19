@@ -19,22 +19,22 @@ describe("filter announcements", () => {
     expect(screen.getByRole("status").textContent).toBe("");
     view.rerender(bar(true, 38));
     settle();
-    expect(screen.getByRole("status").textContent).toBe("1 of 38 cards shown");
+    expect(screen.getByRole("status").textContent).toBe("1 of 38 cards match");
     view.rerender(bar(false, 38));
     settle();
-    expect(screen.getByRole("status").textContent).toBe("All 38 cards shown");
+    expect(screen.getByRole("status").textContent).toBe("Filter cleared. 38 cards total.");
     for (const n of [39, 37]) {
       view.rerender(bar(false, n));
       settle();
-      expect(screen.getByRole("status").textContent).toBe("All 38 cards shown");
+      expect(screen.getByRole("status").textContent).toBe("Filter cleared. 38 cards total.");
     }
     view.rerender(bar(true, 37));
     settle();
-    expect(screen.getByRole("status").textContent).toBe("1 of 37 cards shown");
+    expect(screen.getByRole("status").textContent).toBe("1 of 37 cards match");
     view.rerender(bar(false, 37));
     // A count update while Clear's announcement is pending must not swallow it.
     view.rerender(bar(false, 40));
     settle();
-    expect(screen.getByRole("status").textContent).toBe("All 37 cards shown");
+    expect(screen.getByRole("status").textContent).toBe("Filter cleared. 37 cards total.");
   });
 });

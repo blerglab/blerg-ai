@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/url"
 	"time"
 
@@ -56,7 +57,9 @@ func (c *clusterConsumer) Start(ctx context.Context, m protocol.WorkspaceManifes
 	if err = db.UpsertDaemon(ctx, a.dbPool, clusterDaemonID, "cluster", "runner", ""); err != nil {
 		return "", err
 	}
-	if err = db.InsertClusterSessionAs(ctx, a.dbPool, id, clusterDaemonID, "starting", clusterworkspace.PublicRoot, "", req.Title, req.Model, sessionOriginFor(p.Sub, false, "")); err != nil {
+	origin := sessionOriginFor(p.Sub, false, "")
+	origin.RuntimeTargetID = req.RuntimeTargetID
+	if err = db.InsertClusterSessionAs(ctx, a.dbPool, id, clusterDaemonID, "starting", clusterworkspace.PublicRoot, "", req.Title, req.Model, origin); err != nil {
 		return "", err
 	}
 	plan := clusterWorkspaceStartPlan()
@@ -85,6 +88,9 @@ func (c *clusterConsumer) Start(ctx context.Context, m protocol.WorkspaceManifes
 		}
 	}
 	recordInteraction(ctx, a.dbPool, id, req.Interaction)
+	if err := recordVerbosity(ctx, a.dbPool, id, req.Verbosity); err != nil {
+		log.Printf("record verbosity: %v", err)
+	}
 	recordLaunchAuthSession(ctx, a.dbPool, id, proof.SessionID)
 	recordLaunchEffort(ctx, a.dbPool, id, req.Effort)
 	if proof.TokenID != "" {
@@ -97,7 +103,8 @@ func (c *clusterConsumer) Start(ctx context.Context, m protocol.WorkspaceManifes
 	if env[sessionTokenEnv] == "" {
 		return fail(errClusterWorkspace)
 	}
-	spec := SessionJobSpec{SessionID: id, Title: req.Title, InitialPrompt: req.Prompt, Engine: req.Engine, Model: req.Model, Effort: req.Effort, Interaction: req.Interaction, SpawningAccountID: p.Sub, AuthSessionID: proof.SessionID, TokenID: proof.TokenID, ExtraEnv: env, Workspace: &m, WorkspaceMembers: members, NoOperatorFallback: true}
+	spec := SessionJobSpec{SessionID: id, Title: req.Title, InitialPrompt: req.Prompt, Engine: req.Engine, Model: req.Model, Effort: req.Effort, Interaction: req.Interaction,
+		Verbosity: req.Verbosity, SpawningAccountID: p.Sub, AuthSessionID: proof.SessionID, TokenID: proof.TokenID, ExtraEnv: env, Workspace: &m, WorkspaceMembers: members, NoOperatorFallback: true}
 	jm.launchStage(ctx, id, "plugins_resolve", protocol.StageStateActive, "Resolving optional launch plugins")
 	jm.ResolvePlugins(ctx, &spec)
 	jm.launchStage(ctx, id, "plugins_resolve", protocol.StageStateDone, "Launch plugins resolved or safely omitted")
@@ -149,5 +156,9 @@ func (c *clusterConsumer) StartChild(ctx context.Context, parent, child protocol
 	}
 	spec.Workspace = &child
 	spec.WorkspaceMembers = members
+	// BLG-460: whether this is a read-only cluster worker is decided inside
+	// CreateSessionJob, from the session's own persisted row — not here. The row already
+	// carries this child's parent/delegation markers (re-read above), so that decision is
+	// correct without this call site repeating it.
 	return c.api.hub.JobManager().CreateSessionJob(spec) //nolint:contextcheck // JobManager owns bounded launch/rollback.
 }

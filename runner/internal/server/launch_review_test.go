@@ -20,7 +20,8 @@ import (
 )
 
 // Exercise the real Secret allocation boundary, including the helper's actual
-// ten-second deadline rather than cancellation before any POST is submitted.
+// deadline after POST submission. The production ten-second policy is proved
+// separately under virtual time in TestLaunchCreateDeadlinePolicy.
 func TestLaunchAmbiguousSecretCleanup(t *testing.T) {
 	for _, mode := range []string{"deadline", "canceled", "unavailable", "foreign", "replaced", "delete_refused", "late_commit", "accepted_delete", "deleting", "absent"} {
 		t.Run(mode, func(t *testing.T) {
@@ -115,6 +116,15 @@ func TestLaunchAmbiguousSecretCleanup(t *testing.T) {
 			defer kube.Close()
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
+			var advanceDeadline func()
+			if mode == "deadline" {
+				j.launchCreateContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+					bounded, done := context.WithTimeout(parent, launchCreateTimeout)
+					advanced := &attachDeadlineContext{Context: bounded, done: make(chan struct{})}
+					advanceDeadline = func() { close(advanced.done) }
+					return advanced, done
+				}
+			}
 			client := kube.Client()
 			base := client.Transport
 			client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -133,6 +143,7 @@ func TestLaunchAmbiguousSecretCleanup(t *testing.T) {
 				}
 				_ = resp.Body.Close()
 				if mode == "deadline" {
+					advanceDeadline()
 					<-r.Context().Done()
 				} else {
 					cancel()

@@ -1,8 +1,8 @@
-# Files from a session (artifacts)
+# Files from a workspace (artifacts)
 
-A Claude Code session can hand you a **file**: a report, a chart, an export, a generated
-document. The agent runs one command, and the file shows up as a card in the session's chat and in
-the **Files** tab of the session panel (a dialog from the chat's Files button where the chat has
+An agent can hand you a **file**: a report, a chart, an export, a generated
+document. The agent runs one command, and the file shows up as a card in the workspace's chat and in
+the **Shared** tab of the workspace panel (a dialog from the chat's Files button where the chat has
 no panel: the board), where you can download it or, for most types, read it in the app.
 
 ```bash
@@ -29,26 +29,52 @@ downloading. The link opens the session with that file in the viewer.
 
 ## Opening files the agent names
 
+### Reading a worker's published files
+
+A parent session can list and download files published by its direct children using
+its own session token. For example, Main can inspect a worker's screenshots before
+merging UI changes:
+
+```bash
+blerg-runner session files <child-id>
+blerg-runner session download <child-id> phone.png -o phone.png
+```
+
+Download accepts a file ID or a name; a name selects the newest version. It refuses
+to overwrite an existing local file. Open the downloaded image with the agent's
+image viewer. `blerg-runner files` lists the current session's published files;
+`fetch` retrieves attachments sent to the current session.
+
+Privacy: this access is limited to the authenticated parent's own direct children,
+including private children. Sharing an owner does not grant another session access.
+The child artifact routes also expose attachments already available to that child;
+they do not expose arbitrary workspace files or grant delete access.
+
+### Opening a workspace path
+
 A file reference in chat, such as `.agent-notes/report.md` or
-`attachments/report.md`, opens from the live session's folder for its owner.
+`attachments/report.md`, opens from the live workspace's folder for its owner.
 Benign dot folders and git-ignored files can be opened directly. Protected
 filenames and folders that commonly hold secrets stay blocked with an explanation.
 
 Upgrade-era desktops in shared-credential compatibility mode retain access for
-people with historical sessions on that desktop. Enrolling the desktop preserves
+people with historical workspaces on that desktop. Enrolling the desktop preserves
 the owner's access. If access is refused, use **Settings → Account → Your desktops
 → Enroll**, or ask an administrator to assign the desktop to you. Another person's
-session files require that session's owner to open or publish the file for you;
-a private session remains invisible to other people.
+workspace files require that workspace's owner to open or publish the file for you;
+a private workspace remains invisible to other people.
 
 ## Inline in the chat
 
-An image (up to 10 MiB) is drawn in its card, and a video or audio file gets a play tile; the
-same goes for an image, video or audio file you attach to a message, once it is in the Files
-list. Click the picture or the tile to open the file in the viewer — a video or audio file
-starts playing at once. Everything else keeps the plain card with **View** and **Download**.
-Previews are fetched through the same authenticated route as the viewer, when the card scrolls
-into view, and only once per file.
+An image (up to 10 MiB) is drawn in its card. Videos have an inline player with native
+controls and a fixed frame that preserves the picture's proportions. Press **Play** to load
+and play a clip; videos are not downloaded or played automatically. **Open larger** opens the
+existing viewer. If a video cannot load or its format is unsupported, the card keeps an **Open**
+action. Only the latest published version has an inline player.
+
+Audio files keep a play tile that opens the viewer and starts playback. Attached media also
+previews once it is in the Files list. All previews use the viewer's authenticated file transport.
+Other previews load when their cards scroll into view, once per file.
 
 ## What the app can show
 
@@ -60,18 +86,30 @@ app cannot show is download only.
 | Markdown (`.md`, `.markdown`) | Formatted text, including Mermaid diagrams and inline-data Vega-Lite charts. Raw HTML is never run. |
 | Plain text, logs and source code (`.txt .log .py .js .ts .tsx .go .rs .java .c .h .cpp .sh .yaml .yml .toml .ini .xml .sql .css .rb .php` and similar, and a file with an unknown extension whose bytes are text) | Monospace text. The first 200 KB, with **Show all**; over 2 MiB it is download only. |
 | Diffs and patches (`.diff`, `.patch`) | The diff viewer: see [Diffs](#diffs). Over 2 MiB, download only. |
+| Dashboard (`.dash.json`) | Themed, responsive cards for stats with optional sparklines, gauges, plain text, and embedded charts. Inline rows only; source remains downloadable. |
 | JSON (`.json`) | Pretty-printed; Vega-Lite schema JSON and `.vl.json` / `.vega-lite.json` draw charts. Same size rules as text. |
 | Mermaid (`.mmd`, `.mermaid`) | A diagram, scaled to fit the viewer, with source, copy and zoom controls; it also draws on its card in the chat. Invalid or refused source stays code, with the reason. Color styling (`classDef`, `class`, `style`) is drawn; external resources are refused. |
 | CSV and TSV | A scrollable table: the first 500 rows and 50 columns, with a note when there is more. |
 | Images: `.png .jpg .jpeg .gif .webp .svg` | The image. An SVG is shown only through `<img>`, where scripts in it never run. |
 | PDF | The browser's PDF viewer, with **Open in new tab**. |
 | Audio: `.mp3 .wav .ogg .m4a` and video: `.mp4 .webm` | A player. |
-| HTML (`.html`, `.htm`) | A sandboxed page: its scripts run, but it cannot reach the app, your session, cookies or storage, and it **cannot use the network at all**. See below. |
+| HTML (`.html`, `.htm`) | A sandboxed page: its scripts run, but it cannot reach the app, your sign-in session, cookies or storage, and it **cannot use the network at all**. See below. |
 | Office files and other binaries (`.docx .xlsx .pptx .zip`, and the rest) | No preview: name, size and type, and **Download**. |
 
 Not offered as a preview, on purpose: Office documents (there is no safe in-browser renderer to
 bundle), archives, and executables. The agent is told to send a PDF, HTML or Markdown version
 when you only need to read something.
+
+Vega-Lite charts pass the static policy before compilation. Compilation, parsing, dataflow and
+layout run in one disposable worker at a time. The page terminates a worker after five seconds;
+heavy charts show **This chart is too heavy to draw** and retain their source. Runtime budgets
+cap each row array at 100,000 rows, cumulative row storage at 250,000 slots, evaluated operators at 10,000,
+scene items at 20,000, realized facet/compose groups at 64, and SVG output at 2,000,000 UTF-8 bytes.
+Repeated stroke-dash content is counted per scene item before SVG serialization, without joining
+the arrays. The final UTF-8 check counts bytes without allocating a second output buffer.
+Output also keeps the existing 4,096-pixel side and 8,388,608-pixel area limits. Resizing or closing
+a preview cancels its worker. Browsers do not offer a portable per-worker heap limit; these
+allocation/output budgets and termination bound the supported rendering path (#334).
 
 ### Choosing a format
 
@@ -123,7 +161,7 @@ A checklist item ticked with `--commit` gets the diff of its commits the same wa
 
 ## Versions
 
-Publishing a file whose **name already exists** in the session, from the same side (the agent's
+Publishing a file whose **name already exists** in the workspace, from the same side (the agent's
 files, or the ones you attached), makes the next **version** of it instead of an unrelated
 duplicate. To revise a file the agent just publishes it again under the same name, and says so:
 
@@ -138,7 +176,7 @@ The first publish of a name prints no version note.
   Migration `033` numbered the files that already existed, per name, oldest first.
 - **In the chat.** The card reads `📎 report.md · v3 · 12 KB`. The version shows from v2 on (and on
   a v1 card once its file has later versions); a file with a single version has none.
-- **In the Files tab (or panel).** One row per file, showing the latest version with a `v3` badge. Under it,
+- **In the Shared tab (or panel).** One row per file, showing the latest version with a `v3` badge. Under it,
   **Earlier versions (2)** opens the older ones with their own time, Download, View and Delete.
   Deleting acts on that one version; deleting the latest makes the previous one the latest. The
   count above the list (and the board's Files button) counts files, not versions. The same grouping applies to "Uploaded by
@@ -159,6 +197,64 @@ The first publish of a name prints no version note.
   ([talking-to-an-agent.md](talking-to-an-agent.md#history)). An agent marks its topics with
   `blerg-runner topic`, and names the commits a topic landed with `topic --done --commit <sha>`.
 
+### Live published previews
+
+A file opened from chat follows newer publications with the same name and origin
+in its existing tab. The follow icon uses the selected color while following;
+choose **Pin version** to freeze the displayed version, or **Follow latest** to
+resume. This choice is remembered for that file in the session on this browser,
+including after closing and reopening its tab. Opening Review or Mark up pins the displayed version so a new publication cannot
+replace work in progress. Direct review views keep their immutable reviewed version.
+
+When a newer version arrives while pinned, a small dot appears beside the version
+label in the utility bar. Its tooltip says, for example, **v3 is available**;
+click it to open that version while remaining pinned. Live artifact events update
+this indicator without reloading the page.
+
+Rapid publications are coalesced. A failed read or chart preflight keeps the
+previous preview and shows a short error; toggle follow off and on to retry.
+HTML retains the existing sandbox and no-network policy. Script runtime errors
+cannot reliably be detected, and reloads reset the inner page's scroll position.
+For a supported workspace file opened in a tab, choose **Watch file** to read saved
+changes through the existing workspace-file API without publishing. Reads run one
+at a time, one second after the previous read finishes. **Stop watching** aborts
+the current read and freezes the preview. Read failures and invalid charts keep
+the previous preview. Watch state ends when the tab closes or the workspace changes.
+Development servers are not exposed.
+See the [trust model and pending product decisions](design/live-preview-threat-model.md).
+
+## Live files
+
+Not to be confused with [live published previews](#live-published-previews) above, which is about
+a tab following newer **versions**: a **live file** has no versions at all. `blerg-runner publish
+--live <file>` republishes a file in place — same name, same id, same link — instead of making a
+new version. It is for something an agent refreshes often, like a chart redrawn every time a task
+finishes: the person pulls it into a tab once and keeps asking for it to update, rather than
+collecting a version for every refresh.
+
+```bash
+blerg-runner publish out/chart.png --name latency-p99.png --live   # the first time: this becomes the live file
+blerg-runner publish out/chart.png --name latency-p99.png --live   # every later refresh: updated in place
+```
+
+- **One id, no history.** A file is either live or versioned; its metadata says which. Switching
+  is explicit: `--live` on a name with no live file yet is the switch (a name with ordinary
+  versions keeps them, unchanged, but this publish becomes the one live file from then on); a
+  plain `publish` on a name that is already live is refused, naming `--live` as what to use
+  instead, so a file never flips between the two by accident.
+- **In the chat and the tab.** A live file's card and tab show no version badge and no "Earlier
+  versions": instead, **Updated 2 min ago** (a real, ticking time, never a version number). An
+  open tab redraws with the new content; it does not reopen or lose its place.
+- **Snapshot.** A live file's tab has a **Snapshot** action: it saves the file's current content
+  as a normal versioned file, named with the time (`chart-20261103-153000.png`), leaving the live
+  file exactly as it was. Use it to keep a copy of what a chart looked like at some point, since
+  the live file itself keeps no history of its own.
+- **Another device.** A live file is a session file like any other: opening its link from a
+  different browser or device reads the current row, so it always shows the latest content.
+- **Limits.** The same size caps apply as any other file; an in-place republish is checked against
+  the session's total using its own previous size, so refreshing a live file never double-counts
+  it. The 500-versions-per-name cap does not apply once a name is live (there is only ever one row).
+
 ## Limits
 
 - 100 MiB per file (`BLERG_RUNNER_MAX_FILE_MB`). A larger file is refused before it is sent: the
@@ -166,12 +262,12 @@ The first publish of a name prints no version note.
   session's 1 GiB total below the same way.
 - There is no lifetime file-count cap. The agent frees published space with
   `blerg-runner unpublish <name>` (`blerg-runner files` lists what it published); a file
-  you attached is removed from the Files panel by you, the session owner or an administrator.
+  you attached is removed from the Shared panel by you, the session owner or an administrator.
 - 1 GiB in total for the files one session published (`BLERG_RUNNER_MAX_SESSION_ARTIFACTS_MB`).
   With the attachments below, one session can hold about 1.5 GiB, so size the runner's data volume
   for the sessions you keep, and on a shared machine or cluster node give it a disk quota (see
   [`SECURITY.md`](../SECURITY.md)).
-- 20 versions per file name (per side). A 21st is refused with "This file already has 20 versions;
+- 500 versions per file name (per side). A 501st is refused with "This file already has 500 versions;
   delete an old one first."
 - A file name is cut to its base name (no folders), 120 bytes at most, with control characters
   removed.
@@ -243,10 +339,10 @@ clickable on a card. The same link can be added through the board's API
 (`PATCH /api/cards/{id}` with `{"add_links": [{"kind": "artifact", "url": "/sessions/<id>?artifact=<file id>"}]}`,
 an atomic append) or its MCP tool `blerg_card_link`.
 
-## Uploading files to a session
+## Uploading files to a workspace
 
 The other direction works too: you can attach files (for example two PDFs to analyze) to a message
-from the chat box, and the session's agent fetches them into a private folder outside repositories.
+from the chat box, and the workspace's agent fetches them into a private folder outside repositories.
 
 - **Attach** with the paperclip next to the message box, by dragging files onto the chat, or by
   pasting them. Each file uploads immediately and shows as a chip under the box with its size and a
@@ -274,13 +370,13 @@ from the chat box, and the session's agent fetches them into a private folder ou
   ends (the waiting file then fails), and after seven days without the session being opened. If
   saving to browser storage fails, the chat tells you to keep the page open. Removing a waiting
   chip cancels it.
-- **Free up space…** on a waiting chip or in the session panel’s Files list opens the same
+- **Free up space…** on a waiting chip or in the session panel’s Shared list opens the same
   cleanup dialog. It lists all file versions oldest first with their sizes; when files are waiting,
   it preselects the oldest attachments whose sizes cover the shortfall. Published files count
   against a different quota and are not preselected for attachment space. Only files you may
   delete can be chosen (your own attachments, or every file for the owner or an administrator).
   Published files retain their removed marker in History. Each attachment can also be deleted on
-  its own from the session panel’s **Files** tab, where Delete shows only on files you may delete.
+  its own from the session panel’s **Shared** tab, where Delete shows only on files you may delete.
   Waiting uploads resume after a deletion, on refocus, on reconnecting, or on the next five-second
   space check. A single file over the per-file limit still fails immediately.
 - **Increase storage:** an administrator sees **Increase storage** under waiting files; each click
@@ -312,9 +408,9 @@ from the chat box, and the session's agent fetches them into a private folder ou
   It uses the session's own token, which only works for that session, and it only serves files
   you uploaded, never the agent's published ones.
 - **Privacy:** an upload belongs to its session. Anyone who can see the session can see the uploaded
-  files in the Files panel (under "Uploaded by you" / their own), and a private session's files
+  files in the Shared panel (under "Uploaded by you" / their own), and a private session's files
   are visible to its owner alone. Uploads are stored on the same volume as published files
-  (`origin = 'user'` in `session_artifacts`, migration `032`), deleted from the Files panel or with
+  (`origin = 'user'` in `session_artifacts`, migration `032`), deleted from the Shared panel or with
   the session, and there is no chat event for them, only the message you send.
 - **Untrusted content:** a file you attach is data. The agent is told to use it for the task you
   gave and not to follow instructions found inside it, but a prompt hidden in a document can still
@@ -336,7 +432,7 @@ separately for files, reviews, diffs and image mark-up.
   there; the request is anchored to the quote, the heading above it, and for a PDF the page. For a
   Markdown file can be edited on the rendered page; **Show changes** marks insertions and
   deletions, while **Clean view** hides the marks. **Source** offers direct source editing. Requests list in the margin and their quotes are highlighted. **Submit** sends
-  everything to the session in one message: the requests, each with an id, and your edits as a
+  everything to the workspace in one message: the requests, each with an id, and your edits as a
   diff with the edited copy attached.
 - **Review** (diffs and patches). Select an old or new line number and choose **Request change**.
   Shift-click another line to select a range, or enable **Select range** and tap the first and last
@@ -346,12 +442,12 @@ separately for files, reviews, diffs and image mark-up.
   **Show lines** opens its target, including folded context. Requests from an earlier version stay
   listed without being pinned onto the new patch. The agent changes the source files, replies
   with the same review command and posts an updated diff.
-- **Mark up** (images, the session's or your own). Pen, arrow and box drawings become individually
+- **Mark up** (images, the workspace's or your own). Pen, arrow and box drawings become individually
   selectable annotations with comments, style editing, hide/show and delete. **Comment** adds a
   numbered point comment. **Send** attaches a flattened copy of visible annotations and puts their
   numbered notes in the message; the original image stays unchanged.
 
-The session makes the changes, publishes the file again, and answers each request as done or
+The agent makes the changes, publishes the file again, and answers each request as done or
 declined with a line; the answers show beside your requests the next time you open the review.
 Markdown, PDF and code reviews label these threads **Resolved** or **Rejected**. Collapse a settled
 thread individually, or use **Hide resolved** to hide both kinds together. **Reopen** opens a comment editor and requires an explanation. **Reopen with comment** makes the
@@ -360,11 +456,11 @@ explanation appears in the thread. **Submit** sends it with the original request
 comments or edits. Hidden threads and their anchors remain in the saved review.
 
 What is stored: `<file>.review.json`, uploaded beside the file on every submit (the requests,
-their anchors, and the diff), and the session's copy of the same name with its replies. The viewer
-merges the two: your requests and wording, the session's status and reply. A review submit counts
+their anchors, and the diff), and the agent's copy of the same name with its replies. The viewer
+merges the two: your requests and wording, the agent's status and reply. A review submit counts
 against your upload limits like any attachment (one or two files), and a file keeps at most 20
 versions, so a long-running review of one file may need old `.review.json` versions deleted from
-the Files panel.
+the Shared panel.
 
 On the session's side the commands are `blerg-runner review list [<file>]` and
 `blerg-runner review reply <id> done|declined "<line>"`, which takes several answers in one call
@@ -372,9 +468,14 @@ On the session's side the commands are `blerg-runner review list [<file>]` and
 publishes the review file once; `blerg-runner review --help` explains the loop. The session's
 `.review.json` versions are review state, not documents: the chat shows no file card for them.
 It folds each round of answers into one line, such as "11 requests answered · report.md", that
-opens the review. They stay in the Files panel. Design: [`docs/design/feedback-tools.md`](design/feedback-tools.md).
+opens the review. They stay in the Shared panel. Design: [`docs/design/feedback-tools.md`](design/feedback-tools.md).
 
 ## Asking for an approval
+
+Workers send work for review to Main with `blerg-runner ask`. Main runs the review and asks you
+only when your approval is needed. Worker review requests are refused; Main and person-started
+channels can request your review. Worker questions waiting for Main stay in the worker conversation;
+they enter Questions, Needs you and their counts only after Main escalates them.
 
 When the agent needs you to approve something it published (a policy, a migration, a diff before
 it merges), rather than only show it, it asks explicitly:
@@ -431,9 +532,9 @@ in the list marked "no longer available": View and Download are hidden, its raw 
 routes answer `410 Gone` with `{"error":"file no longer available"}`, and it can still be
 deleted.
 
-A session's files are deleted with the session. The runner also removes, at start and then every
-hour, the directory of any session that no longer exists. You can delete a single file any time
-from the Files panel. Back them up with the rest of the runner data
+A workspace's files are deleted with the workspace. The runner also removes, at start and then every
+hour, the directory of any workspace that no longer exists. You can delete a single file any time
+from the Shared panel. Back them up with the rest of the runner data
 ([`backup-and-restore.md`](backup-and-restore.md)).
 
 ## In a cluster pod
@@ -445,7 +546,10 @@ no token and cannot publish; start a new one. The token lasts 24 hours.
 
 ### Raw source in file viewers
 
-Textual previews offer **Raw** in the viewer header and **Rendered** to return.
+Textual previews offer a **Raw** icon in the shared utility bar and **Rendered** to return.
+Raw, copy, download, follow and comparison actions use the same plain icon style,
+with tooltips and accessible labels; active toggles use the selected color.
+Diff layout and image zoom controls join that same bar.
 This includes Markdown, Mermaid, Vega-Lite, HTML, CSV, JSON and diffs, for both
 published files and workspace files. Each open tab retains its choice while
 switching tabs. Binary media keep their existing viewer controls.
@@ -480,3 +584,76 @@ the end, retrying folders skipped earlier. A daemon restart starts a new pass.
 A missing or failed server reply retains the files. Cleanup stays
 inside the daemon's sessions root and never targets an explicit `--out` folder.
 A resumed session can fetch the attachments again.
+
+## Pages that answer back
+
+Publish an HTML page with `--answer-schema result.schema.json --answer-ask "Choose your options"`.
+The owner opens it from Needs you, reviews the page's proposed JSON, and clicks Submit
+in the viewer. The result returns to the workspace as untrusted data. The page keeps
+its existing sandbox with no network or credentials. See the [contract and threat
+model](answer-back-pages.md) for the postMessage format, schema subset, and limits.
+
+### Review workspace files
+
+Open a workspace file tab and choose **Review**. Select a line number; Shift-click
+another line number to select a range. Write a request and choose **Save request**.
+Repeat in other file tabs, including split panes, then choose **Send requests**.
+Saved requests share one batch within the workspace. They stay in memory when a tab
+closes; unsent requests are lost if the page reloads. A failed send keeps the batch.
+
+The batch uses the existing review format in `Workspace files.review.json`.
+Each request records a workspace-relative path, inclusive line range, SHA-256 of
+the decoded source text, and the selected complete lines. An unchanged passage
+can follow a small edit when it occurs exactly once; **Moved** marks a new line
+position. Changed or ambiguous passages are **Outdated** and never silently attach
+elsewhere. For files without a text preview, a request covers the whole file and
+records the SHA-256 of its bytes (line range 0–0).
+
+The session applies requests to the named workspace paths and answers through
+`blerg-runner review reply <id> done|declined "<one line>"`. Review mode shows the
+status and reply through the same review engine used by published files. The
+workspace file itself does not need to be published.
+
+## Board snapshots in chat
+
+`blerg-runner board snapshot [board] [--column NAME] [--tag TAG] [--priority P]`
+prints a closed `board-snapshot` JSON fence. Paste the entire fence into the
+agent's chat message to show a static board, with column counts and compact
+cards. `--open` omits terminal columns. Repeat `--tag` to require every tag.
+
+`blerg-runner ticket render [NUMBER ...] [--board BOARD] [--query TEXT]`
+uses the same fence with a card grid. With no numbers it shows all matching
+cards; `--column`, `--tag`, `--priority` and `--open` work here too. Query matches
+a title substring. The header states the filters and when the read completed.
+Archived cards are omitted. Snapshots above 5,000 cards are refused.
+
+These commands extend the existing Python messaging CLI to reuse its board
+selection, paging and authenticated gateway; they introduce no second credential
+or access path. Propose-only access cannot read snapshots. The copied display
+fields are visible to readers of the chat, like any text the agent shares;
+card bodies are omitted. The snapshot is never refreshed behind the person.
+Opening a tile reads the live card using the current viewer's board permissions
+and opens Blerg's live card dialog. The Board link comes from the host app.
+
+Each column initially shows twenty cards in a scrollable region, with a button
+for the next fifty, and can collapse. Phones stack columns; wide views distribute
+them across the available chat width. The `cards` mode arranges tiles as a grid.
+Malformed or unfinished fences stay code. Hosts without board readers display
+static tiles without live actions. The optional `ChatRefs.boardUrl` supplies the
+host-owned Board link; `boardCards` and `openCard` supply live card actions.
+
+### Comparing published versions
+
+A versioned file opens as the document. A quiet **Changes since vN** icon in the
+shared utility bar appears only after an earlier text version is verified to differ.
+Its tooltip names both compared versions. It uses the nearest earlier differing
+version; **Compare from** and **Compare to** can select any two
+versions of that file. Text comparisons use the diff viewer, including unified or
+side-by-side layout and line wrapping. Missing, binary, and oversized versions
+show an explanation instead of a text comparison. **Document** returns to the
+rendered file and its current-version review comments.
+
+After an agent republishes a reviewed file, **What changed for requested items**
+lists earlier requests and replies. Select a request to compare its source version
+with the current version around its quoted passage. A passage that cannot be found
+falls back to all changes. Comparisons are read-only; add comments in Document.

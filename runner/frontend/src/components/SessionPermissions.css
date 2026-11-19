@@ -20,7 +20,8 @@
 }
 .perm-revoke:disabled { opacity: 0.5; cursor: default; }
 .perm-error { color: var(--danger); }
-.perm-why { color: var(--amber); }
+/* Keep authority state visible while the resource name truncates. */
+.perm-why { flex: none; white-space: nowrap; color: var(--amber); }
 
 /* The compact summary: title, count, Manage; then the active permissions as chips. */
 .perm-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }

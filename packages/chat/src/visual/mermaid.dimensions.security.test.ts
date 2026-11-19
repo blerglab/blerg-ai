@@ -6,7 +6,8 @@ const api = vi.hoisted(() => ({initialize: vi.fn(), render: vi.fn()}))
 // is a stand-in that hands the config and source to a mock Mermaid.
 vi.mock('./mermaidFrame', () => ({renderInFrame: async (source: string, config: unknown) => {
   api.initialize(config)
-  return (await api.render('blerg-diagram', source)).svg
+  const {svg} = await api.render('blerg-diagram', source)
+  return {svg, measured: null}
 }}))
 const originalDecode = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'decode')
 const decode = vi.fn<() => Promise<void>>()
@@ -41,7 +42,7 @@ describe('independent Mermaid intrinsic dimension security', () => {
   ])('sets only finite bounded intrinsic sizes for %s SVG', async (_name, viewBox, expectedWidth, expectedHeight) => {
     api.render.mockResolvedValueOnce({svg: `<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="${viewBox}"><text>Safe</text></svg>`})
     const host = document.createElement('div')
-    const dispose = await renderMermaid('flowchart LR; A-->B', host)
+    const visual = await renderMermaid('flowchart LR; A-->B', host)
     const svg = output(host).documentElement
     const width = Number(svg.getAttribute('width'))
     const height = Number(svg.getAttribute('height'))
@@ -52,19 +53,19 @@ describe('independent Mermaid intrinsic dimension security', () => {
     expect(Math.max(width, height)).toBeLessThanOrEqual(4096)
     expect(svg.getAttribute('viewBox')).toBe(viewBox)
     expect(document.querySelector('[aria-hidden="true"]')).toBeNull()
-    dispose()
+    visual.dispose()
     expect(host.childElementCount).toBe(0)
   })
 
   it.each(['0 0 1e309 120', '0 0 NaN 120', '0 0 -800 120', '0 0 800 0', '0 0 800', ''])('never writes dimensions derived from invalid bounds %s', async viewBox => {
     api.render.mockResolvedValueOnce({svg: `<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="${viewBox}"><text>Safe</text></svg>`})
     const host = document.createElement('div')
-    const dispose = await renderMermaid('flowchart LR; A-->B', host)
+    const visual = await renderMermaid('flowchart LR; A-->B', host)
     const svg = output(host).documentElement
     expect(svg.getAttribute('width')).toBe('100%')
     expect(svg.hasAttribute('height')).toBe(false)
     expect(svg.hasAttribute('onload')).toBe(false)
-    dispose()
+    visual.dispose()
   })
 
   it('still rejects active SVG before sizing or decoding', async () => {

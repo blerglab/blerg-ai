@@ -1,15 +1,8 @@
-import SessionSettings from './SessionSettings'
-import RuntimeIcon from './RuntimeIcon'
-import { runtimeSentence } from '../lib/runtimes'
-import SessionPermissionChip from './SessionPermissionChip'
-import SidePane from './SidePane'
-import type { PaneLayout } from '../hooks/usePaneLayout'
-import { PanelToggleIcon, SubagentFace } from './IconButton'
-import { usePaletteCommands } from '../commands/context'
-import { PendingProposal } from './ProposalAttention'
-import type { ProposalInfo } from '../types'
-import { reasoningLabel, useKeptScroll } from '@blerglab/chat'
-import { modelDisplayName } from '@blerglab/chat'
+import { newestAttention } from '../lib/needsYou'
+import { AttentionRows } from './QuestionQueue'
+import type { useQuestionItems } from '../hooks/useQuestionItems'
+import { useMessageStore } from '../hooks/useMessageStore'
+import { SessionVerbosity } from './VerbositySelect'
 // SessionRail: the session page's side panel, in tabs. Live: the pinned tickets (PinLines, a line
 // each), what needs the person (the agent's
 // open questions, with a box that answers each; tool changes waiting on a decision), what is running
@@ -23,7 +16,28 @@ import { modelDisplayName } from '@blerglab/chat'
 // It stays mounted while closed (hidden), so the background tasks' state — which failures were
 // dismissed, since when it watches — lives as long as the page shows the session. Render it under
 // a key of the session.
-import { useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { IconButton } from '@blerglab/chat'
+import { pulse, useChangePulses } from '../lib/changePulse'
+import { UI_REVEAL_APPLY, validReveal } from '../lib/uiReveal'
+import { SessionColorPicker } from './SessionColor'
+import QuestionRow from './QuestionRow'
+import ReviewRequestRow from './ReviewRequestRow'
+import { AttentionDismiss } from './AttentionRow'
+import RepositoryRequest from './RepositoryRequest'
+import type { PanelAsk } from '../lib/liveState'
+import SessionSettings from './SessionSettings'
+import RuntimeIcon from './RuntimeIcon'
+import { runtimeSentence } from '../lib/runtimes'
+import SessionPermissionChip from './SessionPermissionChip'
+import SidePane from './SidePane'
+import type { PaneLayout } from '../hooks/usePaneLayout'
+import { PanelToggleIcon, SubagentFace } from './IconButton'
+import { usePaletteCommands } from '../commands/context'
+import { PendingProposal } from './ProposalAttention'
+import type { ProposalInfo } from '../types'
+import { reasoningLabel, useKeptScroll } from '@blerglab/chat'
+import { modelDisplayName } from '@blerglab/chat'
+import { memo, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { createPortal, flushSync } from 'react-dom'
 import { Link, useNavigate } from 'react-router-dom'
 import { OpenSessionContext } from '../lib/openSession'
@@ -59,11 +73,9 @@ import {
   useMainStep,
   useWorkingLineStore,
   type ArtifactInfo,
-  type AskLive,
   type BackgroundTask,
   type PlanLive,
   type LiveState,
-  type MainStep,
   type CardTarget,
   type ChecklistItem,
   type HovercardSources,
@@ -82,6 +94,9 @@ import FilesTab from './FilesTab'
 import { PinnedTicketModal } from './BoardCardView'
 import { boardCardRef, boardReadSettled, cardPreview, checkAccount, signedInAccount, useLiveBoardCards, useTicketView } from '../lib/liveBoardCard'
 import { PINS_SHOWN, STATE_GLYPH, livePins, pinView, withWorkers, workTicket, type ChildPin, type PinView } from '../lib/pins'
+import { cardTimeGlyphLabel, type CardTimeSummary } from '../lib/cardTime'
+import { useCardTimeSummaries } from '../lib/cardTimeData'
+import { cardNumbers } from '../lib/cardRefs'
 import { runTarget, subagentModelFact } from '../lib/runFacts'
 import { startedByLabel } from '../lib/startedBy'
 import HistoryTab from './HistoryTab'
@@ -100,7 +115,7 @@ import UsageLimitResume from './UsageLimitResume'
 import PlanNudges from './PlanNudges'
 import SessionPermissions from './SessionPermissions'
 import { ChildSessionRow, StartedSessions } from './ChildSessions'
-import { childIsWorking, type LiveChildSession, type LiveDelegationGrant, type LiveDelegationRequest, type LiveReviewRequest } from '../lib/liveState'
+import { childIsWorking, type LiveChildSession, type LiveDelegationGrant, type LiveDelegationRequest, type LiveReviewRequest, type LiveAnswerRequest } from '../lib/liveState'
 import { SessionBoardContext, useLoadSessionBoard, useSessionBoard, withSessionBoard } from '../lib/sessionBoard'
 import { CardRefStates, CardRefText } from './ChecklistRefs'
 import { ChecklistRefsContext, useChecklistRefs } from '../lib/checklistRefs'
@@ -116,6 +131,9 @@ const MISSING_MS = 4000
 const FOCUSABLE = 'button:not([disabled]), select:not([disabled]), textarea:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
 
 export interface SessionRailProps {
+  attention?: ReturnType<typeof useQuestionItems>
+  onOpenNeedsYou?: () => void
+  onRevealControlsHost?: (host: HTMLDivElement | null) => void
   onPause?: () => void
   capabilitiesRequest?: number
 
@@ -130,9 +148,11 @@ export interface SessionRailProps {
   /** The Permissions modal took the open request: clear it so a remount does not open it again. */
   onChildApprovalShown?: () => void
   openChecklistItem?: {id: string; n: number} | null
+  historyRequest?: string
   childSessions?: LiveChildSession[]
   delegationRequests?: LiveDelegationRequest[]
   /** The session's pending review requests: one Needs you row each, opening the file at its version. */
+  answerRequests?: LiveAnswerRequest[]
   reviewRequests?: LiveReviewRequest[]
   delegationGrants?: LiveDelegationGrant[]
   /** The element's id (the header toggle's aria-controls). */
@@ -171,7 +191,7 @@ export interface SessionRailProps {
 const NO_EVENTS: never[] = []
 
 export default function SessionRail(props: SessionRailProps) {
-  const { session, live, toolChanges: pendingToolChanges, mode, open, onClose, onReveal } = props
+  const { onRevealControlsHost, session, live, toolChanges: pendingToolChanges, mode, open, onClose, onReveal } = props
   const toolChanges = session.archived_at ? 0 : pendingToolChanges
   const bg = useBackgroundTasks(session.id)
   // A background subagent is also a background task: its subagent row says more, so the task row goes.
@@ -183,26 +203,26 @@ export default function SessionRail(props: SessionRailProps) {
   const requests = session.archived_at ? [] : props.delegationRequests ?? []
   // What the person dismissed (or is waiting out its Undo) leaves Needs you at once.
   const dismissed = useDismissed()
+  const answers = session.archived_at ? [] : props.answerRequests ?? []
   const reviews = (session.archived_at ? [] : props.reviewRequests ?? []).filter(r => !dismissed(`review:${r.request_id}`))
   const openAsks = (session.archived_at ? [] : live.openAsks).filter(a => !a.messageId || !dismissed(`ask:${a.messageId}`))
   // The main agent at work, as the working line under the chat says (ChatView reports it): its row
   // heads Running now and counts there.
   const lineReported = useWorkingLineStore(s => !!s.lines[session.id])
-  const mainWorking = !session.archived_at && lineReported
-  // The clock runs only while something timed is on screen.
-  const timed = open && (mainWorking || live.subagents.length > 0 || live.openAsks.length > 0 || tasks.length > 0 || runningChildren.length > 0)
-  const tick = useTicker(timed)
-  const now = tick - live.clockOffset
-  // Main's clocks run on the chat's own offset (the transcript's), as the working line's do.
-  const chatOffset = useTranscriptStore(s => s.sessions[session.id]?.clockOffset ?? 0)
-  const mainNow = tick - chatOffset
-  const mainStep = useMainStep(session.id, mainNow)
+  const mainWorking = !session.archived_at && !session.paused_reason && lineReported
+  // BLG-431: the 1 Hz elapsed-time clock used to live here (useTicker(timed)) and feed `now` into
+  // every running/asking row as a prop, which meant every tick re-rendered this whole ~1,400-line
+  // component - Needs-you, Tickets, Checklist/Plan, Diffs, Workspace settings - none of which show
+  // elapsed time at all. Each row that actually displays a clock (MainRow, SubagentRow, TaskRow,
+  // AskRow, ChildSessionRow, StartedSessions) now ticks on its own, so a tick only ever re-renders
+  // that one row. `mainPresent` only needs to know whether a step *would* show, not its live value
+  // (useMainStep(id, now) is non-null exactly when the working-line store has a line for this
+  // session; `now` only changes which text is inside it), so it is derived here without a clock.
+  const mainPresent = !session.paused_reason && lineReported
   // A live session that is not working: idle (Zz) or waiting on the person (?). Any other state
   // (starting, stopped, ended, failed, disconnected) has no Main card and keeps "Nothing is running."
   const mainResting = session.status === 'idle' || session.status === 'waiting'
-  const mainShown = !!mainStep || mainResting
-  // Lifetime moves by the minute: a slow clock while the panel is open.
-  const minute = useMinute(open)
+  const mainShown = mainPresent || mainResting
 
   // "Show in conversation" that found nothing (the row is above what the transcript has loaded).
   const [missing, setMissing] = useState<string | null>(null)
@@ -225,6 +245,11 @@ export default function SessionRail(props: SessionRailProps) {
 
   // Live (what needs the person, what runs, the session) or History; the person's choice is kept.
   const [chosen, setTab] = useState<RailTab>(readRailTab)
+  useEffect(() => {
+    if (!props.historyRequest) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Explicit History navigation opens the requested panel tab.
+    setTab('history')
+  }, [props.historyRequest])
   // Opened by itself for a question: show it, without making Live the person's choice; then tell
   // the page, which clears the request, so the next one is taken again.
   useEffect(() => {
@@ -251,17 +276,24 @@ export default function SessionRail(props: SessionRailProps) {
   useEffect(() => { if (liveTaken) onLiveShown?.() }, [liveTaken, onLiveShown])
   // Keep a saved Plan selected until the first read settles; then omit it if there is no plan content.
   const tickets = live.tickets ?? []
+  const ticketPulseRoot = useRef<HTMLUListElement>(null)
+  const ticketSignatures = useMemo(() => new Map((live.tickets ?? []).map(ticket => [ticket.key, ticket.title])), [live.tickets])
+  useChangePulses(ticketPulseRoot, ticketSignatures, 'data-ticket-key', live.settled)
   // Every pin, read live from its board (a Blerg Board card): Live lists the ones in progress, Plan
   // all of them (lib/pins.ts).
   const pinRefs = tickets.flatMap(t => { const r = boardCardRef(t); return r ? [r] : [] })
   // Read again while Live or Plan is on screen, so a card moved to Done shows ✓ before the next pin.
   const boardCards = useLiveBoardCards(pinRefs, session.id, open && (chosen === 'live' || chosen === 'plan'))
+  // BLG-444: worker time and review rounds for each pinned card, present only once a card has
+  // crossed its first budget multiple (the glyph is absent otherwise).
+  const pinCardTimes = useCardTimeSummaries(pinRefs)
   // A switch of account forgets what the hovercards read under the other one.
   useEffect(() => { checkAccount() })
   const basePinViews = tickets.map(t => {
     const r = boardCardRef(t)
     const v = pinView(t, r ? boardCards.get(`${r.board}#${r.number}`) : null)
-    return r && !v.live && !boardReadSettled(r.board, r.number) ? { ...v, pending: true } : v
+    const withCardTime = r ? { ...v, cardTime: pinCardTimes.get(`${r.board}#${r.number}`) } : v
+    return r && !v.live && !boardReadSettled(r.board, r.number) ? { ...withCardTime, pending: true } : withCardTime
   })
   // Live waits for the board's read (at most PIN_READ_WAIT_MS) before it shows a board card, so a
   // card already done never flashes there; Plan shows the pinned state at once, muted.
@@ -281,9 +313,20 @@ export default function SessionRail(props: SessionRailProps) {
     setTab(t)
     writeRailTab(t)
   }
+  useEffect(() => {
+    const apply = (event: Event) => {
+      const request = (event as CustomEvent).detail
+      if (request?.session !== session.id || !validReveal(request) || request.action !== 'panel') return
+      setTab(request.target as RailTab)
+      onReveal?.()
+      requestAnimationFrame(() => { const button = document.getElementById(`${props.id}-tab-${request.target}`); if (button) pulse(button) })
+    }
+    window.addEventListener(UI_REVEAL_APPLY, apply)
+    return () => window.removeEventListener(UI_REVEAL_APPLY, apply)
+  }, [session.id, onReveal, props.id])
   const paletteId = props.id
   const paletteCommands = useMemo(() => ['live', ...(planShown ? ['plan'] : []), 'history', 'files', 'capabilities'].map(t => ({
-    id: `panel:${session.id}:${t}`, destructive: false, title: `Show ${t[0].toUpperCase() + t.slice(1)} panel`,
+    id: `panel:${session.id}:${t}`, destructive: false, title: `Show ${TAB_LABEL[t as RailTab]} panel`,
     run: () => {
       // The tab's kept scroll place is put back as it shows; focusing its button does not scroll it away (#281).
       flushSync(() => { setTab(t as RailTab); writeRailTab(t as RailTab); onReveal?.() })
@@ -381,7 +424,7 @@ export default function SessionRail(props: SessionRailProps) {
   }
   for (const c of children) {
     const w = workFor('child_session', c.id, c.ticket)
-    if (w.ticket) addWorker(pinId(w.ticket), c.title || 'a started session')
+    if (w.ticket) addWorker(pinId(w.ticket), c.title || 'a worker')
     if (w.ticket && childIsWorking(c)) working.add(pinId(w.ticket))
   }
   const pinViews = withWorkers(basePinViews, v => working.has(pinId(v.pin)))
@@ -418,9 +461,9 @@ export default function SessionRail(props: SessionRailProps) {
   // (glyph) a small ☰ whose name and tooltip are the item. A worker on a card has its work line instead.
   const assignmentReference = (kind: 'subagent' | 'child_session', id: string, glyph = false, own?: ChildPin | null) => {
     const { item, ticket } = workFor(kind, id, own)
-    if (ticket) return glyph ? null : workLine(kind, id, children.find(c => c.id === id)?.title || 'a started session', own) ?? null
+    if (ticket) return glyph ? null : workLine(kind, id, children.find(c => c.id === id)?.title || 'a worker', own) ?? null
     if (!item?.id) return null
-    if (glyph) return <button type="button" className="rail-run-glyph rail-run-plan rail-checklist-reference" data-testid="rail-checklist-reference" aria-label={`Plan · ${item.text}`} title={`Plan · ${item.text}`} onClick={() => jumpChecklist(item.id!)}>☰</button>
+    if (glyph || kind === 'child_session') return <button type="button" className="rail-run-glyph rail-run-plan rail-checklist-reference" data-testid="rail-checklist-reference" aria-label={`Plan · ${item.text}`} title={`Plan · ${item.text}`} onClick={() => jumpChecklist(item.id!)}>☰</button>
     return <button type="button" className="rail-link rail-checklist-reference" data-testid="rail-checklist-reference" onClick={() => jumpChecklist(item.id!)}>Plan · {item.text}</button>
   }
 
@@ -475,6 +518,26 @@ export default function SessionRail(props: SessionRailProps) {
   // Card references in the checklist (#157): confirmed on the session's one board, a link that
   // opens the ticket, and the card's state beside an item whose own state differs.
   const checklistTexts = useMemo(() => (live.checklist?.items ?? []).map(i => i.text), [live.checklist])
+  // BLG-444: a bare #N in a checklist item names a card on the session's one board, the same
+  // reading plan-drift's own cardRefs uses (runner/internal/server/plansync.go).
+  const checklistCardRefs = useMemo(() => {
+    if (!sessionBoard) return []
+    const seen = new Set<number>()
+    const out: { board: string; number: number }[] = []
+    for (const text of checklistTexts) for (const n of cardNumbers(text)) {
+      if (!seen.has(n)) { seen.add(n); out.push({ board: sessionBoard.id, number: n }) }
+    }
+    return out
+  }, [sessionBoard, checklistTexts])
+  const checklistCardTimes = useCardTimeSummaries(checklistCardRefs)
+  const cardTimeFor = useCallback((item: { text: string }): CardTimeSummary | undefined => {
+    if (!sessionBoard) return undefined
+    for (const n of cardNumbers(item.text)) {
+      const s = checklistCardTimes.get(`${sessionBoard.id}#${n}`)
+      if (s) return s
+    }
+    return undefined
+  }, [sessionBoard, checklistCardTimes])
   const openTicketRef = useRef<((t: TicketSummaryLive) => void) | null>(null)
   const openRefCard = useCallback((t: CardTarget) => openTicketRef.current?.({ source: 'blerg-board', key: t.key, title: t.title ?? '', status: t.status ?? '', url: '', eventId: '', ...(t.boardId ? { boardId: t.boardId } : {}) } as TicketSummaryLive), [])
   const checklistRefs = useChecklistRefs(session.id, checklistTexts, sessionBoard, open, openRefCard)
@@ -500,8 +563,9 @@ export default function SessionRail(props: SessionRailProps) {
 
   const pendingProposals = props.proposals ?? []
   const waitingProposals = (props.waitingProposals ?? pendingProposals).length
-  const needsCount = openAsks.length + (toolChanges > 0 ? 1 : 0) + waitingProposals + requests.length + reviews.length
-  const needsRows = needsCount > 0 || pendingProposals.length > 0
+  const repositoryCount = session.repository_request && !session.repository_request.refusal ? 1 : 0
+  const needsCount = repositoryCount + openAsks.length + (toolChanges > 0 ? 1 : 0) + waitingProposals + requests.length + reviews.length + answers.length
+  const needsRows = props.attention ? props.attention.items.length > 0 : needsCount > 0 || pendingProposals.length > 0
   // A started session still running is running work too: it counts here and has its row (the same
   // compact row Started sessions lists it with), beside the subagents and background tasks.
   // The main agent counts while it works.
@@ -522,7 +586,7 @@ export default function SessionRail(props: SessionRailProps) {
         // header, the checklist right under it.
         <Section title={tickets.length === 1 ? 'Ticket' : 'Tickets'} testId="rail-ticket"
           meta={<span data-testid="rail-ticket-done">{pinViews.filter(v => v.done).length} of {pinViews.length} done</span>}>
-          <ul className="rail-list rail-pins">
+          <ul ref={ticketPulseRoot} className="rail-list rail-pins">
             {pinViews.map(v => (
               <PinRow key={`${v.pin.source}:${v.pin.boardId ?? ''}:${v.pin.key}`} v={v} worker={workers.get(pinId(v.pin))} onOpen={openTicket}
                 testId="rail-ticket-row" openTestId="rail-ticket-open" />
@@ -536,7 +600,7 @@ export default function SessionRail(props: SessionRailProps) {
             <Section title="Checklist" testId="rail-checklist" meta={<ProgressMeta done={doneCount(live.checklist.items)} total={live.checklist.items.length} />}>
               {/* One line per item; the commit chip opens the diff the CLI published, in the chat's viewer. */}
               <PlanChecklist sessionId={session.id} items={live.checklist.items} onViewDiff={openFile} diffSummary={diffSummary} live={!session.archived_at && !session.ended_at && ['starting', 'running', 'idle', 'waiting'].includes(session.status)} highlightedId={highlightedId} onItemElement={onChecklistElement}
-                doneOpen={doneOpen} onDoneOpen={setDoneOpen}
+                doneOpen={doneOpen} onDoneOpen={setDoneOpen} cardTimeFor={cardTimeFor}
                 assignees={item => (item.assignees ?? []).map(a => ({
                   kind: a.kind,
                   name: assigneeName(a, live.checklist?.workerTitles, live.subagents, children),
@@ -557,10 +621,10 @@ export default function SessionRail(props: SessionRailProps) {
   // The Session section's context line (#191): for whoever may see tokens, not on an archived session.
   const sessionContext = session.archived_at || live.reasoningTokens !== true ? null
     : contextMeter(live.usage?.context, ENGINE_LABELS[session.engine || 'claude'] ?? session.engine)
-  const liveHasContent = !!list || tickets.length > 0 || needsRows || !!props.proposalsError || !!mainStep || tasks.length > 0 || live.subagents.length > 0 || children.length > 0
+  const liveHasContent = !!list || tickets.length > 0 || needsRows || !!props.proposalsError || mainPresent || tasks.length > 0 || live.subagents.length > 0 || children.length > 0
   const liveBody = (
     <>
-      <InitialLoader loading={!live.settled} hasContent={liveHasContent} active={open && tab === 'live'} loadKey={session.id} label="live session" shape="facts">
+      <InitialLoader loading={!live.settled} hasContent={liveHasContent} active={open && tab === 'live'} loadKey={session.id} label="live workspace" shape="facts">
       {shownPins.length > 0 && (
         <Section title={shownPins.length === 1 ? 'Ticket' : 'Tickets'} count={shownPins.length} testId="rail-pins">
           <PinLines views={shownPins} workerOf={v => workers.get(pinId(v.pin))} onOpen={openTicket} />
@@ -568,29 +632,48 @@ export default function SessionRail(props: SessionRailProps) {
       )}
       {list && <PlanSummary list={list} onOpen={() => goPlan()} />}
 
-      <Section title="Needs you" count={openAsks.length + toolChanges + waitingProposals + requests.length + reviews.length} tone="attention" testId="rail-needs" empty={props.proposalsError ? undefined : "Nothing needs you."}>
+      <Section title="Needs you" action={props.onOpenNeedsYou && <button type="button" className="artifact-close" aria-label="Open Needs you as tab" title="Open Needs you as tab" onClick={props.onOpenNeedsYou}>↗</button>} count={props.attention ? props.attention.items.length : repositoryCount + openAsks.length + toolChanges + waitingProposals + requests.length + reviews.length + answers.length} tone="attention" testId="rail-needs" empty={props.proposalsError ? undefined : "Nothing needs you."}>
         {(props.proposalsError || needsRows) && <>
-        {props.proposalsError && <p role="alert">{props.proposalsError} <button type="button" className="btn small" onClick={props.onProposalsChanged}>Retry proposals</button></p>}
-        {needsRows && (
+        {props.proposalsError && <p role="alert">{props.proposalsError} <IconButton label="Retry proposals" onClick={props.onProposalsChanged} /></p>}
+        {props.attention ? <AttentionRows root={props.attention.root} items={props.onOpenNeedsYou ? newestAttention(props.attention.items).slice(0, 3) : props.attention.items}
+            onOpenArtifact={(owner, artifact) => owner === session.id ? props.onOpenArtifact(artifact) : navigate(`/sessions/${encodeURIComponent(owner)}?artifact=${encodeURIComponent(artifact)}`)}
+            renderDecision={item => {
+              const proposal = item.id.startsWith(`proposal:${session.id}:`) ? (props.waitingProposals ?? pendingProposals)[Number(item.id.split(':').at(-1))] : undefined
+              if (proposal) return <PendingProposal proposal={proposal} refresh={() => props.onProposalsChanged?.()} />
+              if (item.id.startsWith(`tool:${session.id}:`)) return <div data-testid="rail-tool-changes"><div className="rail-item-title">1 tool change waits on your decision</div><div className="rail-item-line">An MCP server changed or added a tool this workspace uses; it is off until you decide.</div><Link className="rail-link" to={`/proposals?session=${encodeURIComponent(session.id)}`}>Review on the Proposals page</Link></div>
+              const request = requests.find(r => item.id === `delegation:${r.request_id}`)
+              return request ? <><div className="rail-item-title">Approve worker: {request.title || request.engine}</div><DelegationLiveReview sessionId={session.id} requestId={request.request_id} /></> : null
+            }}
+            renderAsk={item => {
+              const ask: PanelAsk = openAsks.find(a => (a.messageId || a.eventId) === item.question.id) ?? { messageId: item.question.id, eventId: item.question.id, question: item.question.body, askedAt: Date.parse(item.question.created_at), noWait: item.question.no_wait, ownerOnly: item.question.owner_only, waiterEnded: item.question.waiter_ended, ...(item.session.id !== session.id ? { childSessionId: item.session.id, childTitle: item.session.title } : {}) }
+              return <AskRow ask={ask} sessionId={ask.childSessionId ?? session.id} clockOffset={live.clockOffset} active={open}
+                answer={session.archived_at || (ask.noWait && !ask.childSessionId && live.canReleasePrompt === false) ? undefined : live.answer}
+                {...draftFor(ask.eventId)} missing={missing === ask.eventId} onShow={() => jump(ask.eventId, () => scrollToEvent(ask.eventId))}
+                onDismiss={canDismissAsk(ask, ask.childSessionId ? true : live.canReleasePrompt, !!session.archived_at) ? () => dismissWithUndo(`ask:${ask.messageId}`, `Question: ${ask.question.slice(0, 80)}`) : undefined} />
+            }} /> : needsRows && (
           <ul className="rail-list">
+            {repositoryCount > 0 && <li className="rail-item rail-ask"><RepositoryRequest sessionId={session.id} /></li>}
             {pendingProposals.map(p => <li className="rail-item" key={p.id}><PendingProposal proposal={p} refresh={() => props.onProposalsChanged?.()} /></li>)}
-            {reviews.map(r => <ReviewRequestRow key={r.request_id} review={r} onOpen={() => props.onOpenArtifact(r.artifact_id)}
-              onDismiss={() => dismissWithUndo(`review:${r.request_id}`, `Review: ${r.artifact_name}`)} />)}
-            {requests.map(r => <li key={r.request_id} className="rail-item"><div className="rail-item-title"><span className="rail-glyph" aria-hidden="true" title="Can start sessions" data-testid="rail-child-approval-glyph">{GRANT_GLYPH.child}</span> Approve started session: {r.title || r.engine}</div><DelegationLiveReview sessionId={session.id} requestId={r.request_id} /></li>)}
+            {answers.map(r => <li className="rail-item" key={r.request_id} data-testid="rail-answer-request"><button type="button" className="rail-child-button" onClick={() => props.onOpenArtifact(r.artifact_id)}><span className="rail-item-title">Answer: {r.artifact_name}</span><span className="rail-item-line">{r.ask}</span></button></li>)}
+            {reviews.map(r => <li key={r.request_id} className="rail-item rail-ask" data-testid="rail-review-request"><ReviewRequestRow review={r} onOpen={() => props.onOpenArtifact(r.artifact_id)}
+              onDismiss={() => dismissWithUndo(`review:${r.request_id}`, `Review: ${r.artifact_name}`)} /></li>)}
+            {requests.map(r => <li key={r.request_id} className="rail-item"><div className="rail-item-title"><span className="rail-glyph" aria-hidden="true" title="Can start workspaces" data-testid="rail-child-approval-glyph">{GRANT_GLYPH.child}</span> Approve worker: {r.title || r.engine}</div><DelegationLiveReview sessionId={session.id} requestId={r.request_id} /></li>)}
             {openAsks.map(a => (
               <AskRow
                 key={a.eventId}
                 ask={a}
-                now={now}
+                sessionId={a.childSessionId ?? session.id}
+                clockOffset={live.clockOffset}
+                active={open}
                 // Only the owner answers a no-wait question; while that is not known (the panel reads
                 // the chat's own state) the box is offered and the server decides.
-                answer={session.archived_at || (a.noWait && live.canReleasePrompt === false) ? undefined : live.answer}
+                answer={session.archived_at || (a.noWait && !a.childSessionId && live.canReleasePrompt === false) ? undefined : live.answer}
                 {...draftFor(a.eventId)}
                 missing={missing === a.eventId}
                 onShow={() => jump(a.eventId, () => scrollToEvent(a.eventId))}
                 // Whoever may answer it may dismiss it (they may have answered in the chat); never an
                 // engine command approval.
-                onDismiss={canDismissAsk(a, live.canReleasePrompt, !!session.archived_at)
+                onDismiss={canDismissAsk(a, a.childSessionId ? true : live.canReleasePrompt, !!session.archived_at)
                   ? () => dismissWithUndo(`ask:${a.messageId}`, `Question: ${a.question.slice(0, 80)}`) : undefined}
               />
             ))}
@@ -599,7 +682,7 @@ export default function SessionRail(props: SessionRailProps) {
                 <div className="rail-item-title">
                   {toolChanges} tool {toolChanges === 1 ? 'change waits' : 'changes wait'} on your decision
                 </div>
-                <div className="rail-item-line">An MCP server changed or added a tool this session uses; it is off until you decide.</div>
+                <div className="rail-item-line">An MCP server changed or added a tool this workspace uses; it is off until you decide.</div>
                 <div className="rail-actions">
                   <Link className="rail-link" to={`/proposals?session=${encodeURIComponent(session.id)}`}>Review on the Proposals page</Link>
                 </div>
@@ -607,15 +690,16 @@ export default function SessionRail(props: SessionRailProps) {
             )}
           </ul>
         )}
+        {props.onOpenNeedsYou && (props.attention?.items.length ?? 0) > 3 && <div className="rail-actions"><button className="rail-link" type="button" onClick={props.onOpenNeedsYou}>View all waiting items ↗</button></div>}
         </>}
       </Section>
 
       {/* Main (the agent you talk to) is pinned first; its subagents and background commands run
           inside it and are indented under it; a started session runs on its own, at Main's level. */}
-      {!session.archived_at && <Section title="Running now" count={runningCount} tone="running" testId="rail-running" empty={session.status === 'idle' ? 'Idle.' : session.status === 'waiting' ? 'Waiting on you.' : 'Nothing is running.'} id={`${props.id}-running`}>
-        {(mainStep || (mainResting && sessionProgress) || live.subagents.length + tasks.length + runningChildren.length > 0) && (
+      {!session.archived_at && <Section title="Running now" count={runningCount} tone="running" testId="rail-running" empty={session.paused_reason ? 'Paused.' : session.status === 'idle' ? 'Idle.' : session.status === 'waiting' ? 'Waiting on you.' : 'Nothing is running.'} id={`${props.id}-running`}>
+        {(mainPresent || (mainResting && sessionProgress) || live.subagents.length + tasks.length + runningChildren.length > 0) && (
           <ul className="rail-list">
-            {mainShown && <MainRow step={mainStep} engine={session.engine} waiting={session.status === 'waiting'} progress={sessionProgress} now={mainNow}
+            {mainShown && <MainRow paused={!!session.paused_reason} sessionId={session.id} active={open} engine={session.engine} waiting={!session.paused_reason && session.status === 'waiting'} progress={sessionProgress}
               usage={live.reasoningTokens === true ? live.usage ?? null : undefined}
               base={runBase} card={cardLabel(shownPins.find(v => !v.done)?.pin)} startedBy={mainStartedBy}
               missing={missing === 'main'} onShow={() => jump('main', showConversationEnd)} />}
@@ -630,7 +714,8 @@ export default function SessionRail(props: SessionRailProps) {
                 assignment={assignmentReference('subagent', s.childId || s.key, true)}
                 work={workLine('subagent', s.childId || s.key, s.title)}
                 base={runBase} card={cardOf('subagent', s.childId || s.key)}
-                now={now}
+                clockOffset={live.clockOffset}
+                active={open}
                 missing={missing === `sub:${s.key}`}
                 onShow={() => jump(`sub:${s.key}`, () => scrollToCall(s.key))}
               />
@@ -641,20 +726,21 @@ export default function SessionRail(props: SessionRailProps) {
                 nested={mainShown}
                 t={t}
                 base={runBase}
-                now={now}
+                clockOffset={live.clockOffset}
+                active={open}
                 missing={missing === `task:${t.taskId}`}
                 onShow={() => jump(`task:${t.taskId}`, () => scrollToCall(t.callId))}
                 onDismiss={() => bg.dismiss(t.taskId)}
               />
             ))}
-            {runningChildren.map(child => <ChildSessionRow key={child.id} variant="run" child={reasoningChild(child, now)} now={now} parentId={session.id} assignment={assignmentReference('child_session', child.id, true, child.ticket)}
-              work={workLine('child_session', child.id, child.title || 'a started session', child.ticket)}
+            {runningChildren.map(child => <ChildSessionRow key={child.id} variant="run" child={child} clockOffset={live.clockOffset} ticking={open} parentId={session.id} assignment={assignmentReference('child_session', child.id, true, child.ticket)}
+              work={workLine('child_session', child.id, child.title || 'a worker', child.ticket)}
               card={cardOf('child_session', child.id, child.ticket)} />)}
           </ul>
         )}
       </Section>}
 
-      <StartedSessions readOnly={!!session.archived_at} sessionId={session.id} children={children} now={now} assignmentFor={id => assignmentReference('child_session', id, false, children.find(c => c.id === id)?.ticket)}
+      <StartedSessions readOnly={!!session.archived_at} sessionId={session.id} children={children} clockOffset={live.clockOffset} active={open} assignmentFor={id => assignmentReference('child_session', id, false, children.find(c => c.id === id)?.ticket)}
         onShowRunning={session.archived_at ? undefined : () => {
           const running = document.getElementById(`${props.id}-running`)
           running?.scrollIntoView({ block: 'start', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
@@ -664,13 +750,16 @@ export default function SessionRail(props: SessionRailProps) {
       {!session.archived_at && <SessionPermissions sessionId={session.id} active={open && tab === 'live'} delegationGrants={props.delegationGrants ?? []} refreshKey={[...(props.delegationGrants ?? []).map(g => g.id), String(decidedProposals)].join(',')} openRequest={open && tab === 'live' ? props.openChildApproval : undefined} onOpenRequestTaken={props.onChildApprovalShown} />}
       {/* Static facts first (where it runs, the engine, when it started), then what can change
           (model, effort), then the options and the Pause action. */}
-      <Section title="Session" testId="rail-session">
-        <SessionFacts session={session} machine={props.machine} now={minute} />
+      <Section title="Workspace" testId="rail-session">
+        <SessionFacts session={session} machine={props.machine} active={open} />
         {/* What changes: the context in use, then the model and effort. */}
         {sessionContext && <ContextFact meter={sessionContext} />}
+        <SessionColorPicker key={session.id} sessionId={session.id} color={session.color} />
         <SessionSettings session={session} />
         {!session.archived_at && <fieldset className="rail-settings rail-options">
           <legend>Options</legend>
+          <div ref={onRevealControlsHost} />
+          {session.kind === 'agent' && ['running', 'idle', 'waiting'].includes(session.status) && <div className="rail-verbosity"><SessionVerbosity id={session.id} value={session.verbosity ?? 'standard'} /></div>}
           {session.limit_resume_supported === true && <UsageLimitResume key={session.id} sessionId={session.id} />}
           <PlanNudges key={`plan-${session.id}`} sessionId={session.id} active={open && tab === 'live'} />
         </fieldset>}
@@ -682,7 +771,7 @@ export default function SessionRail(props: SessionRailProps) {
   const body = (
     <>
       {checklistNotice?.session === session.id && <p className="rail-checklist-unavailable" role="status">{checklistNotice.text}</p>}
-      <RailTabs idBase={props.id} tab={tab} onPick={pick} plan={planShown ? (planTabLabel(list, tickets.length, diffs.length) ?? '') : null} needs={openAsks.length + toolChanges + waitingProposals + requests.length} files={live.files ? fileCount(live.files.items) : 0} enabled={enabled} />
+      <RailTabs idBase={props.id} tab={tab} onPick={pick} plan={planShown ? (planTabLabel(list, tickets.length, diffs.length) ?? '') : null} needs={props.attention ? props.attention.items.length : repositoryCount + openAsks.length + toolChanges + waitingProposals + requests.length + reviews.length + answers.length} files={live.files ? fileCount(live.files.items) : 0} enabled={enabled} />
       <div className="rail-tabpanel" role="tabpanel" id={`${props.id}-panel-live`} aria-labelledby={`${props.id}-tab-live`} hidden={tab !== 'live'}>
         {liveBody}
       </div>
@@ -702,7 +791,7 @@ export default function SessionRail(props: SessionRailProps) {
         <FilesTab sessionId={session.id} active={open && tab === 'files'} files={live.files} onOpenArtifact={openFile} onAttach={attachFiles} />
       </div>
       <div className="rail-tabpanel" role="tabpanel" id={`${props.id}-panel-capabilities`} aria-labelledby={`${props.id}-tab-capabilities`} hidden={tab !== 'capabilities'}>
-        <CapabilitiesTab key={session.id} loading={capabilitiesLoading} active={capabilitiesShown} report={capabilities} pendingToolChanges={toolChanges} liveMcp={live.mcp ?? null} startedBySession={session.started_by?.kind === 'session'}
+        <CapabilitiesTab sessionId={session.id} key={session.id} loading={capabilitiesLoading} active={capabilitiesShown} report={capabilities} pendingToolChanges={toolChanges} liveMcp={live.mcp ?? null} startedBySession={session.started_by?.kind === 'session'}
           plugins={canManagePlugins ? plugins : null} runtime={session.runtime} machine={daemonName} />
       </div>
     </>
@@ -736,16 +825,16 @@ export default function SessionRail(props: SessionRailProps) {
   const panel = (
     // data-hc-boundary: a hovercard of a chip in the panel opens beside the panel (to its left),
     // never over the rows of its list.
-    <aside id={props.paneLayout ? undefined : props.id} className="session-rail panel" aria-label="Session panel" data-testid="session-rail" data-hc-boundary="" hidden={!open}>
+    <aside id={props.paneLayout ? undefined : props.id} className="session-rail panel" aria-label="Workspace panel" data-testid="session-rail" data-hc-boundary="" hidden={!open}>
       {/* No close button of its own: the header's panel toggle, right above, opens and closes it. */}
       <header className="rail-header">
-        <h2 className="rail-heading">Session panel</h2>
+        <h2 className="rail-heading">Workspace panel</h2>
       </header>
       <RailBody {...kept}>{hovered}</RailBody>
       {ticketModal}
     </aside>
   )
-  return props.paneLayout ? <SidePane layout={props.paneLayout} label="Session panel" toggleLabel="Toggle session panel" icon={<PanelToggleIcon />} side="right" className="session-rail panel session-panel-pane" as="aside" testId="session-rail" hoverBoundary hideRail hideCollapse keepMounted>{panel.props.children}</SidePane> : panel
+  return props.paneLayout ? <SidePane layout={props.paneLayout} label="Workspace panel" toggleLabel="Toggle workspace panel" icon={<PanelToggleIcon />} side="right" className="session-rail panel session-panel-pane" as="aside" testId="session-rail" hoverBoundary hideRail hideCollapse keepMounted>{panel.props.children}</SidePane> : panel
 }
 
 /** What can take the focus in the drawer, the tabs not on screen left out. */
@@ -814,6 +903,7 @@ function Drawer({ id, onClose, children, kept }: { id: string; onClose: () => vo
   }
 
   return createPortal(
+    // button-guard-ignore: useBackdropClose supplies pointer handlers only; this overlay is not a button
     <div className="rail-overlay" data-testid="session-rail-backdrop" {...backdrop}>
       <aside
         ref={ref}
@@ -827,7 +917,7 @@ function Drawer({ id, onClose, children, kept }: { id: string; onClose: () => vo
         onKeyDown={onKeyDown}
       >
         <header className="rail-header">
-          <h2 className="rail-heading" id={titleId}>Session panel</h2>
+          <h2 className="rail-heading" id={titleId}>Workspace panel</h2>
           <button type="button" className="rail-close" aria-label="Close" onClick={onClose}>✕</button>
         </header>
         <RailBody {...kept}>{children}</RailBody>
@@ -838,7 +928,7 @@ function Drawer({ id, onClose, children, kept }: { id: string; onClose: () => vo
 }
 
 const ALL_TABS = RAIL_TABS
-const TAB_LABEL: Record<RailTab, string> = { live: 'Live', plan: 'Plan', history: 'History', files: 'Files', capabilities: 'Capabilities' }
+const TAB_LABEL: Record<RailTab, string> = { live: 'Live', plan: 'Plan', history: 'History', files: 'Shared', capabilities: 'Capabilities' }
 
 /** Live · Plan · History · Files · Capabilities (Plan only when there is one), with the arrow keys, Home and End moving between them (the tabs pattern). */
 function RailTabs({ idBase, tab, onPick, plan, needs, files, enabled }: { idBase: string; tab: RailTab; onPick: (t: RailTab) => void; plan: string | null; needs: number; files: number; enabled: number }) {
@@ -853,7 +943,7 @@ function RailTabs({ idBase, tab, onPick, plan, needs, files, enabled }: { idBase
     focusRailTab(document.getElementById(`${idBase}-tab-${next}`))
   }
   return (
-    <div className="rail-tabs" role="tablist" aria-label="Session panel views" onKeyDown={onKeyDown}>
+    <div className="rail-tabs" role="tablist" aria-label="Workspace panel views" onKeyDown={onKeyDown}>
       {TABS.map(t => (
         <button
           key={t}
@@ -901,8 +991,9 @@ function RailTabs({ idBase, tab, onPick, plan, needs, files, enabled }: { idBase
   )
 }
 
-function Section({ title, count, meta, tone, testId, empty, children, id }: {
+function Section({ title, count, meta, action, tone, testId, empty, children, id }: {
   title: string
+  action?: ReactNode
   /** An id to bring the section into view by (Started sessions' "N running ↑"). */
   id?: string
   count?: number
@@ -922,6 +1013,7 @@ function Section({ title, count, meta, tone, testId, empty, children, id }: {
         <span>{title}</span>
         {count !== undefined && <span className={`rail-count${count > 0 && tone ? ` ${tone}` : ''}`} data-testid={`${testId}-count`}>{count}</span>}
         {meta && <span className="rail-section-meta" data-testid={`${testId}-meta`}>{meta}</span>}
+        {action}
       </h3>
       {hasContent ? children : empty && <p className="rail-empty">{empty}</p>}
     </section>
@@ -986,6 +1078,7 @@ function PinRow({ v, worker, onOpen, testId, openTestId }: { v: PinView; worker?
   const sessionBoard = useSessionBoard()
   const state = STATE_GLYPH[v.state]
   const words = `${state.words}${v.status && v.status.toLowerCase() !== state.words.toLowerCase() ? ` (${v.status})` : ''}`
+  const cardTimeLabel = cardTimeGlyphLabel(v.cardTime)
   const label = `${v.pin.key} ${v.title}, ${words}${worker ? `, ${worker} works on it` : ''}`
   return (
     <li className={`rail-pin${v.done ? ' done' : ''}`} data-testid={testId} data-ticket-key={v.pin.key} data-state={v.state}
@@ -998,6 +1091,7 @@ function PinRow({ v, worker, onOpen, testId, openTestId }: { v: PinView; worker?
         </button>
       </Hover>
       {worker && <span className="rail-run-glyph rail-pin-worker" role="img" aria-label={`Worker: ${worker}`} title={`Worker: ${worker}`} data-testid="rail-pin-worker">↳</span>}
+      {cardTimeLabel && <span className="rail-run-glyph rail-pin-cardtime" role="img" aria-label={cardTimeLabel} title={cardTimeLabel} data-testid="rail-pin-cardtime">⏱</span>}
     </li>
   )
 }
@@ -1085,9 +1179,14 @@ function PlanItems({ plan }: { plan: PlanLive }) {
   )
 }
 
-function AskRow({ ask, now, answer, draft, onDraft, missing, onShow, onDismiss }: {
-  ask: AskLive
-  now: number
+// Ticks its own wait label (BLG-431): 1 Hz lived at SessionRail's top before, so every tick
+// re-rendered the whole rail for this one line. memo keeps an unrelated SessionRail render (a
+// websocket push, say) from re-rendering every ask row too; only this row's own tick does.
+const AskRow = memo(function AskRow({ sessionId, ask, clockOffset, active, answer, draft, onDraft, missing, onShow, onDismiss }: {
+  sessionId: string
+  ask: PanelAsk
+  clockOffset: number
+  active: boolean
   answer?: LiveState['answer']
   draft: string
   onDraft: (text: string) => void
@@ -1095,36 +1194,23 @@ function AskRow({ ask, now, answer, draft, onDraft, missing, onShow, onDismiss }
   onShow: () => void
   onDismiss?: () => void
 }) {
+  const binary = useMessageStore(s => s.messages.some(message => message.id === ask.messageId && message.decision === true))
+  const now = useTicker(active) - clockOffset
   return (
     <li className="rail-item rail-ask" data-testid="rail-ask" data-no-wait={ask.noWait ? 'true' : undefined}>
-      <div className="rail-item-kicker">
-        <span>Question</span>
-        {/* A question the agent did not wait on: it keeps working, and the answer is sent to it. */}
-        {ask.noWait && <span className="rail-ask-nowait" title="The agent keeps working; your answer is sent to it as a message">not blocking</span>}
-        <span className="rail-wait" data-testid="rail-ask-wait">{waitLabel(ask.askedAt, now)}</span>
-      </div>
-      <div className="rail-ask-text">{ask.question}</div>
+      <QuestionRow sessionId={sessionId} decisionButtons={!!answer && binary} id={ask.messageId || ask.question} audience="you" wait={waitLabel(ask.askedAt, now)} worker={ask.childTitle} question={ask.question}
+        headerActions={onDismiss && <AttentionDismiss onDismiss={onDismiss} />}
+        wrapActivity={ask.waiterEnded}
+        activity={ask.waiterEnded ? 'The agent stopped waiting. Your answer will be sent as a message.' : ask.noWait ? `${ask.childTitle || 'Main'} keeps working` : undefined}
+        statusAction={ask.childSessionId ? <Link className="question-thread-action" aria-label="Open worker" title="Open worker" to={`/sessions/${encodeURIComponent(ask.childSessionId)}`}>↗</Link> : <ShowLink onShow={onShow} missing={missing} />}>
+
       {answer
-        ? <AskReply answer={answer} messageId={ask.messageId || undefined} label="Your answer" className="rail-reply" draft={draft} onDraft={onDraft} />
-        : <div className="rail-item-line">{ask.noWait ? 'Only the session owner can answer this question.' : 'Answer it from the message box once the session can take a message.'}</div>}
-      <div className="rail-actions">
-        <ShowLink onShow={onShow} missing={missing} />
-        {onDismiss && <DismissButton what={`question: ${ask.question}`} onDismiss={onDismiss} />}
-      </div>
+        ? <AskReply binary={binary} answer={answer} messageId={ask.messageId || undefined} label="Your answer" className="rail-reply" draft={draft} onDraft={onDraft} />
+        : <div className="rail-item-line">{ask.noWait ? 'Only the workspace owner can answer.' : 'Answer it from the message box once the workspace can take a message.'}</div>}
+      </QuestionRow>
     </li>
   )
-}
-
-/** Dismiss: close it without deciding or answering (the person may have answered in the chat). */
-function DismissButton({ what, onDismiss }: { what: string; onDismiss: () => void }) {
-  return (
-    <button type="button" className="rail-link rail-dismiss" data-testid="rail-dismiss" onClick={onDismiss}
-      aria-label={`Dismiss ${what.length > 80 ? `${what.slice(0, 79)}…` : what}`}
-      title="Dismiss: you answered elsewhere, or it no longer needs you. The agent is told.">
-      Dismiss
-    </button>
-  )
-}
+})
 
 function WorkProgress({ progress, testId }: { progress: LiveProgress; testId?: string }) {
   const valid = readProgress(progress)
@@ -1138,7 +1224,8 @@ function WorkProgress({ progress, testId }: { progress: LiveProgress; testId?: s
 
 type RunBase = { engine?: string; runtime?: string; model?: string }
 
-function SubagentRow({ sub, now, missing, onShow, assignment, work, sessionId, reasoningTokens, sessionEffort, nested, base, card }: { sessionId: string; sub: ProgressSubagent; now: number; missing: boolean; onShow: () => void; assignment?: ReactNode; work?: ReactNode; reasoningTokens: boolean; sessionEffort?: string; nested: boolean; base: RunBase; card?: string }) {
+const SubagentRow = memo(function SubagentRow({ sub, clockOffset, active, missing, onShow, assignment, work, sessionId, reasoningTokens, sessionEffort, nested, base, card }: { sessionId: string; sub: ProgressSubagent; clockOffset: number; active: boolean; missing: boolean; onShow: () => void; assignment?: ReactNode; work?: ReactNode; reasoningTokens: boolean; sessionEffort?: string; nested: boolean; base: RunBase; card?: string }) {
+  const now = useTicker(active) - clockOffset
   const model = modelDisplayName(sub.model)
   const observed = useTranscriptStore(s => s.sessions[sessionId]?.reasoning?.[sub.key])
   const shown = observed?.active === false ? null : observed ?? sub.reasoning
@@ -1147,7 +1234,7 @@ function SubagentRow({ sub, now, missing, onShow, assignment, work, sessionId, r
   const reasoning = shown && !reasoningTokens ? { ...shown, tokens: null } : shown
   const doing = reasoning ? reasoningLabel(reasoning, now) : sub.doing
   // A subagent that reports no effort of its own runs at the session's: say so, never "unknown".
-  const effort = `effort: ${sub.effort || (sessionEffort ? `${sessionEffort} (session's)` : 'unknown')}`
+  const effort = `effort: ${sub.effort || (sessionEffort ? `${sessionEffort} (workspace's)` : 'unknown')}`
   const tooltip = [sub.title, [sub.background ? 'in the background' : 'running', sub.resumed ? 'resumed' : '', sub.type, model, effort].filter(Boolean).join(' · ')].join('\n')
   // Tokens, as on Main and the started sessions, only for a viewer the server affirmatively allows
   // (reasoningTokens: owner or administrator, Insights' rule). The chat's own reading of the
@@ -1180,10 +1267,10 @@ function SubagentRow({ sub, now, missing, onShow, assignment, work, sessionId, r
       work={work} hover={hover}
       after={missing ? <ShowMissing /> : undefined} />
   )
-}
+})
 
 /** The Main card's tooltip and accessible description: what it is, and how the rows under it read. */
-const MAIN_TOOLTIP = "The agent you're talking to. Indented rows run inside it; child sessions run on their own."
+const MAIN_TOOLTIP = "The agent you're talking to. Indented rows run inside it; workers run on their own."
 
 /** The end of the conversation, where the working line is: brought into view (the working line
  *  flashes when it is there). False when the chat is not on the page. */
@@ -1204,23 +1291,29 @@ function showConversationEnd(): boolean {
  *  spinner, the turn's clock and its current step from the working line (the call it waits on,
  *  with that call's clock, or what it is on); otherwise Zz (idle) or ? (waiting on you). The
  *  session's own progress bar, when the engine reports one, is on its step line. */
-function MainRow({ step, engine, waiting, progress, now, missing, onShow, base, card, startedBy, usage }: {
+const MainRow = memo(function MainRow({ paused, sessionId, active, engine, waiting, progress, missing, onShow, base, card, startedBy, usage }: {
   base: RunBase
   /** Its token usage so far; null: none recorded yet; undefined: the viewer may not see tokens. */
   usage?: LiveUsage | null
   card?: string
   startedBy: string
-  step: MainStep | null
+  paused: boolean
+  sessionId: string
   engine?: string
   waiting: boolean
   progress: LiveProgress | null
-  now: number
+  active: boolean
   missing: boolean
   onShow: () => void
 }) {
+  // Main's clock runs on the chat's own offset (the transcript's), as the working line's do.
+  const chatOffset = useTranscriptStore(s => s.sessions[sessionId]?.clockOffset ?? 0)
+  const now = useTicker(active) - chatOffset
+  const reportedStep = useMainStep(sessionId, now)
+  const step = paused ? null : reportedStep
   const id = engine || 'claude'
   const name = ENGINE_LABELS[id] ?? id
-  const stateWord = step ? 'Working' : waiting ? 'Waiting on you' : 'Idle'
+  const stateWord = paused ? 'Paused' : step ? 'Working' : waiting ? 'Waiting on you' : 'Idle'
   const tooltip = [`Main · ${name} · ${step ? step.text : stateWord}`, MAIN_TOOLTIP].join('\n')
   const stepLine = step && <span className="rail-main-step" data-testid="rail-main-step">
     <RunStep text={step.text} testId="rail-main-doing" />
@@ -1234,9 +1327,9 @@ function MainRow({ step, engine, waiting, progress, now, missing, onShow, base, 
     tokens: usage ? [chip?.label, meter?.label].filter(Boolean).join('\n').replace(/\n/g, ' · ') : undefined, card, startedBy,
   })
   return (
-    <RunCard testId="rail-main" actionTestId="rail-main-show" hover={hover} className="rail-main" data={{ state: step ? 'working' : waiting ? 'waiting' : 'idle' }}
+    <RunCard testId="rail-main" actionTestId="rail-main-show" hover={hover} className="rail-main" data={{ state: paused ? 'paused' : step ? 'working' : waiting ? 'waiting' : 'idle' }}
       state={step ? <span className="rail-spin" role="img" aria-label="Working" />
-        : <span className={`rail-run-idle${waiting ? ' attention' : ''}`} role="img" aria-label={stateWord} title={stateWord}>{waiting ? '?' : 'Zz'}</span>}
+        : <span className={`rail-run-idle${waiting ? ' attention' : ''}`} role="img" aria-label={stateWord} title={stateWord}>{paused ? 'Ⅱ' : waiting ? '?' : 'Zz'}</span>}
       title={<span data-testid="rail-main-title">Main</span>}
       tooltip={tooltip} action="Show the end of the conversation" onActivate={onShow}
       elapsed={step && step.since !== null && now >= step.since ? <span className="rail-clock" data-testid="rail-elapsed" title="This turn">{runningLabel(Math.max(0, now - step.since))}</span> : undefined}
@@ -1250,17 +1343,19 @@ function MainRow({ step, engine, waiting, progress, now, missing, onShow, base, 
       </>}
       after={missing ? <span className="rail-missing" role="status">The conversation is not on screen.</span> : undefined} />
   )
-}
+})
 
-function TaskRow({ t, now, missing, onShow, onDismiss, nested, base }: {
+const TaskRow = memo(function TaskRow({ t, clockOffset, active, missing, onShow, onDismiss, nested, base }: {
   base: RunBase
   nested: boolean
   t: BackgroundTask
-  now: number
+  clockOffset: number
+  active: boolean
   missing: boolean
   onShow: () => void
   onDismiss: () => void
 }) {
+  const now = useTicker(active) - clockOffset
   const failed = taskFailed(t)
   const state = !t.done ? 'running' : failed ? 'failed' : 'done'
   const shell = isShell(t)
@@ -1292,9 +1387,13 @@ function TaskRow({ t, now, missing, onShow, onDismiss, nested, base }: {
       glyphs={<KindIcon t={t} />} hover={hover}
       after={missing ? <ShowMissing /> : undefined} />
   )
-}
+})
 
-function SessionFacts({ session, machine, now }: { session: SessionInfo; machine?: string; now: number }) {
+// Owns its own minute clock (rather than reading one computed at SessionRail's top) so the lifetime
+// label advancing does not force the whole rail — tickets, checklist, diffs, settings — to
+// re-render and reconcile every 30 s; only this fact line does.
+function SessionFacts({ session, machine, active }: { session: SessionInfo; machine?: string; active: boolean }) {
+  const now = useMinute(active)
   const started = Date.parse(session.started_at)
   const ended = session.ended_at ? Date.parse(session.ended_at) : NaN
   const runtime = RUNTIME_LABELS[session.runtime || 'daemon'] ?? session.runtime
@@ -1329,24 +1428,4 @@ function useMinute(active: boolean): number {
   return now
 }
 
-/** A pending review request: "Review: <file>", the ask under it; the row opens the file at the
- *  requested version, where the viewer's bar has Approve and Request changes. */
-function ReviewRequestRow({ review, onOpen, onDismiss }: { review: LiveReviewRequest; onOpen: () => void; onDismiss: () => void }) {
-  return (
-    <li className="rail-item rail-child-item rail-review-item" data-testid="rail-review-request">
-      <button type="button" className="rail-child-button" onClick={onOpen} title={`Open ${review.artifact_name} v${review.artifact_version}`}>
-        <span className="rail-item-title"><span aria-hidden="true">✎</span> Review: {review.artifact_name}</span>
-        <span className="rail-item-line">{review.artifact_version > 1 && <span className="rail-chip">v{review.artifact_version}</span>} <span className="rail-review-ask">{review.ask}</span></span>
-      </button>
-      <div className="rail-actions"><DismissButton what={`review request: ${review.artifact_name}`} onDismiss={onDismiss} /></div>
-    </li>
-  )
-}
-
 // Only the working line formats a live reasoning clock; status glyphs remain unchanged.
-function reasoningChild(child: LiveChildSession, now: number): LiveChildSession {
-  if (child.activity !== 'Thinking…' || !child.activity_since) return child
-  const since = Date.parse(child.activity_since)
-  if (!Number.isFinite(since)) return child
-  return { ...child, activity: reasoningLabel({ since, tokens: null }, now), activity_since: undefined }
-}

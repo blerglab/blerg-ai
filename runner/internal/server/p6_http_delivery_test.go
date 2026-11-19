@@ -232,17 +232,30 @@ func p6HTTPDelivery(t *testing.T, endpoint string) (http.HandlerFunc, *http.Requ
 		ctx := r.Context() // authBrowser updates the request's context in place.
 		done := make(chan struct{})
 		go func() { defer close(done); f.mux.ServeHTTP(w, r) }()
-		select {
-		case raw := <-dc.send:
-			var q protocol.WorkspaceExplorerRequest
-			if err := json.Unmarshal(raw, &q); err != nil {
-				t.Error(err)
-			} else {
-				f.api.hub.deliverWorkspaceExplorerResult(dc, reader.Explore(ctx, q))
+	dispatch:
+		for {
+			select {
+			case raw := <-dc.send:
+				var q protocol.WorkspaceExplorerRequest
+				if err := json.Unmarshal(raw, &q); err != nil {
+					t.Error(err)
+				} else {
+					// The real broker ends every request with an idempotent cancel.
+					// A reusable wire peer must consume that frame before the next RPC.
+					if q.Type == "cancel_workspace_explorer" {
+						continue
+					}
+					if q.Type != "workspace_explorer" {
+						t.Fatalf("unexpected explorer frame %q", q.Type)
+					}
+					f.api.hub.deliverWorkspaceExplorerResult(dc, reader.Explore(ctx, q))
+				}
+				break dispatch
+			case <-done:
+				return
+			case <-ctx.Done():
+				break dispatch
 			}
-		case <-done:
-			return
-		case <-ctx.Done():
 		}
 		<-done
 	}
@@ -306,92 +319,136 @@ func (*p6DeadlineOnlyWriter) SetWriteDeadline(time.Time) error { return nil }
 
 func TestP6PrivateHTTPDeliveryFailures(t *testing.T) {
 	for _, endpoint := range []string{"explorer", "result"} {
-		for _, mode := range []string{"ok", "no-deadline", "no-flush", "deadline-error", "write-error", "short-write", "flush-error", "stall-write", "stall-flush"} {
-			t.Run(endpoint+"/"+mode, func(t *testing.T) {
-				handler, r, pool, dc := p6HTTPDelivery(t, endpoint)
-				if mode == "no-deadline" {
-					w := httptest.NewRecorder()
-					handler(w, r)
-					if w.Code != 409 || strings.Contains(w.Body.String(), "private-owner") || strings.Contains(w.Body.String(), "workspace_results") {
-						t.Fatal("private response reached writer without a deadline", w.Body)
+		t.Run(endpoint, func(t *testing.T) {
+			handler, request, pool, dc := p6HTTPDelivery(t, endpoint)
+			for _, mode := range []string{"ok", "no-deadline", "no-flush", "deadline-error", "write-error", "short-write", "flush-error", "stall-write", "stall-flush"} {
+				t.Run(mode, func(t *testing.T) {
+					r := request.Clone(t.Context())
+					if mode == "no-deadline" {
+						w := httptest.NewRecorder()
+						handler(w, r)
+						if w.Code != 409 || strings.Contains(w.Body.String(), "private-owner") || strings.Contains(w.Body.String(), "workspace_results") {
+							t.Fatal("private response reached writer without a deadline", w.Body)
+						}
+						return
 					}
-					return
-				}
-				if mode == "no-flush" {
-					w := &p6DeadlineOnlyWriter{inventoryResponse{header: make(http.Header)}}
-					handler(w, r)
-					if w.status != 409 || strings.Contains(w.String(), "private-owner") || strings.Contains(w.String(), "workspace_results") {
-						t.Fatal("private response reached writer without flush support", w.String())
+					if mode == "no-flush" {
+						w := &p6DeadlineOnlyWriter{inventoryResponse{header: make(http.Header)}}
+						handler(w, r)
+						if w.status != 409 || strings.Contains(w.String(), "private-owner") || strings.Contains(w.String(), "workspace_results") {
+							t.Fatal("private response reached writer without flush support", w.String())
+						}
+						return
 					}
-					return
-				}
-				w := &p6DeliveryWriter{header: make(http.Header), mode: mode}
-				w.probe = func() {
+					w := &p6DeliveryWriter{header: make(http.Header), mode: mode}
+					w.probe = func() {
+						if mode == "deadline-error" {
+							return
+						} // only a generic error after refusal
+						tx, err := pool.Begin(t.Context())
+						if err != nil {
+							t.Error(err)
+							return
+						}
+						defer func() { _ = tx.Rollback(t.Context()) }()
+						var acquired bool
+						if err := tx.QueryRow(t.Context(), `SELECT pg_try_advisory_xact_lock(hashtextextended($1::uuid::text,876434))`, dc.ID).Scan(&acquired); err != nil {
+							t.Error(err)
+						} else if acquired {
+							t.Error("response escaped desktop authority")
+						}
+					}
+					ctx, cancel := context.WithTimeout(t.Context(), 700*time.Millisecond)
+					defer cancel()
+					if strings.HasPrefix(mode, "stall-") {
+						socket, peer := net.Pipe()
+						defer socket.Close()
+						defer peer.Close()
+						w.conn = socket // peer never reads; real socket deadline must release it
+					}
+					done := make(chan struct{})
+					go func() { defer close(done); handler(w, r.WithContext(ctx)) }()
+					select {
+					case <-done:
+					case <-time.After(1500 * time.Millisecond):
+						if w.conn != nil {
+							_ = w.conn.Close()
+						}
+						<-done
+						t.Fatal("stalled delivery retained authority beyond its deadline")
+					}
+					until, _ := ctx.Deadline()
+					if mode != "deadline-error" && (w.deadline.IsZero() || w.deadline.After(until)) {
+						t.Fatalf("delivery extended request deadline: %v > %v", w.deadline, until)
+					}
+					wantStatus := 200
 					if mode == "deadline-error" {
-						return
-					} // only a generic error after refusal
-					tx, err := pool.Begin(t.Context())
-					if err != nil {
-						t.Error(err)
-						return
+						wantStatus = 409
 					}
-					defer func() { _ = tx.Rollback(t.Context()) }()
-					var acquired bool
-					if err := tx.QueryRow(t.Context(), `SELECT pg_try_advisory_xact_lock(hashtextextended($1::uuid::text,876434))`, dc.ID).Scan(&acquired); err != nil {
-						t.Error(err)
-					} else if acquired {
-						t.Error("response escaped desktop authority")
+					if len(w.status) != 1 || w.status[0] != wantStatus || w.writes != 1 {
+						t.Fatalf("response retried or refused incorrectly: status=%v writes=%d body=%s", w.status, w.writes, w.body.String())
 					}
-				}
-				ctx, cancel := context.WithTimeout(t.Context(), 700*time.Millisecond)
-				defer cancel()
-				if strings.HasPrefix(mode, "stall-") {
-					socket, peer := net.Pipe()
-					defer socket.Close()
-					defer peer.Close()
-					w.conn = socket // peer never reads; real socket deadline must release it
-				}
-				done := make(chan struct{})
-				go func() { defer close(done); handler(w, r.WithContext(ctx)) }()
-				select {
-				case <-done:
-				case <-time.After(1500 * time.Millisecond):
-					if w.conn != nil {
-						_ = w.conn.Close()
+					wantFlush := 1
+					if mode == "deadline-error" || mode == "write-error" || mode == "short-write" || mode == "stall-write" {
+						wantFlush = 0
 					}
-					<-done
-					t.Fatal("stalled delivery retained authority beyond its deadline")
+					if w.flushes != wantFlush {
+						t.Fatalf("flushes=%d, want %d", w.flushes, wantFlush)
+					}
+					if mode == "ok" && !json.Valid(w.body.Bytes()) {
+						t.Fatal("incomplete JSON response")
+					}
+					// A fresh exclusive transaction can acquire authority after either
+					// write or flush failure, including a client that never reads.
+					probeCtx, stop := context.WithTimeout(t.Context(), time.Second)
+					defer stop()
+					if err := db.WithDesktopFence(probeCtx, pool, dc.ID, func(context.Context) error { return nil }); err != nil {
+						t.Fatal("delivery retained authority", err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestFencedResponseDeliveryPolicy(t *testing.T) {
+	for _, mode := range []string{"ok", "deadline-error", "write-error", "short-write", "flush-error"} {
+		t.Run(mode, func(t *testing.T) {
+			w := &p6DeliveryWriter{header: make(http.Header), mode: mode, probe: func() {}}
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			started, err := writeFencedResponse(ctx, w, 200, []byte(`{"result":"private"}`))
+			if mode == "deadline-error" {
+				if started || !errors.Is(err, http.ErrNotSupported) || len(w.status) != 0 || w.writes != 0 || w.flushes != 0 {
+					t.Fatalf("unsupported deadline sent response: %v %v %+v", started, err, w)
 				}
-				until, _ := ctx.Deadline()
-				if mode != "deadline-error" && (w.deadline.IsZero() || w.deadline.After(until)) {
-					t.Fatalf("delivery extended request deadline: %v > %v", w.deadline, until)
-				}
-				wantStatus := 200
-				if mode == "deadline-error" {
-					wantStatus = 409
-				}
-				if len(w.status) != 1 || w.status[0] != wantStatus || w.writes != 1 {
-					t.Fatalf("response retried or refused incorrectly: status=%v writes=%d body=%s", w.status, w.writes, w.body.String())
-				}
-				wantFlush := 1
-				if mode == "deadline-error" || mode == "write-error" || mode == "short-write" || mode == "stall-write" {
-					wantFlush = 0
-				}
-				if w.flushes != wantFlush {
-					t.Fatalf("flushes=%d, want %d", w.flushes, wantFlush)
-				}
-				if mode == "ok" && !json.Valid(w.body.Bytes()) {
-					t.Fatal("incomplete JSON response")
-				}
-				// A fresh exclusive transaction can acquire authority after either
-				// write or flush failure, including a client that never reads.
-				probeCtx, stop := context.WithTimeout(t.Context(), time.Second)
-				defer stop()
-				if err := db.WithDesktopFence(probeCtx, pool, dc.ID, func(context.Context) error { return nil }); err != nil {
-					t.Fatal("delivery retained authority", err)
-				}
-			})
-		}
+				return
+			}
+			until, _ := ctx.Deadline()
+			if !started || w.deadline.IsZero() || w.deadline.After(until) || len(w.status) != 1 || w.status[0] != 200 || w.writes != 1 {
+				t.Fatalf("bad bounded delivery: %v %v %+v", started, err, w)
+			}
+			wantFlush := 1
+			if mode == "write-error" || mode == "short-write" {
+				wantFlush = 0
+			}
+			if w.flushes != wantFlush {
+				t.Fatalf("flushes=%d, want %d", w.flushes, wantFlush)
+			}
+			var wantErr error
+			switch mode {
+			case "write-error", "flush-error":
+				wantErr = io.ErrClosedPipe
+			case "short-write":
+				wantErr = io.ErrShortWrite
+			}
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("error=%v, want %v", err, wantErr)
+			}
+			if mode == "ok" && !json.Valid(w.body.Bytes()) {
+				t.Fatal("incomplete JSON")
+			}
+		})
 	}
 }
 

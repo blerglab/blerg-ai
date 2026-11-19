@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { createRef, useLayoutEffect, useMemo } from 'react'
 import { MemoryRouter } from 'react-router-dom'
@@ -22,7 +23,7 @@ function Feature({ run, providers }: { run: () => void; providers: PaletteProvid
   return <><PaletteButton /><textarea aria-label="Session composer" /></>
 }
 
-for (const width of [390, 3840]) describe(`command palette at ${width}px`, () => {
+for (const width of browserWidths([390, 3840])) describe(`command palette at ${width}px`, () => {
   it('uses the viewport, scrolls the active option into view, traps focus, and restores it on Esc', async () => {
     await page.viewport(width, 900)
     const run = vi.fn()
@@ -49,14 +50,14 @@ for (const width of [390, 3840]) describe(`command palette at ${width}px`, () =>
     expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
     expect(screen.getByRole('group', { name: 'Commands' })).toBeTruthy()
     await userEvent.keyboard('{ArrowUp}{Enter}')
-    expect(screen.getAllByRole('option')).toHaveLength(81)
+    expect(screen.getAllByRole('option')).toHaveLength(83)
     expect(screen.getByRole('option', { name: /^Focus mode/ })).toBeTruthy()
     await userEvent.keyboard('{ArrowUp}{ArrowUp}{ArrowUp}{ArrowUp}{ArrowUp}{ArrowUp}')
     await waitFor(() => expect(screen.getByRole('listbox').scrollTop).toBeGreaterThan(0))
     const option = document.getElementById(input.getAttribute('aria-activedescendant')!)!
     const listBox = screen.getByRole('listbox').getBoundingClientRect()
     expect(option.getBoundingClientRect().bottom).toBeLessThanOrEqual(listBox.bottom + 1)
-    await waitFor(() => expect(screen.getByRole('status').textContent).toContain('81 results'))
+    await waitFor(() => expect(screen.getByRole('status').textContent).toContain('83 results'))
     const list = screen.getByRole('listbox'), scroll = list.scrollTop
     const mutations: MutationRecord[] = []
     const observer = new MutationObserver(records => mutations.push(...records))
@@ -91,7 +92,7 @@ for (const width of [390, 3840]) describe(`command palette at ${width}px`, () =>
     expect(screen.getByRole('dialog').textContent).toContain('Command palette')
     await userEvent.keyboard('{Escape}')
     await userEvent.keyboard('{Meta>}p{/Meta}')
-    let input = screen.getByRole('combobox', { name: 'Search session files' })
+    let input = screen.getByRole('combobox', { name: 'Search workspace files' })
     fireEvent.change(input, { target: { value: 'hlw' } })
     await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(2))
     expect(screen.getByRole('status').textContent).toContain('Partial results')
@@ -105,7 +106,7 @@ for (const width of [390, 3840]) describe(`command palette at ${width}px`, () =>
   })
 })
 
-for (const width of [390, 3840]) it(`labels groups and crosses them by keyboard with a safe default at ${width}px`, async () => {
+for (const width of browserWidths([390, 3840])) it(`labels groups and crosses them by keyboard with a safe default at ${width}px`, async () => {
   await page.viewport(width, 900)
   const run = vi.fn()
   function Grouped() {
@@ -124,7 +125,7 @@ for (const width of [390, 3840]) it(`labels groups and crosses them by keyboard 
   const input = screen.getByRole('combobox')
   fireEvent.change(input, { target: { value: 'widget' } })
   expect(screen.getAllByRole('group').map(group => group.getAttribute('aria-labelledby'))).toHaveLength(4)
-  for (const name of ['Sessions', 'Cards', 'Files', 'Commands']) expect(screen.getByRole('group', { name })).toBeTruthy()
+  for (const name of ['Workspaces', 'Cards', 'Files', 'Commands']) expect(screen.getByRole('group', { name })).toBeTruthy()
   for (const name of ['Cards', 'Files', 'Commands']) {
     await userEvent.keyboard('{ArrowDown}')
     const active = document.getElementById(input.getAttribute('aria-activedescendant')!)!
@@ -142,18 +143,18 @@ for (const width of [390, 3840]) it(`labels groups and crosses them by keyboard 
   expect(screen.queryByRole('dialog')).toBeNull()
 })
 
-for (const width of [390, 3840]) it(`opens empty on This session, then recent sessions, then commands at ${width}px`, async () => {
+for (const width of browserWidths([390, 3840])) it(`opens empty on This session, then recent sessions, then commands at ${width}px`, async () => {
   await page.viewport(width, 900)
   const run = vi.fn()
   function Empty() {
     const rows = useMemo(() => [
-      { id: 'quick', destructive: false, title: 'Quick open session files', here: 1, run },
+      { id: 'quick', destructive: false, title: 'Quick open workspace files', here: 1, run },
       { id: 'shell', destructive: true, title: 'Toggle shell', here: 2, run },
       { id: 'model', destructive: false, title: 'Switch model…', here: 3, refine: 'Switch model: ', run },
       { id: 'model-big', destructive: false, title: 'Switch model: Big', run },
       ...['Widget redesign', 'Gadget fix', 'Sprocket docs', 'Fourth session'].map((title, i) => ({ id: `s${i}`, destructive: false, title, group: 'sessions' as const, recentRank: i, repo: 'example-org/a-rather-long-repository-name', run })),
       { id: 'cron', destructive: false, title: 'Nightly cron', group: 'sessions' as const, run },
-      { id: 'new', destructive: false, title: 'New session', empty: true, run },
+      { id: 'new', destructive: false, title: 'New workspace', empty: true, run },
     ], [])
     usePaletteCommands(rows)
     return <PaletteButton />
@@ -161,15 +162,15 @@ for (const width of [390, 3840]) it(`opens empty on This session, then recent se
   render(<MemoryRouter initialEntries={['/sessions/s']}><CommandPaletteProvider><Empty /></CommandPaletteProvider></MemoryRouter>)
   await userEvent.click(screen.getByRole('button', { name: 'Search commands and files' }))
   const input = screen.getByRole('combobox'), dialog = screen.getByRole('dialog')
-  expect(screen.getAllByRole('group').map(group => document.getElementById(group.getAttribute('aria-labelledby')!)!.textContent)).toEqual(['This session', 'Recent sessions', 'Commands'])
-  expect(within(screen.getByRole('group', { name: 'Recent sessions' })).getAllByRole('option')).toHaveLength(3)
+  expect(screen.getAllByRole('group').map(group => document.getElementById(group.getAttribute('aria-labelledby')!)!.textContent)).toEqual(['This workspace', 'Recent workspaces', 'Commands'])
+  expect(within(screen.getByRole('group', { name: 'Recent workspaces' })).getAllByRole('option')).toHaveLength(3)
   expect(screen.queryByRole('option', { name: /Nightly cron/ })).toBeNull()
-  expect(screen.getByRole('option', { selected: true }).textContent).toContain('Quick open session files')
+  expect(screen.getByRole('option', { selected: true }).textContent).toContain('Quick open workspace files')
   expect(dialog.getBoundingClientRect().right).toBeLessThanOrEqual(width)
   expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
   // Keyboard crosses from This session into Recent sessions.
   await userEvent.keyboard('{ArrowDown}{ArrowDown}{ArrowDown}')
-  expect(document.getElementById(input.getAttribute('aria-activedescendant')!)!.closest('[role=group]')).toBe(screen.getByRole('group', { name: 'Recent sessions' }))
+  expect(document.getElementById(input.getAttribute('aria-activedescendant')!)!.closest('[role=group]')).toBe(screen.getByRole('group', { name: 'Recent workspaces' }))
   // A menu entry refines the search instead of running or closing.
   await userEvent.keyboard('{ArrowUp}{Enter}')
   expect(input).toHaveProperty('value', 'Switch model: ')
@@ -178,10 +179,10 @@ for (const width of [390, 3840]) it(`opens empty on This session, then recent se
   expect(run).not.toHaveBeenCalled()
 })
 
-for (const width of [390, 3840]) for (const kind of ['shell', 'discard'] as const) it(`protects real ${kind} consent and cancellation at ${width}px`, async () => {
+for (const width of browserWidths([390, 3840])) for (const kind of ['shell', 'discard'] as const) it(`protects real ${kind} consent and cancellation at ${width}px`, async () => {
   await page.viewport(width, 900)
   const title = kind === 'shell' ? 'New' : 'Discard'
-  const query = kind === 'shell' ? 'New shell' : 'Discard session'
+  const query = kind === 'shell' ? 'New shell' : 'Discard workspace'
   const anchor = createRef<HTMLButtonElement>()
   let registry: CommandRegistry | undefined
   function Controls() {
@@ -203,7 +204,9 @@ for (const width of [390, 3840]) for (const kind of ['shell', 'discard'] as cons
     fireEvent.change(input, { target: { value: `>${title}` } })
     expect(screen.getByRole('option', { selected: true }).textContent).toContain(`${title} help`)
     fireEvent.change(input, { target: { value: query } })
-    expect(screen.getByRole('option').classList.contains('palette-destructive')).toBe(true)
+    // Shell search also offers the separate privileged-host action.
+    const option = kind === 'shell' ? screen.getByRole('option', { name: 'New shell' }) : screen.getByRole('option')
+    expect(option.classList.contains('palette-destructive')).toBe(true)
     expect(input.hasAttribute('aria-activedescendant')).toBe(false)
     await userEvent.keyboard('{Enter}')
     expect(screen.queryByRole('alertdialog')).toBeNull()
@@ -212,10 +215,20 @@ for (const width of [390, 3840]) for (const kind of ['shell', 'discard'] as cons
   }
   await search()
   await userEvent.keyboard('{ArrowDown}{Enter}')
+  expect(screen.queryByRole('dialog', { name: 'Command palette' })).toBeNull()
   const confirm = kind === 'shell'
     ? await screen.findByRole('dialog', { name: 'Allow a shell on this machine?' })
-    : await screen.findByRole('alertdialog', { name: 'Discard session and all children?' })
+    : await screen.findByRole('alertdialog', { name: 'Discard workspace and all workers and channels?' })
+  if (kind === 'shell') {
+    expect(createShell).toHaveBeenCalledTimes(1)
+    expect(createShell.mock.calls[0]).toEqual(['session', expect.anything(), expect.anything(), undefined, false])
+    expect(screen.queryByRole('alertdialog', { name: 'Open a privileged host shell?' })).toBeNull()
+    const shots = import.meta.env.VITE_CHROME_SHOTS_DIR
+    if (shots) await page.screenshot({ path: `${shots}/ordinary-shell-consent-${width}-${/Firefox/.test(navigator.userAgent) ? 'firefox' : 'chromium'}.png` })
+  }
   await userEvent.click(within(confirm).getByRole('button', { name: 'Cancel' }))
+  expect(confirm).not.toBeInTheDocument()
+  if (kind === 'shell') expect(createShell).toHaveBeenCalledTimes(1)
   expect(remember).not.toHaveBeenCalled()
   createShell.mockClear()
   await search()

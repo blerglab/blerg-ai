@@ -1,11 +1,11 @@
 // Inline previews in the transcript: which files get one, and their bytes. An image is drawn
 // in its card (fetched through the transport into a blob URL, like the viewer, and only once per
-// session and file); a video or audio file gets a play tile and is not fetched until it is
-// opened, since a first frame would cost the whole file; an HTML page is drawn small, in the same
-// sandbox the viewer uses (components/ArtifactCard.tsx), and opens in the viewer to be used.
+// session and file); a video gets an inline player and is read only after Play; audio keeps a
+// play tile. An HTML page is drawn small, in the same sandbox the viewer uses
+// (components/ArtifactCard.tsx), and opens in the viewer to be used.
 // Markdown, text and code, JSON and tables show a short excerpt; a PDF shows its first page.
-// All of these are gated by the size the list reports, so nothing big is ever fetched for a
-// preview, and only the small result (an excerpt, a thumbnail) is kept, in a bounded cache.
+// Automatic reads are gated by the size the list reports, so nothing big is fetched for a
+// preview; small results (excerpts, thumbnails) are kept in a bounded cache.
 import { TEXT_VIEW_MAX, mediaUrl, releaseMediaUrl } from './artifactViews'
 import { excerptOf, type Excerpt } from './previewExcerpt'
 import { parsePatch, patchSummary, type PatchFile, type PatchSummary } from './patch'
@@ -27,14 +27,15 @@ export const INLINE_TEXT_MAX = 256 * 1024
 /** A PDF previews only up to this size (its first page is drawn, then the document is released). */
 export const INLINE_PDF_MAX = 5 * 1024 * 1024
 
-export type PreviewKind = 'image' | 'media' | 'html' | 'markdown' | 'text' | 'csv' | 'pdf' | 'diff'
+export type PreviewKind = 'image' | 'video' | 'media' | 'html' | 'markdown' | 'text' | 'csv' | 'pdf' | 'diff'
 
 /** The kinds drawn as an excerpt of the file's text. */
 export const EXCERPT_KINDS: ReadonlySet<PreviewKind> = new Set(['markdown', 'text', 'csv'])
 
 export function previewKind(view: string, size: number): PreviewKind | null {
   if (view === 'image') return size <= INLINE_IMAGE_MAX ? 'image' : null
-  if (view === 'video' || view === 'audio') return 'media'
+  if (view === 'video') return 'video'
+  if (view === 'audio') return 'media'
   if (view === 'html') return size <= INLINE_HTML_MAX ? 'html' : null
   if (view === 'markdown') return size <= INLINE_TEXT_MAX ? 'markdown' : null
   if (view === 'text' || view === 'json') return size <= INLINE_TEXT_MAX ? 'text' : null
@@ -45,6 +46,14 @@ export function previewKind(view: string, size: number): PreviewKind | null {
   return null
 }
 
+// previewKey: a live file (BLG-470) keeps one id for every republish, so the id alone is not a
+// stable cache key for it — rev (its updated_at) must be part of the key, or a card that cached
+// the first publish's preview would show it forever. An ordinary file gets a new id per version,
+// so rev is unused (empty) for it; passing its updated_at anyway would be harmless but pointless.
+function previewKey(sessionId: string, artifactId: string, rev?: string): string {
+  return rev ? `${sessionId}/${artifactId}:${rev}` : `${sessionId}/${artifactId}`
+}
+
 const cache = new Map<string, Promise<string>>()
 
 /** The blob URL of a file's bytes, fetched once per session and file through `raw` (the
@@ -53,10 +62,10 @@ const cache = new Map<string, Promise<string>>()
  *  the browser would render. A failed fetch is forgotten so a retry can work. */
 export function loadPreviewUrl(
   sessionId: string,
-  artifact: { id: string; view: string; content_type: string },
+  artifact: { id: string; view: string; content_type: string; updated_at?: string },
   raw: (id: string) => Promise<Blob>,
 ): Promise<string> {
-  const key = `${sessionId}/${artifact.id}`
+  const key = previewKey(sessionId, artifact.id, artifact.updated_at)
   let p = cache.get(key)
   if (!p) {
     p = (async () => {
@@ -72,9 +81,9 @@ export function loadPreviewUrl(
 const textCache = new Map<string, Promise<string>>()
 
 /** The source of an HTML page, fetched once per session and file through `raw` (bounded like the
- *  other small caches). A failed fetch is forgotten so a retry can work. */
-export function loadPreviewText(sessionId: string, artifactId: string, raw: (id: string) => Promise<Blob>): Promise<string> {
-  return remember(textCache, `${sessionId}/${artifactId}`, async () => (await raw(artifactId)).text())
+ *  other small caches). A failed fetch is forgotten so a retry can work. rev: see previewKey. */
+export function loadPreviewText(sessionId: string, artifactId: string, raw: (id: string) => Promise<Blob>, rev?: string): Promise<string> {
+  return remember(textCache, previewKey(sessionId, artifactId, rev), async () => (await raw(artifactId)).text())
 }
 
 // The small results of the text and PDF previews, at most this many at a time (oldest out first).
@@ -100,10 +109,10 @@ const excerpts = new Map<string, Promise<Excerpt>>()
  *  is read whole (it is at most INLINE_TEXT_MAX, by previewKind) but only the excerpt is kept. */
 export function loadPreviewExcerpt(
   sessionId: string,
-  artifact: { id: string; name: string; view: string; content_type: string },
+  artifact: { id: string; name: string; view: string; content_type: string; updated_at?: string },
   raw: (id: string) => Promise<Blob>,
 ): Promise<Excerpt> {
-  return remember(excerpts, `${sessionId}/${artifact.id}`, async () => {
+  return remember(excerpts, previewKey(sessionId, artifact.id, artifact.updated_at), async () => {
     const text = await (await raw(artifact.id)).text()
     return excerptOf(artifact.view, artifact.name, artifact.content_type, text)
   })
@@ -118,14 +127,14 @@ const diffs = new Map<string, Promise<DiffPreviewData>>()
 
 /** What a diff's card says (files, +/−, the first names), read once per session and file. The
  *  patch is read whole (at most INLINE_TEXT_MAX, by previewKind) but only the summary is kept. */
-export function loadDiffSummary(sessionId: string, artifactId: string, raw: (id: string) => Promise<Blob>): Promise<PatchSummary> {
-  return loadDiffPreview(sessionId, artifactId, raw).then(d => d.summary)
+export function loadDiffSummary(sessionId: string, artifactId: string, raw: (id: string) => Promise<Blob>, rev?: string): Promise<PatchSummary> {
+  return loadDiffPreview(sessionId, artifactId, raw, rev).then(d => d.summary)
 }
 
 /** The card's summary and, for a small patch of ONE file (at most INLINE_DIFF_LINES changed lines),
- *  that file parsed, to draw its hunks in the card. The patch is parsed once. */
-export function loadDiffPreview(sessionId: string, artifactId: string, raw: (id: string) => Promise<Blob>): Promise<DiffPreviewData> {
-  return remember(diffs, `${sessionId}/${artifactId}`, async () => {
+ *  that file parsed, to draw its hunks in the card. The patch is parsed once. rev: see previewKey. */
+export function loadDiffPreview(sessionId: string, artifactId: string, raw: (id: string) => Promise<Blob>, rev?: string): Promise<DiffPreviewData> {
+  return remember(diffs, previewKey(sessionId, artifactId, rev), async () => {
     const parsed = parsePatch(await (await raw(artifactId)).text())
     const summary = patchSummary(parsed)
     const one = parsed.files.length === 1 ? parsed.files[0] : null
@@ -136,9 +145,10 @@ export function loadDiffPreview(sessionId: string, artifactId: string, raw: (id:
 
 const thumbs = new Map<string, Promise<string>>()
 
-/** The first page of a PDF as a small picture (a data URL), made once per session and file. */
-export function loadPdfThumb(sessionId: string, artifactId: string, raw: (id: string) => Promise<Blob>): Promise<string> {
-  return remember(thumbs, `${sessionId}/${artifactId}`, async () => renderPdfThumb(await raw(artifactId)))
+/** The first page of a PDF as a small picture (a data URL), made once per session and file.
+ *  rev: see previewKey. */
+export function loadPdfThumb(sessionId: string, artifactId: string, raw: (id: string) => Promise<Blob>, rev?: string): Promise<string> {
+  return remember(thumbs, previewKey(sessionId, artifactId, rev), async () => renderPdfThumb(await raw(artifactId)))
 }
 
 /** Forgets every cached preview (tests, or a page that leaves the session). */

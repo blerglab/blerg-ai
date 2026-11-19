@@ -26,22 +26,30 @@ import (
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 	"github.com/blerglab/blerg-ai/runner/internal/clusterworkspace"
 	"github.com/blerglab/blerg-ai/runner/internal/codexauth"
+	"github.com/blerglab/blerg-ai/runner/internal/commandsteps"
 	"github.com/blerglab/blerg-ai/runner/internal/daemon"
 	"github.com/blerglab/blerg-ai/runner/internal/gitprovider"
 	"github.com/blerglab/blerg-ai/runner/internal/hostgit"
 	"github.com/blerglab/blerg-ai/runner/internal/nativehistory"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/workbranch"
+	"github.com/blerglab/blerg-ai/runner/skills"
 )
 
 // Config is assembled from the pod environment (set by the server's Job
 // manifest).
 type Config struct {
-	StartCommand  func(*exec.Cmd) error
-	ClusterAttach func(context.Context, *daemon.WSClient) error
+	CommandSteps     *commandsteps.Definition
+	WorkBranch       string
+	WorkBranchCustom bool
+	StartCommand     func(*exec.Cmd) error
+	ClusterAttach    func(context.Context, *daemon.WSClient) error
 	// Supplied by P5 after grant/connection validation, never decoded from env.
-	ClusterPrivateRoot   string // trusted adapter storage excluded from the agent mount/UID authority; never env decoded
-	ClusterServices      ClusterServicesFactory
-	ClusterWriters       clusterworkspace.Writers
+	ClusterPrivateRoot string // trusted adapter storage excluded from the agent mount/UID authority; never env decoded
+	ClusterServices    ClusterServicesFactory
+	ClusterWriters     clusterworkspace.Writers
+	// OnTaskLimit registers who hears that the pod's process tree refused a new task.
+	OnTaskLimit          func(func(message string))
 	Supervisor           protocol.RuntimeSupervisor
 	SupervisorLaunch     protocol.SupervisorLaunch
 	Workspace            *clusterworkspace.Plan
@@ -52,6 +60,7 @@ type Config struct {
 	ServerWS              string // BLERG_RUNNER_SERVER_WS   e.g. ws://blerg-runner-server:8080/ws/daemon
 	ServerHTTP            string // BLERG_RUNNER_SERVER_HTTP e.g. http://blerg-runner-server:8080
 	DaemonToken           string // BLERG_RUNNER_DAEMON_TOKEN
+	SessionToken          string // session messaging credential; never the runtime credential
 	SessionID             string // BLERG_RUNNER_SESSION_ID
 	BoardID               string // selected standalone Board; grant travels in MCPGateway
 	Repo                  string // BLERG_RUNNER_REPO
@@ -66,6 +75,7 @@ type Config struct {
 	GitToken              string // BLERG_RUNNER_GIT_TOKEN optional; injected for https URLs
 	APIKey                string // ANTHROPIC_API_KEY
 	Resume                bool   // BLERG_RUNNER_RESUME=1  → rebuild transcript, expect wip branch
+	HostGenerationFloor   int64  // BLERG_RUNNER_HOST_GENERATION_FLOOR: the session's highest hosting so far
 	Home                  string // workspace parent + $HOME; default /workspace
 	Version               string
 	NativeHistory         *daemon.NativeHistoryConfig
@@ -115,6 +125,8 @@ type Config struct {
 	// variable, or a value that is neither) is read as interactive by the agent host. Plain,
 	// not secret; read and unset at once like the restriction.
 	Interaction string
+	Verbosity   string
+	SkillPolicy *skills.Policy
 }
 
 // takeInteractionEnv consumes daemon.InteractionEnvVar: one of the two modes, or "".
@@ -132,6 +144,19 @@ func takeInteractionEnv() string {
 }
 
 // takeRestrictToolsEnv consumes daemon.RestrictToolsEnvVar: "1" or "true" (any case) restricts.
+func takeCommandStepsEnv() *commandsteps.Definition {
+	raw := os.Getenv("BLERG_RUNNER_FIXED_COMMAND_STEPS")
+	_ = os.Unsetenv("BLERG_RUNNER_FIXED_COMMAND_STEPS")
+	if raw == "" {
+		return nil
+	}
+	var d commandsteps.Definition
+	if json.Unmarshal([]byte(raw), &d) != nil || d.Validate() != nil {
+		return &commandsteps.Definition{}
+	}
+	return &d
+}
+
 func takeRestrictToolsEnv() bool {
 	raw, present := os.LookupEnv(daemon.RestrictToolsEnvVar)
 	if !present {
@@ -173,16 +198,32 @@ func takeMCPGatewayEnv() (*protocol.MCPGatewayConfig, error) {
 // session's tool list does not cover. A watched session with a grant loads it.
 func (c Config) skipsUserConfig() bool { return c.RestrictTools }
 
+// hostGenerationFloor reads the server's value. A bad one is no floor: the pod still starts.
+func hostGenerationFloor(raw string) int64 {
+	floor, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || floor < 0 {
+		return 0
+	}
+	return floor
+}
+
 // podSpawn is the pod's synthesised spawn_session for its one agent session.
 func podSpawn(cfg Config, workDir string) protocol.SpawnSession {
 	spawn := protocol.SpawnSession{
 		Type: "spawn_session", SessionID: cfg.SessionID, Repo: cfg.Repo,
-		Title: cfg.Title, Model: cfg.Model, Effort: cfg.Effort, Engine: cfg.Engine, Kind: "agent",
+		InitialPrompt: cfg.InitialPrompt,
+		Title:         cfg.Title, Model: cfg.Model, Effort: cfg.Effort, Engine: cfg.Engine, Kind: "agent",
+		CommandSteps:         cfg.CommandSteps,
 		MCPGateway:           cfg.MCPGateway,
 		RestrictTools:        cfg.RestrictTools,
 		Interaction:          cfg.Interaction,
+		Verbosity:            cfg.Verbosity,
+		SkillPolicy:          cfg.SkillPolicy,
 		RequireRecoveryReady: cfg.RequireRecoveryReady,
 		BoardID:              cfg.BoardID,
+		SessionToken:         cfg.SessionToken,
+		RecoverQuestions:     cfg.Resume,
+		HostGenerationFloor:  cfg.HostGenerationFloor,
 	}
 	if daemon.NativePluginEngine(cfg.Engine) && !cfg.skipsUserConfig() {
 		spawn.Plugins = cfg.Plugins
@@ -210,8 +251,11 @@ func ConfigFromEnv() Config {
 		Workspace: workspace, WorkspaceErr: workspaceErr,
 		NativeHistory:         retained,
 		ManagedCredential:     os.Getenv("BLERG_RUNNER_MANAGED_CREDENTIAL") == "1",
+		CommandSteps:          takeCommandStepsEnv(),
 		RestrictTools:         takeRestrictToolsEnv(),
 		Interaction:           takeInteractionEnv(),
+		Verbosity:             takeVerbosityEnv(),
+		SkillPolicy:           takeSkillPolicyEnv(),
 		MCPGateway:            gateway,
 		MCPGatewayErr:         gatewayErr,
 		Plugins:               plugins,
@@ -220,6 +264,9 @@ func ConfigFromEnv() Config {
 		ServerHTTP:            os.Getenv("BLERG_RUNNER_SERVER_HTTP"),
 		DaemonToken:           os.Getenv("BLERG_RUNNER_DAEMON_TOKEN"),
 		SessionID:             os.Getenv("BLERG_RUNNER_SESSION_ID"),
+		SessionToken:          os.Getenv("BLERG_RUNNER_SESSION_TOKEN"),
+		WorkBranch:            os.Getenv("BLERG_RUNNER_WORK_BRANCH"),
+		WorkBranchCustom:      os.Getenv("BLERG_RUNNER_WORK_BRANCH_CUSTOM") == "true",
 		BoardID:               os.Getenv("BLERG_RUNNER_BOARD_ID"),
 		RequireRecoveryReady:  os.Getenv("BLERG_RUNNER_REQUIRE_RECOVERY_READY") == "1",
 		Repo:                  os.Getenv("BLERG_RUNNER_REPO"),
@@ -234,6 +281,7 @@ func ConfigFromEnv() Config {
 		GitToken:              os.Getenv("BLERG_RUNNER_GIT_TOKEN"),
 		APIKey:                os.Getenv("ANTHROPIC_API_KEY"),
 		Resume:                os.Getenv("BLERG_RUNNER_RESUME") == "1",
+		HostGenerationFloor:   hostGenerationFloor(os.Getenv("BLERG_RUNNER_HOST_GENERATION_FLOOR")),
 		NoRepo:                os.Getenv("BLERG_RUNNER_NO_REPO") == "1",
 		NewRepo:               os.Getenv("BLERG_RUNNER_NEW_REPO") == "1",
 		IdleTimeout:           idleTimeoutFromEnv(os.Getenv("BLERG_RUNNER_IDLE_TIMEOUT_SECONDS")),
@@ -327,8 +375,6 @@ func writeHermesEnvFromEnv(home string) error {
 	}
 	return os.WriteFile(filepath.Join(dir, ".env"), []byte(raw), 0o600) //nolint:gosec // home is the pod's BLERG_RUNNER_HOME (trusted operator config), file name fixed
 }
-
-func wipBranch(sessionID string) string { return "wip/" + sessionID }
 
 // authURL injects the token into an https clone URL, with the username the
 // host's git provider expects alongside a token (GitHub "x-access-token",
@@ -463,6 +509,9 @@ var (
 // an empty ScratchDir instead, and state WorkspaceEmpty; a new-repo session
 // whose clone fails gets an initialised empty repository, WorkspaceInitialised.
 func PrepareWorkspace(cfg Config) (string, string, error) {
+	if cfg.WorkBranch != "" && !workbranch.Valid(cfg.WorkBranch) {
+		return "", "", errors.New("invalid session work branch")
+	}
 	if cfg.NoRepo {
 		workDir := filepath.Join(cfg.Home, ScratchDir)
 		if err := os.MkdirAll(workDir, 0o750); err != nil {
@@ -523,18 +572,48 @@ func PrepareWorkspace(cfg Config) (string, string, error) {
 		return workDir, WorkspaceInitialised, nil
 	}
 	state := "fresh-clone"
-	wip := wipBranch(cfg.SessionID)
-	if out, err := gitServed(workDir, cfg.GitURL, "upload-pack", "ls-remote", "--heads", "origin", wip); err == nil && strings.Contains(out, wip) {
+	wip := workbranch.Effective(cfg.SessionID, cfg.WorkBranch)
+	custom := cfg.WorkBranchCustom
+	refs, probeErr := gitServed(workDir, cfg.GitURL, "upload-pack", "ls-remote", "--heads", "origin", wip)
+	exists := false
+	if custom {
+		if probeErr != nil {
+			return "", "", errors.New("could not verify the custom work branch on the provider")
+		}
+		for _, line := range strings.Split(refs, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 2 && fields[1] == "refs/heads/"+wip {
+				exists = true
+			}
+		}
+		if exists && !cfg.Resume {
+			return "", "", errors.New("the custom work branch already exists; choose another branch template")
+		}
+	} else {
+		exists = probeErr == nil && strings.Contains(refs, wip)
+	}
+	switch {
+	case exists:
+		current, _ := gitRun(workDir, "symbolic-ref", "--quiet", "--short", "HEAD")
+		if custom && current == wip {
+			return workDir, "resumed-from-wip", nil
+		}
 		if out, err := gitRun(workDir, "checkout", "-b", wip, "origin/"+wip); err != nil {
+			if custom {
+				return "", "", errors.New("could not check out the recorded work branch")
+			}
 			log.Printf("runner: wip checkout failed (%v: %s); staying on default branch", err, out)
 		} else {
 			state = "resumed-from-wip"
 		}
-	} else if !cfg.Resume {
-		// Fresh session: work on the wip branch from the start so every
-		// commit is safety-pushable.
-		_, _ = gitRun(workDir, "checkout", "-b", wip)
+	case !cfg.Resume || !custom:
+		if _, err := gitRun(workDir, "checkout", "-b", wip); err != nil && custom {
+			return "", "", errors.New("could not create the recorded work branch")
+		}
+	case custom:
+		return "", "", errors.New("the recorded work branch is unavailable on the provider")
 	}
+
 	return workDir, state, nil
 }
 
@@ -560,7 +639,7 @@ func initNewRepo(cfg Config, workDir, cloneURL string) error {
 	}
 	for _, args := range [][]string{
 		{"init", "-q"},
-		{"symbolic-ref", "HEAD", "refs/heads/" + wipBranch(cfg.SessionID)},
+		{"symbolic-ref", "HEAD", "refs/heads/" + workbranch.Effective(cfg.SessionID, cfg.WorkBranch)},
 		{"remote", "add", "origin", cloneURL},
 	} {
 		if out, err := gitRun(workDir, args...); err != nil {
@@ -570,11 +649,11 @@ func initNewRepo(cfg Config, workDir, cloneURL string) error {
 	return nil
 }
 
-// newRepoNote is prepended to the first prompt of a session whose repository
+// newRepoNote is engine context for a session whose repository
 // could not be created: the agent would otherwise push, see an error and tell
 // nobody. url is the redacted origin.
 func newRepoNote(repo, url string) string {
-	return "[system] This is a new repository that could not be created on its git host: `origin` points at " + url +
+	return "\nThis is a new repository that could not be created on its git host: `origin` points at " + url +
 		" but that repository does not exist yet, so `git push` will fail until it does. Before pushing, create it (for example with " +
 		"`gh repo create " + repo + "` or the host's API, if you have a credential that may) or ask the person to create it; " +
 		"blerg-runner cannot do this for you. Work and commit as usual in the meantime.\n\n"
@@ -584,9 +663,23 @@ func newRepoNote(repo, url string) string {
 // nil = log only (the default).
 var pushProblem func(workDir, sessionID, detail string)
 
+// A private expected tip survives repeated pushes without writing to an agent's
+// Git metadata. Serial pushes cannot race their own force-with-lease values.
+type workBranchPushState struct {
+	mu    sync.Mutex
+	known bool
+	head  string
+}
+
+var workBranchPushes sync.Map
+
 // PushWip force-pushes the session's wip branch if there are new commits.
 // Idempotent and cheap; called after every turn and on SIGTERM.
-func PushWip(workDir, sessionID string) {
+func PushWip(workDir, sessionID, recorded string, custom bool) {
+	branch := workbranch.Effective(sessionID, recorded)
+	if !workbranch.Valid(branch) {
+		return
+	}
 	remote, ok := legacyGitContexts.Load(workDir)
 	if !ok {
 		return
@@ -599,16 +692,61 @@ func PushWip(workDir, sessionID string) {
 	if err != nil {
 		return
 	}
-	remoteHead, _ := gitRun(workDir, "rev-parse", "origin/"+wipBranch(sessionID))
+	var pushed *workBranchPushState
+	if custom {
+		raw, _ := workBranchPushes.LoadOrStore(struct{ dir, branch string }{workDir, branch}, &workBranchPushState{})
+		var ok bool
+		pushed, ok = raw.(*workBranchPushState)
+		if !ok {
+			return
+		}
+		pushed.mu.Lock()
+		defer pushed.mu.Unlock()
+		// Read HEAD after taking the lock, so a queued push uses the newest commit.
+		head, err = gitRun(workDir, "rev-parse", "HEAD")
+		if err != nil {
+			return
+		}
+	}
+	remoteHead, remoteErr := gitRun(workDir, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+branch)
+	if remoteErr != nil {
+		remoteHead = ""
+	}
+	if custom {
+		if !pushed.known {
+			pushed.head = remoteHead
+			pushed.known = true
+		} else if remoteHead != "" && remoteHead != pushed.head {
+			// A deliberate fetch/merge can acknowledge an external fast-forward,
+			// provided the local work preserves that new tip.
+			_, integratedErr := gitRun(workDir, "merge-base", "--is-ancestor", remoteHead, head)
+			advances := pushed.head == ""
+			if !advances {
+				_, advanceErr := gitRun(workDir, "merge-base", "--is-ancestor", pushed.head, remoteHead)
+				advances = advanceErr == nil
+			}
+			if advances && integratedErr == nil {
+				pushed.head = remoteHead
+			}
+		}
+		remoteHead = pushed.head
+	}
 	if head == remoteHead {
 		return
 	}
-	if out, err := gitServed(workDir, contextURL, "receive-pack", "push", "--force", "--", contextURL, "HEAD:"+wipBranch(sessionID)); err != nil {
+	force := "--force"
+	if custom {
+		force = "--force-with-lease=refs/heads/" + branch + ":" + remoteHead
+	}
+	if out, err := gitServed(workDir, contextURL, "receive-pack", "push", force, "--", contextURL, "HEAD:"+branch); err != nil {
 		log.Printf("runner: wip push failed: %s", classifyPushFailure(out))
 		if pushProblem != nil {
 			pushProblem(workDir, sessionID, classifyPushFailure(out))
 		}
+	} else if custom {
+		pushed.head = head
 	}
+
 }
 
 // classifyPushFailure is the fixed, caller-safe text for a failed push: git's
@@ -616,6 +754,8 @@ func PushWip(workDir, sessionID string) {
 func classifyPushFailure(out string) string {
 	o := strings.ToLower(out)
 	switch {
+	case strings.Contains(o, "stale info"):
+		return "the session branch changed on the provider; integrate its changes and retry"
 	case strings.Contains(o, "repository not found") || strings.Contains(o, "does not appear to be a git repository") || strings.Contains(o, "could not read from remote"):
 		return "the remote repository does not exist (or this session's token cannot see it)"
 	case strings.Contains(o, "authentication failed") || strings.Contains(o, "403") || strings.Contains(o, "permission"):
@@ -660,6 +800,35 @@ func FetchTranscript(ctx context.Context, cfg Config) ([]agent.RestoredEvent, er
 		if len(page) < 500 {
 			return all, nil
 		}
+	}
+}
+
+// startPodSession constructs the single pod spawn and keeps the person's prompt intact.
+func startPodSession(ctx context.Context, cfg Config, workDir, wsState string, host interface {
+	Spawn(protocol.SpawnSession)
+	SpawnResumed(protocol.SpawnSession, []agent.RestoredEvent, string)
+}, fetch func(context.Context, Config) ([]agent.RestoredEvent, error)) {
+	spawn := podSpawn(cfg, workDir)
+	spawn.InitialPromptSource = cfg.InitialPromptSource
+	spawn.InitialPromptClientID = cfg.InitialPromptClientID
+	if cfg.Resume {
+		if cfg.NativeHistory != nil {
+			host.Spawn(spawn)
+		} else {
+			events, err := fetch(ctx, cfg)
+			if err != nil {
+				log.Printf("runner: transcript fetch: %v (starting fresh)", err)
+				host.Spawn(spawn)
+			} else {
+				// The resume prompt rides in the spawn, so the session goes
+				// straight to its turn: delivered separately after spawn, the host
+				// would first report the session idle (nothing queued) and the
+				// user would get a "finished its turn" for a turn that never ran.
+				host.SpawnResumed(spawn, events, wsState)
+			}
+		}
+	} else {
+		host.Spawn(spawn)
 	}
 }
 
@@ -713,7 +882,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// workDir is set once the workspace is ready; the turn-done hook below
 	// only fires after spawn, which is after that.
-	var workDir string
+	var workDir, wsState string
 	killed := make(chan struct{})
 	activity := newIdleTracker()
 	var credentialSource daemon.EngineCredentialSource
@@ -731,8 +900,9 @@ func Run(ctx context.Context, cfg Config) error {
 	sender := &workspaceSender{WSClient: client, runtime: workspace}
 	var preparedServices ClusterServices
 	host := newPodAgentHost(sender, cfg, workspace, func() ClusterServices { return preparedServices }, daemon.AgentHostConfig{
-		CredentialSource: credentialSource,
-		StartCommand:     cfg.StartCommand,
+		FixedCommandStepsInPod: true,
+		CredentialSource:       credentialSource,
+		StartCommand:           cfg.StartCommand,
 		BeforeDriverStop: func(string) error {
 			if workspace == nil || cfg.ClusterWriters == nil {
 				return nil
@@ -741,6 +911,12 @@ func Run(ctx context.Context, cfg Config) error {
 			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
 			return cfg.ClusterWriters.Stop(cleanup)
+		},
+		AdditionalWorkspaceGuide: func() string {
+			if wsState == WorkspaceInitialised {
+				return newRepoNote(cfg.Repo, gitprovider.RedactURL(cfg.GitURL))
+			}
+			return ""
 		},
 		PlanNudges:  client.CanPlanNudges,
 		ReposRoot:   publicRoot,
@@ -762,7 +938,7 @@ func Run(ctx context.Context, cfg Config) error {
 					workspace.PushRound(context.WithoutCancel(ctx))
 					_ = client.SendContext(ctx, workspaceReport(workspace, sessionID))
 				} else {
-					PushWip(workDir, sessionID)
+					PushWip(workDir, sessionID, cfg.WorkBranch, cfg.WorkBranchCustom)
 				}
 			}()
 		},
@@ -778,7 +954,7 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	})
 	client.OnMessage("plan_input_result", host.DeliverPlanInput)
-	client.OnMessage("agent_user_message", func(raw []byte) {
+	client.OnMessage("agent_user_message", func(raw []byte) { //nolint:contextcheck // durable input delivery and adoption own independent session lifetimes
 		if workspace != nil && workspace.AdmissionFenced() {
 			return
 		}
@@ -789,6 +965,12 @@ func Run(ctx context.Context, cfg Config) error {
 				return
 			}
 			host.UserInput(msg.SessionID, agent.Input{Text: msg.Text, PlanNudge: msg.PlanNudge, Source: msg.Source, ClientID: msg.ClientID, ExpectedTurnID: msg.ExpectedTurnID})
+		}
+	})
+	client.OnMessage("set_session_verbosity", func(raw []byte) {
+		var msg protocol.SetSessionVerbosity
+		if json.Unmarshal(raw, &msg) == nil {
+			host.SetVerbosity(msg.SessionID, msg.Verbosity)
 		}
 	})
 	client.OnMessage("set_session_model", func(raw []byte) {
@@ -1001,7 +1183,7 @@ func Run(ctx context.Context, cfg Config) error {
 		client.RequestHeartbeat()
 	}
 
-	var wd, wsState string
+	var wd string
 	if workspace != nil {
 		err = client.SendContext(ctx, protocol.WorkspaceRuntimePrepared{Type: "workspace_runtime_prepared", SessionID: cfg.SessionID, Binding: disk.Binding(cfg.Workspace.Runtime, cfg.Workspace.Manifest.Digest)})
 		if err == nil {
@@ -1037,7 +1219,6 @@ func Run(ctx context.Context, cfg Config) error {
 		// agent's first prompt says what that means for pushing.
 		stages.report(protocol.StartStage{ID: protocol.StageClone, State: protocol.StageStateWarning,
 			Detail: "Initialized an empty repository — no remote yet"})
-		cfg.InitialPrompt = newRepoNote(cfg.Repo, gitprovider.RedactURL(cfg.GitURL)) + cfg.InitialPrompt
 		var once sync.Once
 		pushProblem = func(_, sessionID, detail string) {
 			once.Do(func() {
@@ -1070,35 +1251,7 @@ func Run(ctx context.Context, cfg Config) error {
 		stages.report(done("workspace_prepare"))
 	}
 	reportWorkspaceReady(ctx, cfg, stages, installPlugins)
-	if cfg.Workspace != nil {
-		cfg.InitialPrompt = clusterWorkspaceGuide(*cfg.Workspace) + cfg.InitialPrompt
-	}
-	spawn := podSpawn(cfg, workDir)
-	spawn.InitialPromptSource = cfg.InitialPromptSource
-	spawn.InitialPromptClientID = cfg.InitialPromptClientID
-	if cfg.Resume {
-		if cfg.NativeHistory != nil {
-			spawn.InitialPrompt = cfg.InitialPrompt
-			host.Spawn(spawn) //nolint:contextcheck // The native session outlives startup validation; its prompt fetch is independently bounded.
-		} else {
-			events, err := FetchTranscript(ctx, cfg)
-			if err != nil {
-				log.Printf("runner: transcript fetch: %v (starting fresh)", err)
-				spawn.InitialPrompt = cfg.InitialPrompt
-				host.Spawn(spawn) //nolint:contextcheck // the session outlives this startup context; the prompt-context fetch inside has its own short timeout
-			} else {
-				// The resume prompt rides in the spawn, so the session goes
-				// straight to its turn: delivered separately after spawn, the host
-				// would first report the session idle (nothing queued) and the
-				// user would get a "finished its turn" for a turn that never ran.
-				spawn.InitialPrompt = cfg.InitialPrompt
-				host.SpawnResumed(spawn, events, wsState) //nolint:contextcheck // the session outlives this startup context; the prompt-context fetch inside has its own short timeout
-			}
-		}
-	} else {
-		spawn.InitialPrompt = cfg.InitialPrompt
-		host.Spawn(spawn) //nolint:contextcheck // the session outlives this startup context; the prompt-context fetch inside has its own short timeout
-	}
+	startPodSession(ctx, cfg, workDir, wsState, host, FetchTranscript)
 
 	var idleTick <-chan time.Time
 	if cfg.IdleTimeout > 0 {
@@ -1116,7 +1269,7 @@ func Run(ctx context.Context, cfg Config) error {
 			if workspace != nil {
 				host.Kill(cfg.SessionID) //nolint:contextcheck // teardown has its own bounded cleanup lifetime and must finish after runtime cancellation
 			} else {
-				PushWip(workDir, cfg.SessionID)
+				PushWip(workDir, cfg.SessionID, cfg.WorkBranch, cfg.WorkBranchCustom)
 			}
 			return nil
 		case <-ctx.Done():
@@ -1124,7 +1277,7 @@ func Run(ctx context.Context, cfg Config) error {
 			if workspace != nil {
 				host.Kill(cfg.SessionID) //nolint:contextcheck // teardown has its own bounded cleanup lifetime and must finish after runtime cancellation
 			} else {
-				PushWip(workDir, cfg.SessionID)
+				PushWip(workDir, cfg.SessionID, cfg.WorkBranch, cfg.WorkBranchCustom)
 			}
 			return nil
 		case <-incompatible:
@@ -1134,9 +1287,29 @@ func Run(ctx context.Context, cfg Config) error {
 			if workspace != nil {
 				host.Kill(cfg.SessionID) //nolint:contextcheck // teardown has its own bounded cleanup lifetime and must finish after runtime cancellation
 			} else {
-				PushWip(workDir, cfg.SessionID)
+				PushWip(workDir, cfg.SessionID, cfg.WorkBranch, cfg.WorkBranchCustom)
 			}
 			return nil
 		}
 	}
+}
+
+func takeVerbosityEnv() string {
+	value := os.Getenv(daemon.VerbosityEnvVar)
+	_ = os.Unsetenv(daemon.VerbosityEnvVar)
+	if !protocol.ValidVerbosity(value) {
+		return protocol.VerbosityStandard
+	}
+	return value
+}
+
+func takeSkillPolicyEnv() *skills.Policy {
+	raw := os.Getenv(daemon.SkillPolicyEnvVar)
+	_ = os.Unsetenv(daemon.SkillPolicyEnvVar)
+	policy := skills.Resolve(false)
+	if raw != "" && json.Unmarshal([]byte(raw), &policy) != nil {
+		// A malformed launch must never broaden the inventory.
+		policy = skills.Policy{}
+	}
+	return &policy
 }

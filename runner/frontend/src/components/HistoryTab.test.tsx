@@ -114,7 +114,7 @@ describe('History tab', () => {
     show(ready({ ...reelReply(NOW), topics: [], unmarked: null }))
     const empty = screen.getByTestId('reel-empty')
     expect(empty.textContent).toBe(EMPTY_HISTORY)
-    expect(empty.querySelector('code')).toHaveTextContent('blerg-runner topic "<title>"')
+    expect(empty.querySelector('code')).toBeNull()
     cleanup()
     show(ready({ ...reelReply(NOW), topics: [] }))
     expect(screen.getByTestId('reel-empty').textContent).toBe(EMPTY_HISTORY)
@@ -316,7 +316,7 @@ describe('History tab: cards an approved proposal created', () => {
     expect(chip.tagName).toBe('BUTTON')
     expect(chip).toHaveAccessibleName(/Open card.*#42/)
     expect(chip.getAttribute('href')).toBeNull()
-    expect(chip.getAttribute('title')).toContain('approved by a session permission')
+    expect(chip.getAttribute('title')).toContain('approved by a workspace permission')
   })
   it('lists a card filed outside every topic under Unmarked work', () => {
     const reply = reelReply(NOW)
@@ -336,7 +336,7 @@ describe('History tab: renames', () => {
     show(ready(reply))
     expand(0)
     const row = within(cards()[0]).getByTestId('reel-sum-renames')
-    expect(row).toHaveTextContent('Renamed by the parent: Worker → Fix the login flow')
+    expect(row).toHaveTextContent('Renamed by Main: Worker → Fix the login flow')
   })
   it('lists a rename outside every topic under Unmarked work', () => {
     const reply = reelReply(NOW)

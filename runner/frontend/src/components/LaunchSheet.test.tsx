@@ -195,9 +195,49 @@ describe('LaunchSheet', () => {
       const nameInput = screen.getByTestId('launch-session-name')
       fireEvent.change(nameInput, { target: { value: typedName } })
     }
-    await waitFor(() => expect(screen.getByText('Launch Session')).not.toBeDisabled())
-    fireEvent.click(screen.getByText('Launch Session'))
+    await waitFor(() => expect(screen.getByText('Launch Workspace')).not.toBeDisabled())
+    fireEvent.click(screen.getByText('Launch Workspace'))
   }
+
+  it.each([
+    ['{"error":"Choose another runtime."}', 'Choose another runtime.', false],
+    ['{"error":"cluster Codex needs a dedicated login to renew its access."}', 'cluster Codex needs a dedicated login to renew its access.', true],
+    ['Service unavailable', 'Service unavailable', false],
+  ])('renders launch error sentences: %s', async (body, sentence, reconnect) => {
+    const original = buildFetchMock(captureBody)
+    vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => url === '/api/sessions'
+      ? Promise.resolve(new Response(body, { status: 400 })) : original(url, init)))
+    await renderAndWaitForLoad()
+    await selectRepoAndSubmit()
+    expect(await screen.findByText(`Failed to launch workspace: ${sentence}`)).toBeInTheDocument()
+    const link = screen.queryByRole('link', { name: 'Reconnect in Settings' })
+    if (reconnect) expect(link).toHaveAttribute('href', `${coreOrigin()}/settings#managed-connections`)
+    else expect(link).not.toBeInTheDocument()
+  })
+
+  it('keeps and rechecks workspace repositories when changing desktop runtimes (#316)', async () => {
+    const original = buildFetchMock(captureBody, { daemon: { discovery_version: 1, workspace_capabilities: { manifest_version: 2, linux_host: true, sandbox: true } } })
+    const repository = { name: 'project', path: 'project', source_identity: 'source-project', kind: 'repository' }
+    const previews: string[] = []
+    vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
+      if (url.startsWith('/api/workspace/discovery?')) return Promise.resolve(new Response(JSON.stringify({ ok: true, page: { root_identity: 'root', root: { ...repository, path: '.', name: 'Repositories', kind: 'directory' }, entries: [repository] } })))
+      if (url === '/api/workspace/preview') {
+        const body = JSON.parse(String(init?.body))
+        previews.push(body.runtime)
+        return Promise.resolve(new Response(JSON.stringify({ ok: true, selection: body.selection, members: [{ name: 'project' }] })))
+      }
+      return original(url, init)
+    }))
+    await renderAndWaitForLoad()
+    fireEvent.click(await screen.findByRole('checkbox', { name: /project.*Git repository/ }))
+    await screen.findByRole('button', { name: 'Remove project' })
+    fireEvent.click(screen.getByTestId('runtime-daemon'))
+    await waitFor(() => expect(previews).toEqual(['sandbox', 'host']))
+    expect(screen.getByRole('checkbox', { name: /project.*Git repository/ })).toBeChecked()
+    fireEvent.click(screen.getByTestId('agent-ack'))
+    fireEvent.click(screen.getByRole('button', { name: /Launch/ }))
+    await waitFor(() => expect(captureBody.value?.selection).toMatchObject({ members: [{ path: 'project' }] }))
+  })
 
   it('initializes Git on the host Create & Launch path', async () => {
     vi.stubGlobal('fetch', buildFetchMock(captureBody, { daemon: {
@@ -249,7 +289,7 @@ describe('LaunchSheet', () => {
   // Card #143: the default name is the repository's (no made-up names), "Session" without one.
   it('without a repository the name is "Session"; picking a repo fills it with the repository\'s name', async () => {
     await renderAndWaitForLoad()
-    expect(screen.getByTestId('launch-session-name')).toHaveValue('Session')
+    expect(screen.getByTestId('launch-session-name')).toHaveValue('Workspace')
     fireEvent.click(screen.getByText('myrepo'))
     expect(screen.getByTestId('launch-session-name')).toHaveValue('myrepo')
   })
@@ -272,8 +312,8 @@ describe('LaunchSheet', () => {
     fireEvent.change(input, { target: { value: 'My own name' } })
     fireEvent.click(screen.getByText('myrepo'))
     expect(input).toHaveValue('My own name')
-    await waitFor(() => expect(screen.getByText('Launch Session')).not.toBeDisabled())
-    fireEvent.click(screen.getByText('Launch Session'))
+    await waitFor(() => expect(screen.getByText('Launch Workspace')).not.toBeDisabled())
+    fireEvent.click(screen.getByText('Launch Workspace'))
     await waitFor(() => expect(captureBody.value?.title).toBe('My own name'))
   })
 
@@ -353,10 +393,10 @@ describe('LaunchSheet', () => {
     await screen.findByText('Repository')
     await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
     fireEvent.click(screen.getByText('myrepo'))
-    await waitFor(() => expect(screen.getByText('Launch Session')).not.toBeDisabled())
-    fireEvent.click(screen.getByText('Launch Session'))
+    await waitFor(() => expect(screen.getByText('Launch Workspace')).not.toBeDisabled())
+    fireEvent.click(screen.getByText('Launch Workspace'))
 
-    await waitFor(() => expect(screen.getByText(/Failed to launch session/)).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(/Failed to launch workspace/)).toBeInTheDocument())
     expect(screen.queryByTestId('session-page')).not.toBeInTheDocument()
     expect(mockAddPendingSession).not.toHaveBeenCalled()
   })
@@ -403,8 +443,8 @@ describe('LaunchSheet', () => {
     await screen.findByText('Repository')
     await waitFor(() => expect(screen.queryByText('Checking available engines…')).not.toBeInTheDocument())
     fireEvent.click(screen.getByText('myrepo'))
-    await waitFor(() => expect(screen.getByText('Launch Session')).not.toBeDisabled())
-    fireEvent.click(screen.getByText('Launch Session'))
+    await waitFor(() => expect(screen.getByText('Launch Workspace')).not.toBeDisabled())
+    fireEvent.click(screen.getByText('Launch Workspace'))
 
     await waitFor(() => expect(mockAddPendingSession).toHaveBeenCalledWith('new-sess'))
     expect(await screen.findByTestId('session-page')).toBeInTheDocument()
@@ -547,7 +587,7 @@ describe('LaunchSheet — Run column defaults', () => {
   it('still tells the user sessions run as cluster pods when no daemon is connected', async () => {
     await renderSheet({ daemons: [], clusterStatus: CLUSTER_ON })
     expect(
-      screen.getByText('No workstation daemon connected — sessions will run as cluster pods.'),
+      screen.getByText('No workstation daemon connected — workspaces will run as cluster pods.'),
     ).toBeInTheDocument()
   })
 
@@ -609,10 +649,10 @@ describe('LaunchSheet — runtime and kind on the wire', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Permissions…' }))
     const dialog = screen.getByRole('dialog', { name: 'Permissions' })
     // The local sandbox can only pre-approve sandboxed children: the other row says why it is off.
-    const unsandboxed = within(dialog).getByRole('checkbox', { name: 'Start unsandboxed children without asking' })
+    const unsandboxed = within(dialog).getByRole('checkbox', { name: 'Start unsandboxed workers without asking' })
     expect(unsandboxed).toBeDisabled()
-    expect(within(dialog).getByTestId('pm-children-daemon')).toHaveTextContent("A sandboxed session can't pre-approve unsandboxed children.")
-    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Start sandboxed children without asking' }))
+    expect(within(dialog).getByTestId('pm-children-daemon')).toHaveTextContent("A sandboxed workspace can't pre-approve unsandboxed workers.")
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Start sandboxed workers without asking' }))
     fireEvent.change(await within(dialog).findByRole('combobox', { name: 'Access to Product' }), { target: { value: 'read' } })
     expect(within(dialog).getByTestId('pm-summary')).toHaveTextContent('Grant 2')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
@@ -810,6 +850,7 @@ describe('LaunchSheet — Run column rules', () => {
     await renderSheet()
     const box = screen.getByTestId('unattended-toggle')
     expect(box).not.toBeChecked()
+    expect(screen.getByLabelText('Verbosity')).toHaveValue('')
     expect(screen.getByLabelText(/Unattended/)).toBe(box)
     expect(screen.getByTestId('launch-unattended')).toHaveTextContent(
       'Decide and finish without waiting for you.',
@@ -818,6 +859,7 @@ describe('LaunchSheet — Run column rules', () => {
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
     expect(captureBody.value!.interaction).toBe('interactive')
+    expect(captureBody.value!.verbosity).toBeUndefined()
   })
 
   it('launches unattended when the box is ticked', async () => {
@@ -827,6 +869,17 @@ describe('LaunchSheet — Run column rules', () => {
     await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
+    expect(captureBody.value!.interaction).toBe('unattended')
+  })
+
+  it('launches with verbosity independently of unattended mode', async () => {
+    await renderSheet()
+    fireEvent.change(screen.getByLabelText('Verbosity'), {target:{value:'terse'}})
+    fireEvent.click(screen.getByTestId('unattended-toggle'))
+    await waitFor(() => expect(screen.getByText(/Launch/)).not.toBeDisabled())
+    fireEvent.click(screen.getByText(/Launch/))
+    await waitFor(() => expect(captureBody.value).toBeDefined())
+    expect(captureBody.value!.verbosity).toBe('terse')
     expect(captureBody.value!.interaction).toBe('unattended')
   })
 
@@ -986,7 +1039,7 @@ describe('LaunchSheet — cluster credential preflight', () => {
 
     const warning = screen.getByTestId('cluster-git-warning')
     expect(warning).toHaveTextContent(
-      'No GitHub credential — this session can only clone public repositories and cannot push. Add one in Settings.',
+      'No GitHub credential — this workspace can only clone public repositories and cannot push. Add one in Settings.',
     )
     expect(within(warning).getByRole('link', { name: 'Settings' })).toHaveAttribute('href', `${coreOrigin()}/settings`)
     await waitFor(() => expect(screen.getByText(/Launch/).closest('button')).not.toBeDisabled())
@@ -1066,7 +1119,7 @@ describe('LaunchSheet — cluster credential preflight', () => {
     await renderClusterAgent({ clusterStatus: { ...CLUSTER_ON, workspace_capabilities: {} }, myCreds: { engines: ['claude'], git: true }, extraRepos: [LOCAL_KNOWN] })
     expect(screen.queryByRole('group', { name: 'Hosted repositories' })).toBeNull()
     expect(screen.queryByText('entertainment')).toBeNull()
-    expect(screen.getByText('Workspace sessions and owner shells are not enabled for this runtime.')).toBeInTheDocument()
+    expect(screen.getByText('Workspaces and owner shells are not enabled for this runtime.')).toBeInTheDocument()
     fireEvent.click(screen.getByText('myrepo'))
     fireEvent.click(screen.getByText(/Launch/))
     await waitFor(() => expect(captureBody.value).toBeDefined())
@@ -1800,7 +1853,7 @@ describe('LaunchSheet — clone a named repository onto a daemon', () => {
     fireEvent.click(screen.getByTestId('free-text-repo'))
     expect(screen.getByTestId('clone-plan')).toHaveTextContent('Already on workstation at /repos/linux')
     expect(screen.queryByTestId('clone-git-advisory')).not.toBeInTheDocument()
-    expect(screen.getByText('Launch Session')).toBeInTheDocument()
+    expect(screen.getByText('Launch Workspace')).toBeInTheDocument()
   })
 
   it('does not offer a named clone for text that is not a repository', async () => {
@@ -1898,7 +1951,7 @@ describe('LaunchSheet — No repository', () => {
   }
 
   async function launch() {
-    const button = screen.getByText('Launch Session').closest('button')!
+    const button = screen.getByText('Launch Workspace').closest('button')!
     expect(button).not.toBeDisabled()
     fireEvent.click(button)
     await waitFor(() => expect(captureBody.value).toBeDefined())
@@ -2008,7 +2061,7 @@ describe('LaunchSheet — No repository', () => {
     fireEvent.change(input, { target: { value: 'my-notes' } })
     expect(screen.getByTestId('no-repo-plan')).toHaveTextContent('Keeps your files in /repos/.scratch-my-notes.')
     fireEvent.change(input, { target: { value: '../escape' } })
-    expect(screen.getByText('Launch Session').closest('button')).toBeDisabled()
+    expect(screen.getByText('Launch Workspace').closest('button')).toBeDisabled()
     expect(screen.getByTestId('launch-blocked-reason')).toHaveTextContent('must be 1-64 letters, digits')
     fireEvent.change(input, { target: { value: 'my-notes' } })
     const body = await launch()

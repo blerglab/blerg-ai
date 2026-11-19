@@ -46,7 +46,7 @@ func (s *Service) RestoreBound(ctx context.Context, m protocol.WorkspaceManifest
 		return err
 	}
 	defer func() { _ = root.file.Close() }()
-	return s.restore(root, &operation{ctx: ctx}, m, saved)
+	return s.restore(root, &operation{ctx: ctx, service: s}, m, saved)
 }
 
 // RebindResumed restores the bound selection of a launch the daemon resumed
@@ -89,7 +89,7 @@ func (s *Service) RebindResumed(ctx context.Context, m protocol.WorkspaceManifes
 			saved.PhysicalFolder = false
 		}
 	}
-	op := &operation{ctx: ctx}
+	op := &operation{ctx: ctx, service: s}
 	dir, _, err := safeDirectory(root, saved.Anchor, op)
 	if err != nil {
 		return err

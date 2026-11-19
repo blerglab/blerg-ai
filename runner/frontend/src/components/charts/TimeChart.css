@@ -1,0 +1,18 @@
+.time-chart{margin:12px 0;min-width:0;container-type:inline-size}
+.time-chart svg{display:block;width:100%;height:auto;max-height:400px;overflow:visible}
+.time-chart svg text{font:12px var(--body);fill:var(--fog-dim)}
+.time-chart rect[role=button]{cursor:pointer}
+.time-chart rect[role=button]:focus-visible{outline:2px solid var(--fog);outline-offset:2px}
+.time-chart-grid{stroke:var(--stone);stroke-width:1}
+.time-chart-today{stroke:var(--fog-dim);stroke-dasharray:5 4}
+.time-chart-key{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
+.time-chart-key-item{display:inline-flex;align-items:center;gap:4px}
+.time-chart-key button{display:inline-flex;align-items:center;gap:6px;background:transparent;border:0;color:var(--fog);font:inherit;padding:2px 0;cursor:pointer}
+.time-chart-key button[aria-pressed=false]{opacity:.45}
+.time-chart-key i{width:9px;height:9px;border-radius:2px}
+.time-chart figcaption,.time-chart-events{font-size:12px;color:var(--fog-dim)}
+.time-chart-events{display:flex;flex-wrap:wrap;gap:8px 20px;list-style:none;padding:0}
+
+.time-chart-event { cursor: pointer; outline: none; }
+.time-chart-event:focus-visible circle { stroke: var(--focus-ring, var(--lichen)); stroke-width: 2; }
+.time-chart-events-more { margin: 4px 0 0; font-size: 12px; color: var(--fog-dim); }

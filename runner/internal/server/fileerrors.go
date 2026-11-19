@@ -5,9 +5,8 @@ package server
 //
 //	{"error": "<one plain sentence: what failed, the kind of failure, what to do>", "error_id": "<8 hex>"}
 //
-// and one log line carrying the same error_id and the underlying error. The sentence never
-// carries a path, a token or the raw error; the log line carries the raw error, whose paths are
-// the runner's own data directory.
+// and one middleware log line carrying the same error_id and a safe typed cause.
+// Neither the response nor the log includes raw errors or workspace paths.
 
 import (
 	"crypto/rand"
@@ -15,9 +14,10 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"log"
 	"net/http"
 	"syscall"
+
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 )
 
 // noDatabaseMsg is the 503 of a file or topic route on a runner started without a database.
@@ -32,11 +32,11 @@ func newErrorID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// writeFailure logs logContext and err under a fresh error id and answers status with msg and
-// the id. It returns the id (for a test, or a caller that logs more).
-func writeFailure(w http.ResponseWriter, status int, msg, logContext string, err error) string {
+// writeFailure attaches a safe cause to the middleware and answers with a fresh ID.
+// logContext is retained for callers but is never logged: it may contain private data.
+func writeFailure(w http.ResponseWriter, status int, msg string, _ string, err error) string {
 	id := newErrorID()
-	log.Printf("%s: %v (error_id=%s)", logContext, err, id)
+	failurelog.SetCause(w, err)
 	writeJSON(w, status, map[string]string{"error": msg, "error_id": id})
 	return id
 }

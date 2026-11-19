@@ -15,7 +15,7 @@
 .pdf-page {
   position: relative;
   width: 100%;
-  background: #fff;
+  background: var(--chat-document-bg);
   box-shadow: 0 1px 4px color-mix(in srgb, var(--chat-fg) 25%, transparent);
   border: 1px solid var(--chat-border);
   box-sizing: content-box;
@@ -93,5 +93,5 @@
 .pdf-page-placeholder {
   position: absolute;
   inset: 0;
-  background: color-mix(in srgb, var(--chat-surface-2) 30%, #fff);
+  background: color-mix(in srgb, var(--chat-surface-2) 30%, var(--chat-document-bg));
 }

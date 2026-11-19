@@ -31,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"github.com/blerglab/blerg-ai/contracts/netguard"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 )
@@ -51,11 +52,10 @@ const BoardConnectionID = "00000000-0000-4000-8000-00000000b0a2"
 const boardRenewBefore = 60 * time.Second
 
 // boardToolNames is the fixed set of board tools every board connection offers (spec 10.2).
-// Archiving and creating or updating boards are deliberately absent; column management is the
-// separate boardColumnToolNames.
+// Creating or updating boards is deliberately absent. Person-backed tools are separate.
 var boardToolNames = []string{
 	"blerg_board_get", "blerg_board_list", "blerg_board_schema",
-	"blerg_column_list",
+	"blerg_column_list", "blerg_release_list", "blerg_release_get",
 	"blerg_card_search", "blerg_card_get", "blerg_card_create", "blerg_card_update",
 	"blerg_card_move", "blerg_card_comment", "blerg_card_link",
 }
@@ -80,24 +80,28 @@ func toolSet(names ...[]string) map[string]bool {
 
 var (
 	boardColumnToolSet = toolSet(boardColumnToolNames)
-	allBoardToolSet    = toolSet(boardToolNames, boardColumnToolNames)
+	boardPersonToolSet = toolSet(boardColumnToolNames, []string{"blerg_card_archive"})
+	allBoardToolSet    = toolSet(boardToolNames, boardColumnToolNames, []string{"blerg_card_archive"})
 )
 
-// BoardToolNames returns every board tool a session may call, column management included (a copy).
+// BoardToolNames returns every board tool a session may call, archiving and column management included (a copy).
 func BoardToolNames() []string {
-	return append(append([]string(nil), boardToolNames...), boardColumnToolNames...)
+	return append(append(append([]string(nil), boardToolNames...), boardColumnToolNames...), "blerg_card_archive")
 }
 
 // IsBoardColumnTool reports whether tool manages a board's columns.
 func IsBoardColumnTool(tool string) bool { return boardColumnToolSet[tool] }
 
+// BoardToolNeedsPerson reports whether a tool requires a person behind Full access.
+func BoardToolNeedsPerson(tool string) bool { return boardPersonToolSet[tool] }
+
 // PersonBehind reports whether the access a board call acts with is a person's sign-in (a login
 // session), rather than an agent token's (a cron, or a launch made with a token). Column
-// management needs one.
+// management and archiving need one.
 func PersonBehind(p Proof) bool { return p.SessionID != "" && p.TokenID == "" }
 
 // builtinToolOffered reports whether the built-in board connection offers tool at all (before its
-// level and, for column management, the person behind the access, both read per call).
+// level and, for archiving and column management, the person behind the access, both read per call).
 func builtinToolOffered(tool string) bool {
 	return allBoardToolSet[tool]
 }
@@ -134,7 +138,7 @@ type BoardToken struct {
 type BoardExchanger interface {
 	// Exchange returns a token for boardID. ErrConnectionGone when core answers not found (the proof
 	// is not live). sessionRef is the runner's session id, recorded in core's audit line only.
-	Exchange(ctx context.Context, proof Proof, boardID, sessionRef string) (BoardToken, error)
+	Exchange(ctx context.Context, proof Proof, boardID, sessionRef string, standing bool) (BoardToken, error)
 	// Revoke revokes an exchanged token by its sub. A token already gone is not an error.
 	Revoke(ctx context.Context, accountID, sub string) error
 }
@@ -152,7 +156,9 @@ func BoardHTTPClient(rawURL string, timeout time.Duration, maxBody int64) *http.
 	if u, err := url.Parse(rawURL); err == nil && u.Hostname() != "" {
 		p = netguard.Policy{AllowHTTPHosts: []string{u.Hostname()}, AllowPrivateHosts: []string{u.Hostname()}}
 	}
-	return p.Client(timeout, maxBody)
+	client := p.Client(timeout, maxBody)
+	client.Transport = failurelog.Default.Transport("runner", "board", client.Transport)
+	return client
 }
 
 // ---- the gateway side ------------------------------------------------------------------------
@@ -198,7 +204,11 @@ func (st *grantState) boardCredential(ctx context.Context, gr *db.MCPGrant) (Cre
 			proof = *person
 		}
 	}
-	tok, err := g.cfg.Board.Exchange(ctx, proof, gr.BuiltinRef, gr.SessionID)
+	askedAt := time.Now()
+	tok, err := g.cfg.Board.Exchange(ctx, proof, gr.BuiltinRef, gr.SessionID, true)
+	if PersonBehind(proof) {
+		g.observeAuthority(ctx, gr.SessionID, "board:"+gr.BuiltinRef, "Ticket board", proof, askedAt, err)
+	}
 	switch {
 	case errors.Is(err, ErrConnectionGone):
 		return Credential{}, err
@@ -394,6 +404,7 @@ func (c *HTTPBoardExchanger) post(ctx context.Context, path string, body any) (*
 	}
 	// Never follow a redirect: the request carries the internal key.
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client.Transport = failurelog.Default.Transport("runner", "core", client.Transport)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("core unreachable: %w", err)
@@ -402,6 +413,7 @@ func (c *HTTPBoardExchanger) post(ctx context.Context, path string, body any) (*
 }
 
 type exchangeRequest struct {
+	Standing   bool   `json:"standing,omitempty"`
 	ReadOnly   bool   `json:"read_only,omitempty"`
 	AccountID  string `json:"account_id"`
 	TokenID    string `json:"token_id,omitempty"`
@@ -412,21 +424,21 @@ type exchangeRequest struct {
 }
 
 // Exchange implements BoardExchanger.
-func (c *HTTPBoardExchanger) Exchange(ctx context.Context, proof Proof, boardID, sessionRef string) (BoardToken, error) {
-	return c.exchange(ctx, proof, boardID, sessionRef, false)
+func (c *HTTPBoardExchanger) Exchange(ctx context.Context, proof Proof, boardID, sessionRef string, standing bool) (BoardToken, error) {
+	return c.exchange(ctx, proof, boardID, sessionRef, false, standing)
 }
 
 // ExchangeReadOnly obtains only card.read for duplicate discovery. Ordinary grants retain their capabilities.
-func (c *HTTPBoardExchanger) ExchangeReadOnly(ctx context.Context, proof Proof, boardID, sessionRef string) (BoardToken, error) {
-	return c.exchange(ctx, proof, boardID, sessionRef, true)
+func (c *HTTPBoardExchanger) ExchangeReadOnly(ctx context.Context, proof Proof, boardID, sessionRef string, standing bool) (BoardToken, error) {
+	return c.exchange(ctx, proof, boardID, sessionRef, true, standing)
 }
-func (c *HTTPBoardExchanger) exchange(ctx context.Context, proof Proof, boardID, sessionRef string, readOnly bool) (BoardToken, error) {
+func (c *HTTPBoardExchanger) exchange(ctx context.Context, proof Proof, boardID, sessionRef string, readOnly, standing bool) (BoardToken, error) {
 
 	if !proof.Valid() {
 		return BoardToken{}, errors.New("no liveness proof for the token exchange")
 	}
 	resp, err := c.post(ctx, "/internal/tokens/exchange", exchangeRequest{
-		AccountID: proof.AccountID, TokenID: proof.TokenID, SessionID: proof.SessionID,
+		AccountID: proof.AccountID, TokenID: proof.TokenID, SessionID: proof.SessionID, Standing: standing && PersonBehind(proof),
 		Target: "board", BoardID: boardID, SessionRef: sessionRef, ReadOnly: readOnly,
 	})
 	if err != nil {
@@ -436,11 +448,14 @@ func (c *HTTPBoardExchanger) exchange(ctx context.Context, proof Proof, boardID,
 	switch resp.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotFound:
-		if !isCoreNotFound(resp) {
+		if (!standing || !PersonBehind(proof)) && !isCoreNotFound(resp) {
 			return BoardToken{}, errors.New("core has no token exchange route: is it up to date?")
 		}
-		return BoardToken{}, ErrConnectionGone
+		return BoardToken{}, standingRefusal(resp, standing && PersonBehind(proof))
 	default:
+		if standing && PersonBehind(proof) && resp.Header.Get("X-Blerg-Standing-Cause") == "board_owner_missing" {
+			return BoardToken{}, ErrBoardOwnerMissing
+		}
 		return BoardToken{}, fmt.Errorf("core returned %d to the token exchange", resp.StatusCode)
 	}
 	var out struct {

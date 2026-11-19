@@ -7,8 +7,8 @@ export function hasLiveParent(session: SessionInfo, sessions: readonly SessionIn
   return !!session.parent_session_id && sessions.some(parent => parent.id === session.parent_session_id && !parent.archived_at)
 }
 
-export function nestChildren(sessions: readonly SessionInfo[]): SessionTree {
-  const visible = sessions.filter(session => !session.archived_at)
+export function nestChildren(sessions: readonly SessionInfo[], includeArchived = false): SessionTree {
+  const visible = includeArchived ? sessions : sessions.filter(session => !session.archived_at)
   const listed = new Map(visible.map(s => [s.id, s]))
   const childrenOf = new Map<string, SessionInfo[]>()
   const top: SessionInfo[] = []
@@ -42,4 +42,23 @@ export function searchTree(tree: SessionTree, q: string): SessionTree {
     return matches(s) || children.length > 0
   }
   return { top: tree.top.filter(keep), childrenOf }
+}
+
+export function rootSessionId(sessions: readonly SessionInfo[], id?: string): string | undefined {
+  const seen = new Set<string>()
+  while (id && !seen.has(id)) {
+    seen.add(id)
+    const parent = sessions.find(session => session.id === id)?.parent_session_id
+    if (!parent || !sessions.some(session => session.id === parent && !session.archived_at)) return id
+    id = parent
+  }
+  return id
+}
+export function sessionSearchReason(tree: SessionTree, session: SessionInfo, query: string): string | undefined {
+  const q = query.trim().toLowerCase()
+  if (!q || `${session.title} ${session.repo}`.toLowerCase().includes(q)) return undefined
+  const matches: string[] = []
+  const visit = (id: string) => { for (const child of tree.childrenOf.get(id) ?? []) { if (`${child.title} ${child.repo}`.toLowerCase().includes(q)) matches.push(child.title || 'Untitled chat'); visit(child.id) } }
+  visit(session.id)
+  return matches.length ? `Matches in ${matches.join(', ')}` : undefined
 }

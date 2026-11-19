@@ -124,7 +124,7 @@ export function openAsks(events: AgentEvent[], report: Pick<LiveReport, 'ended' 
     out.push({
       eventId: ev.client_event_id,
       messageId: typeof p.message_id === 'string' ? p.message_id : '',
-      question: typeof p.body === 'string' ? p.body : '',
+      question: (typeof p.body === 'string' ? p.body : '') + (asks.byEvent.get(ev.client_event_id)?.note ? '\n\n' + asks.byEvent.get(ev.client_event_id)!.note : ''),
       askedAt: parseTs(ev.ts),
       ...(p.no_wait === true ? { noWait: true } : {}),
       ...(p.owner_only === true ? { ownerOnly: true } : {}),

@@ -30,6 +30,13 @@ type Actor struct{ Kind, Owner, Login string }
 // Binding is loaded from persisted launch state and a current authenticated runtime connection.
 // The P0b adapter owns admission, cleanup proofs and the runtime-root binding.
 type Binding struct {
+	RuntimeTargetID                                                        string            `json:"runtime_target_id,omitempty"`
+	Container                                                              string            `json:"container_identity,omitempty"`
+	AccessSuspended                                                        bool              `json:"access_suspended,omitempty"`
+	PersistenceDegraded                                                    bool              `json:"persistence_degraded,omitempty"`
+	CustodyClosing                                                         [MaxShells]string `json:"custody_closing,omitzero"`
+	ShellLink                                                              protocol.ShellLinkWelcome
+	IdentityDigest                                                         string
 	RuntimeGeneration                                                      int64
 	Root                                                                   protocol.WorkspaceRoot
 	ManifestDigest                                                         string
@@ -41,7 +48,7 @@ type Binding struct {
 func (b Binding) permits(a Actor) bool {
 	return a.Kind == "human" && a.Owner != "" && a.Login != "" && b.Owner == a.Owner && b.Session != "" && b.Launch != "" && b.Connection != "" && b.Audience != "" && b.Live && !b.Child && !b.Cron && b.RuntimeGeneration > 0 && b.Root.Inode > 0 && b.ManifestDigest != "" && b.Audience == RuntimeAudience(b.Connection, b.RuntimeGeneration) &&
 		b.ServerCapabilities.Supports(b.Runtime, true) && b.RuntimeCapabilities.Supports(b.Runtime, true) &&
-		(b.Runtime == "sandbox" || b.Runtime == "cluster" || (b.Runtime == "host" && b.HostConsentValid && b.Consent != ""))
+		(b.Runtime == "sandbox" || b.Runtime == "cluster" || (b.Runtime == "host" && (b.HostConsentValid && b.Consent != "" || b.persistent())))
 }
 
 // Authority must check the exact login and read live policy, failing closed on any outage.
@@ -66,6 +73,11 @@ type Supervisor interface {
 
 // Audit has deliberately no bytes, command, environment, path, error text or arbitrary metadata.
 type Audit struct {
+	RuntimeTargetID   string        `json:"runtime_target_id,omitempty"`
+	Custody           string        `json:"custody_digest,omitempty"`
+	CustodyKind       string        `json:"custody_kind,omitempty"`
+	Epoch             uint64        `json:"access_epoch"`
+	Outcome           string        `json:"outcome"`
 	RuntimeGeneration int64         `json:"runtime_generation"`
 	Actor             string        `json:"actor_id"`
 	Login             string        `json:"login_id"`
@@ -83,12 +95,16 @@ type Audit struct {
 type Event string
 
 const (
+	TakenOver  Event = "takeover"
 	Opened     Event = "open"
 	OpenFailed Event = "open_failure"
 	Closed     Event = "close"
 	// Detached records a browser attachment dropped for a stalled consumer;
 	// the shell keeps running and can be reattached.
-	Detached Event = "detach"
+	Detached         Event = "detach"
+	Adopted          Event = "adopt"
+	ConsentAccepted  Event = "consent_accept"
+	ConsentWithdrawn Event = "consent_withdraw"
 )
 
 type Reason string
@@ -104,6 +120,7 @@ const (
 	ReasonDetached    Reason = "detached"
 	ReasonRuntime     Reason = "runtime_closed"
 	ReasonShutdown    Reason = "shutdown"
+	ReasonLifetime    Reason = "lifetime"
 )
 
 type AuditSink interface{ Record(Audit) }
@@ -113,6 +130,8 @@ type AuditSink interface{ Record(Audit) }
 type RuntimeDiagnostic interface{ Failure(SignedGrant) error }
 
 type attachment struct {
+	takenOver           chan string
+	device              string
 	errors              chan string
 	phase               chan string
 	id                  string
@@ -121,6 +140,8 @@ type attachment struct {
 	inputSeq, resizeSeq uint64
 }
 type shell struct {
+	name                                   string
+	retained                               *retainedShell
 	waiting                                int
 	operation                              chan struct{}
 	busy                                   bool
@@ -145,20 +166,29 @@ type budget struct {
 }
 type Info = protocol.OwnerShellInfo
 type Attachment struct {
-	Errors <-chan string
-	Phase  <-chan string
-	ID     string
-	Output <-chan []byte
+	Shell     string
+	TakenOver <-chan string
+	Errors    <-chan string
+	Phase     <-chan string
+	ID        string
+	Output    <-chan []byte
 	// Replay, when requested, is the shell's kept scrollback at the moment this
 	// attachment was installed: stream offsets [ReplayEnd-len(Replay), ReplayEnd).
 	// Output then carries exactly the bytes from ReplayEnd on: no gap, no repeat.
 	Replay    []byte
 	ReplayEnd uint64
+	ReplayGap bool
 }
 
 type revocationFence struct{ owner, login, session string }
 
 type Manager struct {
+	availabilityEpoch  uint64
+	retainedAbsence    map[string]time.Time
+	incarnation        string
+	custody            *CustodyRegistry
+	retainedLaunches   map[string]*retainedLaunch
+	retainedClosing    map[string]*shell
 	runtimeFenced      map[protocol.SupervisorLaunch]bool
 	runtimeEpoch       map[protocol.SupervisorLaunch]uint64
 	runtimeRevision    uint64
@@ -172,6 +202,7 @@ type Manager struct {
 	resolver           Resolver
 	supervisor         Supervisor
 	audit              AuditSink
+	nameCleanup        func(context.Context, Actor, string, string)
 	key                ed25519.PrivateKey
 	now                func() time.Time
 	policy             protocol.ShellPolicy
@@ -220,7 +251,11 @@ func New(authority Authority, resolver Resolver, supervisor Supervisor, audit Au
 	if now == nil {
 		now = time.Now
 	}
-	return &Manager{authority: authority, resolver: resolver, supervisor: supervisor, audit: audit, key: key, now: now, shells: map[string]*shell{}, budgets: map[string]*budget{}, fenced: map[protocol.SupervisorLaunch]bool{}, retryAfter: map[protocol.SupervisorLaunch]time.Time{}, cleanupPending: map[string]int{}, identityEpoch: map[string]uint64{}, runtimeFenced: map[protocol.SupervisorLaunch]bool{}, runtimeEpoch: map[protocol.SupervisorLaunch]uint64{}, limits: DefaultLimits(), ended: map[string]endedShell{}}, nil
+	incarnation, err := opaque()
+	if err != nil {
+		return nil, err
+	}
+	return &Manager{retainedAbsence: map[string]time.Time{}, incarnation: incarnation, custody: NewCustodyRegistry(), retainedLaunches: map[string]*retainedLaunch{}, retainedClosing: map[string]*shell{}, authority: authority, resolver: resolver, supervisor: supervisor, audit: audit, key: key, now: now, shells: map[string]*shell{}, budgets: map[string]*budget{}, fenced: map[protocol.SupervisorLaunch]bool{}, retryAfter: map[protocol.SupervisorLaunch]time.Time{}, cleanupPending: map[string]int{}, identityEpoch: map[string]uint64{}, runtimeFenced: map[protocol.SupervisorLaunch]bool{}, runtimeEpoch: map[protocol.SupervisorLaunch]uint64{}, limits: DefaultLimits(), ended: map[string]endedShell{}}, nil
 }
 func opaque() (string, error) {
 	b := make([]byte, 32)
@@ -233,7 +268,19 @@ func (m *Manager) record(s *shell, event Event, reason Reason) {
 	if m.audit == nil {
 		return
 	}
-	m.audit.Record(Audit{Actor: s.actor.Owner, Login: s.actor.Login, Session: s.binding.Session, Runtime: s.binding.Runtime, RuntimeGeneration: s.binding.RuntimeGeneration, Connection: s.binding.Connection, Launch: s.binding.Launch, Shell: s.signed.Grant.ShellGeneration, PolicyRevision: s.signed.Grant.PolicyRevision, Event: event, Reason: reason, At: m.now(), Duration: m.now().Sub(s.opened)})
+	custody, kind := "", ""
+	if s.retained != nil {
+		custody = s.retained.custody.Digest()
+		kind = "allocation"
+	}
+	outcome := "success"
+	if event == OpenFailed || event == Adopted && reason == ReasonRevoked {
+		outcome = "denied"
+	}
+	if reason == ReasonCleanup || reason == ReasonUnavailable {
+		outcome = "unconfirmed"
+	}
+	m.audit.Record(Audit{Custody: custody, CustodyKind: kind, Epoch: s.signed.Grant.AccessEpoch, Outcome: outcome, Actor: s.actor.Owner, Login: s.actor.Login, Session: s.binding.Session, Runtime: s.binding.Runtime, RuntimeTargetID: s.binding.RuntimeTargetID, RuntimeGeneration: s.binding.RuntimeGeneration, Connection: s.binding.Connection, Launch: s.binding.Launch, Shell: s.signed.Grant.ShellGeneration, PolicyRevision: s.signed.Grant.PolicyRevision, Event: event, Reason: reason, At: m.now(), Duration: m.now().Sub(s.opened)})
 }
 
 // SetPolicy is fed only by the authenticated, monitored core stream. Re-enabling never restores handles.
@@ -248,12 +295,15 @@ func (m *Manager) SetPolicy(ctx context.Context, p protocol.ShellPolicy) {
 		m.unavailableLocked(ctx)
 		return
 	}
-	changed := !m.available || p.Revision != m.policy.Revision || p.Enabled != m.policy.Enabled
+	changed := p.Revision != m.policy.Revision || p.Enabled != m.policy.Enabled
+	recovered := !m.available
 	m.policy = p
 	m.revision.Store(p.Revision)
 	m.available = true
 	if changed {
 		m.closeBatchLocked(ctx, m.snapshot(nil), ReasonRevoked)
+	} else if recovered {
+		m.closeBatchLocked(ctx, m.snapshot(func(s *shell) bool { return s.retained == nil }), ReasonRevoked)
 	}
 }
 func (m *Manager) Unavailable(ctx context.Context) {
@@ -264,8 +314,12 @@ func (m *Manager) Unavailable(ctx context.Context) {
 	m.unavailableLocked(ctx)
 }
 func (m *Manager) unavailableLocked(ctx context.Context) {
+	m.availabilityEpoch++
 	m.available = false
-	m.closeBatchLocked(ctx, m.snapshot(nil), ReasonUnavailable)
+	for _, s := range m.snapshot(func(s *shell) bool { return s.retained != nil }) {
+		m.suspendRetainedLocked(ctx, s)
+	}
+	m.closeBatchLocked(ctx, m.snapshot(func(s *shell) bool { return s.retained == nil }), ReasonUnavailable)
 }
 func (m *Manager) Revoke(ctx context.Context, owner, login, session string) {
 	fence := &revocationFence{owner, login, session}
@@ -314,10 +368,19 @@ func (m *Manager) check(ctx context.Context, a Actor, b Binding) error {
 	return nil
 }
 func (m *Manager) grant(s *shell) SignedGrant {
+	if s.retained != nil {
+		launch := m.retainedLaunches[s.retained.custody.PhysicalScope()]
+		return m.retainedGrant(s, s.binding, launch.key, launch.epoch)
+	}
 	now := m.now().Unix()
-	return SignGrant(m.key, protocol.ShellGrant{Version: 1, Audience: s.binding.Audience, OwnerID: s.actor.Owner, LoginID: s.actor.Login, SessionID: s.binding.Session, LaunchGeneration: s.binding.Launch, ConnectionID: s.binding.Connection, ShellGeneration: s.signed.Grant.ShellGeneration, Runtime: s.binding.Runtime, ConsentID: s.binding.Consent, PolicyRevision: m.policy.Revision, IssuedAt: now, ExpiresAt: now + protocol.ShellGrantSeconds})
+	return SignGrant(m.key, protocol.ShellGrant{Privileged: s.signed.Grant.Privileged, Version: 1, Audience: s.binding.Audience, OwnerID: s.actor.Owner, LoginID: s.actor.Login, SessionID: s.binding.Session, LaunchGeneration: s.binding.Launch, ConnectionID: s.binding.Connection, ShellGeneration: s.signed.Grant.ShellGeneration, Runtime: s.binding.Runtime, ConsentID: s.binding.Consent, PolicyRevision: m.policy.Revision, IssuedAt: now, ExpiresAt: now + protocol.ShellGrantSeconds})
 }
 func (m *Manager) Open(ctx context.Context, a Actor, session string) (Info, error) {
+	return m.OpenPrivileged(ctx, a, session, false)
+}
+
+// OpenPrivileged accepts only an explicitly authenticated person's per-shell choice.
+func (m *Manager) OpenPrivileged(ctx context.Context, a Actor, session string, privileged bool) (Info, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.resolver == nil {
@@ -329,6 +392,10 @@ func (m *Manager) Open(ctx context.Context, a Actor, session string) (Info, erro
 	var b Binding
 	err := m.external(ctx, func(call context.Context) error { var e error; b, e = m.resolver.Resolve(call, session); return e })
 	s := &shell{actor: a, binding: b, opened: m.now(), scrollback: &scrollback{}}
+	s.signed.Grant.Privileged = privileged
+	if privileged && (a.Kind != "human" || b.Runtime != "host") {
+		return Info{}, ErrDenied
+	}
 	// Ownership precedes every detailed diagnostic, including successful
 	// resolution followed by binding/policy/fencing refusal. Admin is no exception.
 	if b.Owner == "" || b.Owner != a.Owner || b.Session != session || a.Kind != "human" || a.Login == "" {
@@ -371,19 +438,50 @@ func (m *Manager) Open(ctx context.Context, a Actor, session string) (Info, erro
 	s.done = make(chan struct{})
 	s.handle = handle
 	s.signed.Grant.ShellGeneration = gen
+	if b.persistent() {
+		if err := m.initializeCustody(ctx, s); err != nil {
+			return Info{}, err
+		}
+	}
 	s.signed = m.grant(s)
 	s.lastInput = m.now()
 	s.lastGrant = m.now()
 	s.detached = m.now()
 	m.shells[handle] = s // reserve the slot before releasing the map lock
 	var out <-chan []byte
+	var retainedOut <-chan PersistentFrame
+	retainedPeer, hasRetainedPeer := m.supervisor.(PersistentSupervisor)
 	signed := s.signed
+	openKey := append(ed25519.PublicKey(nil), m.key[ed25519.SeedSize:]...)
+	if s.retained != nil {
+		launch := m.retainedLaunches[s.retained.custody.PhysicalScope()]
+		openKey = append(ed25519.PublicKey(nil), launch.key[ed25519.SeedSize:]...)
+	}
 	err = m.invoke(ctx, s, func(call context.Context) error {
 		var e error
-		out, e = m.supervisor.Open(call, b, signed, append(ed25519.PublicKey(nil), m.key[ed25519.SeedSize:]...))
+		if s.retained != nil {
+			if !hasRetainedPeer {
+				return ErrDenied
+			}
+			retainedOut, e = retainedPeer.OpenCustody(call, b, s.retained.custody, signed, openKey)
+		} else {
+			out, e = m.supervisor.Open(call, b, signed, append(ed25519.PublicKey(nil), m.key[ed25519.SeedSize:]...))
+		}
 		return e
 	})
-	if err != nil || out == nil {
+	if err != nil || out == nil && retainedOut == nil {
+		if s.retained != nil && BeforeAllocation(err) && m.custody.cancelUnallocated(s.retained.custody) {
+			delete(m.shells, handle)
+			close(s.done)
+			m.record(s, OpenFailed, ReasonOpenRuntime)
+			m.releasePersistentConsent(ctx, s, s.retained.custody.Consent)
+			return Info{}, Refuse(ReasonOpenRuntime)
+		}
+		if s.retained != nil {
+			m.record(s, OpenFailed, ReasonOpenRuntime)
+			m.closeBatchLocked(ctx, []*shell{s}, ReasonCleanup)
+			return Info{}, RefuseStart(ReasonOpenRuntime, StartCause(err))
+		}
 		delete(m.shells, handle)
 		launch := physicalLaunch(b)
 		reason := RefusalReason(err)
@@ -422,8 +520,16 @@ func (m *Manager) Open(ctx context.Context, a Actor, session string) (Info, erro
 	}
 	m.shells[handle] = s
 	m.record(s, Opened, ReasonRequested)
-	go m.drain(ctxWithoutCancel(ctx), handle, s.done, out)
-	return Info{Handle: handle, Shell: gen, Runtime: b.Runtime, Folder: b.Folder}, nil
+	if s.retained != nil {
+		if err := m.custody.Activate(s.retained.custody.Digest()); err != nil {
+			m.closeLocked(ctx, s, ReasonCleanup)
+			return Info{}, err
+		}
+		m.startRetainedDrain(ctx, s, retainedOut)
+	} else {
+		go m.drain(ctxWithoutCancel(ctx), handle, s.done, out)
+	}
+	return m.info(s), nil
 }
 
 // A request context must not kill the long-lived output reader after an HTTP open returns.
@@ -441,6 +547,9 @@ func (m *Manager) live(ctx context.Context, a Actor, handle string) (*shell, err
 	})
 	if m.shells[handle] != s {
 		return nil, ErrDenied
+	}
+	if s.retained != nil {
+		return m.retainedLive(ctx, s, b, err)
 	}
 	// A busy desktop verified nothing: refuse this operation and keep the shell. The grant
 	// is renewed only after a successful check, so its expiry still bounds the wait.
@@ -470,6 +579,12 @@ func (m *Manager) AttachWithReplay(ctx context.Context, a Actor, handle string, 
 }
 
 func (m *Manager) attach(ctx context.Context, a Actor, handle string, takeover, replay bool) (Attachment, error) {
+	return m.AttachDevice(ctx, a, handle, takeover, replay, "unknown")
+}
+
+// AttachDevice retains only a coarse platform category, never a user agent or network address.
+func (m *Manager) AttachDevice(ctx context.Context, a Actor, handle string, takeover, replay bool, device string) (Attachment, error) {
+	device = normalizeDevice(device)
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	m.mu.Lock()
@@ -493,28 +608,38 @@ func (m *Manager) attach(ctx context.Context, a Actor, handle string, takeover, 
 	if err != nil {
 		return Attachment{}, ErrDenied
 	}
+	s.signed = m.grant(s)
+	signed := s.signed
+	if err := m.invoke(ctx, s, func(call context.Context) error { return m.supervisor.Renew(call, signed) }); err != nil {
+		m.publishFailure(s, err)
+		if s.retained != nil {
+			m.suspendRetainedLocked(ctx, s)
+		} else {
+			m.closeLocked(ctx, s, ReasonUnavailable)
+		}
+		return Attachment{}, RefuseStart(ReasonOpenRuntime, StartCause(err))
+	}
+	s.lastGrant = m.now()
 	if s.attachment != nil {
+		m.record(s, TakenOver, ReasonRequested)
+		if s.attachment.takenOver != nil {
+			s.attachment.takenOver <- device
+			close(s.attachment.takenOver)
+		}
 		close(s.attachment.output)
 		if s.attachment.phase != nil {
 			close(s.attachment.phase)
 		}
 		s.attachment = nil
 	}
-	s.signed = m.grant(s)
-	signed := s.signed
-	if err := m.invoke(ctx, s, func(call context.Context) error { return m.supervisor.Renew(call, signed) }); err != nil {
-		m.publishFailure(s, err)
-		m.closeLocked(ctx, s, ReasonUnavailable)
-		return Attachment{}, RefuseStart(ReasonOpenRuntime, StartCause(err))
-	}
-	s.lastGrant = m.now()
-	at := &attachment{errors: make(chan string, 1), phase: make(chan string, 4), id: id, output: make(chan []byte, OutputQueue/MaxFrame), heartbeat: m.now()}
+	at := &attachment{device: device, takenOver: make(chan string, 1), errors: make(chan string, 1), phase: make(chan string, 4), id: id, output: make(chan []byte, OutputQueue/MaxFrame), heartbeat: m.now()}
 	// The snapshot and the new attachment are taken under the same lock that
 	// deliver holds while it records a chunk and hands it on, so every byte is
 	// either in the snapshot or queued for this attachment, never both.
-	result := Attachment{ID: id, Output: at.output, Phase: at.phase, Errors: at.errors}
+	result := Attachment{Shell: s.signed.Grant.ShellGeneration, TakenOver: at.takenOver, ID: id, Output: at.output, Phase: at.phase, Errors: at.errors}
 	if replay {
 		result.Replay, result.ReplayEnd = s.scrollback.snapshot()
+		result.ReplayGap = s.retained != nil && result.ReplayEnd > uint64(len(result.Replay))
 	}
 	s.attachment = at
 	s.detached = time.Time{}
@@ -600,12 +725,21 @@ func (m *Manager) InputFrame(ctx context.Context, a Actor, h, id string, seq uin
 	}
 	s.attachment.inputSeq = seq
 	signed, runtimeSeq := s.signed, s.runtimeInputSeq+1
+	if s.retained != nil {
+		s.runtimeInputSeq = runtimeSeq
+	}
 	if err := m.invoke(ctx, s, func(call context.Context) error { return m.supervisor.Input(call, signed, runtimeSeq, data) }); err != nil {
 		m.publishFailure(s, err)
-		m.closeLocked(ctx, s, ReasonUnavailable)
+		if s.retained != nil {
+			m.suspendRetainedLocked(ctx, s)
+		} else {
+			m.closeLocked(ctx, s, ReasonUnavailable)
+		}
 		return RefuseStart(ReasonOpenRuntime, StartCause(err))
 	}
-	s.runtimeInputSeq++
+	if s.retained == nil {
+		s.runtimeInputSeq++
+	}
 	if human {
 		s.lastInput = m.now()
 	}
@@ -631,12 +765,21 @@ func (m *Manager) Resize(ctx context.Context, a Actor, h, id string, seq uint64,
 	}
 	s.attachment.resizeSeq = seq
 	signed, runtimeSeq := s.signed, s.runtimeResizeSeq+1
+	if s.retained != nil {
+		s.runtimeResizeSeq = runtimeSeq
+	}
 	if err := m.invoke(ctx, s, func(call context.Context) error { return m.supervisor.Resize(call, signed, runtimeSeq, cols, rows) }); err != nil {
 		m.publishFailure(s, err)
-		m.closeLocked(ctx, s, ReasonUnavailable)
+		if s.retained != nil {
+			m.suspendRetainedLocked(ctx, s)
+		} else {
+			m.closeLocked(ctx, s, ReasonUnavailable)
+		}
 		return RefuseStart(ReasonOpenRuntime, StartCause(err))
 	}
-	s.runtimeResizeSeq++
+	if s.retained == nil {
+		s.runtimeResizeSeq++
+	}
 	return nil
 }
 func (m *Manager) Close(ctx context.Context, a Actor, h string) error {
@@ -693,7 +836,27 @@ func (m *Manager) closeBatchLocked(ctx context.Context, shells []*shell, reason 
 		if m.shells[s.handle] != s {
 			continue
 		}
+		if _, recorded := m.ended[s.handle]; !recorded {
+			m.recordEndedLocked(s, reason, 0)
+		}
 		delete(m.shells, s.handle)
+		if s.retained != nil {
+			r := s.retained
+			r.active = false
+			if r.history != nil {
+				r.history.Clear()
+			}
+			r.stream++
+			if r.stop != nil {
+				close(r.stop)
+				r.stop = nil
+			}
+			if r.closing == "" {
+				r.closing, _ = opaque()
+				_ = m.custody.BeginClose(r.custody.Digest(), r.closing)
+			}
+			m.retainedClosing[r.custody.Digest()] = s
+		}
 		// Scrollback dies with the shell: never kept past it, never persisted.
 		s.scrollback = nil
 		if s.done != nil {
@@ -713,6 +876,7 @@ func (m *Manager) closeBatchLocked(ctx context.Context, shells []*shell, reason 
 		m.cleanupPending[s.binding.Session+"/"+s.binding.Launch]++
 		tasks = append(tasks, s)
 	}
+	nameCleanup := m.nameCleanup
 	m.mu.Unlock()
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, 8)
@@ -724,18 +888,38 @@ func (m *Manager) closeBatchLocked(ctx context.Context, shells []*shell, reason 
 			defer func() { <-slots }()
 			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 			var err error
-			if m.supervisor != nil {
+			switch {
+			case s.retained != nil:
+				peer, ok := m.supervisor.(PersistentSupervisor)
+				if !ok {
+					err = ErrDenied
+				} else {
+					proof, e := peer.CloseCustody(cleanup, s.retained.custody, s.retained.closing)
+					err = e
+					if err == nil {
+						err = m.custody.Settle(proof, proof.Responder)
+					}
+				}
+			case m.supervisor != nil:
 				err = m.supervisor.Close(cleanup, s.signed)
-			} else {
+			default:
 				err = ErrDenied
 			}
 			cancel()
+			if nameCleanup != nil {
+				metadata, cancelMetadata := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+				nameCleanup(metadata, s.actor, s.binding.Session, s.signed.Grant.ShellGeneration)
+				cancelMetadata()
+			}
 			m.mu.Lock()
 			defer m.mu.Unlock()
 			key := s.binding.Session + "/" + s.binding.Launch
 			m.cleanupPending[key]--
 			if m.cleanupPending[key] == 0 {
 				delete(m.cleanupPending, key)
+			}
+			if err == nil && s.retained != nil {
+				delete(m.retainedClosing, s.retained.custody.Digest())
 			}
 			result := reason
 			if err != nil {
@@ -793,6 +977,7 @@ func (m *Manager) Tick(ctx context.Context) {
 	close(jobs)
 	wg.Wait()
 	m.mu.Lock()
+	m.retryRetainedCleanup(ctx)
 }
 func (m *Manager) tickShell(parent context.Context, s *shell) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 3*time.Second)
@@ -809,6 +994,14 @@ func (m *Manager) tickShell(parent context.Context, s *shell) {
 		return
 	}
 	defer release()
+	if s.retained != nil {
+		now := m.now()
+		limits := m.limits.For(s.binding.Runtime)
+		if now.Unix() >= s.retained.custody.LifetimeUntil || limitReached(s.idleGrace, limits.Idle, s.lastInput, now) || s.attachment == nil && limitReached(s.detachedGrace, limits.Detached, s.detached, now) {
+			m.closeLocked(ctx, s, ReasonIdle)
+			return
+		}
+	}
 	if _, err := m.live(ctx, s.actor, h); err != nil {
 		return
 	}
@@ -837,7 +1030,11 @@ func (m *Manager) tickShell(parent context.Context, s *shell) {
 		signed := s.signed
 		if err := m.invoke(ctx, s, func(call context.Context) error { return m.supervisor.Renew(call, signed) }); err != nil {
 			m.publishFailure(s, err)
-			m.closeLocked(ctx, s, ReasonUnavailable)
+			if s.retained != nil {
+				m.suspendRetainedLocked(ctx, s)
+			} else {
+				m.closeLocked(ctx, s, ReasonUnavailable)
+			}
 			return
 		}
 		s.lastGrant = now
@@ -1074,10 +1271,31 @@ func (m *Manager) List(ctx context.Context, a Actor, session string) ([]Info, er
 	}
 	var b Binding
 	err := m.external(ctx, func(call context.Context) error { var e error; b, e = m.resolver.Resolve(call, session); return e })
-	if Busy(err) {
-		return nil, Refuse(ReasonRuntimeBusy)
+	owned := func(s *shell) bool { return s.actor == a && s.binding.Session == session }
+	suspend := func() {
+		for _, s := range m.snapshot(owned) {
+			if s.retained != nil {
+				m.suspendRetainedLocked(ctx, s)
+			}
+		}
 	}
-	if err != nil || b.Session != session || m.check(ctx, a, b) != nil {
+	if Unknown(err) {
+		suspend()
+		return nil, err
+	}
+	if err != nil || b.Session != session || b.Owner != a.Owner || a.Kind != "human" || a.Login == "" {
+		return nil, ErrDenied
+	}
+	if b.persistent() {
+		if _, err = m.persistentAuthority(ctx, a); err != nil {
+			if Unknown(err) {
+				suspend()
+			} else {
+				m.closeBatchLocked(ctx, m.snapshot(owned), ReasonRevoked)
+			}
+			return nil, err
+		}
+	} else if m.check(ctx, a, b) != nil {
 		return nil, ErrDenied
 	}
 	infos := []Info{}
@@ -1087,12 +1305,12 @@ func (m *Manager) List(ctx context.Context, a Actor, session string) ([]Info, er
 		}
 		if _, err := m.live(ctx, a, h); err != nil {
 			// An inventory that could not check a shell must not report it gone.
-			if Busy(err) {
+			if Unknown(err) {
 				return nil, err
 			}
 			continue
 		}
-		infos = append(infos, Info{Handle: h, Shell: s.signed.Grant.ShellGeneration, Runtime: s.binding.Runtime, Folder: s.binding.Folder, Attached: s.attachment != nil && m.now().Sub(s.attachment.heartbeat) < HeartbeatLease})
+		infos = append(infos, m.info(s))
 	}
 	return infos, nil
 }

@@ -26,9 +26,9 @@ func TestRapidEnqueuesDuringBlockedAskAreNotLost(t *testing.T) {
 	go l.Run(ctx)
 	l.Enqueue("start", "chat")
 	waitForStatus(t, rec, "waiting")
-	l.Enqueue("the answer", "chat")     // fills the ask buffer
-	l.Enqueue("follow-up task", "chat") // must fall through to the queue, not block or vanish
-	waitFor(t, rec, "turn_done")        // returns at all = the transport goroutine never blocked
+	l.AnswerAsk(AskAnswer{QuestionID: "msg-1", Text: "the answer"}) // committed server answer
+	l.Enqueue("follow-up task", "chat")                             // must fall through to the queue, not block or vanish
+	waitFor(t, rec, "turn_done")                                    // returns at all = the transport goroutine never blocked
 
 	var sawFollowUp bool
 	for _, ev := range rec.byKind("user_message") {

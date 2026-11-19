@@ -26,7 +26,7 @@ describe('diff review scroll boundaries', () => {
     await openFiles()
     const phone = width < 700
     await waitFor(() => expect(document.querySelector(phone ? '.diff-file-picker, .diff-main' : '.diff-files')).not.toBeNull())
-    const nav = document.querySelector<HTMLElement>(phone ? '.diff-toolbar' : '.diff-files')!
+    const nav = document.querySelector<HTMLElement>(phone ? '.viewer-toolbar' : '.diff-files')!
     const code = document.querySelector<HTMLElement>('.diff-main')!
     if (count > 1 && !phone) expect(nav.scrollHeight).toBeGreaterThan(nav.clientHeight)
     expect(code.scrollHeight).toBeGreaterThan(code.clientHeight)

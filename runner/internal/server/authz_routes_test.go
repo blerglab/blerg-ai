@@ -12,7 +12,7 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 )
 
-// newAuthzMux registers the board / column / ticket / reply / assist
+// newAuthzMux registers the board / column / ticket / reply
 // routes exactly as cmd/server/main.go does, so the table below exercises the
 // real method+pattern matching and PathValue plumbing rather than handlers
 // called by hand.
@@ -37,7 +37,6 @@ func newAuthzMux(api *API) *http.ServeMux {
 	mux.HandleFunc("DELETE /api/tickets/{id}/dependencies/{depId}", api.HandleRemoveDependency)
 	mux.HandleFunc("GET /api/tickets/{id}/events", api.HandleGetTicketEvents)
 	mux.HandleFunc("GET /api/boards/{id}/archive", api.HandleGetBoardArchive)
-	mux.HandleFunc("POST /api/boards/{id}/assist", api.HandlePostAssist)
 	mux.HandleFunc("GET /api/sessions/{id}/insights", api.HandleGetSessionInsights)
 	return mux
 }
@@ -56,10 +55,6 @@ type authzWorld struct {
 	plainSess  string // that session (not private, so every person may see it)
 	boardTokA  string // board token scoped to a.board with {board}
 }
-
-// authzHubDaemonID is the daemon registered on the hub so POST .../assist can
-// actually spawn (202) instead of 503-ing for want of a daemon.
-const authzHubDaemonID = "00000000-0000-0000-0000-00000000a0d1"
 
 func seedAuthzWorld(ctx context.Context, t *testing.T, api *API, tag string) authzWorld {
 	t.Helper()
@@ -86,8 +81,11 @@ func seedAuthzWorld(ctx context.Context, t *testing.T, api *API, tag string) aut
 			t.Fatalf("CreateTicket: %v", err)
 		}
 		sess := newUUID()
-		if err := db.CreateAssistSession(ctx, pool, sess, daemonID, board.ID, nil, "repo-"+tag, "assist"); err != nil {
-			t.Fatalf("CreateAssistSession: %v", err)
+		if err := db.InsertSession(ctx, pool, sess, daemonID, "running", "/repos/app", "repo-"+tag, "board session", ""); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE sessions SET board_id = $2 WHERE id = $1`, sess, board.ID); err != nil {
+			t.Fatal(err)
 		}
 		msg, err := db.CreateMessage(ctx, pool, sess, "ask", "q?")
 		if err != nil {
@@ -165,8 +163,6 @@ var authzRoutes = []authzRoute{
 		func(authzFixture) string { return `{"answer":"ok"}` }, "session.start", "board"},
 	{"POST /api/messages/x/reply (no board)", "POST", func(_ authzFixture, w authzWorld) string { return "/api/messages/" + w.noBoardMsg + "/reply" },
 		func(authzFixture) string { return `{"answer":"ok"}` }, "session.start", "none"},
-	{"POST /api/boards/x/assist", "POST", func(f authzFixture, _ authzWorld) string { return "/api/boards/" + f.board + "/assist" },
-		func(authzFixture) string { return `{}` }, "session.start", "board"},
 	{"GET /api/boards", "GET", func(authzFixture, authzWorld) string { return "/api/boards" }, nil, "session.start", "browser"},
 	{"GET /api/sessions/x/insights", "GET", func(_ authzFixture, w authzWorld) string { return "/api/sessions/" + w.plainSess + "/insights" }, nil, "session.start", "browser"},
 	{"POST /api/boards", "POST", func(authzFixture, authzWorld) string { return "/api/boards" },
@@ -217,9 +213,6 @@ var coreClassCaps = map[string][]string{
 // boardA (board token scoped to A, used on A), boardB (same token used on B),
 // daemon.
 func expectFor(rt authzRoute, class string) int {
-	if rt.name == "POST /api/boards/x/assist" && (class == "boardA" || class == "daemon") {
-		return http.StatusForbidden
-	}
 	switch class {
 	case "none", "garbage":
 		return http.StatusUnauthorized
@@ -245,8 +238,16 @@ func expectFor(rt authzRoute, class string) int {
 		}
 		return wantSuccess
 	case "boardA":
+		if rt.name == "POST /api/tickets/x/archive" {
+			return http.StatusForbidden // board credentials have no person behind them
+		}
 		switch rt.scope {
 		case "board":
+			// Legacy board tokens have no person proof. Manual archiving
+			// requires that proof even when ordinary board writes are allowed (#335).
+			if rt.name == "POST /api/tickets/x/archive" {
+				return http.StatusForbidden
+			}
 			return wantSuccess
 		case "none":
 			return http.StatusForbidden
@@ -260,7 +261,7 @@ func expectFor(rt authzRoute, class string) int {
 }
 
 // TestAuthzRoutes is the regression guard for the anonymous tier: every
-// board/column/ticket/reply/assist route now demands a verified
+// board/column/ticket/reply route now demands a verified
 // credential, and each credential class is held to the capability ruling.
 // DB-gated.
 func TestAuthzRoutes(t *testing.T) {
@@ -268,12 +269,7 @@ func TestAuthzRoutes(t *testing.T) {
 	ctx := context.Background()
 	const daemonTok = "daemon-secret"
 	hub := NewHub()
-	if err := db.UpsertDaemon(ctx, pool, authzHubDaemonID, "authz-hub-daemon", "local", "/repos"); err != nil {
-		t.Fatalf("UpsertDaemon: %v", err)
-	}
-	hub.Register(&DaemonConn{ID: authzHubDaemonID, Name: "authz-hub-daemon", send: make(chan []byte, 256)})
 	api := NewAPI(hub, pool, daemonTok, nil, "")
-	fixtureOwnDesktop(t, pool, hub.GetDaemon(authzHubDaemonID), "user-1")
 	mint := enableBrowserAuth(t, api)
 	mux := newAuthzMux(api)
 
@@ -329,6 +325,15 @@ func TestAuthzRoutes(t *testing.T) {
 					continue // no board-B variant of a boardless route
 				}
 				check(t, rt, class, do(rt, fixture, w, auth))
+				if class == "boardA" && rt.name == "POST /api/tickets/x/archive" {
+					row, err := db.GetTicket(ctx, pool, fixture.ticket2)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if row.ArchivedAt != nil {
+						t.Fatal("refused board-token archive changed the ticket")
+					}
+				}
 			}
 		})
 	}

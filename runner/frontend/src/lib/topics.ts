@@ -100,13 +100,15 @@ export interface TopicsReply {
   strokes?: Stroke[]
   /** How many older strokes the server left out. */
   strokes_truncated?: number
+  /** Stable recording-sequence cursor for the next bounded History page. */
+  next_cursor?: string
 }
 
 /** decision: a ruling (the person's, or the agent's own); attention: what was asked of the person and
  *  how it was resolved; milestone: merged, deployed, released, a card done; finding: a problem that
  *  changed the plan. */
-export type StrokeKind = 'decision' | 'attention' | 'milestone' | 'finding'
-export const STROKE_KINDS: readonly StrokeKind[] = ['decision', 'attention', 'milestone', 'finding']
+export type StrokeKind = 'decision' | 'attention' | 'milestone' | 'finding' | 'review'
+export const STROKE_KINDS: readonly StrokeKind[] = ['decision', 'attention', 'milestone', 'finding', 'review']
 
 /** Where "Show in conversation" goes: the row of event_id, else the proposal card of proposal_id. */
 export interface StrokeJump { event_id?: string; proposal_id?: string; seq: number }
@@ -117,12 +119,16 @@ export interface StrokeCard { board_id?: string; board_name?: string; number: nu
 /** One line of the feed (runner/internal/topics/strokes.go). Text is data, drawn as text. */
 export interface Stroke {
   id: string
+  verdict?: string
+  findings?: string[]
+  target?: string
+  round?: number
   kind: StrokeKind
   /** approvals: a run of engine command approvals folded into one line (count). */
-  source: 'mark' | 'ask' | 'delegation' | 'proposal' | 'review' | 'review_round' | 'topic' | 'approvals'
+  source: 'mark' | 'ask' | 'delegation' | 'proposal' | 'review' | 'review_round' | 'topic' | 'approvals' | 'command'
   /** A mark's: person (only when the person posted it) | agent. An attention stroke's: who resolved
    *  it (person, parent, permission). */
-  by?: 'person' | 'agent' | 'parent' | 'permission'
+  by?: string
   /** "person" on the agent's line recording a ruling of the person's. */
   recorded_as?: 'person'
   /** A fold of repeated strokes: how many, they themselves (newest first), the oldest one's time and
@@ -166,10 +172,7 @@ export function isTrigger(ev: { kind: string; payload: unknown }): boolean {
   return p.source === 'ask_answer' || (typeof p.text === 'string' && FEEDBACK_HEAD.test(p.text.trimStart()))
 }
 
-/** The marker command, as the empty state shows it. */
-export const TOPIC_COMMAND = 'blerg-runner topic "<title>"'
-export const MARK_COMMAND = 'blerg-runner mark decision "<text>"'
-export const EMPTY_HISTORY = `No topics yet. The agent marks a topic when it starts a piece of work: ${TOPIC_COMMAND}, and a decision, milestone or finding with ${MARK_COMMAND}.`
+export const EMPTY_HISTORY = 'Decisions, milestones and findings will appear here as the agent records its work.'
 
 const pad = (n: number) => String(n).padStart(2, '0')
 
@@ -257,9 +260,9 @@ export function usageTotal(u: ReelUsage | null | undefined): number {
   return (u.input_tokens ?? 0) + (u.output_tokens ?? 0) + (u.cache_read_tokens ?? 0) + (u.cache_write_tokens ?? 0)
 }
 
-/** "Renamed by the parent:": who renamed the session, as History's row starts. */
-export function renamedBy(by: TopicRename['by']): string {
-  if (by === 'parent') return 'Renamed by the parent:'
+/** "Renamed by Main:": who renamed the session, as History's row starts. */
+export function renamedBy(by: TopicRename['by'], actor = 'Main'): string {
+  if (by === 'parent') return `Renamed by ${actor}:`
   if (by === 'agent') return 'Renamed by the agent:'
   return 'Renamed:'
 }
@@ -271,12 +274,13 @@ export function strokeGlyph(s: Pick<Stroke, 'kind' | 'by'>): string {
     case 'decision': return s.by === 'person' ? '◆' : '◇'
     case 'attention': return '?'
     case 'milestone': return '✓'
+    case 'review': return '◇'
     case 'finding': return '⚠'
   }
 }
 
 /** What the glyph means, in words: its tooltip and its accessible name. */
-export function strokeWords(s: Pick<Stroke, 'kind' | 'by' | 'state' | 'source' | 'recorded_as'>): string {
+export function strokeWords(s: Pick<Stroke, 'kind' | 'by' | 'state' | 'source' | 'recorded_as'>, actor = 'Main'): string {
   switch (s.kind) {
     case 'decision':
       if (s.by === 'person') return 'Your decision'
@@ -284,6 +288,7 @@ export function strokeWords(s: Pick<Stroke, 'kind' | 'by' | 'state' | 'source' |
       return 'Decision (agent): its own; you can overrule it'
     case 'milestone':
       return 'Milestone'
+    case 'review': return 'Review'
     case 'finding':
       return 'Finding'
     case 'attention': {
@@ -293,8 +298,8 @@ export function strokeWords(s: Pick<Stroke, 'kind' | 'by' | 'state' | 'source' |
       if (s.state === 'expired') return `${what} · closed`
       if (s.state === 'unanswered') return `${what} · unanswered`
       if (s.state === 'declined') return `${what} · declined`
-      if (s.by === 'parent') return `${what} · answered by the parent session`
-      if (s.by === 'permission') return `${what} · approved by a session permission`
+      if (s.by === 'parent') return `${what} · answered by ${actor}`
+      if (s.by === 'permission') return `${what} · approved by a workspace permission`
       return s.source === 'review_round' ? what : `${what} · resolved`
     }
   }
@@ -302,13 +307,13 @@ export function strokeWords(s: Pick<Stroke, 'kind' | 'by' | 'state' | 'source' |
 
 /** The filter chips' words. */
 export const KIND_WORDS: Record<StrokeKind, string> = {
-  decision: 'Decisions', attention: 'Attention', milestone: 'Milestones', finding: 'Findings',
+  decision: 'Decisions', attention: 'Attention', milestone: 'Milestones', finding: 'Findings', review: 'Reviews',
 }
-export const KIND_GLYPH: Record<StrokeKind, string> = { decision: '◆', attention: '?', milestone: '✓', finding: '⚠' }
+export const KIND_GLYPH: Record<StrokeKind, string> = { decision: '◆', attention: '?', milestone: '✓', finding: '⚠', review: '◇' }
 
 /** How many strokes of each kind. */
 export function strokeCounts(strokes: readonly Stroke[]): Record<StrokeKind, number> {
-  const out: Record<StrokeKind, number> = { decision: 0, attention: 0, milestone: 0, finding: 0 }
+  const out: Record<StrokeKind, number> = { decision: 0, attention: 0, milestone: 0, finding: 0, review: 0 }
   for (const s of strokes) if (s.kind in out) out[s.kind]++
   return out
 }

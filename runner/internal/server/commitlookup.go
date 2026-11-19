@@ -30,8 +30,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/workbranch"
 )
 
 const (
@@ -55,7 +57,18 @@ var (
 	errCommitBusy        = errors.New("commit lookup busy")
 )
 
+// Codes are fixed by the caller; wrapped errors retain errors.Is behavior.
+type commitLookupFailure struct {
+	code string
+	err  error
+}
+
+func (e *commitLookupFailure) Error() string          { return e.code }
+func (e *commitLookupFailure) Unwrap() error          { return e.err }
+func commitLookupFailed(code string, err error) error { return &commitLookupFailure{code, err} }
+
 type commitWaiter struct {
+	graph     bool
 	ref       protocol.WorkspaceGitRef
 	dc        *DaemonConn
 	sessionID string
@@ -81,13 +94,16 @@ func (h *Hub) requestCommitRead(ctx context.Context, dc *DaemonConn, account str
 	}
 	req.WorkspaceGitRef = ref
 	id := newUUID()
-	w := commitWaiter{ref: ref, dc: dc, sessionID: sid, account: account, ch: make(chan protocol.CommitResult, 1)}
+	w := commitWaiter{graph: req.Graph, ref: ref, dc: dc, sessionID: sid, account: account, ch: make(chan protocol.CommitResult, 1)}
 	r := &h.commitReqs
 	r.mu.Lock()
-	perDaemon, perSession, perAccount := 0, 0, 0
+	perDaemon, perSession, perAccount, graphs := 0, 0, 0, 0
 	for _, p := range r.pending {
 		if p.account == account {
 			perAccount++
+		}
+		if p.graph && (p.dc.ID == dc.ID || p.account == account) {
+			graphs++
 		}
 		if p.dc.ID == dc.ID {
 			perDaemon++
@@ -96,9 +112,10 @@ func (h *Hub) requestCommitRead(ctx context.Context, dc *DaemonConn, account str
 			perSession++
 		}
 	}
-	if len(r.pending) >= commitPendingMax || perDaemon >= commitPendingPerDaemon || perSession >= commitPendingPerSession || perAccount >= commitPendingPerAccount {
+	// One graph per desktop or person leaves slots for plan sync and commit diffs.
+	if req.Graph && graphs >= 1 || len(r.pending) >= commitPendingMax || perDaemon >= commitPendingPerDaemon || perSession >= commitPendingPerSession || perAccount >= commitPendingPerAccount {
 		r.mu.Unlock()
-		return protocol.CommitResult{}, errCommitBusy
+		return protocol.CommitResult{}, commitLookupFailed("commit_lookup_busy", errCommitBusy)
 	}
 	if r.pending == nil {
 		r.pending = make(map[string]commitWaiter)
@@ -109,18 +126,18 @@ func (h *Hub) requestCommitRead(ctx context.Context, dc *DaemonConn, account str
 	req.Type, req.RequestID = "read_commit", id
 	raw, _ := json.Marshal(req)
 	if h.FindDaemonForSession(sid) != dc || !h.trySendToDaemon(dc, raw) {
-		return protocol.CommitResult{}, errCommitUnavailable
+		return protocol.CommitResult{}, commitLookupFailed("commit_dispatch_unavailable", errCommitUnavailable)
 	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case res, ok := <-w.ch:
 		if !ok || h.GetDaemon(dc.ID) != dc || h.FindDaemonForSession(sid) != dc {
-			return protocol.CommitResult{}, errCommitUnavailable
+			return protocol.CommitResult{}, commitLookupFailed("commit_connection_changed", errCommitUnavailable)
 		}
 		return res, nil
 	case <-timer.C:
-		return protocol.CommitResult{}, errCommitUnavailable
+		return protocol.CommitResult{}, commitLookupFailed("commit_reply_timeout", errCommitUnavailable)
 	case <-ctx.Done():
 		return protocol.CommitResult{}, ctx.Err()
 	}
@@ -156,6 +173,14 @@ func (h *Hub) abandonCommitRequests(dc *DaemonConn) {
 }
 
 func (a *API) RegisterCommitRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/sessions/{id}/commits/{sha}/file", func(w http.ResponseWriter, r *http.Request) { a.handleCommit(w, r, true) })
+	mux.HandleFunc("GET /api/sessions/{id}/git/graph", func(w http.ResponseWriter, r *http.Request) { a.handleCommit(w, r, false) })
+	mux.HandleFunc("GET /api/sessions/{id}/git", func(w http.ResponseWriter, r *http.Request) {
+		a.handleCommit(w, r, false)
+	})
+	mux.HandleFunc("GET /api/sessions/{id}/git/diff", func(w http.ResponseWriter, r *http.Request) {
+		a.handleCommit(w, r, true)
+	})
 	mux.HandleFunc("GET /api/sessions/{id}/commits/{sha}", func(w http.ResponseWriter, r *http.Request) { a.handleCommit(w, r, false) })
 	mux.HandleFunc("GET /api/sessions/{id}/commits/{sha}/diff", func(w http.ResponseWriter, r *http.Request) { a.handleCommit(w, r, true) })
 }
@@ -167,7 +192,22 @@ func commitProblem(w http.ResponseWriter, status int, message string) {
 }
 
 func (a *API) handleCommit(w http.ResponseWriter, r *http.Request, patch bool) {
-	p, ok := a.authBrowser(w, r)
+	graphRead := r.Pattern == "GET /api/sessions/{id}/git/graph"
+	branchRead := graphRead || r.Pattern == "GET /api/sessions/{id}/git" || r.Pattern == "GET /api/sessions/{id}/git/diff"
+	var p identity.Principal
+	var ok bool
+	// The board brokers only the current signed-in person's proof. Its stored
+	// automation credential never grants access to workspace Git.
+	if branchRead && r.Header.Get(desktopViewerHeader) != "" {
+		if a.boardDesktopViewer(r) == "" {
+			commitProblem(w, 403, "Sign in to read workspace Git.")
+			return
+		}
+		p, _ = identity.Verify(r.Header.Get(desktopViewerHeader), "blerg-board", a.coreAuth.KeySet(), a.coreAuth, coreAuthSensitiveCaps)
+		ok = p.Kind == "human"
+	} else {
+		p, ok = a.authBrowser(w, r)
+	}
 	if !ok {
 		return
 	}
@@ -201,12 +241,12 @@ func (a *API) handleCommit(w http.ResponseWriter, r *http.Request, patch bool) {
 		commitProblem(w, http.StatusNotFound, "Session not found.")
 		return
 	}
-	if !ownsSession(p.Sub, row) && !p.Has(insightsAdminCap) {
+	if !ownsSession(p.Sub, row) && (graphRead || !p.Has(insightsAdminCap)) {
 		commitProblem(w, http.StatusForbidden, "Only the session owner or an administrator can read its commits.")
 		return
 	}
 	sha := r.PathValue("sha")
-	if !protocol.ValidCommitLookupSHA(sha) {
+	if !branchRead && !protocol.ValidCommitLookupSHA(sha) {
 		commitProblem(w, http.StatusNotFound, "Commit not found.")
 		return
 	}
@@ -224,13 +264,72 @@ func (a *API) handleCommit(w http.ResponseWriter, r *http.Request, patch bool) {
 		commitProblem(w, 403, "Only the desktop owner can read its commits.")
 		return
 	}
-	res, err := a.hub.requestCommitRead(ctx, dc, p.Sub, protocol.ReadCommit{SessionID: sid, SHA: sha, Patch: patch, WorkspaceGitRef: workspaceGitQuery(r)}, timeout)
+	if branchRead && r.URL.Query().Get("member_id") == "" {
+		manifest, generation, err := loadExplorerBinding(ctx, a.dbPool, sid)
+		if err == nil && len(manifest.Members) > 1 {
+			if patch {
+				commitProblem(w, 422, "Choose a workspace repository before reading its diff.")
+				return
+			}
+			members := []map[string]string{}
+			for _, m := range manifest.Members {
+				members = append(members, map[string]string{"id": m.ID, "name": m.Name})
+			}
+			writeJSON(w, 200, map[string]any{"members": members, "generation": generation, "launch_generation": manifest.LaunchGeneration})
+			return
+		}
+	}
+	req := protocol.ReadCommit{SessionID: sid, SHA: sha, Patch: patch, WorkspaceGitRef: workspaceGitQuery(r)}
+	// A branch view names a repository, not a runtime: the binding is the server's to
+	// supply, and the daemon's fence still refuses it if the workspace moved on.
+	if branchRead && req.Generation == 0 && req.LaunchGeneration == "" {
+		if manifest, generation, err := loadExplorerBinding(ctx, a.dbPool, sid); err == nil {
+			req.LaunchGeneration, req.Generation = manifest.LaunchGeneration, generation
+			if req.MemberID == "" && len(manifest.Members) == 1 {
+				req.MemberID = manifest.Members[0].ID
+			}
+		}
+	}
+	if r.Pattern == "GET /api/sessions/{id}/commits/{sha}/file" {
+		req.FilePath = r.URL.Query().Get("path")
+		req.Original = r.URL.Query().Get("side") == "original"
+		if !protocol.ValidCommitFilePath(req.FilePath) || r.URL.Query().Get("side") != "original" && r.URL.Query().Get("side") != "changed" {
+			commitProblem(w, 422, "Invalid commit file selection.")
+			return
+		}
+	}
+
+	if graphRead {
+		req.Graph = true
+		req.Depth = 50
+		if raw := r.URL.Query().Get("depth"); raw != "" {
+			depth, err := strconv.Atoi(raw)
+			if err != nil || depth < 1 || depth > 200 {
+				commitProblem(w, 422, "Invalid history depth.")
+				return
+			}
+			req.Depth = depth
+		}
+	} else if branchRead {
+		req.SHA = ""
+		req.Branch = workbranch.Effective(sid, row.WorkBranch)
+		// A caller may select another branch in this authorized member, never a path.
+		if branch := r.URL.Query().Get("branch"); branch != "" {
+			req.Branch = branch
+		}
+		req.Base = r.URL.Query().Get("base")
+		if !workbranch.Valid(req.Branch) || req.Base != "" && !workbranch.Valid(req.Base) {
+			commitProblem(w, 422, "Invalid Git branch.")
+			return
+		}
+	}
+	res, err := a.hub.requestCommitRead(ctx, dc, p.Sub, req, timeout)
 	if errors.Is(err, errCommitBusy) {
 		commitProblem(w, http.StatusTooManyRequests, "Too many commit reads at once; try again.")
 		return
 	}
 	if err != nil {
-		commitProblem(w, http.StatusConflict, "The session's daemon did not read the commit.")
+		commitProblem(w, http.StatusConflict, "The daemon did not read local Git. Keep the workspace connected and update the daemon if it is older than the server.")
 		return
 	}
 	// The daemon that answered must still run this session.
@@ -248,6 +347,8 @@ func (a *API) handleCommit(w http.ResponseWriter, r *http.Request, patch bool) {
 		switch res.ErrorCode {
 		case "not_found", "invalid":
 			commitProblem(w, http.StatusNotFound, "Commit not found.")
+		case "objects_unavailable":
+			commitProblem(w, http.StatusFailedDependency, "Local Git objects needed for this diff are missing or unavailable. Blobless cluster clones may not contain them.")
 		case "too_large":
 			commitProblem(w, http.StatusRequestEntityTooLarge, "The commit's diff is too large to open here.")
 		case "busy":
@@ -282,7 +383,7 @@ func (a *API) handleCommit(w http.ResponseWriter, r *http.Request, patch bool) {
 		w.Header().Set("X-Blerg-Launch-Generation", res.LaunchGeneration)
 		if patch {
 			body, ok := validCommitPatch(res)
-			if !ok {
+			if !ok || req.FilePath != "" && !res.File {
 				commitProblem(w, http.StatusConflict, "The daemon returned an invalid commit.")
 				return nil
 			}
@@ -290,6 +391,23 @@ func (a *API) handleCommit(w http.ResponseWriter, r *http.Request, patch bool) {
 			w.Header().Set("Content-Security-Policy", "sandbox")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(body)
+			return nil
+		}
+		if graphRead {
+			if !validBranchGraph(res.Graph, req.Depth) {
+				commitProblem(w, 409, "The daemon could not read branch history.")
+				return nil
+			}
+			res.Graph.WorkspaceGitRef = res.WorkspaceGitRef
+			writeJSON(w, 200, res.Graph)
+			return nil
+		}
+		if branchRead {
+			if !validBranchInfo(res.Branch, req.Branch) {
+				commitProblem(w, 409, "The daemon could not return local branch history. Update the daemon if it is older than the server, then try again.")
+				return nil
+			}
+			writeJSON(w, 200, res.Branch)
 			return nil
 		}
 		if !validCommitInfo(res.Commit, sha) {
@@ -352,6 +470,61 @@ func validCommitInfo(c *protocol.CommitInfo, sha string) bool {
 	}
 	if c.Files == nil {
 		c.Files = []protocol.CommitFile{}
+	}
+	return true
+}
+
+func validBranchInfo(b *protocol.BranchInfo, branch string) bool {
+	if b == nil || b.Name != branch || len(b.Base) > 1024 || len(b.Commits) > 30 {
+		return false
+	}
+	for _, c := range b.Commits {
+		if !protocol.ValidSessionOriginCommit(c.SHA) || len(c.Message) > protocol.CommitSubjectMaxBytes || len(c.Author) > protocol.CommitAuthorMaxBytes || len(c.Date) > 64 {
+			return false
+		}
+	}
+	return true
+}
+
+func validBranchGraph(g *protocol.BranchGraph, depth int) bool {
+	if g == nil || len(g.Refs) > 64 || len(g.Commits) > depth || len(g.Tags) > 16 {
+		return false
+	}
+	for _, r := range g.Refs {
+		if r.Name == "" || len(r.Name) > 1024 || !protocol.ValidSessionOriginCommit(r.SHA) {
+			return false
+		}
+	}
+	names := make(map[string]bool)
+	for _, tag := range g.Tags {
+		names[tag.Name] = true
+	}
+	commits := make(map[string]bool)
+	for _, c := range g.Commits {
+		commits[c.SHA] = true
+	}
+	for _, tag := range g.Tags {
+		if tag.Name == "" || len(tag.Name) > 1024 || !protocol.ValidSessionOriginCommit(tag.SHA) || len(tag.Contains) > depth || tag.Previous != "" && !names[tag.Previous] {
+			return false
+		}
+		seen := make(map[string]bool)
+		for _, sha := range tag.Contains {
+			if !commits[sha] || seen[sha] {
+				return false
+			}
+			seen[sha] = true
+		}
+	}
+
+	for _, c := range g.Commits {
+		if !protocol.ValidSessionOriginCommit(c.SHA) || len(c.Subject) > protocol.CommitSubjectMaxBytes || len(c.Date) > 40 || len(c.Parents) > protocol.CommitParentsMax {
+			return false
+		}
+		for _, p := range c.Parents {
+			if !protocol.ValidSessionOriginCommit(p) {
+				return false
+			}
+		}
 	}
 	return true
 }

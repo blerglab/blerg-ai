@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, Board } from "./api";
 
 // Board metrics: the board's life in numbers. Charts are hand-rolled SVG
@@ -80,20 +80,30 @@ function BarChart({ title, rows, value, split, fmt }: {
   fmt: (n: number) => string;
 }) {
   const { days, keys, data } = seriesOf(rows, value, split);
+  const plot = useRef<HTMLDivElement>(null);
+  const [availableWidth, setAvailableWidth] = useState<number | null>(null);
+  useEffect(() => {
+    if (!plot.current) return;
+    const observer = new ResizeObserver(([entry]) => setAvailableWidth(entry.contentRect.width));
+    observer.observe(plot.current);
+    return () => observer.disconnect();
+  }, [days.length, rows]);
   if (days.length === 0) return null;
   const totals = days.map((d) => keys.reduce((a, k) => a + (data.get(d)?.get(k) ?? 0), 0));
   if (totals.every((t) => t === 0)) return null;
   const yMax = niceCeil(Math.max(...totals, 1));
 
-  // layout: fixed margins for axes; bars never stretch
+  // Keep the existing axes and type size; fit bars to the sheet like the release chart.
   const ML = 46, MB = 20, MT = 16, plotH = 110;
-  const bw = 26, gap = 8;
-  const plotW = days.length * (bw + gap);
-  const W = ML + plotW + 8, H = MT + plotH + MB;
+  const W = Math.min(ML + days.length * 34 + 8, availableWidth ?? 800);
+  const plotW = Math.max(1, W - ML - 8);
+  const slot = plotW / days.length;
+  const bw = Math.min(26, slot * 0.76), gap = slot - bw;
+  const H = MT + plotH + MB;
   const y = (v: number) => MT + plotH - (v / yMax) * plotH;
-  const showValues = days.length <= 16;
+  const showValues = days.length <= 16 && slot >= 34;
   // x labels: at most ~6, always first and last
-  const step = Math.max(1, Math.ceil(days.length / 6));
+  const step = Math.max(1, Math.ceil(days.length / Math.max(1, Math.min(6, Math.floor(plotW / 55)))));
   const ticks = [0, 0.5, 1].map((f) => f * yMax);
 
   return (
@@ -109,7 +119,7 @@ function BarChart({ title, rows, value, split, fmt }: {
           </span>
         )}
       </div>
-      <div className="metric-plot">
+      <div className="metric-plot" ref={plot}>
         <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H} role="img" aria-label={title}>
           {/* gridlines + y labels */}
           {ticks.map((t) => (
@@ -138,8 +148,8 @@ function BarChart({ title, rows, value, split, fmt }: {
                     {fmt(totals[i])}
                   </text>
                 )}
-                {(i % step === 0 || i === days.length - 1) && (
-                  <text x={x0 + bw / 2} y={H - 6} textAnchor="middle" className="axis-label">
+                {((i % step === 0 && days.length - 1 - i >= step) || i === 0 || i === days.length - 1) && (
+                  <text x={x0 + bw / 2} y={H - 6} textAnchor={slot < 34 && i === 0 ? "start" : slot < 34 && i === days.length - 1 ? "end" : "middle"} className="axis-label">
                     {d.slice(5)}
                   </text>
                 )}
@@ -176,7 +186,7 @@ export function MetricsModal({ boardId, onClose }: { boardId: string; onClose: (
       </div>
 
       <div className="rollups">
-        <div className="rollup"><b>{r.sessions}</b><span>sessions{r.since ? ` since ${String(r.since).slice(0, 10)}` : ""}</span></div>
+        <div className="rollup"><b>{r.sessions}</b><span>workspaces{r.since ? ` since ${String(r.since).slice(0, 10)}` : ""}</span></div>
         <div className="rollup"><b>{dur(r.agent_seconds)}</b><span>agent time</span></div>
         <div className="rollup"><b>{tok(r.tokens_in + r.tokens_out)}</b><span>tokens{r.tokens_in + r.tokens_out > 0 ? ` (${tok(r.tokens_in)} in / ${tok(r.tokens_out)} out)` : ""}</span></div>
         <div className="rollup"><b>{r.cards_completed}</b><span>cards completed</span></div>
@@ -184,7 +194,7 @@ export function MetricsModal({ boardId, onClose }: { boardId: string; onClose: (
         <div className="rollup"><b>{r.gate_calls}</b><span>gate calls</span></div>
       </div>
 
-      <BarChart title="Sessions per day" rows={m.sessions}
+      <BarChart title="Workspaces per day" rows={m.sessions}
         value={(d) => d.count} split={(d) => d.role ?? "all"} fmt={(n) => String(n)} />
       <BarChart title="Agent time per day" rows={m.sessions}
         value={(d) => d.seconds ?? 0} split={(d) => d.role ?? "all"} fmt={dur} />

@@ -15,18 +15,22 @@ import { HostedViewerRequest, useViewerHost } from './ViewerHost'
 import { useBackdropClose } from '../hooks/useBackdropClose'
 import { useSelectAllIn } from '../hooks/useSelectAllIn'
 import { formatSize } from '../model/artifacts'
-import { ARTIFACT_VIEWS, blobTypeFor, isViewable, keptMediaUrl, mediaUrl, releaseMediaUrl, tooBigToPreview } from '../model/artifactViews'
+import { ARTIFACT_VIEWS, blobTypeFor, isViewable, keptMediaUrl, mediaUrl, releaseMediaUrl, tooBigToPreview, TEXT_VIEW_MAX } from '../model/artifactViews'
 import { queuedRead } from '../model/imageQueue'
 import { contentKeeper, peekContent } from '../model/viewCache'
 import { workspaceErrorText } from '../model/workspaceErrors'
 import { fileErrorText, saveBlob, WorkspaceFileError } from '../transport/files'
 import type { ArtifactInfo, TransportFiles, WorkspaceFile } from '../transport/types'
 import ErrorId from './ErrorId'
-import ViewerToolbar, { ViewerAction, WrapToggle } from './ViewerToolbar'
+import WorkspaceReview from './review/WorkspaceReview'
+import { useChat } from './context'
+import ViewerToolbar, { ViewerActionsContext, ViewerAction, WrapToggle } from './ViewerToolbar'
 import { WrapHostContext, WrapScopeContext, isWrapShortcut, toggleWrapIn, type WrapTarget } from '../model/lineWrap'
 import SourceCode from './SourceCode'
 import { hasRenderedText } from '../model/rawView'
 import { BlobView, NoPreview, TextView } from './ArtifactViewer'
+import { visualFile } from '../model/visualKind'
+import { renderVisual } from '../visual/render'
 import type { MarkdownDocument } from './Markdown'
 
 /** The longest the spinner runs before the viewer gives up (the server answers within ~11 s). */
@@ -49,6 +53,8 @@ function fromKept(kept: KeptFile): { kind: 'ready'; file: WorkspaceFile; text?: 
 }
 
 interface Props {
+  /** Commit blobs have no workspace folder and cannot be uploaded as workspace copies. */
+  commitBlob?: boolean
   sessionId: string
   files: TransportFiles
   path: string
@@ -66,10 +72,13 @@ interface Props {
 export default function WorkspaceFileViewer(props: Props) {
   const host = useViewerHost()
   if (host && !props.embedded) return <HostedViewerRequest view={{ kind: 'workspace', path: props.path, line: props.line }} consumed={props.onClose} />
-  return <WorkspaceFileViewerBody {...props} />
+  return <WorkspaceFileViewerBody key={`${props.sessionId}:${props.path}`} {...props} />
 }
-function WorkspaceFileViewerBody({ sessionId, files, path, line, onClose, onSaved, embedded = false, headerActions }: Props) {
+function WorkspaceFileViewerBody({ sessionId, files, path, line, onClose, onSaved, embedded = false, headerActions, commitBlob = false }: Props) {
   const viewerHost = useViewerHost()
+  const chat = useChat()
+  const [reviewing, setReviewing] = useState(false)
+  const [utilityHost, setUtilityHost] = useState<HTMLSpanElement | null>(null)
   const titleId = useId()
   const dialogRef = useRef<HTMLDivElement | null>(null)
   useSelectAllIn(dialogRef)
@@ -85,13 +94,24 @@ function WorkspaceFileViewerBody({ sessionId, files, path, line, onClose, onSave
   useEffect(() => { shown.current = state }, [state])
   // An object URL made for a kept picture, freed when the view goes.
   useEffect(() => () => { if (shown.current.kind === 'ready') releaseMediaUrl(shown.current.url) }, [])
+  const [watching, setWatching] = useState(false)
+  const watch = useRef(false)
+  const watchRead = useRef<AbortController | null>(null)
+  const refresh = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const [watchError, setWatchError] = useState(false)
+  function toggleWatch() {
+    watch.current = !watch.current
+    setWatching(watch.current)
+    setWatchError(false)
+    if (watch.current) setAttempt(value => value + 1)
+    else { clearTimeout(refresh.current); watchRead.current?.abort() }
+  }
   const [attempt, setAttempt] = useState(0)
   const [note, setNote] = useState<{ ok: boolean; message: string; errorId?: string } | null>(null)
   const [saving, setSaving] = useState(false)
   const [raw, setRaw] = useState(false)
   // The kind of code on show, for the wrap toggle; null while the file is rendered, not code.
   const [codeWrap, setCodeWrap] = useState<WrapTarget | null>(null)
-  const [copied, setCopied] = useState(false)
   const name = path.slice(path.lastIndexOf('/') + 1)
 
   useEffect(() => { if (!embedded || viewerHost?.autoFocus !== false) dialogRef.current?.focus() }, [embedded, viewerHost?.autoFocus])
@@ -100,8 +120,10 @@ function WorkspaceFileViewerBody({ sessionId, files, path, line, onClose, onSave
     const read = files.workspaceFile
     if (!read) return // ChatView opens the viewer only for a transport that has the read
     const ac = new AbortController()
+    watchRead.current = ac
     let url: string | null = null
     let timedOut = false
+    let cancelled = false
     const keep = contentKeeper<KeptFile>(files, sessionId, keptIdentity(path))
     // What is on screen before this read (kept contents): the read only checks it is still current.
     const before = shown.current.kind === 'ready' ? shown.current.file : null
@@ -114,11 +136,25 @@ function WorkspaceFileViewerBody({ sessionId, files, path, line, onClose, onSave
         const file = await queuedRead(signal => read.call(files, sessionId, path, signal), ac.signal, { onRefused: e => { lastRefusal = e } })
         clearTimeout(timer)
         if (ac.signal.aborted) return
+        if (watch.current) {
+          if (!before || file.view !== before.view || file.path !== before.path ||
+            !(file.view === 'html' || visualFile(name, file.view, '')) ||
+            file.size > TEXT_VIEW_MAX || file.blob.size > TEXT_VIEW_MAX) throw new Error()
+          setWatchError(false)
+        }
         // Unchanged since the kept contents were read: nothing on screen moves (scroll, selection).
         if (before && before.path === file.path && before.size === file.size && before.mtime === file.mtime && before.view === file.view) return
         const spec = isViewable(file.view) ? ARTIFACT_VIEWS[file.view] : null
         if (spec?.textual && !tooBigToPreview(file.view, file.size)) {
           const text = await file.blob.text()
+          const kind = watch.current && visualFile(name, file.view, text)
+          if (kind && !ac.signal.aborted) {
+            const target = document.createElement('div')
+            target.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;width:800px'
+            document.body.append(target)
+            try { const visual = await renderVisual(kind, text, target, undefined, ac.signal); visual.dispose() }
+            finally { target.remove() }
+          }
           if (!ac.signal.aborted) { setState({ kind: 'ready', file, text }); keep({ file, text }, file.size + text.length * 2) }
         } else if (spec && !spec.textual) {
           const buf = await file.blob.arrayBuffer()
@@ -139,6 +175,7 @@ function WorkspaceFileViewerBody({ sessionId, files, path, line, onClose, onSave
       } catch (e) {
         clearTimeout(timer)
         if (ac.signal.aborted && !timedOut) return // cancelled by the person
+        if (watch.current && before) { setWatchError(true); return }
         // Kept contents on screen: a read that could not reach the server leaves them as they are.
         if (before && !(e instanceof WorkspaceFileError)) return
         if (timedOut) {
@@ -149,21 +186,26 @@ function WorkspaceFileViewerBody({ sessionId, files, path, line, onClose, onSave
         }
         else if (e instanceof WorkspaceFileError) setState({ kind: 'error', message: workspaceErrorText(e.status, e.serverText, e.code), errorId: e.errorId })
         else setState({ kind: 'error', message: 'Couldn’t reach the server to open that file.' })
+      } finally {
+        // Schedule only after completion, so slow reads never overlap.
+        if (!cancelled && watch.current && (timedOut || !ac.signal.aborted)) refresh.current = setTimeout(() => setAttempt(value => value + 1), 1000)
       }
     })()
     return () => {
+      cancelled = true
+      clearTimeout(refresh.current)
       clearTimeout(timer)
       ac.abort()
       releaseMediaUrl(url)
     }
-  }, [sessionId, files, path, attempt])
+  }, [sessionId, files, path, name, attempt])
 
   const ready = state.kind === 'ready' ? state : null
   // A markdown file's relative images and links resolve beside it, in the same folder.
   const mdDocument = useMemo<MarkdownDocument>(() => ({
     path: ready?.file.path ?? path,
-    readWorkspace: files.workspaceFile ? (p: string, signal?: AbortSignal) => files.workspaceFile!.call(files, sessionId, p, signal) : undefined,
-  }), [files, sessionId, path, ready?.file.path])
+    readWorkspace: !commitBlob && files.workspaceFile ? (p: string, signal?: AbortSignal) => files.workspaceFile!.call(files, sessionId, p, signal) : undefined,
+  }), [files, sessionId, path, ready?.file.path, commitBlob])
 
   async function saveCopy() {
     if (!ready) return
@@ -180,18 +222,11 @@ function WorkspaceFileViewerBody({ sessionId, files, path, line, onClose, onSave
     }
   }
 
-  function copyPath() {
-    if (typeof navigator === 'undefined' || !navigator.clipboard) return
-    void navigator.clipboard.writeText(path).then(
-      () => { setCopied(true); setTimeout(() => setCopied(false), 1200) },
-      () => {},
-    )
-  }
-
-  const meta = ['From the session’s folder', 'as of now', ready ? formatSize(ready.file.size) : null].filter(Boolean).join(' · ')
+  const meta = ['From the workspace’s folder', 'as of now', ready ? formatSize(ready.file.size) : null].filter(Boolean).join(' · ')
 
   const body = (
-    <div className={embedded ? "embedded-viewer embedded-workspace" : "artifact-overlay artifact-overlay-viewer"} data-testid="workspace-viewer-overlay" {...(embedded ? {} : backdrop)}>
+    // button-guard-ignore: useBackdropClose supplies pointer handlers only; this overlay is not a button
+    <div className={embedded ? "embedded-viewer embedded-workspace" : "artifact-overlay artifact-overlay-viewer workspace-file-overlay"} data-testid="workspace-viewer-overlay" {...(embedded ? {} : backdrop)}>
       <div
         ref={dialogRef}
         className="artifact-dialog artifact-viewer"
@@ -201,36 +236,25 @@ function WorkspaceFileViewerBody({ sessionId, files, path, line, onClose, onSave
         tabIndex={-1}
         onKeyDown={e => { if (!embedded && e.key === 'Escape') { e.stopPropagation(); onClose() } else if (isWrapShortcut(e) && toggleWrapIn(e.currentTarget)) { e.preventDefault(); e.stopPropagation() } }}
       >
-        {embedded ? <ViewerToolbar titleId={titleId} title={path} meta={meta} toggle={ready?.text !== undefined && hasRenderedText(name, ready.file.view, ready.text) && <button type="button" className="artifact-btn" onClick={() => setRaw(!raw)}>{raw ? 'Rendered' : 'Raw'}</button>}>
-          {codeWrap && <WrapToggle kind={codeWrap.kind} available={codeWrap.available} />}
+        <ViewerToolbar exports={<>
           {ready && <ViewerAction icon="download" label="Download" onClick={() => saveBlob(ready.file.blob, name)} />}
-          {ready && <ViewerAction icon="save" label={saving ? 'Saving…' : 'Save a copy to Files'} disabled={saving} onClick={() => void saveCopy()} />}
-        </ViewerToolbar> : <header className="artifact-header">
-          <div className="artifact-header-text">
-            <h2 id={titleId}>{path}</h2>
-            <p className="artifact-meta" title={ready?.file.mtime ? `Last changed ${ready.file.mtime}` : undefined}>{meta}</p>
-          </div>
-          {!embedded && <>
-          <button type="button" className="artifact-btn" onClick={copyPath}>{copied ? 'Copied' : 'Copy path'}</button>
-          {ready && <button type="button" className="artifact-btn" onClick={() => saveBlob(ready.file.blob, name)}>Download</button>}
-          {ready && (
-            <button type="button" className="artifact-btn" disabled={saving} onClick={() => void saveCopy()}>
-              {saving ? 'Saving…' : 'Save a copy to Files'}
-            </button>
-          )}
-          </>}
-          {ready?.text !== undefined && hasRenderedText(name, ready.file.view, ready.text) && <button type="button" className="artifact-btn" onClick={() => setRaw(!raw)}>{raw ? 'Rendered' : 'Raw'}</button>}
-          {codeWrap && <WrapToggle kind={codeWrap.kind} available={codeWrap.available} text />}
+        </>} titleId={titleId} title={path} showPath={!embedded || path !== name} meta={meta} primary={ready && chat?.sessionId === sessionId && <ViewerAction icon="review" label="Review" pressed={reviewing} onClick={() => setReviewing(value => !value)} />} toggle={ready?.text !== undefined && hasRenderedText(name, ready.file.view, ready.text) && <ViewerAction icon="raw" label={raw ? 'Rendered' : 'Raw'} title={raw ? 'Show rendered file' : 'Show raw source'} pressed={raw} onClick={() => setRaw(!raw)} />}>
+          {codeWrap && <WrapToggle kind={codeWrap.kind} available={codeWrap.available} />}
+          {ready && !commitBlob && <ViewerAction icon="save" label={saving ? 'Saving…' : 'Save a copy to Files'} disabled={saving} onClick={() => void saveCopy()} />}
+          {ready && (ready.file.view === 'html' || visualFile(name, ready.file.view, '')) && <ViewerAction icon="follow" label={watching ? 'Stop watching' : 'Watch file'} pressed={watching} onClick={toggleWatch} />}
+          <span className="viewer-control-slot" ref={setUtilityHost} />
           {headerActions}
-          <button type="button" className="artifact-close" aria-label="Close" onClick={onClose}>✕</button>
-        </header>}
+          {!embedded && <ViewerAction icon="close" label="Close" onClick={onClose} />}
+        </ViewerToolbar>
+        {watchError && <div className="artifact-status" role="status">Could not update preview. The previous file is still shown.</div>}
+        {watching && !watchError && <div className="artifact-status" role="status">Watching file</div>}
         {note && (
           <div className={note.ok ? 'artifact-status' : 'artifact-error'} role={note.ok ? 'status' : 'alert'} data-testid="workspace-note">
             {note.message}<ErrorId id={note.errorId} />
           </div>
         )}
         <div className="artifact-body">
-          {state.kind === 'loading' ? (
+          {reviewing && ready ? <WorkspaceReview sessionId={sessionId} files={files} path={ready.file.path} text={ready.text} blob={ready.file.blob} onClose={() => setReviewing(false)} /> : state.kind === 'loading' ? (
             <div className="artifact-status workspace-loading" role="status" data-testid="workspace-loading">
               <span className="workspace-spinner" aria-hidden="true" /> Opening the file…{' '}
               <button type="button" className="artifact-link" onClick={onClose}>Cancel</button>
@@ -247,7 +271,7 @@ function WorkspaceFileViewerBody({ sessionId, files, path, line, onClose, onSave
       </div>
     </div>
   )
-  const scoped = <WrapScopeContext.Provider value={files.queueScope?.() ?? ''}><WrapHostContext.Provider value={setCodeWrap}>{body}</WrapHostContext.Provider></WrapScopeContext.Provider>
+  const scoped = <WrapScopeContext.Provider value={files.queueScope?.() ?? ''}><WrapHostContext.Provider value={setCodeWrap}><ViewerActionsContext.Provider value={utilityHost}>{body}</ViewerActionsContext.Provider></WrapHostContext.Provider></WrapScopeContext.Provider>
   return embedded ? scoped : createPortal(scoped, document.body)
 }
 

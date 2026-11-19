@@ -73,6 +73,7 @@ export function composeReviewMessage(review: ReviewFile, file: { name: string; v
       const { anchor } = r
       const where: string[] = []
       if (anchor.kind === 'general') where.push('General comment')
+      if (anchor.workspace) where.push(`${anchor.workspace.path}, ${anchor.workspace.start ? `lines ${anchor.workspace.start}–${anchor.workspace.end}` : 'whole file'} (SHA-256 ${anchor.workspace.contentHash})`)
       if (anchor.diff) where.push(diffAnchorLabel(anchor.diff))
       if (anchor.heading) where.push(`Under "${anchor.heading}"`)
       if (anchor.page !== undefined) where.push(where.length ? `page ${anchor.page}` : `Page ${anchor.page}`)
@@ -103,6 +104,10 @@ export function composeReviewMessage(review: ReviewFile, file: { name: string; v
   if (review.edit) {
     out.push('', `Edited copy attached as ${file.name} (your copy, edited directly); the diff:`, '```diff')
     out.push(review.edit.diff.replace(/\n$/, ''), '```')
+  }
+  if (review.requests.some(r => r.anchor.workspace)) {
+    out.push('', 'Apply each request in the workspace file named by its anchor. Check the current source before changing it; the selected text and SHA-256 describe the reviewed content. Reply with `blerg-runner review reply <id> done|declined "<one line>"` per request. Workspace files do not need to be published.')
+    return out.join('\n')
   }
   if (isDiff) {
     out.push('', 'Apply each anchored request in the source files named by its patch anchor. Address general comments as well. Suggestions describe replacement code; check the current source before applying them. Keep the published diff name unchanged so its threads carry forward. Then publish an updated diff with `blerg-runner diff <range>`. Reply with `blerg-runner review reply <id> done|declined "<one line>"` per request.')

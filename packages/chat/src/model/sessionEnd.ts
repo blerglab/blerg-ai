@@ -46,14 +46,14 @@ export const END_REASON: Record<string, EndReasonEntry> = {
   auto_stopped: { text: () => 'Stopped automatically when its task finished' },
   process_exited: { text: () => 'The process exited on its own' },
   process_failed: { text: () => 'The process exited with an error', failure: true },
-  start_failed: { text: () => 'The session failed to start', failure: true },
+  start_failed: { text: () => 'The workspace failed to start', failure: true },
   job_finished: { text: () => 'The cluster job finished' },
   job_failed: { text: () => 'The cluster job failed', failure: true },
   job_disappeared: { text: () => 'The cluster job was removed outside Blerg', failure: true },
   not_resumed: { text: () => 'Expired: nobody resumed it within a day', failure: true },
   daemon_lost: { text: () => 'Its daemon disconnected and never came back', failure: true },
-  parent_ended: { text: () => 'Stopped when the session that started it ended' },
-  daemon_unreported: { text: () => 'Its daemon no longer had this session' },
+  parent_ended: { text: () => 'Stopped when the workspace that started it ended' },
+  daemon_unreported: { text: () => 'Its daemon no longer had this workspace' },
 }
 
 export interface SessionEndLine {

@@ -23,7 +23,22 @@ const WorkspaceExplorerProbeVersion = "workspace-explorer-v2"
 // wire version. Host containment/helper probes and sandbox image/storage probes
 // establish independent support. A missing backend never disables another one.
 func (s *LocalWorkspaceService) Capabilities(ctx context.Context) protocol.WorkspaceCapabilities {
-	return s.capabilitiesForPlatform(ctx, runtime.GOOS, s.probeWorkspaceHost, probeWorkspaceImage)
+	caps := s.capabilitiesForPlatform(ctx, runtime.GOOS, s.probeWorkspaceHost, probeWorkspaceImage)
+	if (caps.LinuxHost || caps.Sandbox) && s.persistentStackReady(ctx) {
+		caps.ShellPersistence = 2
+		caps.PersistentHost = caps.LinuxHost
+		caps.PersistentSandbox = false
+	}
+	return caps
+}
+
+type keeperProbeContext struct{}
+
+func (s *LocalWorkspaceService) persistentStackReady(ctx context.Context) bool {
+	if registry, ok := s.Supervisor.(*workspaceSupervisors); ok && registry.service.HostKeeperReconnects() && ctx.Value(keeperProbeContext{}) != true {
+		return registry.service.KeeperPersistenceReady()
+	}
+	return s.probePersistentStack(ctx) == nil
 }
 
 // Probes are injected only by package tests. Production always probes the
@@ -162,4 +177,34 @@ func probeWorkspaceImage(ctx context.Context) error {
 		return errors.New("workspace image helpers unavailable")
 	}
 	return nil
+}
+
+// The installed fixed helper must validate the native suspend-aware clock.
+// Each prepared launch repeats the probe inside its own runtime and pinned
+// member directory before describe can offer actual custody authority.
+func (s *LocalWorkspaceService) probePersistentStack(ctx context.Context) error {
+	root, err := os.MkdirTemp("", "blerg-shell-probe-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(root) }()
+	identity, err := shellruntime.ResolvePersistentIdentity(root)
+	if err != nil {
+		return err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	command := shellruntime.HostCommand(executable, identity)
+	if s.HostCommand != nil {
+		command = s.HostCommand(identity)
+	}
+	command.Root = identity.MemberRoot
+	command.PublicRoot = identity.Cwd
+	if registry, ok := s.Supervisor.(*workspaceSupervisors); ok && registry.service.UsesHostKeeper() {
+		return registry.service.ProbeHostKeeper(ctx, command)
+	}
+	_, err = shellruntime.ProbePersistentCommand(ctx, command)
+	return err
 }

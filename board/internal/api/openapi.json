@@ -1,5 +1,6 @@
 {
   "openapi": "3.1.0",
+  "x-runtime-targets": "Boards expose runtime_target_id for their default cluster target. PATCH with run_runtime and run_daemon_id may carry runtime_target_id; card spawn accepts it too. Omitted selects the default cluster target; unknown IDs refuse with 422. The runner owns the target record; desktop behavior is unchanged.",
   "info": {
     "title": "blerg-board",
     "version": "v1",
@@ -14,7 +15,388 @@
     { "name": "cards", "description": "The work itself: file, read, update, move, archive, comment." },
     { "name": "reviews", "description": "Admission-gate verdicts." }
   ],
+  "x-card-filing-estimates": {
+    "path": "POST /api/boards/{id}/file-card",
+    "description": "The approved draft optionally includes size (S/M/L/XL), risk and complexity (low/medium/high). All supplied estimates are bound by the signed approval digest and stored as first-class card fields with server-owned first-set timestamps. Missing estimates remain permitted."
+  },
   "paths": {
+    "/api/me/theme": {
+      "get": {
+        "summary": "Read the signed-in person’s account theme",
+        "description": "Human browser tokens only. Core stores one choice shared by core, runner and board. An unset choice follows the device color scheme.",
+        "responses": {
+          "200": {
+            "description": "Account theme (empty string when unset)"
+          },
+          "400": {
+            "description": "Invalid theme"
+          },
+          "401": {
+            "description": "Sign in required"
+          },
+          "403": {
+            "description": "Human sign-in required"
+          },
+          "503": {
+            "description": "Theme sync unavailable"
+          }
+        }
+      },
+      "put": {
+        "summary": "Save the signed-in person’s account theme",
+        "description": "Human browser tokens only. Core stores one choice shared by core, runner and board. An unset choice follows the device color scheme.",
+        "responses": {
+          "200": {
+            "description": "Account theme (empty string when unset)"
+          },
+          "400": {
+            "description": "Invalid theme"
+          },
+          "401": {
+            "description": "Sign in required"
+          },
+          "403": {
+            "description": "Human sign-in required"
+          },
+          "503": {
+            "description": "Theme sync unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "theme"
+                ],
+                "properties": {
+                  "theme": {
+                    "type": "string",
+                    "enum": [
+                      "system",
+                      "dark",
+                      "light",
+                      "colorblind-dark",
+                      "colorblind-light",
+                      "high-contrast"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+"/api/boards/{id}/automation/identity": {
+  "get": {
+    "summary": "Read the board automation credential owner name",
+    "description": "Requires card.read on this board. Returns only username, or an empty name if Core cannot resolve the credential. Never returns the credential. Not cached.",
+    "parameters": [
+      {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "responses": {
+      "200": {
+        "description": "Credential owner name",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "username": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "403": {
+        "description": "Board access refused"
+      }
+    }
+  }
+},
+    "/api/boards/{id}/burn": {
+      "get": {
+        "summary": "Read burn-up and burn-down data for a milestone tag",
+        "description": "Requires board card.read access. Returns daily count and size series with scope, done, confirmed, added and finished totals. Older incomplete history is disclosed in history_note.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "milestone",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Milestone burn chart"
+          },
+          "400": {
+            "description": "Missing or invalid milestone tag"
+          },
+          "403": {
+            "description": "Requires board card-read access"
+          }
+        }
+      }
+    },
+
+    "/api/boards/{id}/releases": {
+      "get": {
+        "summary": "Read board releases and progress",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Release result"
+          },
+          "403": {
+            "description": "Requires board access and a person behind writes"
+          }
+        }
+      },
+      "post": {
+        "summary": "Manage releases with person-backed card.write access",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Release result"
+          },
+          "403": {
+            "description": "Requires board access and a person behind writes"
+          },
+          "201": {
+            "description": "Created release"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "maxLength": 120
+                  },
+                  "target_date": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "format": "date"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "planned",
+                      "in progress"
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "status"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/boards/{id}/releases/{release}": {
+      "delete": {"summary": "Delete an active release and clear its card assignments; released records cannot be deleted", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}, {"name": "release", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}], "responses": {"200": {"description": "Deleted"}, "400": {"description": "Invalid UUID or released record"}, "403": {"description": "Person-backed card.write access required"}}},
+      "get": {
+        "summary": "Read board releases and progress",
+        "description": "Burn dates use UTC. Released charts retain cut-time history; burn.restored counts cards restored after the cut. If optional chart history cannot be read, burn.unavailable is true and release details remain available.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "release",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Release result"
+          },
+          "403": {
+            "description": "Requires board access and a person behind writes"
+          }
+        }
+      },
+      "patch": {
+        "summary": "Manage releases with person-backed card.write access",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "release",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Release result"
+          },
+          "403": {
+            "description": "Requires board access and a person behind writes"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "maxLength": 120
+                  },
+                  "target_date": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "format": "date"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "planned",
+                      "in progress"
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "status"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/boards/{id}/releases/{release}/close": {
+      "post": {
+        "summary": "Manage releases with person-backed card.write access",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "release",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Release result"
+          },
+          "403": {
+            "description": "Requires board access and a person behind writes"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "next_release_id": {
+                    "type": "string",
+                    "description": "Next active release UUID; required when open cards remain."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/board-key-suggestion": {
       "get": {
         "summary": "Suggest an available board key (unscoped board admin)",
@@ -91,7 +473,7 @@
       "get": {
         "summary": "Discover the board's execution target choices and unavailable selected targets",
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
-        "responses": { "200": { "description": "default_runtime, default_daemon_id, can_choose, and targets (runtime, daemon_id, label, desktop_name, optional unavailable reason). A card's menu offers a desktop's host only when the board's own target is that acknowledged host." } }
+        "responses": { "200": { "description": "default_runtime, default_runtime_target_id, default_daemon_id, can_choose, and targets (runtime, runtime_target_id for the cluster, daemon_id, label, desktop_name, optional unavailable reason). A card's menu offers a desktop's host only when the board's own target is that acknowledged host." } }
       }
     },
     "/agents": {
@@ -430,6 +812,234 @@
         }
       }
     },
+    "/api/boards/{id}/cards/view": {
+      "get": {
+        "operationId": "board_card_view",
+        "tags": [
+          "cards"
+        ],
+        "summary": "Recent cards and older done counts for the board.",
+        "description": "Recent live cards and paginated older matches. Filters and facet counts include all live cards.",
+        "security": [
+          {
+            "agentToken": [
+              "card.read"
+            ]
+          },
+          {
+            "boardToken": [
+              "card.read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/BoardId"
+          },
+          {
+            "name": "expand",
+            "in": "query",
+            "required": false,
+            "description": "Column IDs whose older done cards to include.",
+            "style": "form",
+            "explode": true,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "JSON q, tag, type, priority filter."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Older page size, default 50, maximum 100."
+          },
+          {
+            "name": "older_column",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Fetch only the next older page for this column."
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Next cursor returned for the column."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent or expanded cards and older-card counts per column.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "cards",
+                    "older"
+                  ],
+                  "properties": {
+                    "cards": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Card"
+                      }
+                    },
+                    "older": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
+                    "totals": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "integer"
+                      }
+                    },
+                    "matched": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "integer"
+                      }
+                    },
+                    "loaded": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "integer"
+                      }
+                    },
+                    "next": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "chips": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "facet": {
+                            "type": "string",
+                            "enum": [
+                              "tag",
+                              "type",
+                              "priority"
+                            ]
+                          },
+                          "value": {
+                            "type": "string"
+                          },
+                          "count": {
+                            "type": "integer"
+                          },
+                          "on": {
+                            "type": "boolean"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/boards/{id}/archive-preview": {
+      "post": {
+        "summary": "Preview automatic archiving",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "auto_archive_keep_tags": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "auto_archive_done_days": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Eligible count; requires board admin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "count": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "agentToken": [
+              "board.admin"
+            ]
+          },
+          {
+            "boardToken": [
+              "board.admin"
+            ]
+          }
+        ]
+      }
+    },
+
     "/api/boards/{id}/cards/search": {
       "get": {
         "operationId": "search_cards",
@@ -445,6 +1055,10 @@
           { "name": "column", "in": "query", "required": false, "description": "Exact column names (case-insensitive) or UUIDs on this board. Repeat to match any: column=inbox&column=ready. Archived cards have no column.", "style": "form", "explode": true, "schema": { "type": "array", "items": { "type": "string" } } },
           { "name": "archived", "in": "query", "required": false, "description": "Legacy: 1 selects archived cards only, taking precedence over include_archived.", "schema": { "type": "string", "enum": ["1"] } },
           { "name": "priority", "in": "query", "required": false, "schema": { "type": "string", "enum": ["low", "medium", "high", "urgent"] } },
+          {"name": "size", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "release_id", "in": "query", "schema": {"type":"string"}, "description":"Release UUID or none; include_archived=1 includes archived cards."},
+          {"name": "risk", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "complexity", "in": "query", "required": false, "schema": {"type": "string"}},
           { "name": "include_archived", "in": "query", "required": false, "description": "`1` includes archived cards.", "schema": { "type": "string", "enum": ["1"] } },
           { "name": "field.{key}", "in": "query", "required": false, "description": "Equality filter on a declared field, e.g. `field.severity=sev1`.", "schema": { "type": "string" } },
           { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "default": 20, "maximum": 100 } },
@@ -485,6 +1099,10 @@
           { "name": "column", "in": "query", "required": false, "description": "Exact column names (case-insensitive) or UUIDs on this board. Repeat to match any: column=inbox&column=ready. Archived cards have no column.", "style": "form", "explode": true, "schema": { "type": "array", "items": { "type": "string" } } },
           { "name": "archived", "in": "query", "required": false, "description": "Legacy: 1 selects archived cards only, taking precedence over include_archived.", "schema": { "type": "string", "enum": ["1"] } },
           { "name": "priority", "in": "query", "required": false, "schema": { "type": "string", "enum": ["low", "medium", "high", "urgent"] } },
+          {"name": "size", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "release_id", "in": "query", "schema": {"type":"string"}, "description":"Release UUID or none; include_archived=1 includes archived cards."},
+          {"name": "risk", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "complexity", "in": "query", "required": false, "schema": {"type": "string"}},
           { "name": "include_archived", "in": "query", "required": false, "description": "`1` includes archived cards.", "schema": { "type": "string", "enum": ["1"] } },
           { "name": "field.{key}", "in": "query", "required": false, "description": "Equality filter on a declared field, e.g. `field.severity=sev1`.", "schema": { "type": "string" } },
           { "name": "limit", "in": "query", "required": false, "description": "Unpaged: no default or maximum cap; an explicit positive limit is honored. Paged: default 20, maximum 100.", "schema": { "type": "integer", "minimum": 1 } },
@@ -811,6 +1429,8 @@
           "gate_enabled": { "type": "boolean", "description": "Whether agent writes pass the admission gate." },
           "require_repo": { "type": "boolean" },
           "field_schema": { "type": "array", "items": { "$ref": "#/components/schemas/FieldDef" } },
+          "auto_archive_keep_tags": { "type": "array", "items": { "type": "string" }, "default": ["to-test"], "description": "Keep cards with any of these tags." },
+          "auto_archive_done_days": { "type": "integer", "minimum": 0, "maximum": 36500, "default": 0, "description": "Archive explicitly terminal cards after this many days in the column; 0 disables. Unavailable on mirrored boards." },
           "concurrency": { "type": "integer", "description": "How many cards a board run works at once." },
           "deploy_url": { "type": ["string", "null"] },
           "run_runtime": { "type": "string", "enum": ["", "cluster", "docker", "daemon"], "description": "Default execution target for all board starts." },
@@ -840,6 +1460,8 @@
           "field_schema": { "type": "array", "items": { "$ref": "#/components/schemas/FieldDef" } },
           "gate_enabled": { "type": "boolean" },
           "require_repo": { "type": "boolean" },
+          "auto_archive_keep_tags": { "type": "array", "items": { "type": "string" }, "default": ["to-test"], "description": "Keep cards with any of these tags." },
+          "auto_archive_done_days": { "type": "integer", "minimum": 0, "maximum": 36500, "default": 0, "description": "Archive explicitly terminal cards after this many days in the column; 0 disables. Unavailable on mirrored boards." },
           "concurrency": { "type": "integer" },
           "deploy_url": { "type": "string" },
           "run_runtime": { "type": "string", "enum": ["", "cluster", "docker", "daemon"], "description": "PATCH only, saved with run_daemon_id by the automation owner." },
@@ -877,17 +1499,23 @@
         "type": "object",
         "required": ["id", "board_id", "title", "version"],
         "properties": {
+          "release_id": {"type": ["string", "null"], "format": "uuid"},
           "model": { "type": "string", "description": "Opaque model ID for the configured engine." },
           "effort": { "type": "string", "description": "Model effort; empty uses native policy. A model-only change clears its previous effort." },
           "id": { "type": "string", "format": "uuid" },
           "board_id": { "type": "string", "format": "uuid" },
           "column_id": { "type": "string", "format": "uuid" },
+          "size_first_set_at": { "type": ["string", "null"], "format": "date-time", "description": "First observed estimate; historical values may be unknown." },
+          "risk_first_set_at": { "type": ["string", "null"], "format": "date-time", "description": "First observed estimate; historical values may be unknown." },
+          "complexity_first_set_at": { "type": ["string", "null"], "format": "date-time", "description": "First observed estimate; historical values may be unknown." },
           "number": { "type": "integer", "description": "The human card number, e.g. 42." },
           "title": { "type": "string" },
           "body": { "type": "string" },
           "type": { "type": "string" },
           "priority": { "type": "string", "enum": ["low", "medium", "high", "urgent"] },
           "size": { "type": "string", "enum": ["XS", "S", "M", "L", "XL"] },
+          "risk": { "type": ["string", "null"], "enum": ["low", "medium", "high", null] },
+          "complexity": { "type": ["string", "null"], "enum": ["low", "medium", "high", null] },
           "repos": { "type": "array", "items": { "type": "string" } },
           "tags": { "type": "array", "items": { "type": "string" } },
           "fields": { "type": "object", "description": "Custom fields, matching the board's field schema." },
@@ -901,13 +1529,16 @@
         "type": "object",
         "required": ["title"],
         "properties": {
+          "release_id": {"type": "string", "description": "Active release UUID on this board. Empty clears. Restore archived cards before retargeting; restoring a released card detaches it."},
           "model": { "type": "string", "description": "Opaque model ID for the configured engine." },
           "effort": { "type": "string", "description": "Model effort; empty uses native policy. A model-only change clears its previous effort." },
           "title": { "type": "string", "description": "What the card is — specific, not vague." },
           "body": { "type": "string", "description": "Details, evidence, acceptance criteria." },
           "type": { "type": "string", "description": "feature, bug, task, chore, incident, … (lowercased)." },
           "priority": { "type": "string", "enum": ["low", "medium", "high", "urgent"] },
-          "size": { "type": "string", "enum": ["XS", "S", "M", "L", "XL"] },
+          "size": { "type": "string", "enum": ["S", "M", "L", "XL"] },
+          "risk": { "type": "string", "enum": ["low", "medium", "high", ""] },
+          "complexity": { "type": "string", "enum": ["low", "medium", "high", ""] },
           "repos": { "type": "array", "items": { "type": "string" }, "description": "First entry is the primary working directory." },
           "tags": { "type": "array", "items": { "type": "string" } },
           "fields": { "type": "object" },
@@ -920,12 +1551,15 @@
       "CardPatch": {
         "type": "object",
         "properties": {
+          "release_id": {"type": "string", "description": "Active release UUID on this board. Empty clears. Restore archived cards before retargeting; restoring a released card detaches it."},
           "model": { "type": "string", "description": "Opaque model ID for the configured engine." },
           "effort": { "type": "string", "description": "Model effort; empty uses native policy. A model-only change clears its previous effort." },
           "title": { "type": "string" },
           "body": { "type": "string" },
           "priority": { "type": "string", "enum": ["low", "medium", "high", "urgent"] },
-          "size": { "type": "string", "enum": ["XS", "S", "M", "L", "XL"] },
+          "size": { "type": "string", "enum": ["S", "M", "L", "XL", ""], "description": "An empty string clears the estimate while preserving its first-set time." },
+          "risk": { "type": "string", "enum": ["low", "medium", "high", ""] },
+          "complexity": { "type": "string", "enum": ["low", "medium", "high", ""] },
           "fields": { "type": "object" },
           "tags": { "type": "array", "items": { "type": "string" }, "description": "Replacement tag set." },
           "repos": { "type": "array", "items": { "type": "string" }, "description": "Replacement repo set." },

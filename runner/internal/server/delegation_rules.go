@@ -57,7 +57,7 @@ func ruleView(r db.DelegationRule) delegationRuleView {
 func (a *API) delegationLimits(ctx context.Context) delegationLimitsView {
 	limits := a.effectiveChildLimits(ctx)
 	return delegationLimitsView{PerParentRunning: limits.parallel, PerParentStartsPerHour: limits.hourly,
-		PerAccountRunning: maxRunningChildrenPerAccount, PerAccountStartsPerHour: maxStartsPerAccountPerHour}
+		PerAccountRunning: accountRunningLimit(limits), PerAccountStartsPerHour: maxStartsPerAccountPerHour}
 }
 
 // ruleOwner is personAccount plus a login session (sid): the person changing their rules or grants.

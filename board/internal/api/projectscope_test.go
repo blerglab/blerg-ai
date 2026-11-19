@@ -33,12 +33,17 @@ func projectToken(t *testing.T, project string, caps []string) string {
 
 // projectTokenKind is projectToken for any core token kind.
 func projectTokenKind(t *testing.T, kind, project string, caps []string) string {
+	return projectTokenProof(t, kind, project, caps, false)
+}
+
+func projectTokenProof(t *testing.T, kind, project string, caps []string, person bool) string {
 	t.Helper()
 	if corePriv == nil {
 		t.Fatal("projectToken: no fake core wired")
 	}
 	claims := identity.Claims{
-		Sub: kind + "-" + project, Aud: "blerg-board", Kind: kind, Project: project,
+		PersonBehind: person,
+		Sub:          kind + "-" + project, Aud: "blerg-board", Kind: kind, Project: project,
 		OnBehalfOf: "acct-1", Caps: caps, ExpiresAt: time.Now().Unix() + 3600,
 	}
 	hb, _ := json.Marshal(map[string]string{"alg": "EdDSA", "kid": coreTestKID})
@@ -145,6 +150,7 @@ func TestProjectScoped_ForeignObjectsIndistinguishableFromMissing(t *testing.T) 
 		{"GET", "/api/boards/{board}/columns", nil},
 		{"POST", "/api/boards/{board}/columns", map[string]any{"name": "new"}},
 		{"GET", "/api/boards/{board}/cards", nil},
+		{"GET", "/api/boards/{board}/cards/view", nil},
 		{"POST", "/api/boards/{board}/cards", map[string]any{"title": "sneak"}},
 		{"GET", "/api/boards/{board}/cards/search?q=zebra", nil},
 		{"GET", "/api/boards/{board}/schema", nil},
@@ -295,6 +301,7 @@ func TestProjectScoped_SameBoardSucceeds(t *testing.T) {
 	ok("GET", "/api/boards/"+fx.A.ID+"/schema", nil, 200)
 	ok("GET", "/api/boards/"+fx.A.ID+"/columns", nil, 200)
 	ok("GET", "/api/boards/"+fx.A.ID+"/cards", nil, 200)
+	ok("GET", "/api/boards/"+fx.A.ID+"/cards/view", nil, 200)
 	ok("GET", "/api/boards/"+fx.A.ID+"/cards/search?q=zebra", nil, 200)
 	ok("GET", "/api/reviews?board="+fx.A.ID, nil, 200)
 	ok("GET", "/api/cards/"+fx.cardA.ID, nil, 200)
@@ -308,6 +315,10 @@ func TestProjectScoped_SameBoardSucceeds(t *testing.T) {
 	ok("POST", "/api/cards/"+nc.ID+"/dependencies", map[string]any{"depends_on": fx.cardA.ID}, 200)
 	ok("POST", "/api/boards/"+fx.A.ID+"/columns", map[string]any{"name": "extra"}, 201)
 	ok("POST", "/api/columns/"+fx.colA.ID+"/move", map[string]any{}, 200)
+	// A plain card.write token is refused; the same scoped, signed person
+	// exchange retains the successful archive path.
+	ok("POST", "/api/cards/"+nc.ID+"/archive", map[string]any{}, 403)
+	fx.scoped = projectTokenProof(t, "agent", fx.A.ID, boardAgentCaps, true)
 	ok("POST", "/api/cards/"+nc.ID+"/archive", map[string]any{}, 200)
 }
 
@@ -506,7 +517,14 @@ func TestProjectScoped_MCP(t *testing.T) {
 		{"blerg_column_move", map[string]any{"column_id": fx.colA.ID}},
 		{"blerg_card_archive", map[string]any{"card_id": fx.cardA2.ID}},
 	} {
-		if r := fx.mcpCall(t, fx.scoped, tc.tool, tc.args); r.IsError {
+		token := fx.scoped
+		if tc.tool == "blerg_card_archive" {
+			if result := fx.mcpCall(t, token, tc.tool, tc.args); !result.IsError {
+				t.Fatal("plain card.write token archived through MCP")
+			}
+			token = projectTokenProof(t, "agent", fx.A.ID, boardAgentCaps, true)
+		}
+		if r := fx.mcpCall(t, token, tc.tool, tc.args); r.IsError {
 			t.Errorf("same-board %s failed: %s", tc.tool, r.Text)
 		}
 	}

@@ -62,6 +62,7 @@ const topics = (id: string) => ({ session_id: id, through_seq: 2, generated_at: 
   topics: [{ id: 't1', source: 'marker', title: `Cache the explorer for ${id}`, status: 'open', start_seq: 1, end_seq: 2, started_at: '2026-10-27T11:00:00Z', ended_at: null, counts: {}, items: [] }] })
 
 beforeEach(() => {
+  localStorage.setItem('blerg-runner.session-dock.windows', JSON.stringify({ active: 'files', panels: [], ratio: .5 }))
   who.subject = 'person-a'
   Object.assign(server, { generation: {}, hold: false, held: [], fail: new Set(), calls: [], workspaceInFlight: 0, workspaceMaxInFlight: 0 })
   useTranscriptStore.setState({ sessions: {} })
@@ -114,7 +115,7 @@ async function visitA() {
   await within(explorer()).findByRole('treeitem', { name: /^README-sess-a\.md/ })
   await userEvent.click(within(tree()).getByRole('treeitem', { name: /^docs/ }))
   await within(tree()).findByRole('treeitem', { name: /^guide-sess-a\.md/ })
-  await within(panel()).findByText('None yet: this session asks you each time.')
+  await within(panel()).findByText('None yet: this workspace asks you each time.')
   await within(panel()).findByRole('checkbox', { name: 'Nudge when the plan drifts' })
   body().scrollTop = 400
   body().dispatchEvent(new Event('scroll'))
@@ -143,7 +144,7 @@ for (const [width, height] of [[1440, 900], [3840, 2160]] as const) {
     const guide = within(tree()).getByRole('treeitem', { name: /^guide-sess-a\.md/ })
     expect(body().scrollTop).toBe(400)
     expect(explorer().querySelector('.initial-skeleton')).toBeNull()
-    expect(within(panel()).getByText('None yet: this session asks you each time.')).toBeTruthy()
+    expect(within(panel()).getByText('None yet: this workspace asks you each time.')).toBeTruthy()
     expect(within(panel()).queryByText('Loading permissions…')).toBeNull()
     expect((within(panel()).getByRole('checkbox', { name: 'Nudge when the plan drifts' }) as HTMLInputElement).checked).toBe(true)
     if (shotDir) await page.screenshot({ path: `${shotDir}/switch-back-${width}x${height}.png` })
@@ -231,7 +232,7 @@ it('a failed background read keeps the cached view and says so', async () => {
   await act(async () => go('/sessions/sess-a'))
   await settle()
   expect(within(tree()).getByRole('treeitem', { name: /^README-sess-a\.md/ })).toBeTruthy()
-  expect(within(explorer()).getByRole('status').textContent).toBe('The daemon is not answering.')
+  expect(within(screen.getByRole('tabpanel', { name: 'Files' })).getByRole('status').textContent).toBe('The daemon is not answering.')
   expect(explorer().querySelector('.initial-skeleton')).toBeNull()
   expect(within(panel()).getByText('Cache the explorer for sess-a')).toBeTruthy()
   expect(await within(panel()).findByTestId('reel-stale')).toBeTruthy()
@@ -283,7 +284,7 @@ it('another account sees none of it', async () => {
   server.hold = true
   await act(async () => go('/sessions/sess-a'))
   expect(within(explorer()).queryByRole('treeitem', { name: /^README-sess-a\.md/ })).toBeNull()
-  expect(within(panel()).queryByText('None yet: this session asks you each time.')).toBeNull()
+  expect(within(panel()).queryByText('None yet: this workspace asks you each time.')).toBeNull()
   expect(readView('person-a', 'sess-b', 'explorer')).toBeUndefined()
   await release()
 })

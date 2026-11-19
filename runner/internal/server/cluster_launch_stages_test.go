@@ -178,9 +178,30 @@ func TestClusterQueuedStageRecordsKubernetesReason(t *testing.T) {
 			if strings.Contains(string(raw), "fixture-private") {
 				t.Fatal("API body escaped diagnostics")
 			}
-			if len(f.fake.deletedSecrets) != 1 {
+			// Submission rollback and terminal start cleanup are independently
+			// idempotent. Both may delete the same per-session Secret.
+			if len(f.fake.deletedSecrets) == 0 {
 				t.Fatal("unused Secret was not cleaned up")
 			}
+			for _, name := range f.fake.deletedSecrets {
+				if name != sessionSecretName(id) {
+					t.Fatalf("deleted another session's Secret: %s", name)
+				}
+			}
 		})
+	}
+}
+
+func TestClusterWorkspaceFailureLaunchCauses(t *testing.T) {
+	for _, tc := range []struct{ detail, want string }{
+		{"Repository clone failed", "repository_clone_failed"},
+		{"Repository clone failed (deadline)", "repository_clone_failed_deadline"},
+		{"Repository clone failed (authentication)", "repository_clone_failed_authentication"},
+		{"Retained repository storage is missing; resume refused", "retained_storage_missing"},
+		{"Retained checkout could not be verified; recovery required", "retained_checkout_unverified"},
+	} {
+		if got := launchDiagnosticReason(protocol.StartStage{State: protocol.StageStateFailed, Detail: tc.detail}); got != tc.want {
+			t.Errorf("%s: got %s", tc.want, got)
+		}
 	}
 }

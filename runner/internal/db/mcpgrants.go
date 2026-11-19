@@ -41,6 +41,7 @@ func (t MCPGrantTool) IsListed() bool { return t.Listed == nil || *t.Listed }
 // MCPGrant is a row of session_mcp_grants. The proof is what the gateway presents to
 // core when it fetches the connection's credential.
 type MCPGrant struct {
+	SessionScope *MCPSessionScope `json:"-"`
 	SessionID    string
 	ConnectionID string
 	Name         string
@@ -66,15 +67,23 @@ type MCPGrant struct {
 }
 
 const mcpGrantColumns = `session_id::text, connection_id::text, name, account_id, tools, url_snapshot,
-	proof_kind, proof_value, token_hash, call_budget, calls_used, created_at, builtin, builtin_ref, preset, known_tools`
+	proof_kind, proof_value, token_hash, call_budget, calls_used, created_at, builtin, builtin_ref, preset, known_tools,session_scope`
 
 func scanMCPGrant(row pgx.Row) (*MCPGrant, error) {
 	var g MCPGrant
-	var tools, known []byte
+	var tools, known, scope []byte
 	if err := row.Scan(&g.SessionID, &g.ConnectionID, &g.Name, &g.AccountID, &tools, &g.URLSnapshot,
 		&g.ProofKind, &g.ProofValue, &g.TokenHash, &g.CallBudget, &g.CallsUsed, &g.CreatedAt, &g.Builtin, &g.BuiltinRef,
-		&g.Preset, &known); err != nil {
+		&g.Preset, &known, &scope); err != nil {
 		return nil, err
+	}
+	if len(scope) > 0 {
+		if err := json.Unmarshal(scope, &g.SessionScope); err != nil {
+			return nil, ErrMCPSessionScope
+		}
+	}
+	if !validGrantScope(g) {
+		return nil, ErrMCPSessionScope
 	}
 	if err := json.Unmarshal(tools, &g.Tools); err != nil {
 		return nil, fmt.Errorf("decode grant tools: %w", err)
@@ -110,6 +119,7 @@ func ReplaceMCPGrants(ctx context.Context, pool *pgxpool.Pool, sessionID string,
 // carriedGrant is what a replace (a resume) keeps from the row it deletes: the call budget spent,
 // and the tools, preset and known tools AS THE ROW HAS THEM. An accept or an auto-accept that
 // landed between the caller's read and this replace must not be undone by the caller's stale copy.
+// Scope is deliberately excluded: only the newly issued grant supplies its frozen authority.
 type carriedGrant struct {
 	used   int
 	tools  []byte
@@ -147,6 +157,13 @@ func storeMCPGrants(ctx context.Context, pool *pgxpool.Pool, replaceSession stri
 		}
 	}
 	for _, g := range grants {
+		if !validGrantScope(g) {
+			return ErrMCPSessionScope
+		}
+		scope, err := scopeJSON(g.SessionScope)
+		if err != nil {
+			return err
+		}
 		tools, err := json.Marshal(g.Tools)
 		if err != nil {
 			return fmt.Errorf("InsertMCPGrants encode tools: %w", err)
@@ -177,10 +194,10 @@ func storeMCPGrants(ctx context.Context, pool *pgxpool.Pool, replaceSession stri
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO session_mcp_grants
 			  (session_id, connection_id, name, account_id, tools, url_snapshot,
-			   proof_kind, proof_value, token_hash, call_budget, calls_used, builtin, builtin_ref, preset, known_tools)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+			   proof_kind, proof_value, token_hash, call_budget, calls_used, builtin, builtin_ref, preset, known_tools,session_scope)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,$16)`,
 			g.SessionID, g.ConnectionID, g.Name, g.AccountID, tools, g.URLSnapshot,
-			g.ProofKind, g.ProofValue, g.TokenHash, g.CallBudget, used, g.Builtin, g.BuiltinRef, preset, known); err != nil {
+			g.ProofKind, g.ProofValue, g.TokenHash, g.CallBudget, used, g.Builtin, g.BuiltinRef, preset, known, scope); err != nil {
 			return fmt.Errorf("InsertMCPGrants insert: %w", err)
 		}
 	}

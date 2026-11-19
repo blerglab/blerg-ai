@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { beforeEach, expect, it, vi } from 'vitest'
 import { act, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
@@ -23,13 +24,13 @@ const reduced = !!import.meta.env.VITE_LOADER_REDUCED_MOTION
 beforeEach(() => { localStorage.clear() })
 
 for (const surface of ['live', 'plan', 'history', 'files', 'capabilities', 'explorer', 'shell', 'board']) {
-  it.each([390, 1024, 3840])(`${surface} has a labeled skeleton without overflow at %i px`, async width => {
+  it.each(browserWidths([390, 1024, 3840]))(`${surface} has a labeled skeleton without overflow at %i px`, async width => {
     const height = width === 3840 ? 2160 : 844
     await page.viewport(width, height)
     localStorage.setItem(RAIL_TAB_KEY, surface)
     const shell = new FakeShell('loading'); shell.connectionState = 'connecting'
     let content
-    const labels: Record<string, string> = { live: 'live session', explorer: 'workspace', board: 'board card' }
+    const labels: Record<string, string> = { live: 'live workspace', explorer: 'workspace', board: 'board card' }
     if (surface === 'explorer') content = <WorkspaceTree sessionId="session" active />
     else if (surface === 'shell') content = <div style={{ height: 400, display: 'flex' }}><ShellView transport={shell} /></div>
     else if (surface === 'board') content = <PinnedTicketModal ticket={{ source: 'blerg-board', board_id: 'board', key: '#12', title: 'Example card' }} sessionId="session" onClose={() => {}} />

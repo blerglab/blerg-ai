@@ -16,35 +16,41 @@ func (h *Hub) qualifyWorkspaceGit(ctx context.Context, sid string, ref protocol.
 		if ref.IsZero() {
 			return ref, nil
 		}
-		return ref, errCommitUnavailable
+		return ref, commitLookupFailed("git_database_unavailable", errCommitUnavailable)
 	}
-	ws, err := db.GetSessionWorkspace(ctx, h.desktopPool, sid)
+	ws, err := db.GetSessionReaderWorkspace(ctx, h.desktopPool, sid)
 	if err != nil {
-		return ref, err
+		return ref, commitLookupFailed("git_workspace_read_failed", err)
 	}
 	if ws == nil || ws.Manifest == nil {
 		if ws != nil && ws.Kind == "repo" && ref.IsZero() {
 			return ref, nil
 		}
-		return ref, errCommitUnavailable
+		return ref, commitLookupFailed("git_workspace_missing", errCommitUnavailable)
 	}
 	manifest, generation, err := loadExplorerBinding(ctx, h.desktopPool, sid)
 	if err != nil {
-		return ref, err
+		return ref, commitLookupFailed("git_binding_unavailable", err)
 	}
 	if ref.IsZero() && len(manifest.Members) == 1 {
 		ref = protocol.WorkspaceGitRef{WorkspaceRuntimeRef: protocol.WorkspaceRuntimeRef{LaunchGeneration: manifest.LaunchGeneration, Generation: generation}, MemberID: manifest.Members[0].ID}
 	}
 	if err := ref.Validate(manifest, generation); err != nil {
-		return ref, err
+		return ref, commitLookupFailed("git_reference_stale", err)
 	}
 	dc := h.FindDaemonForSession(sid)
 	if dc == nil {
-		return ref, errCommitUnavailable
+		return ref, commitLookupFailed("git_daemon_missing", errCommitUnavailable)
 	}
 	authorized, ok := dc.authorizedWorkspaceRuntime(sid)
-	if !ok || authorized != ref.WorkspaceRuntimeRef || validateWorkspaceDesktop(ctx, h.desktopPool, dc, sid) != nil {
-		return ref, errCommitUnavailable
+	if !ok {
+		return ref, commitLookupFailed("git_runtime_not_authorized", errCommitUnavailable)
+	}
+	if authorized != ref.WorkspaceRuntimeRef {
+		return ref, commitLookupFailed("git_runtime_changed", errCommitUnavailable)
+	}
+	if err := validateWorkspaceDesktop(ctx, h.desktopPool, dc, sid); err != nil {
+		return ref, commitLookupFailed("git_desktop_authority_failed", err)
 	}
 	return ref, nil
 }

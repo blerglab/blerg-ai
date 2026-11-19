@@ -152,12 +152,16 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 	// same runtime/kind labels the sessions list shows.
 	kind := msg.Kind
 	runtime := ""
+	runtimeTargetID := ""
 	effort := "" // the launch effort, recorded on the row at spawn
 	engine := ""
 	cronID := "" // set when a cron started the session, so the badge shows from the first message
 	var startedBy *protocol.StartedBy
 	var parentSessionID *string
 	interaction := ""
+	verbosity := "standard"
+	color := ""
+	emoji := ""
 	if pool != nil {
 		if row, err := db.GetSession(ctx, pool, msg.SessionID); err != nil {
 			log.Printf("session_started GetSession %s: %v", msg.SessionID, err)
@@ -168,11 +172,15 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 			if row.Effort != nil {
 				effort = *row.Effort
 			}
+			runtimeTargetID = derefOrEmpty(row.RuntimeTargetID)
 			engine = derefOrEmpty(row.Engine)
 			cronID = derefOrEmpty(row.CronID)
 			startedBy = startedByOf(row)
 			parentSessionID = row.ParentSessionID
 			interaction = effectiveInteraction(row)
+			verbosity = effectiveVerbosity(row)
+			color = row.Color
+			emoji = row.Emoji
 			if kind == "" {
 				kind = row.Kind
 			}
@@ -185,7 +193,17 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 	advanceStart(ctx, hub, pool, msg.SessionID, false,
 		protocol.StartStage{ID: protocol.StageEngine, State: protocol.StageStateActive, Detail: "Starting the engine"})
 
+	var startedRow *db.SessionRow
+	if pool != nil {
+		startedRow, _ = db.GetSession(ctx, pool, msg.SessionID)
+	}
 	hub.BroadcastJSONPerAccount(func(account string) any { //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
+		var workspace *protocol.WorkspaceManifest
+		var workspaceResults []protocol.WorkspaceMemberResult
+		if startedRow != nil {
+			info := hub.sessionInfoFor(ctx, *startedRow, account)
+			workspace, workspaceResults = info.Workspace, info.WorkspaceResults
+		}
 		visible := runtime == runnerRuntimeCluster || hub.ownsDesktopID(ctx, account, daemonID)
 		publicDaemon, publicPath, publicRepo := "", "", ""
 		if visible {
@@ -194,10 +212,14 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 		return protocol.BrowserSessionStarted{
 			Type: "session_started",
 			Session: protocol.SessionInfo{
+				Workspace:            workspace,
+				WorkspaceResults:     workspaceResults,
 				ParentSessionID:      parentSessionID,
 				SteeringSupported:    engineSteeringSupported(engine, kind),
 				LimitResumeSupported: kind == "agent" && engineLimitResumeSupported(engine),
 				ID:                   msg.SessionID,
+				Color:                color,
+				Emoji:                emoji,
 				DaemonID:             publicDaemon,
 				Status:               "starting",
 				ProjectPath:          publicPath,
@@ -209,9 +231,11 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 				StartedAt:            time.Now().UTC().Format(time.RFC3339),
 				Kind:                 kind,
 				Runtime:              runtime,
+				RuntimeTargetID:      runtimeTargetID,
 				CronID:               cronID,
 				StartedBy:            startedBy,
 				Interaction:          interaction,
+				Verbosity:            verbosity,
 			},
 		}
 	})
@@ -304,13 +328,22 @@ func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 		if updateErr != nil {
 			return fmt.Errorf("UpdateSessionStatus %s → %s: %w", msg.SessionID, msg.Status, updateErr)
 		}
+		if isLiveStatus(msg.Status) {
+			if err := resolveSessionFailureAlerts(ctx, hub, pool, msg.SessionID); err != nil {
+				return fmt.Errorf("resolve recovered failure: %w", err)
+			}
+		}
 		if end.Reason != "" {
 			hub.SessionTerminallyEnded(msg.SessionID)
+			hub.ChildTurnEnded(msg.SessionID, "recommended_channel_closed", "")
 		}
 		if msg.Status == "error" && current.Status != "error" {
 			hub.ChildTurnEnded(msg.SessionID, childTurnFailed, "") // child_turn_notes.go
 		}
 		hub.ChildActivity(msg.SessionID)
+		if msg.Status == "idle" {
+			hub.applyPendingMembership(ctx, pool, msg.SessionID)
+		}
 		if msg.Status == "running" {
 			hub.checkUsageNotices(hub.FindDaemonForSession(msg.SessionID), msg.SessionID)
 		}
@@ -339,6 +372,13 @@ func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 			revokeSessionTokens(ctx, pool, msg.SessionID, "daemon reported "+msg.Status)
 			hub.NotifyCompletion(msg.SessionID)
 		} else if finalStartFailure {
+			// Error rows are outside the Job reconciler's live-session sweep.
+			// Remove the failed launch now, retaining its workspace PVC.
+			if jm := hub.JobManager(); jm != nil {
+				if err := jm.cleanupFailedSessionJob(ctx, msg.SessionID); err != nil {
+					logLaunchFailure("failed_start_cleanup", err)
+				}
+			}
 			failPendingSessionInputs(ctx, hub, pool, msg.SessionID)
 			revokeSessionTokens(ctx, pool, msg.SessionID, "cluster start failed")
 			hub.NotifyCompletion(msg.SessionID)
@@ -455,6 +495,7 @@ func handleSessionEndedEffects(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 			hub.releaseWorkspaceSelection(hub.FindDaemonForSession(msg.SessionID), ws.Manifest)
 		}
 		hub.SessionTerminallyEnded(msg.SessionID)
+		hub.ChildTurnEnded(msg.SessionID, "recommended_channel_closed", "")
 		if msg.Message != "" {
 			// Why it failed (its engine runtime stopped): the reason the session page, the
 			// sidebar and `session watch` show.

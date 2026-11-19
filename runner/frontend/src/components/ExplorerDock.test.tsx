@@ -118,7 +118,7 @@ it('works when browser storage is unavailable or malformed', async () => {
     fireEvent.click(toggle())
     await screen.findByRole('tree')
     expect(set).toHaveBeenCalledWith(explorerPrefKey('person-a'), expect.any(String))
-    fireEvent.click(screen.getByRole('button', { name: 'Collapse explorer' }))
+    fireEvent.click(toggle())
     expect(toggle()).toHaveAttribute('aria-expanded', 'false')
   } finally { get.mockRestore(); set.mockRestore() }
 })
@@ -130,6 +130,16 @@ it('cancels the active read when the explorer closes', () => {
   expect(read).toHaveBeenCalledTimes(1)
   const signal = read.mock.calls[0][1].signal as AbortSignal
   expect(signal.aborted).toBe(false)
-  fireEvent.click(screen.getByRole('button', { name: 'Collapse explorer' }))
+  fireEvent.click(toggle())
   expect(signal.aborted).toBe(true)
+})
+
+it('uses the folder toggle and Escape without a duplicate desktop collapse button', async () => {
+  render(<Harness />)
+  fireEvent.click(toggle())
+  const tree = await screen.findByRole('tree')
+  expect(screen.queryByRole('button', { name: 'Collapse explorer' })).toBeNull()
+  fireEvent.keyDown(tree, { key: 'Escape' })
+  expect(toggle()).toHaveAttribute('aria-expanded', 'false')
+  expect(toggle()).toHaveFocus()
 })

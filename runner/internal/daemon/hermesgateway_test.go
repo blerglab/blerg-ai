@@ -2,11 +2,13 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -37,6 +39,8 @@ func fakeHermesGateway(t *testing.T) string {
 
 const fakeHermesGatewaySource = `import json,sys,os
 sid='runtime-owned';key='durable-owned';calls=0
+stop_marker=os.getenv('FAKE_HERMES_STOP_MARKER','')
+stuck_stop=bool(stop_marker and not os.path.exists(stop_marker))
 
 def send(x): print(json.dumps(x),flush=True)
 def event(kind,payload=None,session=sid):send({'jsonrpc':'2.0','method':'event','params':{'type':kind,'session_id':session,'payload':payload or {}}})
@@ -76,12 +80,22 @@ for line in sys.stdin:
   if p.get('session_id')!=key:send({'id':rid,'error':{'code':4007,'message':'missing PRIVATE_SECRET'}});continue
   result={'session_id':sid,'stored_session_id':key,'info':{'model':'fixture-model','desktop_contract':8,'usage':{'input':0,'output':0}}}
  elif method=='prompt.submit':
+  if p.get('text')=='reject' and os.getenv('FAKE_HERMES_REJECT_MARKER'):
+   import time;open(os.environ['FAKE_HERMES_REJECT_MARKER'],'w').close();time.sleep(0.15)
+   send({'id':rid,'result':{'status':'rejected'}} if os.getenv('FAKE_HERMES_REJECT_STATUS') else {'id':rid,'error':{'code':4000,'message':'fixture rejected prompt'}});continue
   send({'id':rid,'result':{'status':'streaming'}});event('message.start')
-  if not os.getenv('FAKE_HERMES_HOLD') and (not os.getenv('FAKE_HERMES_HOLD_AFTER_FIRST') or calls==0):done()
+  if not stuck_stop and not os.getenv('FAKE_HERMES_HOLD') and (not os.getenv('FAKE_HERMES_HOLD_AFTER_FIRST') or calls==0):done()
   continue
  elif method=='session.redirect':
-  send({'id':rid,'result':{'status':'redirected'}});done();continue
+  send({'id':rid,'result':{'status':'redirected'}})
+  if not os.getenv('FAKE_HERMES_HOLD_REDIRECT'):done()
+  continue
  elif method=='session.interrupt':
+  if os.getenv('FAKE_HERMES_NATIVE_ACK_MARKER') and not os.path.exists(os.environ['FAKE_HERMES_NATIVE_ACK_MARKER']):
+   import time;open(os.environ['FAKE_HERMES_NATIVE_ACK_MARKER'],'w').close();event('message.complete',{'status':'interrupted'});event('message.start');time.sleep(0.08);send({'id':rid,'result':{'status':'interrupted'}});continue
+  if stuck_stop:
+   with open(stop_marker,'w') as f:f.write('stopped')
+   send({'id':rid,'result':{'status':'interrupting'}});continue
   send({'id':rid,'result':{'status':'interrupted'}});event('message.complete',{'text':'','status':'interrupted'});continue
  else:result={}
  send({'id':rid,'result':result})
@@ -163,4 +177,138 @@ func TestHermesResumeWaitsForRecoveryAuthority(t *testing.T) {
 	}
 	close(blocked)
 	waitUntil(t, "native resume after authorization", func() bool { b, _ := os.ReadFile(log); return strings.Contains(string(b), "session.resume") })
+}
+
+func TestHermesStopFallbackHoldsQueuedInput(t *testing.T) {
+	shrink(t, &hermesInterruptResultAfter, 100*time.Millisecond)
+	fakeHermesGateway(t)
+	marker := filepath.Join(t.TempDir(), "stopped")
+	logPath := filepath.Join(t.TempDir(), "calls")
+	t.Setenv("FAKE_HERMES_STOP_MARKER", marker)
+	t.Setenv("FAKE_HERMES_RPC_LOG", logPath)
+	em := &collectEmitter{}
+	d := newHermesDriver(AgentDriverOpts{Spec: engineRegistry["hermes"], WorkDir: t.TempDir(), Emitter: em})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); d.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	d.Enqueue("first", "chat")
+	waitUntil(t, "first Hermes turn", func() bool { return countKind(em, "user_message") == 1 })
+	d.Interrupt()
+	d.Enqueue("next", "chat")
+	d.Interrupt()
+	waitUntil(t, "Hermes Stop fallback and queue", func() bool { return countKind(em, "turn_done") == 2 })
+	if em.count("turn_done:interrupted") != 1 || em.count("user:next") != 1 || countKind(em, "error") != 0 {
+		t.Fatal(em.outline())
+	}
+	raw, _ := os.ReadFile(logPath)
+	if strings.Contains(string(raw), "session.redirect") {
+		t.Fatal("queued input steered the stopped Hermes turn")
+	}
+	if !strings.Contains(string(raw), "session.resume") {
+		t.Fatal("fallback did not resume saved conversation")
+	}
+}
+
+func TestHermesStopReportsRestartRefusal(t *testing.T) {
+	shrink(t, &hermesInterruptResultAfter, 200*time.Millisecond)
+	fakeHermesGateway(t)
+	t.Setenv("FAKE_HERMES_STOP_MARKER", filepath.Join(t.TempDir(), "stopped"))
+	em := &collectEmitter{}
+	d := newHermesDriver(AgentDriverOpts{Spec: engineRegistry["hermes"], WorkDir: t.TempDir(), Emitter: em})
+	starts := 0
+	d.startCommand = func(cmd *exec.Cmd) error {
+		starts++
+		if starts > 1 {
+			return errors.New("fixture containment refusal")
+		}
+		return cmd.Start()
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); d.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	d.Enqueue("first", "chat")
+	waitUntil(t, "Hermes turn", func() bool { return countKind(em, "user_message") == 1 })
+	entered, release := make(chan struct{}), make(chan struct{})
+	d.mu.Lock()
+	d.recoveryInputGate = func(ctx context.Context) {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+	}
+	d.mu.Unlock()
+	d.EnqueueInput(agent.Input{Text: "next", ClientID: "held"})
+	<-entered
+	d.Interrupt()
+	close(release)
+	waitUntil(t, "clear restart refusal", func() bool {
+		for _, e := range em.snapshot() {
+			if p, ok := e.Payload.(agent.ErrorPayload); ok && p.Code == agent.ErrorCodeRuntimeStopped && strings.Contains(p.Message, "fixture containment refusal") {
+				return true
+			}
+		}
+		return false
+	})
+	if em.count("user:next") != 0 {
+		t.Fatal("refused restart recorded undelivered input")
+	}
+	waitUntil(t, "undelivered receipt", func() bool {
+		for _, e := range em.snapshot() {
+			if p, ok := e.Payload.(agent.ErrorPayload); ok && p.ClientID == "held" {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+func TestHermesStopRefusalKeepsQueueForRetry(t *testing.T) {
+	shrink(t, &hermesInterruptResultAfter, 60*time.Millisecond)
+	fakeHermesGateway(t)
+	t.Setenv("FAKE_HERMES_STOP_MARKER", filepath.Join(t.TempDir(), "stopped"))
+	em := &collectEmitter{}
+	d := newHermesDriver(AgentDriverOpts{Spec: engineRegistry["hermes"], WorkDir: t.TempDir(), Emitter: em})
+	var refuse atomic.Bool
+	refuse.Store(true)
+	d.startCommand = func(cmd *exec.Cmd) error {
+		cancel := cmd.Cancel
+		cmd.Cancel = func() error {
+			if refuse.CompareAndSwap(true, false) {
+				return errors.New("fixture stop refusal")
+			}
+			return cancel()
+		}
+		return cmd.Start()
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); d.Run(ctx) }()
+	defer func() { refuse.Store(false); cancel(); <-done }()
+	d.Enqueue("first", "chat")
+	waitUntil(t, "Hermes turn", func() bool { return countKind(em, "user_message") == 1 })
+	d.Interrupt()
+	d.EnqueueInput(agent.Input{Text: "next", ClientID: "held"})
+	waitUntil(t, "visible Stop refusal", func() bool {
+		for _, e := range em.snapshot() {
+			if p, ok := e.Payload.(agent.ErrorPayload); ok && strings.Contains(p.Message, "fixture stop refusal") {
+				return true
+			}
+		}
+		return false
+	})
+	if countKind(em, "turn_done") != 0 || em.count("user:next") != 0 {
+		t.Fatal("refused Stop reported success")
+	}
+	d.Interrupt()
+	waitIdle(t, em, 2)
+	if em.count("user:next") != 1 || em.count("turn_done:interrupted") != 1 {
+		t.Fatal(em.outline())
+	}
 }

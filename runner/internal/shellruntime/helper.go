@@ -19,18 +19,33 @@ import (
 // HelperFrame is private, framed stdio to a fixed executable, never an agent
 // socket. Bootstrap is provisioned only by the authenticated runtime coordinator.
 type HelperFrame struct {
-	StartStage string                 `json:"start_stage,omitempty"`
-	StartCause string                 `json:"start_cause,omitempty"`
-	PublicRoot string                 `json:"public_root"`
-	Root       protocol.WorkspaceRoot `json:"root"`
-	Op         string                 `json:"op"`
-	ID         uint64                 `json:"id,omitempty"`
-	Grant      ownershell.SignedGrant `json:"grant,omitempty"`
-	Key        ed25519.PublicKey      `json:"key,omitempty"`
-	Expected   protocol.ShellGrant    `json:"expected,omitempty"`
-	Identity   Identity               `json:"identity,omitempty"`
-	Data       []byte                 `json:"data,omitempty"`
-	Seq        uint64                 `json:"seq,omitempty"`
+	ControlMAC   string                 `json:"control_mac,omitempty"`
+	ControlSeq   uint64                 `json:"control_seq,omitempty"`
+	Inspected    bool                   `json:"inspected,omitempty"`
+	AccessActive bool                   `json:"access_active,omitempty"`
+	SyncUntil    int64                  `json:"sync_until,omitempty"`
+	Custody      *protocol.ShellCustody `json:"custody,omitempty"`
+	ShellCgroup  string                 `json:"shell_cgroup,omitempty"` // bootstrap: hold the shell here instead of tracing it
+	HelperID     string                 `json:"helper_id,omitempty"`
+	CleanupKey   []byte                 `json:"cleanup_key,omitempty"` // private bootstrap only
+	Cleanup      cleanupRequest         `json:"cleanup,omitzero"`
+	Transaction  string                 `json:"transaction,omitempty"`
+	Epoch        uint64                 `json:"epoch,omitempty"`
+	Offset       uint64                 `json:"offset,omitempty"`
+	End          uint64                 `json:"end,omitempty"`
+	Gap          bool                   `json:"gap,omitempty"`
+	StartStage   string                 `json:"start_stage,omitempty"`
+	StartCause   string                 `json:"start_cause,omitempty"`
+	PublicRoot   string                 `json:"public_root"`
+	Root         protocol.WorkspaceRoot `json:"root"`
+	Op           string                 `json:"op"`
+	ID           uint64                 `json:"id,omitempty"`
+	Grant        ownershell.SignedGrant `json:"grant,omitempty"`
+	Key          ed25519.PublicKey      `json:"key,omitempty"`
+	Expected     protocol.ShellGrant    `json:"expected,omitempty"`
+	Identity     Identity               `json:"identity,omitempty"`
+	Data         []byte                 `json:"data,omitempty"`
+	Seq          uint64                 `json:"seq,omitempty"`
 	// Window is output flow control. On bootstrap the daemon offers a credit
 	// window; a helper that supports it echoes the window on ready and then never
 	// has more than that many output bytes unacknowledged. "credit" frames return
@@ -93,7 +108,9 @@ func (c *outputCredit) take(ctx context.Context, want int) int {
 
 // ServeHelper must run in its own process: kernel tracing and orphan reaping
 // cannot share the agent/daemon's child-reaper namespace or output writer.
-func ServeHelper(in io.Reader, out io.Writer) error { return serveHelper(in, out, ResolveIdentity) }
+func ServeHelper(in io.Reader, out io.Writer) error {
+	return serveHelperWithResolvers(in, out, ResolveIdentity, ResolvePersistentIdentity, time.Now, persistentClock)
+}
 
 // ServeClusterHelper is a trusted image entry point, never selected by RPC.
 // Its tracer stays at the supervisor UID; the PTY executes as the agent UID.
@@ -106,6 +123,14 @@ func serveHelper(in io.Reader, out io.Writer, resolve func(string) (Identity, er
 }
 
 func serveHelperWithClock(in io.Reader, out io.Writer, resolve func(string) (Identity, error), now func() time.Time) (result error) {
+	return serveHelperWithClocks(in, out, resolve, now, persistentClock)
+}
+
+func serveHelperWithClocks(in io.Reader, out io.Writer, resolve func(string) (Identity, error), now func() time.Time, clock func() (ownershell.LeaseClock, error)) (result error) {
+	return serveHelperWithResolvers(in, out, resolve, resolve, now, clock)
+}
+
+func serveHelperWithResolvers(in io.Reader, out io.Writer, resolve, persistentResolve func(string) (Identity, error), now func() time.Time, clock func() (ownershell.LeaseClock, error)) (result error) {
 	var identityChanged atomic.Bool
 	var boot HelperFrame
 	started := false
@@ -139,7 +164,33 @@ func serveHelperWithClock(in io.Reader, out io.Writer, resolve func(string) (Ide
 	if err := decode(&boot); err != nil {
 		return stageError("bootstrap_read", err)
 	}
+	protected := false
+	if boot.Op == "protect" {
+		if protectHelperProcess() != nil {
+			return stageError("bootstrap_validate", nil)
+		}
+		if json.NewEncoder(out).Encode(HelperFrame{Op: "protected", ID: boot.ID, OK: true}) != nil {
+			return ErrClosed
+		}
+		protected = true
+		boot = HelperFrame{}
+		if err := decode(&boot); err != nil {
+			return stageError("bootstrap_read", err)
+		}
+	}
 	if boot.Op != "bootstrap" || len(boot.Key) != ed25519.PublicKeySize {
+		return stageError("bootstrap_validate", nil)
+	}
+	if boot.Expected.Version == 2 {
+		if !protected {
+			return stageError("bootstrap_validate", nil)
+		}
+		resolve = persistentResolve
+	}
+	if boot.ShellCgroup != "" && (boot.Expected.Runtime != "host" || !validShellCgroup(boot.ShellCgroup)) {
+		return stageError("bootstrap_validate", nil)
+	}
+	if boot.Expected.Privileged != (boot.ShellCgroup != "") {
 		return stageError("bootstrap_validate", nil)
 	}
 	publicRoot := boot.PublicRoot
@@ -154,7 +205,7 @@ func serveHelperWithClock(in io.Reader, out io.Writer, resolve func(string) (Ide
 	if err != nil {
 		return stageError("resolve_identity", err)
 	}
-	if boot.Expected.Runtime == "host" && actual != boot.Identity {
+	if boot.Expected.Runtime == "host" && ((boot.Expected.Version == 1 && actual != boot.Identity) || (boot.Expected.Version == 2 && RuntimeIdentityDigest(actual) != RuntimeIdentityDigest(boot.Identity))) {
 		return stageError("verify_identity", nil)
 	}
 	if actual.Cwd != boot.Identity.Cwd {
@@ -164,6 +215,9 @@ func serveHelperWithClock(in io.Reader, out io.Writer, resolve func(string) (Ide
 		return stageError("verify_root", nil)
 	}
 	expected := boot.Expected
+	if expected.Version == 2 {
+		return servePersistentHelper(boot, actual, publicRoot, decode, out, resolve, clock, &started)
+	}
 	if err := ownershell.VerifyGrant(boot.Key, boot.Grant, expected, expected.PolicyRevision, now()); err != nil {
 		if errors.Is(err, ownershell.ErrGrantClock) {
 			return stageError("grant_clock", nil)
@@ -173,7 +227,7 @@ func serveHelperWithClock(in io.Reader, out io.Writer, resolve func(string) (Ide
 		}
 		return stageError("verify_grant", nil)
 	}
-	process, err := startTraced(actual, boot.Root, publicRoot)
+	process, err := startShell(actual, boot.Root, publicRoot, boot.ShellCgroup)
 	if err != nil {
 		return err
 	}
@@ -423,6 +477,11 @@ func serveHelperWithClock(in io.Reader, out io.Writer, resolve func(string) (Ide
 				return stageError("control_grant", nil)
 			}
 			switch f.Op {
+			case "sync":
+				// Admission is suspended by the coordinator; privileged writers keep running.
+				if !expected.Privileged {
+					return stageError("control_operation", nil)
+				}
 			case "freeze", "thaw":
 				call, cancel := context.WithTimeout(ctx, 2*time.Second)
 				if f.Op == "freeze" {

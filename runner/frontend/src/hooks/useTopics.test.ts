@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
 import { useTranscriptStore, type AgentEvent } from '@blerglab/chat'
 import { MIN_GAP_MS, useTopics } from './useTopics'
+import * as sessionViews from '../lib/sessionView'
 import type { TopicsReply } from '../lib/topics'
 
 vi.mock('../ws', () => import('../test/wsMock'))
@@ -224,4 +225,22 @@ describe('useTopics', () => {
     await wait(MIN_GAP_MS)
     expect(fetchMock).toHaveBeenLastCalledWith('/api/sessions/s2/topics', { headers: { 'If-None-Match': '"b"' }, signal: expect.any(AbortSignal) })
   })
+})
+
+it('keeps cursor pages and their ETags separate from the newest History read', async () => {
+  const cache = vi.spyOn(sessionViews, 'sessionView')
+  fetchMock.mockResolvedValueOnce(json(reply({ through_seq: 20000, next_cursor: '20000:19701' }), '"newest"'))
+  const { result, rerender } = renderHook(({ cursor }) => useTopics('s1', true, '', cursor), { initialProps: { cursor: '' } })
+  await flush()
+  fetchMock.mockResolvedValueOnce(json(reply({ through_seq: 20000, next_cursor: '20000:19401' }), '"older"'))
+  rerender({ cursor: '20000:19701' })
+  await flush()
+  expect(fetchMock).toHaveBeenLastCalledWith(URL_OF + '?cursor=20000%3A19701', { headers: {}, signal: expect.any(AbortSignal) })
+  expect(result.current.status === 'ready' && result.current.reply.next_cursor).toBe('20000:19401')
+  fetchMock.mockResolvedValueOnce(res(304, ''))
+  ingest('mark')
+  await wait(MIN_GAP_MS)
+  expect(fetchMock).toHaveBeenLastCalledWith(URL_OF + '?cursor=20000%3A19701', { headers: { 'If-None-Match': '"older"' }, signal: expect.any(AbortSignal) })
+  expect(cache.mock.calls.every(([, slot]) => slot === 'topics')).toBe(true)
+  cache.mockRestore()
 })

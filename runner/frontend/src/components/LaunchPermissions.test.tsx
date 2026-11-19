@@ -14,7 +14,7 @@ const open = (props: Partial<Parameters<typeof LaunchPermissions>[0]> = {}) => {
 describe('the launch sheet children permissions', () => {
   it('offers an unsandboxed desktop session cluster children where the install has a cluster, with the cluster engines', async () => {
     const { dialog, onChange } = open({ runtime: 'daemon', cluster: { engines: ['codex'] } })
-    const box = within(dialog).getByRole('checkbox', { name: 'Start children on the cluster without asking' })
+    const box = within(dialog).getByRole('checkbox', { name: 'Start workers on the cluster without asking' })
     expect(within(dialog).getByTestId('pm-children-cluster')).toHaveTextContent('On the cluster.')
     expect(within(dialog).getByTestId('pm-children-cluster')).toHaveTextContent('Codex')
     expect(within(dialog).getByTestId('pm-children-docker')).toHaveTextContent('On this desktop.')
@@ -25,13 +25,13 @@ describe('the launch sheet children permissions', () => {
 
   it('shows a sandboxed session the cluster row disabled, with why', () => {
     const { dialog } = open({ cluster: { engines: ['codex'] } })
-    expect(within(dialog).getByRole('checkbox', { name: 'Start children on the cluster without asking' })).toBeDisabled()
-    expect(within(dialog).getByTestId('pm-children-cluster')).toHaveTextContent('asks you for each cluster child, because the pod gets your credentials')
+    expect(within(dialog).getByRole('checkbox', { name: 'Start workers on the cluster without asking' })).toBeDisabled()
+    expect(within(dialog).getByTestId('pm-children-cluster')).toHaveTextContent('asks you for each cluster worker, because the pod gets your credentials')
   })
 
   it('has no cluster row on a desktop-only install', () => {
     const { dialog } = open()
-    expect(within(dialog).getByRole('checkbox', { name: 'Start sandboxed children without asking' })).toBeInTheDocument()
-    expect(within(dialog).queryByRole('checkbox', { name: 'Start children on the cluster without asking' })).toBeNull()
+    expect(within(dialog).getByRole('checkbox', { name: 'Start sandboxed workers without asking' })).toBeInTheDocument()
+    expect(within(dialog).queryByRole('checkbox', { name: 'Start workers on the cluster without asking' })).toBeNull()
   })
 })

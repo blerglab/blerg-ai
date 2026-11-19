@@ -4,11 +4,20 @@
 import type { PatchSummary } from '../model/patch'
 import { createContext, useContext } from 'react'
 import type { ReviewFile } from '../model/review'
-import type { ArtifactInfo, TransportFiles } from '../transport/types'
+import type { ArtifactInfo, TransportFiles, Transport } from '../transport/types'
 import type { ArtifactPayload, ChecklistItem } from '../types'
 import type { ArtifactLink } from '../model/artifactLinks'
 
 export interface ChatContextValue {
+  channelRecommendationRevision?: number
+  channelRecommendation?: Transport['channelRecommendation']
+  decideChannelRecommendation?: Transport['decideChannelRecommendation']
+  blackboardRecommendationRevision?: number
+  blackboardRecommendation?: Transport['blackboardRecommendation']
+  decideBlackboardRecommendation?: Transport['decideBlackboardRecommendation']
+  /** Opens the workspace's blackboard tab (the recommendation card's "View blackboard"). Absent:
+   *  that action is left off the card. */
+  openBlackboard?: () => void
   sessionId: string
   checklistItems?: readonly ChecklistItem[]
   onOpenChecklistItem?: (itemId: string) => void
@@ -19,6 +28,11 @@ export interface ChatContextValue {
   artifactLink?: (href: string | undefined) => ArtifactLink | null
   /** The newest version number of the file a card's payload is a version of (from the list). */
   latestVersion: (a: ArtifactPayload) => number | undefined
+  /** The current row of a live file (BLG-470), by id, from the session's list: a card's own
+   *  creation event is never replaced, so its size/content/updated_at go stale after a republish
+   *  without this. Absent, or undefined for an id the list does not (yet) have, is read as "use
+   *  the card's own payload" (not yet known to be live, or no fresher row found). */
+  liveArtifact?: (id: string) => ArtifactInfo | undefined
   /** Resolves an attachment by its stable identity, including earlier same-name uploads. */
   attachmentById?: (id: string) => ArtifactInfo | undefined
   /** For a message sent before attachment IDs: the newest upload of that name made at or before

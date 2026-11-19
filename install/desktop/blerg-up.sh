@@ -5,7 +5,7 @@
 # to answer its health check, then installs+starts the runner DAEMON as a
 # host service (systemd --user on Linux, launchd on macOS — see daemon/
 # install.sh and DAEMON.md). The daemon can't be containerized: it drives
-# your own `claude` CLI and tmux directly, so it always runs on the host.
+# your own engine CLI and login directly, so it always runs on the host.
 #
 # Usage: ./blerg-up.sh [--no-build] [--no-daemon] [--no-open] [--yes]
 #                      [--regen-secrets] [--reset-admin] [--help]
@@ -27,6 +27,19 @@
 
 set -euo pipefail
 umask 077
+
+# Upgrade orchestration is a separate host process and is built outside the
+# checkout before any installer setup or secret regeneration can run.
+for upgrade_arg in "$@"; do
+  if [ "$upgrade_arg" = --upgrade ]; then
+    [ "${1:-}" = --upgrade ] && [ "$#" -le 2 ] && [[ "${2:-}" != -* ]] || {
+      echo "blerg-up.sh: --upgrade [vX.Y.Z] cannot be mixed with installer options" >&2
+      exit 2
+    }
+    shift
+    exec "$(dirname "${BASH_SOURCE[0]}")/upgrade.sh" "$@"
+  fi
+done
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 . ./brand.sh
@@ -57,6 +70,7 @@ Brings up the desktop stack (postgres, blerg-core, blerg-board, blerg-runner)
 and installs the runner daemon as a host service.
 
 Options:
+  --upgrade [vX.Y.Z]  back up and upgrade to a published stable release (no other options)
   --no-build       skip rebuilding images (fast path; --build is accepted as a
                    no-op, rebuilding is the default)
   --no-daemon      skip installing the runner daemon service
@@ -138,6 +152,10 @@ Install it, then re-run ./blerg-up.sh:
   Fedora/RHEL:    sudo dnf install curl
   macOS:          brew install curl
 EOF
+fi
+
+if [ "$INSTALL_DAEMON" -eq 1 ]; then
+  require_desktop_python
 fi
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -256,6 +274,10 @@ service this run:
   ./blerg-up.sh --no-daemon
 EOF
     exit 1
+  fi
+  if [ "$PREFLIGHT_RC" -ne 0 ]; then
+    blerg_fail "Daemon preflight failed (exit code $PREFLIGHT_RC). Fix the error above, then rerun ./blerg-up.sh."
+    exit "$PREFLIGHT_RC"
   fi
 fi
 
@@ -393,7 +415,14 @@ BLERG_DOCKER_NO_PROXY="$(docker_client_no_proxy)"
 export BLERG_DOCKER_NO_PROXY
 
 blerg_step "Starting desktop stack (postgres, blerg-core, blerg-board, blerg-runner)..."
-docker compose -f "$COMPOSE_FILE" up -d $BUILD_FLAG
+# Build before crossing the migration boundary: failed builds can restart old services.
+if [ -n "${BLERG_UPGRADE_MIGRATION_MARKER:-}" ]; then
+  [ -z "$BUILD_FLAG" ] || docker compose -f "$COMPOSE_FILE" build
+  (umask 077; printf 'started\n' > "$BLERG_UPGRADE_MIGRATION_MARKER")
+  docker compose -f "$COMPOSE_FILE" up -d --no-build
+else
+  docker compose -f "$COMPOSE_FILE" up -d $BUILD_FLAG
+fi
 
 wait_for() {
   local name="$1" url="$2" tries=60
@@ -428,6 +457,7 @@ fi
 DAEMON_UP=0
 DAEMON_REFUSED=0
 DAEMON_ENROLL_PENDING=0
+DAEMON_ERROR=0
 if [ "$INSTALL_DAEMON" -eq 1 ]; then
   blerg_step "Installing the runner daemon as a host service..."
   daemon_rc=0
@@ -444,7 +474,8 @@ if [ "$INSTALL_DAEMON" -eq 1 ]; then
     6) # install.sh's EXIT_TOKEN_REFUSED: the server refused the daemon token in .env (said above)
       DAEMON_REFUSED=1
       blerg_fail "The server refused the daemon token in .env; see the message above." ;;
-    *) blerg_fail "Daemon service install didn't work — falling back to manual steps (see above for why)." ;;
+    *) DAEMON_ERROR="$daemon_rc"
+      blerg_fail "Daemon service install failed; fix the error above, then rerun ./daemon/install.sh install." ;;
   esac
 fi
 
@@ -489,7 +520,9 @@ if [ -n "$SETUP_URL" ]; then
    Until you do, any user, process or container on this machine can claim
    the admin account: finish setup now." ;;
   esac
-  ADMIN_STEP="$(cat <<HINT
+  # Bash 3.2 mis-parses quotes in heredocs inside $(...). Read directly;
+  # EOF returns 1, and trimming its final newline matches command substitution.
+  IFS= read -r -d '' ADMIN_STEP <<HINT || true
 Create your account: open
 
      $SETUP_URL
@@ -497,9 +530,9 @@ Create your account: open
    and choose your username and password. It is the administrator, and
    every component accepts its login.$SETUP_NOTE
 HINT
-)"
+  ADMIN_STEP=${ADMIN_STEP%$'\n'}
 elif [ "$SETUP_RC" -eq 2 ]; then
-  ADMIN_STEP="$(cat <<HINT
+  IFS= read -r -d '' ADMIN_STEP <<HINT || true
 Create your account. Get the one-time setup link (a credential, so it is
    not printed here) by running this in your own terminal, in $PWD:
 
@@ -507,15 +540,15 @@ Create your account. Get the one-time setup link (a credential, so it is
 
    then open it and choose your username and password.
 HINT
-)"
+  ADMIN_STEP=${ADMIN_STEP%$'\n'}
 else
-  ADMIN_STEP="$(cat <<HINT
+  IFS= read -r -d '' ADMIN_STEP <<HINT || true
 Sign in at http://localhost:$PORT_CORE with your account; every component
    accepts it. Forgot the password? Mint a one-time one:
 
      $0 --reset-admin
 HINT
-)"
+  ADMIN_STEP=${ADMIN_STEP%$'\n'}
 fi
 
 echo
@@ -534,40 +567,54 @@ This shell is done and about to exit - that's success. Go build something.
 EOF
 else
   if [ "$DAEMON_REFUSED" -eq 1 ]; then
-    DAEMON_STEP="$(cat <<STEP
+    IFS= read -r -d '' DAEMON_STEP <<STEP || true
 1. Enroll the desktop for its recorded owner: the server refused its
    credential (the message above says more). Then run:
    ./daemon/install.sh install
 STEP
-)"
-    DAEMON_FOOTER="$(cat <<STEP
+    DAEMON_STEP=${DAEMON_STEP%$'\n'}
+    IFS= read -r -d '' DAEMON_FOOTER <<STEP || true
 The stack is running, but the daemon is not connected: fix the token
 (step 1), then run ./daemon/install.sh install. This run ends with an
 error (exit code 6) for that reason.
 STEP
-)"
+    DAEMON_FOOTER=${DAEMON_FOOTER%$'\n'}
+  elif [ "${DAEMON_ENROLL_PENDING:-0}" -eq 1 ]; then
+    DAEMON_STEP="1. After creating your account (step 2), enroll this desktop:
+   ./daemon/install.sh install"
+    DAEMON_FOOTER="The stack is ready, but desktop enrollment is still required.
+This run ends with exit code 7. Finish setup, then install the daemon again."
+  elif [ "${DAEMON_ERROR:-0}" -ne 0 ]; then
+    DAEMON_STEP="1. Fix the daemon installation error above, then run:
+   ./daemon/install.sh install"
+    DAEMON_FOOTER="The stack is running, but daemon installation failed.
+This run ends with an error (exit code $DAEMON_ERROR)."
   else
     # Enrollment stores a private person credential; this box never prints it.
-    DAEMON_STEP="$(cat <<STEP
+    IFS= read -r -d '' DAEMON_STEP <<STEP || true
 1. Start the runner daemon (new terminal - it runs on this host, not
-   in a container, so it can use your own claude CLI login and tmux;
+   in a container, so it can use your own engine CLI login;
    see DAEMON.md to install it as a persistent service instead):
 
      export BLERG_RUNNER_SERVER_URL=ws://localhost:$PORT_RUNNER/ws/daemon
      python3 "$PWD/daemon/enroll.py" "$PWD/.env" "\$HOME/.blerg-runner-daemon" "ws://localhost:$PORT_RUNNER/ws/daemon"
      $REPOS_ROOT_LINE
+     # Linux/WSL host shells: initialize once and run the keeper in a separate
+     # terminal. Agents keep running if it is unavailable. macOS skips this.
+     ( cd $RUNNER_DIR && GOWORK=off go run ./cmd/daemon shell-keeper init )
+     ( cd $RUNNER_DIR && GOWORK=off go run ./cmd/daemon shell-keeper serve )
      ( cd $RUNNER_DIR && GOWORK=off go run ./cmd/daemon )
 
    Not logged into claude yet? Run 'claude setup-token' first and
    export its output as CLAUDE_CODE_OAUTH_TOKEN before starting it.
 STEP
-)"
-    DAEMON_FOOTER="$(cat <<STEP
+    DAEMON_STEP=${DAEMON_STEP%$'\n'}
+    IFS= read -r -d '' DAEMON_FOOTER <<STEP || true
 That's it - the board can then claim cards and spawn real agent sessions.
 The stack's running in the background; this shell is done and about to
 exit - that's success, not a crash. Go start that daemon.
 STEP
-)"
+    DAEMON_FOOTER=${DAEMON_FOOTER%$'\n'}
   fi
   blerg_box "do this next" <<EOF
 $DAEMON_STEP
@@ -598,4 +645,8 @@ fi
 if [ "$DAEMON_ENROLL_PENDING" -eq 1 ]; then
   blerg_fail "The stack is ready. Create your account in setup, then rerun ./daemon/install.sh install to enroll this desktop."
   exit 7
+fi
+
+if [ "$DAEMON_ERROR" -ne 0 ]; then
+  exit "$DAEMON_ERROR"
 fi

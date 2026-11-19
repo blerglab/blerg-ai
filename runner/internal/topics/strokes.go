@@ -28,7 +28,7 @@ import (
 
 // StrokeKinds are the event kinds the strokes read beyond the reel's (Kinds) and proposal_decided:
 // the kinds of agent_events_strokes_idx (db.StrokeKindsSQL), in its order.
-var StrokeKinds = []string{"mark", "ask", "proposal_request", "review_requested", "review_decided", "delegation_request", "delegation_decided"}
+var StrokeKinds = []string{"mark", "ask", "proposal_request", "review_requested", "review_decided", "delegation_request", "delegation_decided", "background_task_done"}
 
 // MaxFoldItems is how many members and cards a fold carries, the newest (every waiting member too).
 const MaxFoldItems = 50
@@ -45,7 +45,7 @@ const maxStrokeText = 200
 // Stroke is one line of the History feed.
 //
 //	Kind: decision | attention | milestone | finding.
-//	Source: mark | ask | delegation | proposal | review | review_round | topic | approvals (a fold
+//	Source: mark | ask | delegation | proposal | review | review_round | topic | command | approvals (a fold
 //	  of command approvals). A fold of any repeated attention stroke has Count and Items.
 //	By: whose it is: "person" or "agent" for a mark; for an attention stroke, who resolved it
 //	  ("person", "parent": the session that started this one, "permission": a session permission
@@ -55,6 +55,17 @@ const maxStrokeText = 200
 //	Backdated: a mark that records an earlier moment (an import): At is that moment, and its jump is
 //	  the person's message before it (or none).
 type Stroke struct {
+	ClaimedBy   string `json:"claimed_by,omitempty"`
+	FailureType string `json:"type,omitempty"`
+	Severity    string `json:"severity,omitempty"`
+	Suite       string `json:"suite,omitempty"`
+	RerunPassed bool   `json:"rerun_passed,omitempty"`
+
+	Verdict  string   `json:"verdict,omitempty"`
+	Findings []string `json:"findings,omitempty"`
+	Target   string   `json:"target,omitempty"`
+	Round    int      `json:"round,omitempty"`
+
 	ID        string      `json:"id"`
 	Kind      string      `json:"kind"`
 	Source    string      `json:"source"`
@@ -141,8 +152,23 @@ func strokes(events []Event, wins []*Topic, opt Options) []Stroke {
 					recorded = "person"
 				}
 			}
-			s := &Stroke{ID: ev.ID, Kind: p.Kind, Source: "mark", By: by, RecordedAs: recorded, Text: text, At: ev.Ts, Seq: ev.Seq,
+			if p.Kind == "review" || p.Kind == "failure" {
+				by = p.By
+			}
+			if (p.Kind == "review" || p.Kind == "failure") && p.PostedBy != "owner" && p.By == "person" {
+				by, recorded, p.ClaimedBy = "agent", "", "person"
+			}
+			s := &Stroke{ClaimedBy: p.ClaimedBy, FailureType: p.FailureType, Severity: p.Severity, Suite: p.Suite, RerunPassed: p.RerunPassed, Verdict: p.Verdict, Findings: p.Findings, Target: p.Target, Round: p.Round, ID: ev.ID, Kind: p.Kind, Source: "mark", By: by, RecordedAs: recorded, Text: text, At: ev.Ts, Seq: ev.Seq,
 				Commits: doneCommits(p.Commits, opt.CommitURL), Jump: &Jump{EventID: ev.ID, Seq: ev.Seq}}
+			// Existing History finding rows can show failures without a new UI.
+			// Canonical mark kind and structured failure fields remain distinct.
+			if p.Kind == "failure" {
+				s.Kind = "finding"
+				s.Text = "Failure (" + p.FailureType + ", " + p.Severity + ", " + p.Suite + "): " + text
+				if p.RerunPassed {
+					s.Text = "Rerun passed: " + s.Text
+				}
+			}
 			if p.Card > 0 && p.Card <= MaxCard {
 				board := ""
 				if boardIDRe.MatchString(p.BoardID) {
@@ -156,6 +182,16 @@ func strokes(events []Event, wins []*Topic, opt Options) []Stroke {
 				}
 			}
 			add(s)
+		case "background_task_done":
+			var p agent.BackgroundTaskDonePayload
+			if json.Unmarshal(ev.Payload, &p) != nil || p.TaskID == "" || p.Kind == "agent" {
+				continue
+			}
+			if p.Status != "failed" && p.Status != "stopped" {
+				continue
+			}
+			text := "Background command " + p.Status + ": " + p.Summary
+			add(&Stroke{ID: ev.ID, Kind: "finding", Source: "command", Text: CleanText(text, maxStrokeText), At: ev.Ts, Seq: ev.Seq, Jump: &Jump{EventID: ev.ID, Seq: ev.Seq}})
 		case "ask":
 			var p struct {
 				Body      string `json:"body"`
@@ -399,6 +435,15 @@ func strokes(events []Event, wins []*Topic, opt Options) []Stroke {
 		} else {
 			s.TopicID = topicAtSeq(wins, s.Seq)
 		}
+	}
+	if opt.PageStrokes {
+		page := out[:0]
+		for _, s := range out {
+			if (s.Seq >= opt.StrokeMinSeq && s.Seq < opt.StrokeBeforeSeq) || s.State == "open" {
+				page = append(page, s)
+			}
+		}
+		out = page
 	}
 	res := foldRuns(out)
 	// Newest first: by the moment each records, then by seq.

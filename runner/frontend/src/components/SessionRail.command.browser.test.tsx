@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, within } from '@testing-library/react'
+import { act, render, screen, within } from '@testing-library/react'
 import { page, userEvent } from 'vitest/browser'
 import { MemoryRouter } from 'react-router-dom'
-import type { BackgroundTask } from '@blerglab/chat'
+import { useTranscriptStore, type AgentEvent, type BackgroundTask } from '@blerglab/chat'
 import SessionRail from './SessionRail'
 import { makeSession } from '../test/fixtures'
 import { makeLive } from '../test/planTabFixture'
@@ -34,7 +34,7 @@ beforeEach(() => localStorage.clear())
 describe('bounded Running now shell command cards', () => {
   for (const phone of [false, true]) {
     it(`keeps a heredoc card to two lines, the whole text in its tooltip, on ${phone ? 'phone' : 'desktop'}`, async () => {
-      await page.viewport(phone ? 390 : 1280, 800)
+      await page.viewport(phone ? 390 : 3840, 800)
       const card = show(heredoc, true, phone)
       // Two lines: the title (what it is for) and the result; the command and the rest in the tooltip,
       // and in the conversation the card brings into view.
@@ -47,7 +47,7 @@ describe('bounded Running now shell command cards', () => {
       expect(within(card).getByTestId('rail-task-summary').getAttribute('title')).toContain('fixture line 80')
       expect(within(card).getByRole('button', { name: 'Dismiss' })).toBeVisible()
       expect(within(card).getByRole('img', { name: 'failed' })).toBeVisible()
-      expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(phone ? 390 : 1280)
+      expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(phone ? 390 : 3840)
     })
   }
   it('on a phone a tap on the step line shows the whole command in place, scrollable, and a second tap folds it', async () => {
@@ -77,3 +77,25 @@ describe('bounded Running now shell command cards', () => {
     expect(within(card).getByTestId('rail-task-note')).toHaveTextContent('Run the checks')
   })
 })
+
+for (const width of [390, 3840]) {
+  it.each(['clear', 'later turn'])(`retires a failure through the real rail at ${width}px on %s`, async action => {
+    await page.viewport(width, 800)
+    const session = makeSession()
+    let seq = 0
+    const ingest = (kind: AgentEvent['kind'], payload: unknown) => act(() => {
+      seq++
+      useTranscriptStore.getState().ingest({ type: 'agent_event', session_id: session.id, client_event_id: `clear-${width}-${seq}`, seq, ts: new Date().toISOString(), kind, payload } as AgentEvent)
+    })
+    useTranscriptStore.getState().resetEvents(session.id)
+    ingest('background_task_started', { task_id: 'cmd', call_id: 'call', kind: 'bash', command: 'npm test' })
+    ingest('background_task_done', { task_id: 'cmd', kind: 'bash', status: 'failed', summary: 'exit 1' })
+    render(<MemoryRouter><SessionRail id="rail" session={session} live={makeLive()} toolChanges={0} mode={width === 390 ? 'drawer' : 'panel'} open onClose={() => {}} onOpenArtifact={() => {}} /></MemoryRouter>)
+    expect(screen.getByTestId('rail-task')).toHaveTextContent('exit 1')
+    expect(within(screen.getByTestId('rail-task')).getByRole('img', { name: 'Background command' })).toBeVisible()
+    if (action === 'clear') ingest('background_task_cleared', { task_id: 'cmd' })
+    else ingest('status_changed', { status: 'running' })
+    expect(screen.queryByTestId('rail-task')).toBeNull()
+    expect(useTranscriptStore.getState().sessions[session.id]?.events.some(e => e.kind === 'background_task_done')).toBe(true)
+  })
+}

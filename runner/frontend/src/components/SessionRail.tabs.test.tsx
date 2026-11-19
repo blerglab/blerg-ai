@@ -103,7 +103,7 @@ async function renderWithSettings() {
 }
 
 const rail = () => screen.getByTestId('session-rail')
-const tab = (name: string) => within(rail()).getByRole('tab', { name: ['Live', 'Files', 'Capabilities'].includes(name) ? new RegExp(`^${name}`) : name })
+const tab = (name: string) => within(rail()).getByRole('tab', { name: ['Live', 'Shared', 'Capabilities'].includes(name) ? new RegExp(`^${name}`) : name })
 const toolbar = () => screen.getByTestId('agent-chat').querySelector('.agent-toolbar') as HTMLElement
 const composerActions = () => screen.getByTestId('agent-chat').querySelector('.agent-composer-actions') as HTMLElement
 
@@ -131,17 +131,28 @@ describe('the session panel: Files, Capabilities and the Settings dialog', () =>
     localStorage.removeItem(THINKING_KEY)
   })
 
+  it.each(['waiting', 'idle'] as const)('labels unrecovered %s activity Paused in the real SessionDetail', async status => {
+    seed({ status, paused_reason: 'restart', paused_detail: 'Recovery paused: Workspace stop is unfinished. Send a message to retry.' })
+    await renderPage()
+    expect(within(rail()).getByTestId('rail-running')).toHaveTextContent('Paused.')
+    expect(within(rail()).getByTestId('rail-running')).not.toHaveTextContent('Waiting on you')
+    expect(screen.queryByTestId('stop-turn')).toBeNull()
+    expect(screen.queryByTestId('working')).toBeNull()
+    expect(screen.queryByTestId('waiting')).toBeNull()
+    expect(screen.getByTestId('recovery-notice')).toHaveTextContent('Paused: Workspace stop is unfinished.')
+  })
+
   it('names the header controls "End session" and "Stop the agent\'s current turn", side by side; the composer has no Stop', async () => {
     seed({ status: 'running', model: 'claude-opus-5-5', effort: 'high' })
     await renderPage()
     // Stop sits in the header, immediately left of End session; neither the composer nor the toolbar has one.
     expect(within(composerActions()).queryByRole('button', { name: /^Stop/ })).toBeNull()
     expect(within(toolbar()).queryByRole('button', { name: /^Stop/ })).toBeNull()
-    expect(screen.getAllByRole('button', { name: 'End session' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'End workspace' })).toHaveLength(1)
     expect(screen.getAllByRole('button', { name: /^Stop/ })).toHaveLength(1)
-    expect(screen.queryByRole('button', { name: 'Stop session' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Stop workspace' })).toBeNull()
     // The header button draws an X; Stop draws a filled square.
-    const end = screen.getByRole('button', { name: 'End session' })
+    const end = screen.getByRole('button', { name: 'End workspace' })
     expect(end.querySelector('.end-session-x')).not.toBeNull()
     expect(end.classList.contains('danger')).toBe(true)
     const stop = screen.getByRole('button', { name: "Stop the agent's current turn" })
@@ -218,7 +229,7 @@ describe('the session panel: Files, Capabilities and the Settings dialog', () =>
     seed()
     await renderPage()
     await waitFor(() => expect(reads('/artifacts')).toBe(1))
-    fireEvent.click(tab('Files'))
+    fireEvent.click(tab('Shared'))
     expect(localStorage.getItem(RAIL_TAB_KEY)).toBe('files')
     await waitFor(() => expect(reads('/artifacts')).toBe(2))
     const panel = within(rail()).getByTestId('rail-files')
@@ -244,7 +255,7 @@ describe('the session panel: Files, Capabilities and the Settings dialog', () =>
     }
     seed()
     await renderPage()
-    fireEvent.click(within(rail()).getByRole('tab', { name: /^Files/ }))
+    fireEvent.click(within(rail()).getByRole('tab', { name: /^Shared/ }))
     const panel = within(rail()).getByTestId('rail-files')
     await waitFor(() => expect(within(panel).getAllByTestId('artifact-name')).toHaveLength(2))
   })
@@ -254,17 +265,17 @@ describe('the session panel: Files, Capabilities and the Settings dialog', () =>
     files = [{ ...report, version: 2, latest_version: 2 }, { ...report, id: 'a0', version: 1, latest_version: 2 }, notes] as typeof files
     seed()
     await renderPage()
-    await waitFor(() => expect(within(tab('Files')).getByTestId('rail-files-tab-count')).toHaveTextContent('2'))
-    expect(tab('Files')).toHaveAccessibleName('Files, 2 files')
+    await waitFor(() => expect(within(tab('Shared')).getByTestId('rail-files-tab-count')).toHaveTextContent('2'))
+    expect(tab('Shared')).toHaveAccessibleName('Shared, 2 files')
     // The agent publishes a file: the count follows without the tab being opened.
     files = [{ id: 'a3', name: 'plan.md', size: 10, content_type: 'text/markdown', view: 'markdown', created_at: '2026-10-15T11:00:00Z' } as typeof report, ...files]
     act(() => { useTranscriptStore.getState().ingest(ev('artifact', { artifact_id: 'a3', name: 'plan.md' })) })
-    await waitFor(() => expect(tab('Files')).toHaveAccessibleName('Files, 3 files'))
+    await waitFor(() => expect(tab('Shared')).toHaveAccessibleName('Shared, 3 files'))
     // Everything deleted: no badge.
     files = []
     act(() => { useTranscriptStore.getState().ingest(ev('artifact', { artifact_id: 'a4', name: 'x.md' })) })
-    await waitFor(() => expect(within(tab('Files')).queryByTestId('rail-files-tab-count')).toBeNull())
-    expect(tab('Files')).toHaveAccessibleName('Files')
+    await waitFor(() => expect(within(tab('Shared')).queryByTestId('rail-files-tab-count')).toBeNull())
+    expect(tab('Shared')).toHaveAccessibleName('Shared')
   })
 
   it('Files on screen from the start does not read again the list the chat has just read', async () => {
@@ -289,7 +300,7 @@ describe('the session panel: Files, Capabilities and the Settings dialog', () =>
   it('Files offers the message box’s file picker', async () => {
     seed()
     await renderPage()
-    fireEvent.click(tab('Files'))
+    fireEvent.click(tab('Shared'))
     const input = screen.getByTestId('attach-input') as HTMLInputElement
     const picked = vi.fn()
     input.addEventListener('click', picked)
@@ -383,11 +394,11 @@ describe('the session panel: Files, Capabilities and the Settings dialog', () =>
       expect(within(toolbar()).queryByTestId('files-toggle')).toBeNull()
       expect(within(toolbar()).queryByTestId('capabilities-toggle')).toBeNull()
       fireEvent.click(screen.getByTestId('rail-toggle'))
-      const drawer = screen.getByRole('dialog', { name: 'Session panel' })
-      expect(within(drawer).getAllByRole('tab').map(t => t.textContent)).toEqual(['Live', 'History', 'Files2, 2 files', 'Capabilities'])
+      const drawer = screen.getByRole('dialog', { name: 'Workspace panel' })
+      expect(within(drawer).getAllByRole('tab').map(t => t.textContent)).toEqual(['Live', 'History', 'Shared2, 2 files', 'Capabilities'])
       const row = (await within(drawer).findAllByTestId('artifact-row'))[0]
       fireEvent.click(within(row).getByRole('button', { name: /^View / }))
-      expect(screen.queryByRole('dialog', { name: 'Session panel' })).toBeNull()
+      expect(screen.queryByRole('dialog', { name: 'Workspace panel' })).toBeNull()
       expect(await screen.findByRole('region', { name: /report\.md/ })).toBeInTheDocument()
     })
   })

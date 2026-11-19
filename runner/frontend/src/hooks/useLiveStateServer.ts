@@ -81,12 +81,20 @@ function foldable(events: readonly AgentEvent[], through: number): AgentEvent[] 
   return out
 }
 
-/** Server time now, moving by the minute (what has had no sign of life for 12 h stops counting). */
+/** Server time now, moving while the page is visible (what has had no sign of life for 12 h stops
+ *  counting). BLG-431: this used to tick every 60 s unconditionally - even for a hidden tab, or one
+ *  nobody is looking at - which re-renders whatever calls useLiveStateServer (SessionDetail, the
+ *  whole session page) that often for a threshold measured in hours. The 12 h stale-running cutoff
+ *  and the MCP tool-change hold's own expiry do not need minute resolution, so this now ticks every
+ *  15 minutes, and only while the tab is visible; a hidden tab's view still catches up the moment it
+ *  becomes visible (via the visibilitychange read() below) or on any real event/read in the meantime. */
 function useMinute(): number {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 60_000)
-    return () => clearInterval(t)
+    const tick = () => { if (document.visibilityState === 'visible') setNow(Date.now()) }
+    const t = setInterval(tick, 15 * 60_000)
+    document.addEventListener('visibilitychange', tick)
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', tick) }
   }, [])
   return now
 }

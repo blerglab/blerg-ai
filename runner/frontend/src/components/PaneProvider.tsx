@@ -1,3 +1,4 @@
+import { useToastStore } from '../hooks/useToastStore'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { PaneContext, SessionToolsHost, type PaneHandle } from '../panes/context'
 import { usePaletteCommands } from '../commands/context'
@@ -53,9 +54,11 @@ export default function PaneProvider({ children, scope = '' }: { children: React
     else {
       snapshot.current = new Map([...handles.current].map(([id, handle]) => [id, { handle, open: handle.current.open }]))
       setFocused(true)
+      const entered = snapshot.current
+      useToastStore.getState().addToast({ title: 'Focus mode', body: 'Surrounding panels are hidden.', action: { label: 'Undo', onClick: () => { if (snapshot.current === entered) restore() } }, ttlMs: 8000 })
     }
   }, [restore])
-  const commands = useMemo(() => [{ id: 'focus-mode', destructive: false, title: 'Focus mode', keywords: 'Focus this tab maximize restore layout', shortcut: 'Ctrl/⌘+Shift+Enter', run: toggle }], [toggle])
+  const commands = useMemo(() => [{ id: 'focus-mode', destructive: false, title: 'Focus mode', keywords: 'Focus this tab maximize restore layout', shortcutGroup: 'Panes' as const, shortcut: 'Ctrl/⌘+Shift+Enter', run: toggle }], [toggle])
   usePaletteCommands(commands)
   useEffect(() => {
     if (!scope.startsWith('/sessions/')) return

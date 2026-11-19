@@ -384,14 +384,11 @@ func TestDelegatedSpawnSkipsPluginsAndCarriesNoEnv(t *testing.T) {
 	if att == nil {
 		t.Fatal("no start attempt")
 	}
-	found := false
+	// A routine delegated skip is deliberately quiet; it is not a plugin failure.
 	for _, s := range att.stages {
 		if s.ID == protocol.StagePlugins {
-			found = s.Detail == pluginsNoteDelegated && s.State == protocol.StageStateWarning
+			t.Fatalf("routine delegated plugin skip shown: %+v", s)
 		}
-	}
-	if !found || pluginsNoteDelegated != "skipped: started by another session" {
-		t.Fatalf("plugin stage missing or wrong: %+v", att.stages)
 	}
 
 	// The daemon path refuses a delegate request that carries anything the allowlist does not.

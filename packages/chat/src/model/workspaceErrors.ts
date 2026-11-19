@@ -8,7 +8,7 @@ export function workspaceErrorText(status: number, serverText = '', code?: strin
   const t = serverText.toLowerCase()
   if (status === 403) {
     if (code === 'person_required' || t.startsWith('workspace files can only be opened by a signed-in person')) return 'Sign in as a person to open workspace files.'
-    if (code === 'session_ownership' || t.startsWith('only the session owner or an administrator can open workspace files')) return 'You don’t have access to this session’s workspace files. Ask the session owner to open or publish the file for you.'
+    if (code === 'session_ownership' || t.startsWith('only the session owner or an administrator can open workspace files')) return 'You don’t have access to these workspace files. Ask the workspace owner to open or publish the file for you.'
     // Older runners did not send a reason code for desktop access refusals.
     if (t.startsWith('this desktop is unavailable to you')) return 'This desktop is unavailable to you. Open Settings → Account → Your desktops and enroll it to you, or ask an administrator to assign it first.'
   }
@@ -16,18 +16,18 @@ export function workspaceErrorText(status: number, serverText = '', code?: strin
   if (status === 409 && code) {
     if (code === 'busy') return 'The file reader is busy. Try again in a moment.'
     if (code === 'daemon_timeout' || code === 'changed' || code === 'invalid') return 'Couldn’t read the file just now. Try again.'
-    if (code === 'not_running') return 'The session isn’t running, so its files can’t be read.'
+    if (code === 'not_running') return 'The workspace isn’t running, so its files can’t be read.'
   }
   switch (status) {
     case 401: return 'Sign in again to open files.'
-    case 404: return t.startsWith('session not found') ? 'This session can’t be found.' : 'Not found in the session’s folder.'
+    case 404: return t.startsWith('session not found') ? 'This workspace can’t be found.' : 'Not found in the workspace’s folder.'
     case 403: return t.startsWith('blerg doesn\'t open files that usually hold secrets') || t.startsWith('blerg doesn’t open files that usually hold secrets')
       ? 'Blerg doesn’t open files that usually hold secrets.'
       : 'Blerg can’t open that path.'
     case 409:
       if (t.includes('busy')) return 'The file reader is busy. Try again in a moment.'
       if (t.includes('did not provide') || t.includes('changed while') || t.includes('invalid')) return 'Couldn’t read the file just now. Try again.'
-      return 'The session isn’t running, so its files can’t be read.'
+      return 'The workspace isn’t running, so its files can’t be read.'
     case 413: return 'Too large to open here.'
     default: return 'Couldn’t open that file.'
   }

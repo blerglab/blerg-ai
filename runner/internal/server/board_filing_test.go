@@ -80,7 +80,7 @@ func filingRequest(fx *topicFx, method, path, token string, body any) *httptest.
 }
 func queueFiling(t *testing.T, fx *topicFx) *db.Proposal {
 	t.Helper()
-	code, out := fx.postWork("file-ticket", fx.sess, fx.sessTok, map[string]any{"board": "A", "title": "Original", "body": "Private reproduction fixture", "sensitive": true})
+	code, out := fx.postWork("file-ticket", fx.sess, fx.sessTok, map[string]any{"board": "A", "title": "Original", "body": "Private reproduction fixture", "sensitive": true, "size": "M", "risk": "high", "complexity": "low"})
 	if code != 202 {
 		t.Fatalf("queue code=%d", code)
 	}
@@ -122,7 +122,7 @@ func TestBoardFilingQueuesOnlyAndApprovalUsesSavedDraft(t *testing.T) {
 		t.Fatal("stale draft approved")
 	}
 	approved := filingRequest(fx, "POST", "/api/proposals/"+p.ID+"/approve", human, map[string]any{"expected_arguments_raw": string(edited.Arguments)})
-	if approved.Code != 200 || up.creates != 1 || up.board != "board-b" || up.draft.Title != "Approved edit" || up.draft.Body != "Edited private fixture" || !up.draft.Sensitive || len(up.draft.Repos) != 1 || up.draft.Repos[0] != "team/target" || up.draft.Origin != args.Origin {
+	if approved.Code != 200 || up.creates != 1 || up.board != "board-b" || up.draft.Size != "M" || up.draft.Risk != "high" || up.draft.Complexity != "low" || up.draft.Title != "Approved edit" || up.draft.Body != "Edited private fixture" || !up.draft.Sensitive || len(up.draft.Repos) != 1 || up.draft.Repos[0] != "team/target" || up.draft.Origin != args.Origin {
 		t.Fatalf("saved edit not honored: code=%d", approved.Code)
 	}
 }

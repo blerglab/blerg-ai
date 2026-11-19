@@ -61,6 +61,8 @@ export async function api<T = unknown>(
 // ── shapes ──────────────────────────────────────────────────────────────────
 
 export interface Board {
+  auto_archive_done_days?: number;
+  auto_archive_keep_tags?: string[];
   key?: string;
   suggested_key?: string;
   key_aliases?: string[];
@@ -133,6 +135,8 @@ export interface CardLink { kind: string; url: string; label: string | null }
 export interface CardOriginInfo { session_url: string; repo: string; commit: string; engine: string; component_version?: string; component_commit?: string }
 
 export interface Card {
+  commit_summary?: CardCommitSummary[];
+  release_id?: string | null;
   reference?: string;
   sensitive?: boolean;
   origin?: CardOriginInfo | null;
@@ -146,6 +150,11 @@ export interface Card {
   body: string | null;
   priority: string;
   size: string | null;
+  risk?: string | null;
+  complexity?: string | null;
+  size_first_set_at?: string | null;
+  risk_first_set_at?: string | null;
+  complexity_first_set_at?: string | null;
   effort?: string;
   model: string; // "" = this card's sessions use the board's model
   fields: Record<string, unknown>;
@@ -170,6 +179,19 @@ export interface Card {
   // number/title and whether it has landed. Any unsatisfied entry means the
   // dispatcher is skipping this card — which is why it renders.
   blockers: Blocker[] | null;
+}
+
+export interface CardCommitSummary {
+  repository: string;
+  session_id: string;
+  member_id?: string;
+  generation?: number;
+  launch_generation?: string;
+  branch: string;
+  base: string;
+  commits: {sha: string; message: string; author: string; date: string}[];
+  files: {path: string; old_path?: string; adds: number; dels: number; binary?: boolean}[];
+  truncated?: boolean;
 }
 
 export interface Blocker {

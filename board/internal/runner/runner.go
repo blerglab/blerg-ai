@@ -17,7 +17,14 @@ import (
 	"time"
 )
 
+type Repository struct {
+	Repo     string `json:"repo"`
+	GitURL   string `json:"git_url,omitempty"`
+	Provider string `json:"provider,omitempty"`
+}
+
 type StartRequest struct {
+	Repositories []Repository
 	// TargetAccount binds a per-run override to the automation owner that authorized it.
 	// Internal to Board; never sent on the runner wire.
 	TargetAccount string
@@ -43,8 +50,9 @@ type StartRequest struct {
 	// runner contract ("cluster", "docker" or "daemon") and, for the last two,
 	// the connected daemon. Empty leaves the board's configured runtime and
 	// the runner's own placement, as before.
-	Runtime  string
-	DaemonID string
+	RuntimeTargetID string
+	Runtime         string
+	DaemonID        string
 	// Token is the credential this ONE start is made with: the board's
 	// automation token, a blerg-core agent token its owner minted for
 	// themselves. The runner resolves it to that person's account and runs the
@@ -291,6 +299,15 @@ func (k *BlergRunner) Start(ctx context.Context, r StartRequest) (string, error)
 		"repo": r.Repo, "title": r.Title, "prompt": r.Prompt,
 		"model": r.Model, "env": r.Env,
 	}
+	if len(r.Repositories) > 0 {
+		repositories := append([]Repository(nil), r.Repositories...)
+		for i := range repositories {
+			if repositories[i].GitURL == "" && k.gitBase != "" {
+				repositories[i].GitURL = JoinRepoURL(k.gitBase, repositories[i].Repo)
+			}
+		}
+		body["repositories"] = repositories
+	}
 	if r.Effort != "" {
 		body["effort"] = r.Effort
 	}
@@ -304,6 +321,12 @@ func (k *BlergRunner) Start(ctx context.Context, r StartRequest) (string, error)
 		body["runtime"] = r.Runtime
 	} else if k.runtime != "" {
 		body["runtime"] = k.runtime
+	}
+	if body["runtime"] == "cluster" {
+		body["runtime_target_id"] = "cluster"
+		if r.RuntimeTargetID != "" {
+			body["runtime_target_id"] = r.RuntimeTargetID
+		}
 	}
 	if r.DaemonID != "" {
 		body["daemon_id"] = r.DaemonID

@@ -90,10 +90,10 @@ func TestSessionInputNonReceiptDoesNotBlockIngestion(t *testing.T) {
 }
 
 // Card #156: the input_accepted event says whose message it is, so the chat never draws Blerg's
-// relay of an answer as the person's queued bubble; the message the agent gets is unchanged.
+// relay of an answer as the person's queued bubble; its source label leads the exact answer.
 func TestSessionInputAcceptanceNamesItsSource(t *testing.T) {
 	f := newIngestFixture(t)
-	row := db.MessageRow{ID: "7b5dcd88-7c6a-4a6d-b093-d6417264f6d2", Body: "Favorite color?", Kind: "ask", NoWait: true}
+	row := db.MessageRow{ID: "7b5dcd88-7c6a-4a6d-b093-d6417264f6d2", Body: "Favorite color?", Kind: "ask", NoWait: true, AnsweredBy: "person:owner-1"}
 	text := questionAnswerText(row, "orange")
 	if text != `Answer to your question 7b5dcd88-7c6a-4a6d-b093-d6417264f6d2 ("Favorite color?"): orange` {
 		t.Fatalf("the agent's message changed: %q", text)

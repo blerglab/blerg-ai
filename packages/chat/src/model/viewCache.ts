@@ -9,6 +9,11 @@
 //   over VIEW_CACHE_ENTRY_BYTES is not kept), Files lists by session count (VIEW_CACHE_LISTS).
 // - A host forgets a session that ended, was archived or discarded (forgetViewCacheSession).
 
+/** A revision's identity is shared by an inline visual and its destination tab. */
+export function artifactContentIdentity(a: {id: string; version?: number; view: string; size: number; updated_at?: string}): string {
+  return `artifact:${a.id}:${a.version ?? ''}:${a.view}:${a.size}:${a.updated_at ?? ''}`
+}
+
 /** Bytes of file contents kept in all (per page). */
 export const VIEW_CACHE_BYTES = 32 << 20
 /** A file larger than this is not kept. */
@@ -20,6 +25,8 @@ const scopes = new WeakMap<object, number>()
 let nextScope = 1
 /** Bumped by clearViewCache: a read that began before it keeps nothing. */
 let epoch = 0
+/** Lets other session-local views discard their transient state on sign-out. */
+export function viewEpoch(): number { return epoch }
 /** Bumped for a session when it is forgotten: a read of it that began before keeps nothing. */
 const sessionGen = new Map<string, number>()
 /** Sessions that ended, were archived or discarded: nothing more is kept for them. */

@@ -1,9 +1,9 @@
 import { useEffect } from 'react'
 import { beforeEach, afterEach, it, expect, vi } from 'vitest'
-import { render, screen, waitFor, within, act } from '@testing-library/react'
+import { render, screen, waitFor, within, act, fireEvent } from '@testing-library/react'
 import { page, userEvent, cdp } from 'vitest/browser'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
-import { useTranscriptStore, type AgentEvent } from '@blerglab/chat'
+import { useTranscriptStore, localStorageChatStorage, type AgentEvent } from '@blerglab/chat'
 import { useSessionStore } from '../hooks/useSessionStore'
 import { useToastStore } from '../hooks/useToastStore'
 import { RAIL_PREF_KEY, RAIL_TAB_KEY } from '../lib/sessionRail'
@@ -32,7 +32,8 @@ const wide = 'long-command-or-title-'.repeat(400)
 const shotDir = import.meta.env.VITE_CHROME_SHOTS_DIR
 beforeEach(() => {
  shellMode.restore=false; shellMode.ids=['focus']; shellMode.available=true
- localStorage.clear();document.documentElement.setAttribute('data-theme', 'dark')
+ localStorage.clear();for(const id of ['sess-a','sess-b'])localStorageChatStorage.set(`blerg-runner.draft.${id}`,null)
+ localStorage.setItem('blerg-runner.session-dock.windows', JSON.stringify({ active: 'files', panels: [], ratio: .5 }));document.documentElement.setAttribute('data-theme', 'dark')
  useTranscriptStore.setState({ sessions: {} });useToastStore.setState({ toasts: [] })
  useSessionStore.setState({ daemons: [makeDaemon()], sessions: ['sess-a', 'sess-b'].map(id => makeSession({ id, kind: 'agent', status: 'idle', title: id === 'sess-a' ? 'Build session chrome' : 'Check the release', runtime: 'daemon', model: 'model-next', effort: 'high' })) })
  for (const id of ['sess-a','sess-b']) {
@@ -81,7 +82,8 @@ it.each([1024,2860,3840])('contains long chat and 2,000 History strokes at %i px
 it.each([1024,3840])('gives all the width back when the panel is collapsed at %i',async width=>{
  await page.viewport(width,1000);localStorage.setItem(RAIL_PREF_KEY,'0');mount();await waitFor(()=>expect(composer()).toBeTruthy())
  const columns=screen.getByTestId('session-columns'),chat=screen.getByTestId('session-chat-column')
- expect(screen.getAllByTestId('rail-toggle')).toHaveLength(1);expect(panelToggle().closest('nav')).toHaveAttribute('aria-label','Workspace')
+ // The panel toggle is a header control now (card BLG-450), not a tab-bar one.
+ expect(screen.getAllByTestId('rail-toggle')).toHaveLength(1);expect(panelToggle().closest('[data-testid="session-header-controls"]')).toBeTruthy()
  expect(chat.getBoundingClientRect().right).toBe(columns.getBoundingClientRect().right);expect(columns.querySelector('.pane-rail-right')).toBeNull()
  await userEvent.click(panelToggle());expect(screen.getByTestId('session-rail')).toBeVisible()
 })
@@ -100,17 +102,26 @@ it.each([390,3840])('shows header, Session settings, shell popover and toast at 
  useTranscriptStore.setState({sessions:{}})
  const state=useTranscriptStore.getState();state.ingest({session_id:'sess-a',client_event_id:'review-chat',seq:1,kind:'assistant_text',ts:'2026-10-25T12:00:00Z',payload:{text:'The workspace is ready. Model and effort are available in the Session panel.',done:true}} as AgentEvent);state.ingestReplayDone('sess-a',{lastSeq:1,hasMore:false})
  await page.viewport(width,width===390?844:2160);localStorage.setItem(RAIL_PREF_KEY,'0');mount();await waitFor(()=>expect(composer()).toBeTruthy())
- expect(screen.getByRole('navigation',{name:width===390?'Session navigation':'Workspace'}).querySelector('button')).toHaveAccessibleName('Toggle explorer')
+ expect(screen.getByRole('navigation',{name:width===390?'Workspace navigation':'Workspace'}).querySelector('button')).toHaveAccessibleName('Toggle explorer')
  expect(screen.queryByTestId('posture-banner')).toBeNull();expect(screen.getByRole('img',{name:/Runs unsandboxed/})).toBeVisible();expect(screen.queryByRole('button',{name:/0 open files/})).toBeNull()
  if(shotDir)await page.screenshot({path:`${shotDir}/session-chrome-header-${width}.png`})
- await userEvent.click(panelToggle());const panel=width===390?screen.getByRole('dialog',{name:'Session panel'}):screen.getByTestId('session-rail')
+ await userEvent.click(panelToggle());const panel=width===390?screen.getByRole('dialog',{name:'Workspace panel'}):screen.getByTestId('session-rail')
  await userEvent.click(within(panel).getByRole('tab',{name:/Live/}));const section=within(panel).getByTestId('rail-session');section.scrollIntoView({block:'end'})
  expect(within(section).getByRole('combobox',{name:'Model'})).toBeVisible();expect(within(section).getByRole('combobox',{name:'Effort'})).toBeVisible();expect(within(section).queryByRole('button',{name:'Rules'})).toBeNull()
  if(shotDir){await waitFor(()=>expect(panel.getAnimations().length).toBe(0));await page.screenshot({path:`${shotDir}/session-chrome-panel-${width}.png`})}
  if(width===390)await userEvent.keyboard('{Escape}');else await userEvent.click(panelToggle())
- await userEvent.click(await screen.findByRole('button',{name:'New shell'}));const error=await screen.findByRole('alertdialog',{name:"Shell didn't start"});expect(error).toHaveTextContent('executable or its working directory is missing')
+ // New shell is a header control at a normal width, and a menu item inside the header's collapsed
+ // Open menu on a phone (card BLG-450).
+ if(width===390){await userEvent.click(screen.getByTestId('open-tab-menu'));await userEvent.click(await screen.findByRole('menuitem',{name:'New shell'}))}
+ else await userEvent.click(await screen.findByRole('button',{name:'New shell'}))
+ const error=await screen.findByRole('alertdialog',{name:"Shell didn't start"});expect(error).toHaveTextContent('executable or its working directory is missing')
  if(shotDir){await waitFor(()=>expect(getComputedStyle(error).opacity).toBe('1'));await page.screenshot({path:`${shotDir}/session-chrome-popover-${width}.png`})}
- await userEvent.click(within(error).getByRole('button',{name:'Dismiss'}));act(()=>useToastStore.getState().addToast({title:'Needs your attention',body:'The agent has a question.',ttlMs:60000}))
+ await userEvent.click(within(error).getByRole('button',{name:'Dismiss'}))
+ // Collapsing the panel intentionally leaves an Undo notification. Dismiss it before
+ // measuring the attention notification in isolation.
+ const panelNotice=screen.getByText('Panel hidden').closest('[role="status"]')!
+ await userEvent.click(within(panelNotice as HTMLElement).getByRole('button',{name:'Dismiss notification'}))
+ act(()=>useToastStore.getState().addToast({title:'Needs your attention',body:'The agent has a question.',ttlMs:60000}))
  const toast=await screen.findByTestId('toast-session');await waitFor(()=>expect(toast.getBoundingClientRect().bottom).toBeLessThan(composer().getBoundingClientRect().top))
  if(shotDir)await page.screenshot({path:`${shotDir}/session-chrome-toast-${width}.png`})
 },30000)
@@ -168,5 +179,72 @@ it.each(['present', 'ended', 'all-ended', 'unavailable'])('retains shell selecti
   shellMode.ids = ['second', 'focus']; switchTo('sess-a')
   await waitFor(() => expect(shellInput('second')).not.toBeNull())
   expect(shellInput('second')).not.toHaveFocus()
+ }
+})
+
+it.each([[1920,1080],[1280,600],[2160,3840],[390,844],[3840,2160]])('grows and drags a long composer at %ix%i', async (width,height) => {
+ await page.viewport(width,height)
+ localStorage.setItem(RAIL_PREF_KEY,'0');const ui=mount()
+ if(width===390)document.documentElement.setAttribute('data-theme','colorblind-dark')
+ await waitFor(()=>expect(composer()).toBeTruthy())
+ let box = composer()
+ const pane=box.closest<HTMLElement>('.agent-chat')!
+ const paneHeight=pane.clientHeight
+ expect(box.getBoundingClientRect().height).toBe(40)
+ const text = Array.from({length:60},(_,i)=>`Step ${i+1}: Review the composer layout and keep the transcript and Send button visible.`).join('\n')
+ await userEvent.click(box)
+ await cdp().send('Input.insertText',{text})
+ expect(box).toHaveValue(text)
+ const automatic=Math.min(420,paneHeight*.5)
+ await waitFor(()=>expect(box.getBoundingClientRect().height).toBeCloseTo(automatic,0))
+ expect(box.scrollHeight).toBeGreaterThan(box.clientHeight)
+ const shots=import.meta.env.VITE_COMPOSER_SHOTS_DIR
+ if(shots)await page.screenshot({path:`${shots}/composer-auto-${width}x${height}.png`})
+ const handle=screen.getByRole('separator',{name:'Resize message box'})
+ expect(handle).toHaveAttribute('aria-orientation','horizontal')
+ expect(Number(handle.getAttribute('aria-valuenow'))).toBe(Math.round(automatic))
+ const r=handle.getBoundingClientRect(),f=window.frameElement?.getBoundingClientRect(),scale=f?f.width/innerWidth:1
+ const x=(f?.left??0)+(r.left+r.width/2)*scale,y=(f?.top??0)+(r.top+r.height/2)*scale
+ await cdp().send('Input.dispatchMouseEvent',{type:'mousePressed',x,y,button:'left',clickCount:1})
+ await cdp().send('Input.dispatchMouseEvent',{type:'mouseMoved',x,y:Math.max(1,(f?.top??0)+2),button:'left',buttons:1})
+ await cdp().send('Input.dispatchMouseEvent',{type:'mouseReleased',x,y:Math.max(1,(f?.top??0)+2),button:'left',clickCount:1})
+ expect(box).toHaveValue(text)
+ const maximum=paneHeight*.85
+ await waitFor(()=>expect(box.getBoundingClientRect().height).toBeCloseTo(maximum,0))
+ expect(Number(handle.getAttribute('aria-valuenow'))).toBe(Math.round(maximum))
+ expect(box.getBoundingClientRect().bottom).toBeLessThanOrEqual(innerHeight)
+ expect(screen.getByRole('button',{name:/^Send$/}).getBoundingClientRect().bottom).toBeLessThanOrEqual(innerHeight)
+ console.log('COMPOSER_HEIGHT',JSON.stringify({width,height,paneHeight,automatic,dragged:box.getBoundingClientRect().height}))
+ if(shots)await page.screenshot({path:`${shots}/composer-dragged-${width}x${height}.png`})
+ const key=Object.keys(localStorage).find(key=>key.startsWith('blerg.chat.composer.height.'))!
+ expect(key).toContain('person-a');expect(key).not.toContain('sess-a')
+ ui.unmount();mount()
+ await waitFor(()=>expect(composer().getBoundingClientRect().height).toBeCloseTo(maximum,0))
+ switchTo('sess-b')
+ await waitFor(()=>expect(composer().getBoundingClientRect().height).toBeCloseTo(maximum,0))
+ box=composer()
+ const restoredHandle=screen.getByRole('separator',{name:'Resize message box'})
+ act(()=>fireEvent.keyDown(restoredHandle,{key:'ArrowDown'}))
+ expect(box.getBoundingClientRect().height).toBeCloseTo(maximum-24,0)
+ act(()=>fireEvent.keyDown(restoredHandle,{key:'ArrowUp'}))
+ expect(box.getBoundingClientRect().height).toBeCloseTo(maximum,0)
+ act(()=>fireEvent.doubleClick(restoredHandle))
+ expect(localStorage.getItem(key)).toBeNull()
+ expect(box.getBoundingClientRect().height).toBe(40)
+ if(width===3840){
+  await userEvent.fill(box,text)
+  expect(box.getBoundingClientRect().height).toBe(420)
+  const currentPane=box.closest<HTMLElement>('.agent-chat')!
+  currentPane.style.height='300px'
+  await waitFor(()=>expect(box.getBoundingClientRect().height).toBe(150))
+  currentPane.style.height=''
+  await waitFor(()=>expect(box.getBoundingClientRect().height).toBe(420))
+  await userEvent.fill(box,'Review this layout. '.repeat(12))
+  expect(box.getBoundingClientRect().height).toBeLessThan(420)
+  const column=screen.getByTestId('session-chat-column')
+  column.style.maxWidth='360px'
+  await waitFor(()=>expect(box.getBoundingClientRect().height).toBeGreaterThan(120))
+  column.style.maxWidth=''
+  await waitFor(()=>expect(box.getBoundingClientRect().height).toBeLessThan(120))
  }
 })

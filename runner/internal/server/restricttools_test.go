@@ -273,6 +273,7 @@ func TestCronPicksACapableDaemon(t *testing.T) {
 	}
 	dc2 := &DaemonConn{ID: old, Name: "old", ReposRoot: "/repos", send: make(chan []byte, 8)}
 	dc2.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc2.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	dc2.SetMCPGateway(true)
 	dc2.SetSandboxAvailable(true)
 	cf.hub.Register(dc2)
@@ -323,6 +324,7 @@ func TestStartRefusedOnADaemonThatCannotRestrict(t *testing.T) {
 func TestDaemonConnRecordsTheRestrictToolsCapability(t *testing.T) {
 	dc := &DaemonConn{ID: "d"}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	if dc.CanRestrictTools() {
 		t.Error("a daemon that has not said so must not be assumed to restrict")
 	}

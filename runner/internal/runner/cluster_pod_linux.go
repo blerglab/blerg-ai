@@ -80,10 +80,12 @@ func ConfigureClusterRuntime(cfg *Config) error {
 	pod := &podRuntime{group: group, launch: protocol.SupervisorLaunch{SessionID: cfg.SessionID, LaunchGeneration: cfg.Workspace.Runtime.LaunchGeneration, RuntimeGeneration: cfg.Workspace.Runtime.Generation, Runtime: "cluster", ConnectionID: hex.EncodeToString(nonce[:])}}
 	cfg.ClusterPrivateRoot = clusterPrivateRoot
 	cfg.ClusterWriters = pod
+	cfg.OnTaskLimit = group.OnLimit
 	cfg.StartCommand = func(cmd *exec.Cmd) error {
 		if err := projectClusterLaunchFiles(cmd); err != nil {
 			return err
 		}
+		clusterToolEnvironment(cmd)
 		return group.Start(cmd)
 	}
 	cfg.Supervisor = pod

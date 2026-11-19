@@ -81,7 +81,7 @@ func (c *httpBoardFiling) boardRequest(ctx context.Context, method, path, token 
 }
 func (c *httpBoardFiling) read(ctx context.Context, proof mcpgw.Proof, board, path string) (json.RawMessage, error) {
 	ex := &mcpgw.HTTPBoardExchanger{BaseURL: c.core.BaseURL, InternalKey: c.core.InternalKey, HTTP: c.core.httpClient()}
-	tok, err := ex.ExchangeReadOnly(ctx, proof, board, "")
+	tok, err := ex.ExchangeReadOnly(ctx, proof, board, "", true)
 	if err != nil {
 		return nil, apiErrorf(503, "Board access could not be verified.")
 	}
@@ -212,7 +212,7 @@ func (c *httpBoardFiling) Describe(ctx context.Context, proof mcpgw.Proof, board
 		return filedCard{}, errors.New("invalid card id")
 	}
 	ex := &mcpgw.HTTPBoardExchanger{BaseURL: c.core.BaseURL, InternalKey: c.core.InternalKey, HTTP: c.core.httpClient()}
-	tok, err := ex.ExchangeReadOnly(ctx, proof, board, "")
+	tok, err := ex.ExchangeReadOnly(ctx, proof, board, "", true)
 	if err != nil {
 		return filedCard{}, apiErrorf(503, "Board access could not be verified.")
 	}

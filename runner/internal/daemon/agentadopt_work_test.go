@@ -25,7 +25,7 @@ func TestDriverReportsOpenWork(t *testing.T) {
 	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", &collectEmitter{}, nil)
 	d.now = func() time.Time { return time.Unix(1_800_000_000, 0) }
 	d.steer.legacy = false
-	p := &ccProc{}
+	p := claudeTestProc(t, d, &ccProc{})
 	d.steer.proc = p
 	type snap struct {
 		tasks []agent.BackgroundTaskStartedPayload
@@ -629,6 +629,7 @@ func TestRestartDenyList(t *testing.T) {
 		{"kubectl apply -f k8s/", true},
 		{"kubectl -n blerg delete pod x", true},
 		{"./install.sh install --yes", true},
+		{"make install-daemon", true},
 		{"systemctl --user restart blerg-runner-daemon", true},
 		{"launchctl kickstart -k gui/501/x", true},
 		{`psql -c "DROP TABLE sessions"`, true},
@@ -912,7 +913,7 @@ func TestEngineEndEndsItsSubagents(t *testing.T) {
 	if rec, _ := readRecord(t, dir, "s1"); len(rec.OpenSubagents) != 1 || rec.OpenSubagents[0].AgentID != "a1234" || len(rec.OpenTasks) != 1 {
 		t.Fatalf("open while it runs: %+v", rec)
 	}
-	d.endBackgroundTasks()
+	d.endBackgroundTasks(false)
 	var ends []agent.SubagentPayload
 	for _, ev := range em.snapshot() {
 		if p, ok := ev.Payload.(agent.SubagentPayload); ok && ev.Kind == "subagent_done" && !p.Background {

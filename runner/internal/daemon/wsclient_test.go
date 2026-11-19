@@ -101,6 +101,7 @@ func TestWSClient(t *testing.T) {
 	defer cancel()
 
 	client := NewWSClient(cfg)
+	client.repositoryCloneVersion = protocol.RepositoryCloneVersion
 	go client.Run(ctx, func() []string { return []string{} })
 
 	// ── Assert: first daemon_hello received ───────────────────────────────────
@@ -113,6 +114,9 @@ func TestWSClient(t *testing.T) {
 
 	if firstHello.Type != "daemon_hello" {
 		t.Errorf("first message type = %q, want daemon_hello", firstHello.Type)
+	}
+	if firstHello.RepositoryCloneVersion != protocol.RepositoryCloneVersion {
+		t.Fatal("hello omitted repository clone capability")
 	}
 	hostname, err := os.Hostname()
 	if err != nil || firstHello.Hostname != hostname || firstHello.Hostname == "" {
@@ -233,9 +237,10 @@ func TestHelloAndHeartbeatReportRepoRemotes(t *testing.T) {
 	}
 
 	type msg struct {
-		Type        string                         `json:"type"`
-		RepoRemotes map[string]string              `json:"repo_remotes"`
-		RepoOrigins map[string]protocol.RepoOrigin `json:"repo_origins"`
+		WorkBranches bool                           `json:"work_branches"`
+		Type         string                         `json:"type"`
+		RepoRemotes  map[string]string              `json:"repo_remotes"`
+		RepoOrigins  map[string]protocol.RepoOrigin `json:"repo_origins"`
 	}
 	// repo_origins carries every provider; the legacy repo_remotes stays
 	// GitHub-only so an older server never reads a GitLab repo as GitHub.
@@ -277,6 +282,9 @@ func TestHelloAndHeartbeatReportRepoRemotes(t *testing.T) {
 				continue
 			}
 			seen[m.Type] = true
+			if m.Type == "daemon_hello" && !m.WorkBranches {
+				t.Fatal("daemon did not advertise recorded work branches")
+			}
 			if len(m.RepoRemotes) != len(want) {
 				t.Fatalf("%s repo_remotes = %v, want %v", m.Type, m.RepoRemotes, want)
 			}

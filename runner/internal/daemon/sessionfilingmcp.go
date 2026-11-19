@@ -78,7 +78,7 @@ func codexSessionFilingStdio() map[string]any {
 }
 func sessionFilingSpec() map[string]any {
 	str := map[string]any{"type": "string"}
-	return map[string]any{"type": "function", "name": sessionFilingToolName, "description": "List accessible boards, search for duplicates, or propose a ticket. A person must approve before any card is written.", "inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"action"}, "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"list_boards", "search", "propose"}}, "board": str, "query": str, "title": str, "body": str, "type": str, "sensitive": map[string]any{"type": "boolean"}, "repos": map[string]any{"type": "array", "items": str}}}}
+	return map[string]any{"type": "function", "name": sessionFilingToolName, "description": "List accessible boards, search for duplicates, or propose a ticket. A person must approve before any card is written.", "inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"action"}, "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"list_boards", "search", "propose"}}, "board": str, "query": str, "title": str, "size": str, "risk": str, "complexity": str, "body": str, "type": str, "sensitive": map[string]any{"type": "boolean"}, "repos": map[string]any{"type": "array", "items": str}}}}
 }
 
 // sessionFilingTool is used only by Codex's already isolated dynamic runtime.

@@ -59,6 +59,11 @@ func ListLiveEvents(ctx context.Context, pool *pgxpool.Pool, sessionID string, t
 		return nil, err
 	}
 	rows = append(rows, latest...)
+	notes, err := scanEventRows(ctx, pool, `SELECT DISTINCT ON(payload->>'message_id') session_id,seq,client_event_id,kind,payload::text,ts FROM agent_events WHERE session_id=$1 AND seq<=$2 AND kind='bound_ask_note' ORDER BY payload->>'message_id',seq DESC`, sessionID, throughSeq)
+	if err != nil {
+		return nil, err
+	}
+	rows = append(rows, notes...)
 	sortRowsBySeq(rows)
 	return rows, nil
 }

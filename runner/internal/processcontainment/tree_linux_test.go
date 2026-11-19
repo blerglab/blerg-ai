@@ -39,25 +39,25 @@ func TestFreezeDiagnosticsBounded(t *testing.T) {
 	}
 }
 
-// wait4 may return a child's initial stop and even its exit before its creator's event. Force each
+// wait4 may return a child's first stop and even its exit before its creator's event. Force each
 // order: an event that arrives after the child was reaped must not track it again.
 func TestBirthsReconcileEitherReportOrder(t *testing.T) {
 	b := newBirths()
 	// child stop, child exit, then the creator's event
-	if !b.reported(100, false, false) {
+	if !b.reported(100, false) {
 		t.Fatal("an untracked TID's first report is a birth")
 	}
 	if track, _ := b.created(100, false); track {
 		t.Fatal("a reaped child would be tracked again by its creator's late event")
 	}
 	// the creator's event first: the child is pending until it reports itself
-	if track, superseded := b.created(101, false); !track || superseded {
+	if track, reborn := b.created(101, false); !track || reborn {
 		t.Fatal("a child announced first must be tracked as pending")
 	}
-	if b.reported(101, true, true) {
+	if b.reported(101, true) {
 		t.Fatal("a pending child's first stop is not another birth")
 	}
-	if len(b.early) != 0 || len(b.pending) != 0 || len(b.stale) != 0 {
+	if len(b.early) != 0 || len(b.pending) != 0 {
 		t.Fatalf("leftover state: %+v", b)
 	}
 }
@@ -65,8 +65,8 @@ func TestBirthsReconcileEitherReportOrder(t *testing.T) {
 // One TID can be reported, reaped and reused before either creator event arrives.
 func TestBirthsCountOverlappingGenerations(t *testing.T) {
 	b := newBirths()
-	b.reported(100, false, false) // first task, reaped
-	b.reported(100, false, false) // reused TID, reaped too
+	b.reported(100, false) // first task, reaped
+	b.reported(100, false) // reused TID, reaped too
 	for i := range 2 {
 		if track, _ := b.created(100, false); track {
 			t.Fatalf("creator event %d would track a dead task", i+1)
@@ -77,52 +77,33 @@ func TestBirthsCountOverlappingGenerations(t *testing.T) {
 	}
 }
 
-// A non-leader thread T execs: Linux frees T's TID before the tracer collects the EXEC event that
-// names it. A new task C reusing that TID is a birth in either report order, and the EXEC event
-// removes only the stale entry, never C's.
-func TestBirthsTIDReusedDuringPendingExec(t *testing.T) {
-	const T = 200
-	t.Run("child stop first", func(t *testing.T) {
-		b := newBirths()
-		b.reported(T, false, false) // T itself, long ago
-		b.created(T, true)
-		if !b.ambiguous(T) || !b.reported(T, true, true) {
-			t.Fatal("C's auto-attach stop under T's stale TID must be a birth (ledger record, no continue before it)")
-		}
-		if track, _ := b.created(T, true); track {
-			t.Fatal("C's creator event must pair with C's early report")
-		}
-		if b.execed(T) {
-			t.Fatal("T's EXEC event would delete C's live entry")
-		}
-		if !b.execed(T) {
-			t.Fatal("a later exec of the same TID removes its entry again")
-		}
-	})
-	t.Run("creator event first", func(t *testing.T) {
-		b := newBirths()
-		b.reported(T, false, false)
-		b.created(T, true)
-		track, superseded := b.created(T, true)
-		if !track || !superseded {
-			t.Fatal("C's creator event under T's stale TID must track C as a new, pending task")
-		}
-		if b.ambiguous(T) || b.reported(T, true, true) {
-			t.Fatal("C's own first stop pairs with its creator event")
-		}
-		if b.execed(T) {
-			t.Fatal("T's EXEC event would delete C's live entry")
-		}
-	})
-	t.Run("no reuse", func(t *testing.T) {
-		b := newBirths()
-		b.reported(T, false, false)
-		b.created(T, true)
-		if b.reported(T, true, false) {
-			t.Fatal("a freeze stop of a tracked task is not a birth")
-		}
-		if !b.execed(T) {
-			t.Fatal("T's EXEC event removes T's former TID")
-		}
-	})
+// A creator event naming a task that is tracked and settled is the one thing the exec barrier rules
+// out. It is noticed, and the new task is still tracked.
+// A task that came past the barrier can report, exit and be reaped with its creator's event still to
+// come. That event must not track it. If the event already came, its own report is still due.
+func TestBirthsKeepATaskPastTheBarrier(t *testing.T) {
+	b := newBirths()
+	b.kept(7)
+	if track, reborn := b.created(7, false); track || reborn {
+		t.Fatalf("the creator's event tracked a gone task: track=%t reborn=%t", track, reborn)
+	}
+	if b.created(8, true); !b.pending[8] {
+		t.Fatal("not pending")
+	}
+	b.kept(8)
+	if b.early[8] != 0 {
+		t.Fatal("a creator's event already seen was counted as still due")
+	}
+}
+
+func TestBirthsNoticeATrackedTIDReborn(t *testing.T) {
+	b := newBirths()
+	b.reported(200, false)
+	b.created(200, true)
+	if track, reborn := b.created(200, true); !track || !reborn {
+		t.Fatal("a new task under a tracked TID went unnoticed")
+	}
+	if b.reported(200, true) {
+		t.Fatal("its own first stop pairs with its creator event")
+	}
 }

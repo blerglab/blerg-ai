@@ -214,13 +214,18 @@ func (a *API) startOnRunnerConfigured(ctx context.Context, boardID string, req r
 		if err != nil {
 			return "", runner.StartRequest{}, err
 		}
-		if err := a.clusterReposProblem(ctx, board, []string{req.Repo}); err != nil {
+		if err := a.clusterReposProblem(ctx, board, startRepositoryNames(req)); err != nil {
 			return "", runner.StartRequest{}, err
 		}
 	}
 	token, engine := authority.Token, authority.Engine
 
 	req.Runtime, req.DaemonID = target.Runtime, target.DaemonID
+	if target.Runtime == "cluster" {
+		req.RuntimeTargetID = "cluster"
+	} else if target.Runtime != "" {
+		req.RuntimeTargetID = ""
+	}
 	req.Token, req.Engine = token, engine
 	model := modelForEngine(engine, req.Model)
 	if model != req.Model {
@@ -322,4 +327,15 @@ func (a *API) verifyAutomationToken(w http.ResponseWriter, p auth.Principal, raw
 	}
 	exp := tok.ExpiresAt
 	return &db.AutomationTokenUpdate{Token: raw, ExpiresAt: &exp, AccountID: tok.AccountID}, true
+}
+
+func startRepositoryNames(req runner.StartRequest) []string {
+	if len(req.Repositories) == 0 {
+		return []string{req.Repo}
+	}
+	repos := make([]string, len(req.Repositories))
+	for i, repo := range req.Repositories {
+		repos[i] = repo.Repo
+	}
+	return repos
 }

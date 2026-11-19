@@ -57,6 +57,9 @@ func TestWorkspaceRecoveryAfterLostRemovalAcknowledgement(t *testing.T) {
 	if results[0].Pending || results[0].Head == results[0].Base {
 		t.Fatalf("offline copy lost work: %+v", results)
 	}
+	if results[0].Summary == nil || len(results[0].Summary.Commits) != 1 || results[0].Summary.Commits[0].SHA != results[0].Head || len(results[0].Summary.Files) != 1 {
+		t.Fatalf("delivered metadata missing: %+v", results[0].Summary)
+	}
 }
 
 func TestWorkspaceRecoverMemberReleaseIntentAfterDeletion(t *testing.T) {
@@ -372,5 +375,38 @@ func TestWorkspaceRecoverPreparedBeforeRuntimeCreation(t *testing.T) {
 	}
 	if recovered.state.Stopped || len(recovered.state.Members) != 2 {
 		t.Fatal("prepared membership lost")
+	}
+}
+
+func TestWorkspaceWorkerSyncWithoutDocker(t *testing.T) {
+	w, _, _, sources := localWorkspaceFixture(t)
+	childCommit(t, w.state.Members[0].Clone, "worker-change.txt")
+	bin := t.TempDir()
+	for _, name := range []string{"git", "sh"} {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(path, filepath.Join(bin, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin)
+	if _, err := exec.LookPath("docker"); err == nil {
+		t.Fatal("docker visible in worker fixture")
+	}
+	results, err := w.Sync(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Pending || results[0].Head == results[0].Base {
+		t.Fatalf("worker sync failed: %+v", results[0])
+	}
+	if results[0].Summary == nil || len(results[0].Summary.Commits) != 1 || results[0].Summary.Commits[0].SHA != results[0].Head || len(results[0].Summary.Files) != 1 {
+		t.Fatalf("delivered metadata missing: %+v", results[0].Summary)
+	}
+	tip := childRepoGit(t, sources[0].Path, "rev-parse", "refs/heads/"+w.branch())
+	if tip != results[0].Head {
+		t.Fatal("destination did not receive worker commit")
 	}
 }

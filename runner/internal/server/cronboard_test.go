@@ -35,7 +35,7 @@ type fakeBoardExchanger struct {
 	revoked []string
 }
 
-func (f *fakeBoardExchanger) Exchange(_ context.Context, p mcpgw.Proof, boardID, _ string) (mcpgw.BoardToken, error) {
+func (f *fakeBoardExchanger) Exchange(_ context.Context, p mcpgw.Proof, boardID, _ string, standing bool) (mcpgw.BoardToken, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
@@ -158,7 +158,7 @@ func TestCronWithBoardGetsTheBuiltinBoardGrant(t *testing.T) {
 		}
 	}
 	for _, n := range mcpgw.BoardToolNames() {
-		if mcpgw.IsBoardColumnTool(n) {
+		if mcpgw.BoardToolNeedsPerson(n) {
 			if _, ok := board.Tools[n]; ok {
 				t.Errorf("a cron's board grant carries column tool %s", n)
 			}

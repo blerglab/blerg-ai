@@ -5,13 +5,17 @@ package server
 // A parent session that starts a child would otherwise have to keep `blerg-runner session watch`
 // running to learn that the child finished, asked something, is waiting on the person's approval
 // or failed. Instead the runner tells it, as a note from Blerg that arrives at the parent's next
-// step: `Child "<title>" finished its turn: "<first line>". blerg-runner session result <id>`.
+// step with fixed event metadata. Main explicitly reads untrusted worker data
+// through `blerg-runner session result <id>`; worker text never enters a wake.
 //
 // The note is relayed in Blerg's own voice (source childTurnSource, which reservedMessageSource
-// refuses from every caller, so no agent can write one) through sendRelay. It is deduplicated per
-// child turn: its client id names the child, the kind of note and the child's newest user message
-// (the input its current turn answers), so a re-sent event, a turn that both ends in error and
-// marks the session errored, or a second question in the same turn tells the parent once. A parent
+// refuses from every caller, so no agent can write one) through sendRelay. A completed turn's
+// notification is saved with its transcript event and retried until the parent's input outbox
+// accepts it. Its stable client ID names the child and the first outstanding root work event.
+// Background continuations update that report while its parent input is unconsumed. The latest
+// summary survives reconnect without another engine wake. Repeated ends share that ID,
+// including a turn that both errors and marks the session errored.
+// Questions are delivered independently by child_questions.go, once per question. A parent
 // that has ended is never woken.
 
 import (
@@ -19,11 +23,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 )
 
@@ -32,11 +38,12 @@ const childTurnSource = "child_turn"
 
 // What a child's turn ended in.
 const (
-	childTurnFinished  = "finished"
-	childTurnAsked     = "asked"
-	childTurnApproval  = "approval"
-	childTurnFailed    = "failed"
-	childRestartPaused = "restart_paused"
+	childDiscardUnanswered = "discard_unanswered"
+	childTurnFinished      = "finished"
+	childTurnAsked         = "asked"
+	childTurnApproval      = "approval"
+	childTurnFailed        = "failed"
+	childRestartPaused     = "restart_paused"
 	// childSessionFailed: the session itself failed (its runtime stopped, it exited with an
 	// error) rather than one of its turns. Its note is deduplicated apart from the turn's, so a
 	// child that dies after its last turn was reported is still reported.
@@ -98,12 +105,31 @@ func (s *childTurnSeen) forget(key string) {
 // onChildTurnEnded is the hub hook: it runs off the caller's goroutine (a daemon's read pump, a
 // request handler), since relaying to the parent can wait on the parent's own locks.
 func (a *API) onChildTurnEnded(sessionID, kind, detail string) {
-	if a == nil || a.dbPool == nil || sessionID == "" {
+	if a == nil || a.dbPool == nil || !validSessionID(sessionID) {
 		return
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), childTurnNoteTimeout)
 		defer cancel()
+		if kind == "recommended_channel_closed" {
+			if _, err := a.dbPool.Exec(ctx, `INSERT INTO channel_close_notices(child_id) VALUES($1) ON CONFLICT DO NOTHING`, sessionID); err != nil {
+				failurelog.Default.Event("runner:channel-close:record", slog.LevelError, "component", "runner", "operation", "channel_close", "stage", "record", "session_id", sessionID, "cause", failurelog.Cause(err))
+				return
+			}
+			if err := a.reconcileChannelCloses(ctx); err != nil {
+				failurelog.Default.Event("runner:channel-close:reconcile", slog.LevelError, "component", "runner", "operation", "channel_close", "stage", "reconcile", "session_id", sessionID, "cause", failurelog.Cause(err))
+			}
+			return
+		}
+		if kind == "durable_turn" {
+			// Scoped to sessionID: every "durable_turn" call site names the one child whose
+			// notice might now be ready, so there is no need to sweep every other child's
+			// pending row too (BLG-447 review).
+			if err := a.reconcileChildTurn(ctx, sessionID); err != nil {
+				log.Printf("child turn delivery: %v", err)
+			}
+			return
+		}
 		if err := recordSessionFailure(ctx, a.hub, a.dbPool, sessionID); err != nil {
 			log.Printf("session failure alert: %v", err)
 		}
@@ -121,8 +147,8 @@ func (a *API) onChildTurnEnded(sessionID, kind, detail string) {
 }
 
 // noteChildTurn relays one child-turn note to childID's parent, if it has one that is still
-// running. Best effort: a failure is logged.
-func (a *API) noteChildTurn(ctx context.Context, childID, kind, detail string) bool {
+// running. This is one attempt; durable turn intents retry failures.
+func (a *API) noteChildTurn(ctx context.Context, childID, kind, detail string, notice ...childTurnDelivery) bool {
 	// Reconciliation calls this directly too. A stuck coordinator must not
 	// hold up the independent owner alert or its escalation sweep.
 	ctx, cancel := context.WithTimeout(ctx, childTurnNoteTimeout)
@@ -131,6 +157,12 @@ func (a *API) noteChildTurn(ctx context.Context, childID, kind, detail string) b
 	if err != nil || child == nil {
 		return false
 	}
+	if kind == "recommended_channel_closed" {
+		return a.noteRecommendedChannelClosed(ctx, child)
+	}
+	if child.DelegationVia == "person" {
+		return true
+	} // Personal chats never relay their content to Main.
 	parentID := derefOrEmpty(child.ParentSessionID)
 	if parentID == "" || child.ArchivedAt != nil {
 		return false
@@ -139,54 +171,82 @@ func (a *API) noteChildTurn(ctx context.Context, childID, kind, detail string) b
 	if err != nil || parent == nil || parent.Kind != "agent" {
 		return false
 	}
-	if parentEnded(parent) {
+	if parentEnded(parent) || parent.Status == "error" {
+		return false
+	}
+	if a.hub.FindDaemonForSession(parentID) == nil && derefOrEmpty(parent.Runtime) == runnerRuntimeCluster {
 		return false
 	}
 	if kind == childTurnFinished || (kind == childTurnFailed && detail == "") {
-		answer, failure := a.lastTurnAnswer(ctx, childID)
-		switch {
-		case failure != "":
-			kind, detail = childTurnFailed, failure
-		case kind == childTurnFinished:
-			detail = answer
+		failure := ""
+		if len(notice) > 0 {
+			var err error
+			_, failure, _, err = a.childTurnAnswer(ctx, childID, notice[0].event)
+			if err != nil {
+				return false
+			}
+		} else {
+			_, failure = a.lastTurnAnswer(ctx, childID)
+		}
+		if failure != "" {
+			kind = childTurnFailed
 		}
 	}
-	if (kind == childTurnFailed || kind == childSessionFailed) && detail == "" {
-		detail = derefOrEmpty(child.ErrorReason)
-		if detail == "" {
-			detail = strings.ReplaceAll(derefOrEmpty(child.EndReason), "_", " ")
+	coalesce := len(notice) > 0
+	turn := int64(0)
+	if len(notice) > 0 {
+		turn = notice[0].turn
+	} else {
+		var err error
+		if kind == childTurnFinished || kind == childTurnFailed {
+			err = a.dbPool.QueryRow(ctx, `SELECT COALESCE(max(seq),0) FROM agent_events WHERE session_id=$1 AND (kind='user_message' OR (kind IN ('assistant_text','tool_call') AND COALESCE(payload->>'parent_call_id','')=''))`, childID).Scan(&turn)
+		} else {
+			turn, err = db.LatestUserMessageSeq(ctx, a.dbPool, childID)
+		}
+		if err != nil {
+			log.Printf("child turn note %s: %v", childID, err)
+			return false
 		}
 	}
-	turn, err := db.LatestUserMessageSeq(ctx, a.dbPool, childID)
-	if err != nil {
-		log.Printf("child turn note %s: %v", childID, err)
-		return false
+	if !coalesce && (kind == childTurnFinished || kind == childTurnFailed) {
+		var outstanding int64
+		err := a.dbPool.QueryRow(ctx, `SELECT COALESCE((SELECT c.turn_seq FROM child_turn_notices c WHERE c.child_id=$1 AND (NOT c.delivered OR EXISTS(SELECT 1 FROM session_inputs i WHERE i.session_id=$2 AND i.client_id='child-turn-'||c.child_id::text||'-finished-'||c.turn_seq::text AND i.settled_at IS NULL)) ORDER BY c.event_seq DESC LIMIT 1),-1)`, childID, parentID).Scan(&outstanding)
+		if err != nil {
+			return false
+		}
+		if outstanding >= 0 {
+			turn = outstanding
+			coalesce = true
+		}
 	}
 	group := kind
 	if kind == childTurnFailed {
 		group = childTurnFinished // one end of a turn, however it is reported
 	}
 	clientID := fmt.Sprintf("child-turn-%s-%s-%d", childID, group, turn)
-	if !a.childTurns.first(clientID) {
+	if !coalesce && !a.childTurns.first(clientID) {
 		return false
 	}
-	text := childTurnNote(childTitle(child), childID, kind, detail)
-	if kind == childSessionFailed && !db.TerminallyEnded(child) {
-		text = "Child " + quotedName(childTitle(child)) + " stopped unexpectedly: " + quotedLine(detail, 160) + ". Check its work before resuming. blerg-runner session result " + childID
-	}
-	if problem := a.lastTurnSyncProblem(ctx, childID); kind != childRestartPaused && problem != "" {
-		text += " Its commits from this turn were NOT brought back to wip/" + childID + ": " + quotedLine(problem, 160) + "."
-	}
-	if kind == childSessionFailed || kind == childRestartPaused || kind == childTurnFailed {
-		work, _ := failureWork(ctx, a.dbPool, child)
-		text += " " + work
+	noticeEvent := workerEvent{childID, kind, workerEventID(clientID)}
+	text := workerNotice(noticeEvent.child, noticeEvent.kind, noticeEvent.id)
+	if coalesce {
+		refreshed, err := db.RefreshChildTurnInput(ctx, a.dbPool, parentID, clientID, text)
+		if err != nil {
+			return false
+		}
+		if refreshed {
+			return true
+		}
+		if !a.childTurns.first(clientID) {
+			return true
+		}
 	}
 	principal := runnerPrincipal{Kind: "human", Sub: derefOrEmpty(parent.SpawningAccountID)}
 	var apiErr *APIError
 	if dc := a.hub.FindDaemonForSession(parentID); dc == nil || dc.CanInputReceipts() {
-		apiErr = a.sendRelay(ctx, principal, parentID, text, childTurnSource, clientID)
+		apiErr = a.sendWorkerNotice(ctx, principal, parentID, noticeEvent, clientID)
 	} else {
-		apiErr = a.sendRelay(ctx, principal, parentID, text, childTurnSource)
+		apiErr = a.sendWorkerNotice(ctx, principal, parentID, noticeEvent)
 	}
 	if apiErr != nil {
 		a.childTurns.forget(clientID)
@@ -205,33 +265,6 @@ func childTitle(child *db.SessionRow) string {
 		return t
 	}
 	return sessionLabel("", child.Repo, child.ID)
-}
-
-// childTurnNote is the note's text. The title and the child's own words are quoted on one line
-// and clipped, so a child cannot make its text read as Blerg's.
-func childTurnNote(title, childID, kind, detail string) string {
-	head := "Child " + quotedName(title)
-	line := quotedLine(detail, 160)
-	with := func(s string) string {
-		if line == "" {
-			return s
-		}
-		return s + ": " + line
-	}
-	switch kind {
-	case childRestartPaused:
-		return with(head+" paused after a restart") + fmt.Sprintf(". Check its interrupted work before resuming. blerg-runner session result %s", childID)
-	case childTurnAsked:
-		return with(head+" asked a question") + fmt.Sprintf(". Answer it with blerg-runner session send %s \"<answer>\"; escalate anything destructive with blerg-runner ask.", childID)
-	case childTurnApproval:
-		return with(head+" is waiting on an approval from the person") + fmt.Sprintf(". Only the person can decide it, in the child's chat. blerg-runner session result %s", childID)
-	case childTurnFailed:
-		return with(head+" failed its turn") + fmt.Sprintf(". blerg-runner session result %s", childID)
-	case childSessionFailed:
-		return with(head+" failed") + fmt.Sprintf(" and stopped; it takes no more messages. blerg-runner session result %s", childID)
-	default:
-		return with(head+" finished its turn") + fmt.Sprintf(". blerg-runner session result %s", childID)
-	}
 }
 
 // quotedLine is the first non-empty line of s, its whitespace collapsed and double quotes made
@@ -268,6 +301,10 @@ func (a *API) lastTurnSyncProblem(ctx context.Context, childID string) string {
 	if err != nil {
 		return ""
 	}
+	return turnSyncProblem(rows)
+}
+
+func turnSyncProblem(rows []db.AgentEventRow) string {
 	for i, ev := range rows { // newest first
 		if ev.Kind == turnDoneKind {
 			if i > 0 {

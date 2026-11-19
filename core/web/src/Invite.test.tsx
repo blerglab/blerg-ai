@@ -1,0 +1,31 @@
+import { beforeEach, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import Invite from "./Invite";
+const mock = vi.hoisted(() => ({ redirect: vi.fn() }));
+vi.mock('./authClient', () => ({ redirectToRefresh: mock.redirect }));
+beforeEach(() => { mock.redirect.mockReset(); history.replaceState(null, '', '/invite#code=' + 'a'.repeat(43)); });
+it('consumes the fragment and sends chosen credentials before desktop setup', async () => {
+    const fetch = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', fetch);
+    render(<Invite />);
+    expect(location.hash).toBe('');
+    fireEvent.change(screen.getByLabelText('Choose your username'), { target: { value: 'new-person' } });
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'a-long-password' } });
+    fireEvent.change(screen.getByLabelText('Confirm password'), { target: { value: 'a-long-password' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Set up your desktop' }));
+    await waitFor(() => expect(mock.redirect).toHaveBeenCalledWith(`${location.origin}/settings?setup=desktop`));
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ code: 'a'.repeat(43), provider_subject: 'new-person', password: 'a-long-password' });
+    vi.unstubAllGlobals();
+});
+it('refuses mismatched passwords before sending the invite', async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    render(<Invite />);
+    fireEvent.change(screen.getByLabelText('Choose your username'), { target: { value: 'new-person' } });
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'a-long-password' } });
+    fireEvent.change(screen.getByLabelText('Confirm password'), { target: { value: 'different-password' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Set up your desktop' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent("Passwords don't match.");
+    expect(fetch).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+});

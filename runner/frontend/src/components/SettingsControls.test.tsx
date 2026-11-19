@@ -15,7 +15,7 @@ const json = (body: unknown, ok = true) => Promise.resolve({ ok, status: ok ? 20
 
 // The app's styled classes for a button (the general .btn, and the dialog's own close ✕, preview
 // segments and Reset links) and for a select.
-const BUTTON_CLASSES = ['btn', 'caps-close', 'cc-seg', 'cc-reset']
+const BUTTON_CLASSES = ['btn', 'refresh-control', 'caps-close', 'cc-seg', 'cc-reset']
 
 function unstyled(root: HTMLElement): string[] {
   const out: string[] = []

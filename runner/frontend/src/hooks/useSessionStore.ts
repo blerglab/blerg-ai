@@ -1,3 +1,4 @@
+import { setShellReportContext } from '../shellReport'
 import { clearHovercardCache, clearPreviewCache, useTranscriptStore } from '@blerglab/chat'
 import { invalidateChatTransport } from '../lib/chatTransport'
 import { clearLaunchCache } from '../lib/launchCache'
@@ -5,7 +6,7 @@ import { syncViewCacheSessions } from '../lib/sessionViewCache'
 import { clearDesktopCacheScopes, desktopCacheScopeLost, rememberDesktopCacheScope, updateDesktopSessionScopes } from '../lib/desktopCacheScope'
 import { create } from 'zustand'
 import type { DaemonInfo, SessionInfo, SessionStatus, InitialState, DaemonConnected, DaemonDisconnected, SessionStarted, SessionStateChanged, SessionReadChanged, SessionStarChanged, SessionMetaChanged, SessionTitleChanged, SessionEnded, SessionArchived, SessionBackgroundChanged, SessionPausedChanged, SessionNotice, DaemonLimitsChanged } from '../types'
-import { onMessage } from '../ws'
+import { onClose, onMessage } from '../ws'
 import { useToastStore } from './useToastStore'
 
 // Module-level timer handles so they're cancellable without storing in zustand state.
@@ -20,6 +21,8 @@ const PENDING_TIMEOUT_MESSAGE = "This is taking longer than expected — it may 
 interface SessionStore {
   daemons: DaemonInfo[]
   sessions: SessionInfo[]
+  /** A full snapshot has arrived on the current connection and identity. */
+  inventoryComplete: boolean
   serverVersion: string
   /** The release version (the VERSION file) and git commit the server was built from; '' when unstamped. */
   serverRelease: string
@@ -70,12 +73,14 @@ function invalidateDesktopTranscripts() {
 }
 
 export const useSessionStore = create<SessionStore>((set, get) => {
+  onClose(() => set({ inventoryComplete: false }))
+
   window.addEventListener('blerg-identity-changed', () => {
     invalidateChatTransport()
     useTranscriptStore.setState({ sessions: {} })
     clearDesktopCacheScopes()
     clearLaunchCache()
-    set({ daemons: [], sessions: [], pendingSessionIds: {}, failedSessions: {} })
+    set({ daemons: [], sessions: [], inventoryComplete: false, pendingSessionIds: {}, failedSessions: {} })
     clearHovercardCache()
     clearPreviewCache()
     window.dispatchEvent(new Event('blerg-desktop-scope-changed'))
@@ -94,14 +99,14 @@ export const useSessionStore = create<SessionStore>((set, get) => {
     clearLaunchCache()
     set(state => ({ failedSessions: {}, daemons: state.daemons.filter(d => d.id !== msg.desktop_id),
       sessions: state.sessions.map(s => s.daemon_id === msg.desktop_id
-        ? { ...s, daemon_id: '', project_path: '', repo: '', desktop_compatibility: undefined, desktop_status: undefined, desktop_status_reason: undefined, workspace: undefined, workspace_results: undefined, error_reason: undefined, message: undefined } : s) }))
+        ? { ...s, daemon_id: '', project_path: '', repo: '', desktop_compatibility: undefined, desktop_status: undefined, desktop_status_reason: undefined, workspace: undefined, workspace_results: undefined, repository_request: undefined, error_reason: undefined, message: undefined } : s) }))
     clearHovercardCache()
     clearPreviewCache()
     window.dispatchEvent(new Event('blerg-desktop-scope-changed'))
   })
   onMessage<import('../types').DesktopInventoryInvalidated>('desktop_inventory_invalidated', () => {
     invalidateDesktopTranscripts()
-    set(state => ({ failedSessions: {}, daemons: [], sessions: state.sessions.map(s => ({ ...s, daemon_id: '', project_path: '', repo: '', desktop_compatibility: undefined, desktop_status: undefined, desktop_status_reason: undefined, workspace: undefined, workspace_results: undefined, error_reason: undefined, message: undefined })) }))
+    set(state => ({ failedSessions: {}, daemons: [], sessions: state.sessions.map(s => ({ ...s, daemon_id: '', project_path: '', repo: '', desktop_compatibility: undefined, desktop_status: undefined, desktop_status_reason: undefined, workspace: undefined, workspace_results: undefined, repository_request: undefined, error_reason: undefined, message: undefined })) }))
     // Metadata-free hint: refresh only our own inventory, never borrow the
     // administrator's assignment list for launch discovery.
     clearLaunchCache()
@@ -134,7 +139,7 @@ export const useSessionStore = create<SessionStore>((set, get) => {
     const key = serverVersion === "" ? "" : `${serverVersion}@${msg.server_commit ?? ""}`
     const loaded = get().loadedVersion || key
     set({
-      daemons: msg.daemons, sessions: msg.sessions, statusChangedAt, serverVersion,
+      daemons: msg.daemons, sessions: msg.sessions, inventoryComplete: true, statusChangedAt, serverVersion,
       serverRelease: msg.server_release ?? "", serverCommit: msg.server_commit ?? "",
       latestVersion: msg.latest_version ?? "", latestUrl: msg.latest_url ?? "",
       maxFileBytes: typeof msg.limits?.max_file_bytes === "number" && msg.limits.max_file_bytes > 0 ? msg.limits.max_file_bytes : null,
@@ -178,6 +183,7 @@ export const useSessionStore = create<SessionStore>((set, get) => {
   })
 
   onMessage<SessionStarted>('session_started', (msg) => {
+    const previousRepositoryRequest = get().sessions.find(s => s.id === msg.session.id)?.repository_request?.id
     // A queued update may be redacted at delivery after ownership changed.
     // Invalidate before replacing the row, without waiting for a scope watcher.
     const lostAccess = lostDesktopAccess([msg.session], false)
@@ -210,8 +216,11 @@ export const useSessionStore = create<SessionStore>((set, get) => {
           ...msg.session,
           // This is a full snapshot; an omitted reason clears a prior pod death.
           error_reason: msg.session.error_reason,
+          repository_request: msg.session.repository_request,
           status: liveAlready && msg.session.status === 'starting' ? prev.status : msg.session.status,
           starred: prev.starred,
+          color: prev.color,
+          emoji: prev.emoji ?? msg.session.emoji,
           unread: prev.unread,
         }
         const sessions = [...state.sessions]
@@ -230,6 +239,7 @@ export const useSessionStore = create<SessionStore>((set, get) => {
         pendingSessionIds: pendingRest,
       }
     })
+    if (previousRepositoryRequest !== msg.session.repository_request?.id) window.dispatchEvent(new Event('blerg:repository-requests-changed'))
     if (lostAccess) window.dispatchEvent(new Event('blerg-desktop-scope-changed'))
   })
 
@@ -334,9 +344,19 @@ export const useSessionStore = create<SessionStore>((set, get) => {
   onMessage<SessionPausedChanged>('session_paused_changed', (msg) => {
     set((state) => ({
       sessions: state.sessions.map(s =>
-        s.id === msg.session_id ? { ...s, paused_reason: msg.paused_reason || undefined } : s
+        s.id === msg.session_id ? { ...s, paused_reason: msg.paused_reason || undefined, paused_detail: msg.paused_detail, ...(msg.paused_reason ? {status: 'waiting' as const} : {}) } : s
       ),
     }))
+  })
+
+  onMessage<import('../types').SessionVerbosityChanged>('session_verbosity_changed', msg => {
+    set(state => ({sessions:state.sessions.map(session => session.id === msg.session_id ? {...session,verbosity:msg.verbosity} : session)}))
+  })
+  onMessage<import('../types').SessionEmojiChanged>('session_emoji_changed', msg => {
+    set(state => ({sessions: state.sessions.map(s => s.id === msg.session_id ? {...s, emoji: msg.emoji} : s)}))
+  })
+  onMessage<{type: 'session_color_changed'; session_id: string; color: string}>('session_color_changed', (msg) => {
+    set(state => ({ sessions: state.sessions.map(s => s.id === msg.session_id ? {...s, color: msg.color} : s) }))
   })
 
   onMessage<SessionTitleChanged>('session_title_changed', (msg) => {
@@ -371,6 +391,7 @@ export const useSessionStore = create<SessionStore>((set, get) => {
   return {
     daemons: [],
     sessions: [],
+    inventoryComplete: false,
     serverVersion: "",
     serverRelease: "",
     serverCommit: "",
@@ -383,7 +404,7 @@ export const useSessionStore = create<SessionStore>((set, get) => {
     pendingSessionIds: {},
     failedSessions: {},
 
-    setInitialState: (daemons, sessions) => set({ daemons, sessions }),
+    setInitialState: (daemons, sessions) => set({ daemons, sessions, inventoryComplete: true }),
 
     upsertDaemon: (daemon) =>
       set((state) => {
@@ -491,3 +512,11 @@ useSessionStore.subscribe((state, previous) => {
   if (state.sessions !== previous.sessions) syncViewCacheSessions(state.sessions)
 })
 useTranscriptStore.subscribe(rememberTranscriptScopes)
+
+// Resolve only presentation/version fields when the person explicitly copies a report.
+setShellReportContext(session => {
+  const store = useSessionStore.getState()
+  const daemonId = store.sessions.find(s => s.id === session)?.daemon_id
+  const daemon = store.daemons.find(d => d.id === daemonId)
+  return { runner: store.serverRelease || store.serverVersion, commit: store.serverCommit, daemon: daemon?.version, desktop: daemon?.id }
+})

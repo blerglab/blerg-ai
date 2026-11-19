@@ -165,3 +165,68 @@ func TestShellOutputBurstQueuesBoundedAndCoalesced(t *testing.T) {
 		t.Fatalf("%d bytes queued past the %d byte bound", total, remoteOutputQueue+ownershell.MaxFrame)
 	}
 }
+
+func TestShellCallPreservesPersistentVersionAndRejectsLegacyReply(t *testing.T) {
+	hub := NewHub()
+	dc := &DaemonConn{ID: "desktop", send: make(chan []byte, 8), shellControl: make(chan []byte, 2)}
+	hub.Register(dc)
+	hub.SetSessionOwner("session", dc.ID)
+	done := make(chan error, 1)
+	go func() {
+		_, err := hub.shellCall(t.Context(), dc, shellruntime.RPC{Version: 2, SessionID: "session", Op: "inventory"})
+		done <- err
+	}()
+	var request shellruntime.RPC
+	if err := json.Unmarshal(<-dc.shellControl, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Version != 2 {
+		t.Fatalf("persistent request downgraded to %d", request.Version)
+	}
+	reply := request
+	reply.Version = 1
+	reply.OK = true
+	reply.Type = "owner_shell_result"
+	hub.deliverShell(dc, reply)
+	select {
+	case <-done:
+		t.Fatal("legacy reply satisfied v2 request")
+	default:
+	}
+	reply.Version = 2
+	hub.deliverShell(dc, reply)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDaemonIngressDispatchesBothShellWireVersions(t *testing.T) {
+	for _, version := range []int{1, 2, 3} {
+		t.Run(string(rune('0'+version)), func(t *testing.T) {
+			hub := NewHub()
+			dc := &DaemonConn{ID: "daemon", send: make(chan []byte, 8)}
+			hub.Register(dc)
+			hub.SetSessionOwner("session", dc.ID)
+			replies := make(chan shellruntime.RPC, 1)
+			hub.shellRPC.pending = map[string]shellWaiter{"request": {dc: dc, session: "session", version: version, op: "consent_challenge", reply: replies}}
+			frame := shellruntime.RPC{Version: version, Type: "owner_shell_result", SessionID: "session", RequestID: "request", Op: "consent_challenge", OK: true}
+			raw, err := json.Marshal(frame)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !handleDaemonFrame(t.Context(), hub, dc, nil, raw, envelope{Type: frame.Type, SessionID: frame.SessionID}) {
+				t.Fatal("shell frame rejected")
+			}
+			select {
+			case <-replies:
+				if version == 3 {
+					t.Fatal("unsupported version delivered")
+				}
+			default:
+				if version != 3 {
+					t.Fatal("supported shell wire version dropped")
+				}
+			}
+		})
+	}
+}

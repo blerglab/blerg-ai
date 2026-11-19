@@ -1,5 +1,8 @@
+import { PaneContext } from '../panes/context'
+import { useSessionStore } from '../hooks/useSessionStore'
+import { makeSession } from '../test/fixtures'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { Profiler, useMemo } from 'react'
+import { Profiler, useContext, useMemo } from 'react'
 import { MemoryRouter, useNavigate } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import CommandPaletteProvider, { PaletteButton, PaletteDialog } from './CommandPalette'
@@ -211,7 +214,7 @@ describe('command palette', () => {
   it('takes Print only inside a session, supports >, lists shortcuts, and traps forward/backward Tab', () => {
     show()
     act(() => { expect(key('p').defaultPrevented).toBe(true) })
-    const input = screen.getByRole('combobox', { name: 'Search session files' })
+    const input = screen.getByRole('combobox', { name: 'Search workspace files' })
     fireEvent.change(input, { target: { value: '>shell' } })
     expect(screen.getByRole('option')).toHaveTextContent('Ctrl+`')
     fireEvent.keyDown(input, { key: 'Tab' })
@@ -330,4 +333,21 @@ it('rejects a newly registered action without an explicit safety marker', () => 
     return null
   }
   expect(() => render(<MemoryRouter><CommandPaletteProvider><Unclassified /></CommandPaletteProvider></MemoryRouter>)).toThrow('must explicitly set destructive')
+})
+
+
+it('retains workspace focus mode across worker routes and exits for another workspace', () => {
+  useSessionStore.setState({ sessions: [makeSession({ id: 'main' }), makeSession({ id: 'worker', parent_session_id: 'main' }), makeSession({ id: 'other' })] })
+  function FocusProbe() {
+    const pane = useContext(PaneContext)!
+    const navigate = useNavigate()
+    return <><output data-testid="focused">{String(pane.focused)}</output><button onClick={pane.toggle}>Focus workspace</button><button onClick={() => navigate('/sessions/worker')}>Worker</button><button onClick={() => navigate('/sessions/other')}>Other workspace</button></>
+  }
+  render(<MemoryRouter initialEntries={['/sessions/main']}><CommandPaletteProvider><FocusProbe /></CommandPaletteProvider></MemoryRouter>)
+  fireEvent.click(screen.getByText('Focus workspace'))
+  expect(screen.getByTestId('focused')).toHaveTextContent('true')
+  fireEvent.click(screen.getByText('Worker'))
+  expect(screen.getByTestId('focused')).toHaveTextContent('true')
+  fireEvent.click(screen.getByText('Other workspace'))
+  expect(screen.getByTestId('focused')).toHaveTextContent('false')
 })

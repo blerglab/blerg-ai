@@ -30,7 +30,13 @@ func migratedPool(t *testing.T, maxConns int32) *pgxpool.Pool {
 			return err
 		}
 		defer pool.Close()
-		return db.RunMigrations(ctx, pool)
+		if err := db.RunMigrations(ctx, pool); err != nil {
+			return err
+		}
+		// The live-file unique index is built CONCURRENTLY after migrations in production
+		// (cmd/server/main.go); tests that rely on it (its own-row-per-name constraint) need it
+		// built here too, once, in the template every test's schema copies.
+		return db.EnsureLiveArtifactIndex(ctx, pool)
 	})
 	cfg := base.Config()
 	cfg.MaxConns = maxConns
@@ -191,11 +197,11 @@ func TestMigrationsAndQueries(t *testing.T) {
 
 	// ── UpsertPushSubscription ────────────────────────────────────────────────
 	ep := "https://push.example.com/sub/abc"
-	if err := db.UpsertPushSubscription(ctx, pool, ep, "key1", "auth1"); err != nil {
+	if err := db.UpsertPushSubscription(ctx, pool, ep, "key1", "auth1", "account"); err != nil {
 		t.Fatalf("UpsertPushSubscription: %v", err)
 	}
 	// Update the same endpoint.
-	if err := db.UpsertPushSubscription(ctx, pool, ep, "key2", "auth2"); err != nil {
+	if err := db.UpsertPushSubscription(ctx, pool, ep, "key2", "auth2", "account"); err != nil {
 		t.Fatalf("UpsertPushSubscription (update): %v", err)
 	}
 
@@ -212,10 +218,10 @@ func TestMigrationsAndQueries(t *testing.T) {
 	}
 
 	// ── DeletePushSubscription ────────────────────────────────────────────────
-	if err := db.DeletePushSubscription(ctx, pool, ep); err != nil {
+	if err := db.DeletePushSubscription(ctx, pool, ep, "account"); err != nil {
 		t.Fatalf("DeletePushSubscription: %v", err)
 	}
-	if err := db.DeletePushSubscription(ctx, pool, ep); err != nil {
+	if err := db.DeletePushSubscription(ctx, pool, ep, "account"); err != nil {
 		t.Fatalf("DeletePushSubscription (gone already): %v", err)
 	}
 	if subs, err := db.ListPushSubscriptions(ctx, pool); err != nil || len(subs) != 0 {

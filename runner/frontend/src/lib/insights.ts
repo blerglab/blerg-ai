@@ -36,6 +36,8 @@ export interface TokenCounts {
 }
 
 export interface InsightsResponse {
+  workspace_name?: string
+  workspace_id?: string
   range: { label: string; from: string; to: string }
   scope: 'all' | 'mine'
   is_admin: boolean
@@ -52,6 +54,11 @@ export interface InsightsResponse {
     idle_seconds: number
     busy_fraction: number
     by_day: { day: string; started: number }[]
+    /** "started" split by role for the selected range (BLG-466): a workspace root (Main), a
+     *  person-started channel, or a worker/cron run. main + channels + workers === started. */
+    main: number
+    channels: number
+    workers: number
   }
   startup: {
     groups: { runtime: string; kind: 'start' | 'resume'; attempts: number; failed: number; seconds: Quantiles }[]
@@ -66,9 +73,42 @@ export interface InsightsResponse {
     daily: (TokenCounts & { day: string })[]
     top_sessions: (TokenCounts & { session_id: string; title: string; runtime: string; started_at: string })[]
     unpriced_models: string[]
+    by_engine_day?: (TokenCounts & {at:string;day:string;engine:string;complete:boolean})[]
+    previous_by_engine_day?: (TokenCounts & {at:string;day:string;engine:string;complete:boolean})[]
   }
   cluster: { active: number; max: number; peak_concurrent: number } | null
   crons: { runs: number; late: number; manual: number; by_status: CountRow[]; seconds: Quantiles }
+  /** The owner's recorded weekly ("7d") usage-window samples, current and previous window, one
+   *  per provider that has reported a subscription usage window. Independent of range: the
+   *  weekly window does not follow the Insights period picker. */
+  usage_budget?: UsageBudgetSample[]
+  /** Each turn's context-window reading in range (BLG-463): how full the conversation was when
+   *  that turn reported it, and whether the engine compacted. A turn that reported no context is
+   *  absent, not zero. */
+  context_fill?: ContextFillReading[]
+  context_fill_truncated?: boolean
+}
+
+/** One turn_done's context report, behind the Context view's fill-over-time chart: one line per
+ *  conversation (BLG-464 round 2), so title and role carry enough identity to name, emphasize
+ *  (Main) and rank (the fullest channels and workers) each conversation's own line. */
+export interface ContextFillReading {
+  session_id: string
+  title: string
+  role: 'main' | 'channel' | 'worker'
+  at: string
+  percent: number
+  compacted: boolean
+}
+
+/** One minute-rounded reading of a provider's weekly usage window, behind Spending's burndown. */
+export interface UsageBudgetSample {
+  provider: string
+  window_id: string
+  used_percent: number
+  window_start: string
+  resets_at: string
+  sampled_at: string
 }
 
 export type ModelTokens = TokenCounts & { model: string; priced: boolean }
@@ -251,6 +291,16 @@ const OUTCOME_LABELS: Record<string, string> = {
 /** outcomeLabel names how a session ended. */
 export function outcomeLabel(key: string): string {
   return OUTCOME_LABELS[key] ?? key.replace(/_/g, ' ')
+}
+
+/** partialReportNote says exactly what was left out and how many (BLG-466): never a bare "0 cards
+ *  could not be read", and never suggests opening a workspace when the report is already scoped to
+ *  one. null when nothing was actually omitted. */
+export function partialReportNote(truncated: boolean, omittedCards: number, workspace?: string): string | null {
+  const parts: string[] = []
+  if (omittedCards > 0) parts.push(`${omittedCards} linked card${omittedCards === 1 ? '' : 's'} could not be read with your board access.`)
+  if (truncated) parts.push(`Some conversations were left out of this report (showing at most 1,000 conversations and 50 linked cards).${workspace ? '' : ' Try a shorter period or open a workspace for a smaller report.'}`)
+  return parts.length ? parts.join(' ') : null
 }
 
 /** shortDay renders "2026-10-01" as "Oct 1". */

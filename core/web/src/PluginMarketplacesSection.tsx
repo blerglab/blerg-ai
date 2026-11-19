@@ -45,7 +45,7 @@ export default function PluginMarketplacesSection() {
   return <section className="settings-section section" aria-label="Plugin marketplaces" data-testid="plugin-marketplaces">
     <p className="eyebrow">Administration</p>
     <h2 className="settings-heading section-title">Plugin marketplaces</h2>
-    <p className="settings-description">Allow trusted sources for plugins that run code in sessions. Changes apply across runners and desktops. Turning a source off keeps existing plugins and flags them as disallowed.</p>
+    <p className="settings-description">Allow trusted sources for plugins that run code in workspaces. Changes apply across runners and desktops. Turning a source off keeps existing plugins and flags them as disallowed.</p>
     {!policy && !error && <p>Loading marketplace policy…</p>}
     {policy && <>
       <ul className="marketplace-policy-list">
@@ -58,7 +58,7 @@ export default function PluginMarketplacesSection() {
       <div className="settings-toggle"><span id="any-marketplace-label">Allow any valid marketplace</span><button type="button" className="settings-toggle-control" role="switch" aria-labelledby="any-marketplace-label" aria-checked={policy.any_marketplace} disabled={busy} onClick={() => { void save(policy.marketplaces, !policy.any_marketplace); }} /></div>
       {policy.any_marketplace && <p className="field-help">All valid sources are allowed. Turn this off to enforce the individual switches.</p>}
       <form className="card-form" onSubmit={e => { e.preventDefault(); if (validMarketplace(draft) && !duplicate) void save([...policy.marketplaces, { source: draft, enabled: true }]); }}>
-        <label className="settings-field field" htmlFor="add-plugin-marketplace"><span className="field-label">Add marketplace (owner/repo or codex:&lt;marketplace&gt;)</span><input id="add-plugin-marketplace" value={source} onChange={e => setSource(e.target.value)} maxLength={140} spellCheck={false} autoCapitalize="none" aria-invalid={!!invalid} aria-describedby={invalid ? "marketplace-validation" : undefined} /></label>
+        <label className="settings-field field" htmlFor="add-plugin-marketplace"><span className="field-label">Add marketplace (owner/repo or codex:&lt;marketplace&gt;)</span><input className="settings-field" id="add-plugin-marketplace" value={source} onChange={e => setSource(e.target.value)} maxLength={140} spellCheck={false} autoCapitalize="none" aria-invalid={!!invalid} aria-describedby={invalid ? "marketplace-validation" : undefined} /></label>
         {invalid && <p id="marketplace-validation" className="field-help">{duplicate ? "This marketplace is already listed." : "Enter a GitHub owner/repo or codex:<marketplace>. URLs and paths are not accepted."}</p>}
         <div className="card-actions"><button className="settings-action btn btn-primary" type="submit" disabled={busy || !draft || !!invalid || policy.marketplaces.length >= 100}>Add marketplace</button></div>
       </form>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent } from 'react'
 import './image-view.css'
+import { ViewerAction, ViewerControls } from './ViewerToolbar'
 
 type Point = { x: number; y: number }
 type View = Point & { scale: number; fit: boolean }
@@ -12,6 +13,7 @@ function boundedOffset(value: number, size: number, available: number, fit: bool
 /** Owns only the preview's gestures. MarkupMode has its own image/canvas coordinate system. */
 export default function ImageView({ src, name }: { src: string; name: string }) {
   const viewport = useRef<HTMLDivElement>(null)
+  const controls = useRef<HTMLSpanElement>(null)
   const natural = useRef({ width: 0, height: 0 })
   const current = useRef<View>({ x: 0, y: 0, scale: 1, fit: true })
   const [view, setView] = useState<View>({ x: 0, y: 0, scale: 1, fit: true })
@@ -161,19 +163,21 @@ export default function ImageView({ src, name }: { src: string; name: string }) 
   useLayoutEffect(() => {
     const root = viewport.current!.parentElement!
     const host = root.closest('.artifact-viewer') ?? root
-    const key = (e: KeyboardEvent) => { if (e.target === host || root.contains(e.target as Node)) keyDown(e) }
+    const key = (e: KeyboardEvent) => { if (e.target === host || root.contains(e.target as Node) || controls.current?.contains(e.target as Node)) keyDown(e) }
     host.addEventListener('keydown', key as EventListener)
     return () => host.removeEventListener('keydown', key as EventListener)
   }, [keyDown])
 
   return <div className="image-view">
-    <div className="image-view-toolbar" role="toolbar" aria-label="Image zoom">
-      <button type="button" className="artifact-btn" aria-label="Zoom out" title="Zoom out (−)" disabled={!ready || view.scale <= floor + 1e-9} onClick={() => zoom(current.current.scale / 1.25)}>−</button>
-      <button type="button" className="artifact-btn" aria-label="Zoom in" title="Zoom in (+)" disabled={!ready || view.scale >= 16} onClick={() => zoom(current.current.scale * 1.25)}>+</button>
-      <button type="button" className="artifact-btn" aria-pressed={view.fit} title="Fit (0)" disabled={!ready} onClick={fit}>Fit</button>
-      <button type="button" className="artifact-btn" aria-pressed={!view.fit && view.scale === 1} title="Actual size (1)" disabled={!ready} onClick={() => zoom(1)}>100%</button>
-      <output aria-label="Zoom percent">{Math.round(view.scale * 100)}%</output>
-    </div>
+    <ViewerControls className="image-view-toolbar" label="Image zoom">
+      <span className="viewer-control-slot" ref={controls}>
+        <ViewerAction icon="zoomOut" label="Zoom out" title="Zoom out (−)" disabled={!ready || view.scale <= floor + 1e-9} onClick={() => zoom(current.current.scale / 1.25)} />
+        <ViewerAction icon="zoomIn" label="Zoom in" title="Zoom in (+)" disabled={!ready || view.scale >= 16} onClick={() => zoom(current.current.scale * 1.25)} />
+        <ViewerAction icon="maximize" label="Fit" title="Fit (0)" pressed={view.fit} disabled={!ready} onClick={fit} />
+        <ViewerAction icon="actualSize" label="100%" title="Actual size (1)" pressed={!view.fit && view.scale === 1} disabled={!ready} onClick={() => zoom(1)} />
+        <output className="image-zoom-percent" aria-label="Zoom percent">{Math.round(view.scale * 100)}%</output>
+      </span>
+    </ViewerControls>
     <div ref={viewport} className={`image-view-viewport${pannable ? ' can-pan' : ''}${dragging && pannable ? ' is-dragging' : ''}`}
       role="region" aria-label={`${name} image viewport`} tabIndex={0}
       onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerEnd} onPointerCancel={pointerEnd} onLostPointerCapture={pointerEnd}

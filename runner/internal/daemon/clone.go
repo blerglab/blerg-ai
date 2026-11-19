@@ -210,9 +210,12 @@ var cloneTargetTimeout = 30 * time.Minute
 // CloneTarget is a hosted repository to clone into a named folder: what a
 // spawn's CloneFrom asks for.
 type CloneTarget struct {
-	Provider string // gitprovider ID; required
-	FullName string // "owner/name" on Provider
-	Folder   string // one folder name under the repos root
+	// ConnectedHost forbids URL rewrites, redirects and transport fallback for
+	// an approved URL addition. Only its registered HTTPS host may be contacted.
+	ConnectedHost bool
+	Provider      string // gitprovider ID; required
+	FullName      string // "owner/name" on Provider
+	Folder        string // folder under the repos root; connected approvals may use a nested workspace
 	// Token is the launching account's personal token for Provider, or ""
 	// (a public repository, or no token). Used for this clone only.
 	Token string
@@ -229,8 +232,10 @@ type CloneTarget struct {
 // cloneTargetGit and cloneInSandbox are the two ways EnsureClonedTarget runs
 // one attempt — seams for tests; production is gitClone / sandboxGitClone.
 var (
-	cloneTargetGit = gitClone
-	cloneInSandbox = sandboxGitClone
+	cloneTargetGit          = gitClone
+	cloneConnectedGit       = gitCloneConnected
+	cloneInSandbox          = sandboxGitClone
+	cloneConnectedInSandbox = sandboxGitCloneConnected
 )
 
 // EnsureClonedTarget makes reposRoot/t.Folder a checkout of t.FullName on
@@ -252,7 +257,7 @@ var (
 // when t.HostTokenAllowed (tokenHeaderEnv), and is refused otherwise; either
 // way the token is scoped to that host and never in argv, the URL, the
 // clone's .git/config or a log. If HTTPS fails for any reason but its own
-// timeout or a kill, the provider's ssh remote is tried on the host with the
+// timeout, a kill or invalid CA configuration, the provider's ssh remote is tried on the host with the
 // machine's own keys, as every daemon clone before this did (never with the
 // token). The folder's origin is the token-free HTTPS URL.
 func EnsureClonedTarget(ctx context.Context, reposRoot string, t CloneTarget) error {
@@ -264,7 +269,11 @@ func EnsureClonedTarget(ctx context.Context, reposRoot string, t CloneTarget) er
 		return fmt.Errorf("cannot clone %q: give it as owner/name on %s", t.FullName, t.Provider)
 	}
 	p, _ := gitprovider.Default.ProviderForCredentialKind(ref.Provider)
-	if t.Folder == "" || strings.ContainsAny(t.Folder, "/\\") || strings.HasPrefix(t.Folder, ".") {
+	invalidFolder := t.Folder == "" || strings.ContainsAny(t.Folder, "/\\") || strings.HasPrefix(t.Folder, ".")
+	if t.ConnectedHost {
+		invalidFolder = t.Folder == "" || t.Folder == "." || filepath.IsAbs(t.Folder) || filepath.Clean(t.Folder) != t.Folder || strings.Contains(t.Folder, "\\") || t.Folder == ".." || strings.HasPrefix(t.Folder, "../")
+	}
+	if invalidFolder {
 		return fmt.Errorf("invalid folder name %q", t.Folder)
 	}
 	dest, err := resolveProjectPath(reposRoot, t.Folder)
@@ -278,6 +287,9 @@ func EnsureClonedTarget(ctx context.Context, reposRoot string, t CloneTarget) er
 			return nil
 		}
 		what := "a folder with no recognizable origin"
+		if t.ConnectedHost {
+			return errConnectedCloneDestinationExists
+		}
 		if ok {
 			what = fmt.Sprintf("%s repository %s", got.Provider, got.FullName())
 		}
@@ -299,24 +311,40 @@ func EnsureClonedTarget(ctx context.Context, reposRoot string, t CloneTarget) er
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		return fmt.Errorf("prepare clone of %s: %w", ref.FullName(), err)
 	}
-	tmp, err := os.MkdirTemp(filepath.Dir(dest), cloneTmpPrefix)
+	// Recovery sweeps this root only. Keep staging here even when the final
+	// checkout belongs below a physical workspace anchor.
+	tmp, err := os.MkdirTemp(reposRoot, cloneTmpPrefix)
 	if err != nil {
 		return fmt.Errorf("prepare clone of %s: %w", ref.FullName(), err)
 	}
-	defer func() { _ = os.RemoveAll(tmp) }() // empty after the rename; a failed clone's leftovers otherwise
+	defer func() { _ = os.RemoveAll(tmp) }() // #nosec G703 -- tmp is the fresh MkdirTemp directory created above, never a request path.
 	into := filepath.Join(tmp, "repo")
 
 	httpsURL := p.CloneURL(ref.Owner, ref.Name, "") // never carries the token
+	clone := cloneTargetGit
+	if t.ConnectedHost {
+		clone = cloneConnectedGit
+	}
 	var httpsErr error
 	switch {
 	case t.Token != "" && t.Sandbox:
-		httpsErr = cloneInSandbox(ctx, cloneTargetTimeout, httpsURL, tmp, p, t.Token)
+		cloneSandbox := cloneInSandbox
+		if t.ConnectedHost {
+			cloneSandbox = cloneConnectedInSandbox
+		}
+		httpsErr = cloneSandbox(ctx, cloneTargetTimeout, httpsURL, tmp, p, t.Token)
 	case t.Token != "":
-		httpsErr = cloneTargetGit(ctx, cloneTargetTimeout, httpsURL, into, tokenHeaderEnv(p, t.Token))
+		httpsErr = clone(ctx, cloneTargetTimeout, httpsURL, into, tokenHeaderEnv(p, t.Token))
 	default:
-		httpsErr = cloneTargetGit(ctx, cloneTargetTimeout, httpsURL, into, nil)
+		httpsErr = clone(ctx, cloneTargetTimeout, httpsURL, into, nil)
 	}
 	if httpsErr != nil {
+		if errors.Is(httpsErr, errCloneEnvironment) {
+			return errCloneEnvironment
+		}
+		if t.ConnectedHost {
+			return errConnectedCloneFailed
+		}
 		if errors.Is(httpsErr, errCloneCancelled) {
 			return errCloneCancelled
 		}
@@ -327,7 +355,7 @@ func EnsureClonedTarget(ctx context.Context, reposRoot string, t CloneTarget) er
 			// again, holding up every spawn behind it.
 			return fmt.Errorf("could not clone %s repository %s in time:\n%s", ref.Provider, ref.FullName(), msg)
 		}
-		_ = os.RemoveAll(into)
+		_ = os.RemoveAll(into) // #nosec G703 -- fixed repo child of the fresh MkdirTemp staging directory.
 		sshURL := fmt.Sprintf("git@%s:%s.git", p.Host(), ref.FullName())
 		if sshErr := cloneTargetGit(ctx, cloneTargetTimeout, sshURL, into, nil); sshErr != nil {
 			if errors.Is(sshErr, errCloneCancelled) {
@@ -340,7 +368,7 @@ func EnsureClonedTarget(ctx context.Context, reposRoot string, t CloneTarget) er
 	if _, err := os.Lstat(dest); err == nil {
 		return fmt.Errorf("folder %q appeared under the repos root while %s was cloning — not replacing it", t.Folder, ref.FullName())
 	}
-	if err := os.Rename(into, dest); err != nil {
+	if err := os.Rename(into, dest); err != nil { // #nosec G703 -- staging source is daemon-created; resolveProjectPath validated the destination under reposRoot.
 		return fmt.Errorf("move clone of %s into place: %w", ref.FullName(), err)
 	}
 	return nil
@@ -361,11 +389,21 @@ cred=
 export HOME="$home"
 exec git clone -- "$2" /clone/repo`
 
+var sandboxConnectedCloneScript = strings.Replace(sandboxCloneScript, `printf '[http "https://%s/"]`, `printf '[http]\n\tfollowRedirects = false\n[http "https://%s/"]`, 1)
+
 // sandboxGitClone clones remote into tmp/repo inside a throwaway sandbox
 // container (the same image and hardening a Local sandbox session gets),
 // with p's token as an Authorization header for p's host only. The token
 // travels over the docker CLI's stdin — not in its argv or environment.
 func sandboxGitClone(ctx context.Context, timeout time.Duration, remote, tmp string, p gitprovider.Provider, token string) error {
+	return sandboxGitCloneWithScript(ctx, timeout, remote, tmp, p, token, sandboxCloneScript)
+}
+
+func sandboxGitCloneConnected(ctx context.Context, timeout time.Duration, remote, tmp string, p gitprovider.Provider, token string) error {
+	return sandboxGitCloneWithScript(ctx, timeout, remote, tmp, p, token, sandboxConnectedCloneScript)
+}
+
+func sandboxGitCloneWithScript(ctx context.Context, timeout time.Duration, remote, tmp string, p gitprovider.Provider, token, script string) error {
 	var rb [6]byte
 	_, _ = rand.Read(rb[:])
 	name := "blerg-clone-" + hex.EncodeToString(rb[:])
@@ -378,7 +416,12 @@ func sandboxGitClone(ctx context.Context, timeout time.Duration, remote, tmp str
 	for _, e := range gitSafetyEnv() {
 		args = append(args, "-e", e)
 	}
-	args = append(args, sandboxImage(), "sh", "-c", sandboxCloneScript, "clone", p.Host(), remote)
+	envArgs, err := sandboxCloneEnvironment(tmp)
+	if err != nil {
+		return err
+	}
+	args = append(args, envArgs...)
+	args = append(args, sandboxImage(), "sh", "-c", script, "clone", p.Host(), remote)
 	cmd := exec.Command("docker", args...) //nolint:gosec,noctx // literal docker binary, argv assembled by the daemon (no shell); container name is generated, remote and image come from validated config; noctx: runClone owns the context and timeout, and its cleanup callback removes the container
 	cmd.Stdin = strings.NewReader(base64.StdEncoding.EncodeToString([]byte(p.TokenUser()+":"+token)) + "\n")
 	return runClone(ctx, timeout, cmd, "git clone "+gitprovider.RedactURL(remote)+" (in the sandbox)", func() {

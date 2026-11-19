@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"github.com/blerglab/blerg-ai/runner/skills"
 	"log"
 	"os"
 	"path/filepath"
@@ -201,24 +202,50 @@ func ensureCliSymlink(repoRoot, homeDir string) (changed bool, err error) {
 
 // ─── ensureSkillSymlink ──────────────────────────────────────────────────────
 
-// ensureSkillSymlink ensures <homeDir>/.claude/skills/managing-tickets is a
-// symlink to <repoRoot>/runner/skills/managing-tickets — the monorepo
-// layout, where `runner/` is its own Go module and the skill lives under it,
-// not directly under repoRoot.
+// ensureSkillSymlink installs universal ticket guidance in shared homes. Scoped
+// skill links are only installed when an isolated home's policy is supplied.
 // Returns (true, nil) if the symlink was created or corrected.
-func ensureSkillSymlink(repoRoot, homeDir string) (changed bool, err error) {
-	target := filepath.Join(repoRoot, "runner", "skills", "managing-tickets")
+func ensureSkillSymlink(repoRoot, homeDir string, policies ...skills.Policy) (changed bool, err error) {
+	// The workstation home is shared by sessions with different settings. Only
+	// an isolated session home may receive scoped discovery links.
+	policy := skills.Policy{}
+	if len(policies) > 0 {
+		policy = policies[0]
+	}
+	for _, engineDir := range []string{".claude", ".codex", ".agents", ".hermes"} {
+		for _, skill := range []string{"product-phase", "managing-tickets", "coordinating", "test-driven-development", "ux-design", "planning", "visualizing", "test-timing"} {
+			enabled := skill == "product-phase" || skill == "planning" && policy.Planning || skill == "managing-tickets" || skill == "test-timing" || skill == "coordinating" && policy.Coordinating || skill == "test-driven-development" && policy.TDD || skill == "ux-design" && policy.UX || skill == "visualizing" && policy.Visualizing
+			if !enabled {
+				link := filepath.Join(homeDir, engineDir, "skills", skill)
+				target, readErr := os.Readlink(link)
+				if readErr == nil && target == filepath.Join(repoRoot, "runner", "skills", skill) {
+					removeErr := os.Remove(link)
+					err = errors.Join(err, removeErr)
+					changed = changed || removeErr == nil
+				}
+				continue
+			}
+			c, e := ensureEngineSkillSymlink(repoRoot, homeDir, engineDir, skill)
+			err = errors.Join(err, e)
+			changed = changed || c
+		}
+	}
+	return changed, err
+}
+
+func ensureEngineSkillSymlink(repoRoot, homeDir, engineDir, skill string) (changed bool, err error) {
+	target := filepath.Join(repoRoot, "runner", "skills", skill)
 
 	if _, err := os.Stat(target); err != nil {
-		return false, fmt.Errorf("managing-tickets skill not found at %s: %w", target, err)
+		return false, fmt.Errorf("%s skill not found at %s: %w", skill, target, err)
 	}
 
-	skillsDir := filepath.Join(homeDir, ".claude", "skills")
+	skillsDir := filepath.Join(homeDir, engineDir, "skills")
 	if err := os.MkdirAll(skillsDir, 0o750); err != nil {
 		return false, fmt.Errorf("mkdir %s: %w", skillsDir, err)
 	}
 
-	link := filepath.Join(skillsDir, "managing-tickets")
+	link := filepath.Join(skillsDir, skill)
 
 	existing, readErr := os.Readlink(link)
 	if readErr == nil {
@@ -233,7 +260,7 @@ func ensureSkillSymlink(repoRoot, homeDir string) (changed bool, err error) {
 		// EINVAL from Readlink means the path exists but is not a symlink.
 		var pathErr *os.PathError
 		if errors.As(readErr, &pathErr) && errors.Is(pathErr.Err, syscall.EINVAL) {
-			return false, fmt.Errorf("a non-symlink file exists at %s; remove it to let the daemon manage the managing-tickets skill", link)
+			return false, fmt.Errorf("a non-symlink file exists at %s; remove it to let the daemon manage the %s skill", link, skill)
 		}
 		return false, fmt.Errorf("readlink %s: %w", link, readErr)
 	}
@@ -298,7 +325,7 @@ func RepoRootFromExecutable() (string, error) {
 //     not own, so it defaults to off (env BLERG_RUNNER_PROVISION_CLAUDE_MD,
 //     default false) — opt in explicitly if you want it.
 //  2. Ensures ~/.local/bin/blerg-runner is a symlink to the CLI script in the repo.
-//  3. Ensures ~/.claude/skills/managing-tickets is a symlink to the skill in the repo.
+//  3. Links ticket guidance and removes scoped skill links from shared homes.
 //
 // It is best-effort: any error is logged and the daemon continues to start
 // normally.  It is safe to call on every daemon start.
@@ -311,7 +338,15 @@ func Provision(repoRoot, homeDir string, provisionClaudeMd bool) {
 			log.Printf("provision: updated %s/.claude/CLAUDE.md with blerg-runner-messaging block", homeDir)
 		}
 	} else {
-		log.Printf("provision: not editing ~/.claude/CLAUDE.md (set BLERG_RUNNER_PROVISION_CLAUDE_MD=true to add the blerg-runner messaging block)")
+		// Refresh only our existing, explicitly marked block. Old releases put
+		// scoped skills here, which would otherwise bypass every off switch.
+		// Never add a block or change an unmarked user file without opt-in.
+		raw, readErr := os.ReadFile(filepath.Join(homeDir, ".claude", "CLAUDE.md")) //nolint:gosec // fixed instructions path under the configured home
+		if readErr == nil && strings.Contains(string(raw), managedBlockStart) && strings.Contains(string(raw), managedBlockEnd) {
+			if _, err := ensureClaudeMd(homeDir); err != nil {
+				log.Printf("provision: refresh existing managed guidance: %v", err)
+			}
+		}
 	}
 
 	changed, err := ensureCliSymlink(repoRoot, homeDir)
@@ -326,7 +361,6 @@ func Provision(repoRoot, homeDir string, provisionClaudeMd bool) {
 	if err != nil {
 		log.Printf("provision: ensureSkillSymlink: %v", err)
 	} else if changed {
-		log.Printf("provision: symlinked %s/.claude/skills/managing-tickets → %s/runner/skills/managing-tickets",
-			homeDir, repoRoot)
+		log.Printf("provision: updated universal skill links and removed shared scoped skill links")
 	}
 }

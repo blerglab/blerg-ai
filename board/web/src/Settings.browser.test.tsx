@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { page } from 'vitest/browser'
 import './styles.css'
 import { Tokens } from './Tokens'
@@ -21,9 +21,25 @@ describe('Board settings primitives', () => {
     const board = { id: 'b1', name: 'Example', repos: [], concurrency: 1, ci_policy: 'required', automation_token_set: true, automation_engine: 'codex' } as unknown as Board
     render(<MeProvider><BoardSettings board={board} /></MeProvider>)
     fireEvent.click(screen.getByRole('button', { name: /model/ }))
+    const models = await screen.findByRole('dialog', { name: 'Board models' })
+    expect(models.querySelectorAll('select')).toHaveLength(8)
+    expect(models.textContent).not.toContain('Repos')
+    expect(models.getBoundingClientRect().right).toBeLessThanOrEqual(width)
+    fireEvent.click(screen.getByRole('button', { name: /Board settings/ }))
+    await waitFor(() => expect(screen.getByLabelText('Board name')).toHaveValue('Example'))
+    for (const name of ['General', 'Repos', 'Runs', 'Filed tickets', 'Models']) expect(screen.getByRole('heading', { name })).toBeVisible()
+
     const toggle = await screen.findByRole('checkbox', { name: 'Include component version on filed tickets' })
     await screen.findByRole('combobox', { name: 'Engine' })
+    const retention = await screen.findByRole('spinbutton', { name: 'Auto-archive done after (days)' })
+    expect(retention.getBoundingClientRect().width).toBeGreaterThan(0)
+    expect(retention.getBoundingClientRect().right).toBeLessThanOrEqual(width)
+    fireEvent.change(retention, { target: { value: '30' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save archiving' }))
+    const confirm = await screen.findByRole('button', { name: 'Confirm archiving' })
+    expect(confirm.getBoundingClientRect().right).toBeLessThanOrEqual(width)
     const dialog = screen.getByRole('dialog', { name: 'Board settings' })
+    expect(dialog.getBoundingClientRect().width).toBeGreaterThan(width * 0.9)
     expect(getComputedStyle(toggle).appearance).toBe('none')
     expect(toggle.getBoundingClientRect().width).toBeLessThan(60)
     expect(dialog.getBoundingClientRect().right).toBeLessThanOrEqual(width)

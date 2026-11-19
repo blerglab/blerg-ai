@@ -153,6 +153,22 @@ func (g *ResolvedGrant) valid() bool {
 	return g != nil && g.AccountID != "" && g.Proof.AccountID == g.AccountID && g.Proof.Valid() && len(g.Connections) > 0
 }
 
+// hasGitProviderConnection reports whether any of g's connections points at a known git
+// provider (L5, BLG-460): refused by default for a cluster worker under option B, which
+// must reach a git host, if at all, only through its own one read-only token — never
+// through an MCP connection that could carry write scope.
+func (g *ResolvedGrant) hasGitProviderConnection(workspaceHosts ...string) bool {
+	if g == nil {
+		return false
+	}
+	for _, c := range g.Connections {
+		if isGitProviderURL(c.URL, workspaceHosts...) {
+			return true
+		}
+	}
+	return false
+}
+
 // MCPConnection is one of an account's connections as core lists it (no secret).
 type MCPConnection struct {
 	ID           string
@@ -199,7 +215,17 @@ var ErrMCPCoreOutdated = errors.New("blerg-core does not offer MCP connections: 
 
 // coreNotFound tells a dead proof (core's handler answered its uniform 404) from a missing route
 // (the router answered), the two of which used to be reported as "sign in again".
-func coreNotFound(resp *http.Response) error {
+func coreNotFound(resp *http.Response, standing ...bool) error {
+	if len(standing) > 0 && standing[0] {
+		switch resp.Header.Get("X-Blerg-Standing-State") {
+		case "suspended":
+			return errStandingSuspended
+		case "revoked":
+			return errStandingRevoked
+		default:
+			return errCorePrincipalUnavailable
+		}
+	}
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 	if strings.EqualFold(strings.TrimSpace(string(raw)), "not found") {
 		return ErrMCPProofInvalid
@@ -208,6 +234,8 @@ func coreNotFound(resp *http.Response) error {
 }
 
 type coreListRequest struct {
+	BoardID   string `json:"board_id,omitempty"`
+	Standing  bool   `json:"standing,omitempty"`
 	AccountID string `json:"account_id"`
 	TokenID   string `json:"token_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
@@ -227,13 +255,16 @@ type coreListResponse struct {
 
 // ListConnections implements MCPConnectionLister.
 func (c *HTTPMCPCoreClient) ListConnections(ctx context.Context, proof mcpgw.Proof) ([]MCPConnection, error) {
+	return c.listConnections(ctx, proof, false)
+}
+func (c *HTTPMCPCoreClient) listConnections(ctx context.Context, proof mcpgw.Proof, standing bool) ([]MCPConnection, error) {
 	if !proof.Valid() || proof.AccountID == "" {
 		return nil, errors.New("no liveness proof for the connection list")
 	}
 	if c.BaseURL == "" || c.InternalKey == "" {
 		return nil, errors.New("core is not configured")
 	}
-	raw, err := json.Marshal(coreListRequest{AccountID: proof.AccountID, TokenID: proof.TokenID, SessionID: proof.SessionID})
+	raw, err := json.Marshal(coreListRequest{AccountID: proof.AccountID, TokenID: proof.TokenID, SessionID: proof.SessionID, Standing: standing && mcpgw.PersonBehind(proof)})
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +284,7 @@ func (c *HTTPMCPCoreClient) ListConnections(ctx context.Context, proof mcpgw.Pro
 	switch resp.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotFound:
-		return nil, coreNotFound(resp)
+		return nil, coreNotFound(resp, standing && mcpgw.PersonBehind(proof))
 	default:
 		return nil, fmt.Errorf("core returned %d", resp.StatusCode)
 	}
@@ -714,6 +745,11 @@ func (a *API) checkGrantTarget(t grantTarget) *APIError {
 	if a.dbPool == nil {
 		return apiErrorf(http.StatusServiceUnavailable, "%s", msgMCPNoDB)
 	}
+	return checkGrantTarget(t, a.hub.mcpStart.get())
+}
+
+// checkGrantTarget checks placement and configuration without accessing storage.
+func checkGrantTarget(t grantTarget, cfg *mcpStartConfig) *APIError {
 	if !restrictedEngineSupported(t.Engine) {
 		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgMCPEngine)
 	}
@@ -735,7 +771,6 @@ func (a *API) checkGrantTarget(t grantTarget) *APIError {
 	default:
 		return apiErrorf(http.StatusUnprocessableEntity, "%s", msgMCPRuntime)
 	}
-	cfg := a.hub.mcpStart.get()
 	switch {
 	case cfg == nil || cfg.Hasher == nil:
 		return apiErrorf(http.StatusServiceUnavailable, "%s", msgMCPNoGateway)
@@ -1084,6 +1119,7 @@ func grantResumeProblem(ctx context.Context, pool *pgxpool.Pool, sessionID, laun
 		log.Printf("resume %s: list MCP grants: %v", sessionID, err)
 		return nil, apiErrorf(http.StatusServiceUnavailable, "could not check the session's MCP connections")
 	}
+	grants = accountResumeGrants(grants)
 	if len(grants) == 0 {
 		return nil, nil
 	}
@@ -1105,7 +1141,7 @@ func reissueGrants(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, a
 		return nil, errors.New(msgMCPNoGateway)
 	}
 	specs := make([]mcpgw.GrantSpec, 0, len(old))
-	for _, g := range old {
+	for _, g := range accountResumeGrants(old) {
 		specs = append(specs, mcpgw.GrantSpec{ConnectionID: g.ConnectionID, Name: g.Name, URL: g.URLSnapshot, Tools: g.Tools,
 			CallBudget: g.CallBudget, Builtin: g.Builtin, BuiltinRef: g.BuiltinRef})
 	}
@@ -1113,9 +1149,24 @@ func reissueGrants(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, a
 	if err != nil {
 		return nil, err
 	}
+	if len(specs) == 0 {
+		return nil, nil // Detached scoped servers supply no engine MCP configuration.
+	}
 	out := gatewayConfig(cfg.GatewayURL, specs, tokens)
 	if err := validateGatewayConfig(out); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// Generic conversation recovery may restore account grants. Scoped credentials
+// require a separate human same-origin reattachment; never strip their scope.
+func accountResumeGrants(grants []db.MCPGrant) []db.MCPGrant {
+	out := make([]db.MCPGrant, 0, len(grants))
+	for _, grant := range grants {
+		if grant.SessionScope == nil {
+			out = append(out, grant)
+		}
+	}
+	return out
 }

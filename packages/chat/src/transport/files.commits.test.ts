@@ -64,3 +64,12 @@ it('qualifies summaries and patches by member and launch and refuses mismatched 
   fetch.mockImplementation(async () => new Response('old patch', { status: 200, headers: { 'X-Blerg-Member-ID': 'two', 'X-Blerg-Launch-Generation': 'launch', 'X-Blerg-Generation': '6' } }))
   expect(await files.commitDiff!('s1', SHA, undefined, member)).toBeNull()
 })
+
+it('reads a full commit blob with literal path, side and member fencing', async () => {
+  const member = { member_id: 'member-two', launch_generation: 'launch', generation: 4 }
+  const fetcher = vi.fn<typeof fetch>(async () => new Response('all lines\n', { headers: { 'X-Blerg-Member-ID': member.member_id, 'X-Blerg-Launch-Generation': member.launch_generation, 'X-Blerg-Generation': '4' } }))
+  const files = createFiles({ base: s => `/api/sessions/${s}`, commits: true, fetch: fetcher as typeof fetch })
+  const file = await files.commitFile!('s1', SHA, 'folder/a b.txt', 'original', undefined, member)
+  expect(await file.blob.text()).toBe('all lines\n')
+  expect(fetcher.mock.calls[0][0]).toBe(`/api/sessions/s1/commits/${SHA}/file?path=folder%2Fa+b.txt&side=original&member_id=member-two&launch_generation=launch&generation=4`)
+})

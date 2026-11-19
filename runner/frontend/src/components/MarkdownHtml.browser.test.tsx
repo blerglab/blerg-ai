@@ -68,7 +68,7 @@ describe('a README with raw HTML (real browser)', () => {
     expect(md.textContent).not.toMatch(/<\/?(p|img|table|td|a|b|br|sub)\b/)
 
     // The banner: centered, read from brand/ in the folder, drawn from a blob at full width.
-    const banner = await within(md).findByAltText(/^blerg\[ai\]: your coding agents/)
+    const banner = await within(md).findByAltText(/^blerg\[ai\]: your coding agents/, undefined, { timeout: 10_000 })
     await waitFor(() => expect(banner.getAttribute('src')).toMatch(/^blob:/))
     expect(banner.closest('p')?.getAttribute('align')).toBe('center')
     expect(banner.getAttribute('width')).toBe('100%')

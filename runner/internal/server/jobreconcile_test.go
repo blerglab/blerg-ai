@@ -504,3 +504,13 @@ func TestClusterReconcilerLoopStopsOnContextCancel(t *testing.T) {
 	}
 	f.waitForWebhook(t, 1)
 }
+
+func TestClusterReconcilerRefusesSucceededStartingJob(t *testing.T) {
+	f := newReconcileFixture(t, "starting")
+	f.fake.setJobStatus(f.jobName, map[string]any{"succeeded": 1})
+	f.api.reconcileClusterJobsOnce(t.Context())
+	row, err := db.GetSession(t.Context(), f.pool, f.sessionID)
+	if err != nil || row == nil || row.Status != "error" || derefOrEmpty(row.EndReason) != db.EndReasonStartFailed || derefOrEmpty(row.ErrorReason) == "" {
+		t.Fatalf("unreported startup failure lost: %v %+v", err, row)
+	}
+}

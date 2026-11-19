@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import SessionBoardButton from './SessionBoardButton'
-import { boardLinksOf, publishSessionPermissions, resetSessionBoardLinksForTest } from '../lib/sessionBoardLinks'
+import { boardLinksOf, publishSessionPermissions, refreshSessionBoardNames, resetSessionBoardLinksForTest } from '../lib/sessionBoardLinks'
 import { readPermissions, type BoardAccess } from '../lib/sessionPermissions'
 
 const apiFetch = vi.hoisted(() => vi.fn())
@@ -27,9 +27,9 @@ describe('session board links', () => {
       { board_id: 'b-alpha', board_name: 'Alpha', level: 'file' },
     ])))
     expect(links).toEqual([
-      { id: 'b-zeta', name: 'Zeta', launch: true },
-      { id: 'b-alpha', name: 'Alpha', launch: false },
-      { id: 'b-ops', name: 'Ops', launch: false },
+      { id: 'b-zeta', name: 'Zeta', launch: true, readable: true, movable: true },
+      { id: 'b-alpha', name: 'Alpha', launch: false, readable: true, movable: false },
+      { id: 'b-ops', name: 'Ops', launch: false, readable: true, movable: false },
     ])
   })
 })
@@ -87,4 +87,22 @@ describe('board button', () => {
     expect(await screen.findByRole('link', { name: 'Open board: Ops' })).toBeTruthy()
     expect(apiFetch).toHaveBeenCalledTimes(1)
   })
+})
+
+it('refreshes a renamed board even when the grant keeps its saved name', async () => {
+ const boards: BoardAccess[] = [{ board_id: 'b-rel', board_name: 'Saved name', level: 'read' }]
+ serve(boards, [{ id: 'b-rel', name: 'Current name' }])
+ render(<SessionBoardButton sessionId="s1" />)
+ await screen.findByRole('link', { name: 'Open board: Saved name' })
+ await act(async () => { await refreshSessionBoardNames(); publishSessionPermissions('s1', readPermissions(view(boards))) })
+ expect(await screen.findByRole('link', { name: 'Open board: Current name' })).toBeTruthy()
+ await act(async () => { await refreshSessionBoardNames() })
+ expect(apiFetch.mock.calls.filter(([url]) => url === '/api/session-boards')).toHaveLength(1)
+})
+
+it('keeps a proposal-only launch board as an external link', async () => {
+ serve([{ board_id: 'b-rel', board_name: 'Release', level: 'propose', launch: true }])
+ render(<SessionBoardButton sessionId="s1" />)
+ expect(await screen.findByRole('link', { name: 'Open board: Release' })).toHaveAttribute('href', 'https://board.example.com/boards/b-rel')
+ expect(boardLinksOf(readPermissions(view([{ board_id: 'b-rel', level: 'propose', launch: true }])))[0].readable).toBe(false)
 })

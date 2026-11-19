@@ -86,6 +86,7 @@ export default function CapabilitiesPanel({ onClose, ...view }: Props) {
   }
 
   return createPortal(
+    // button-guard-ignore: useBackdropClose supplies pointer handlers only; this overlay is not a button
     <div
       className="caps-overlay"
       data-testid="caps-overlay"
@@ -132,7 +133,7 @@ export function CapabilitiesView({ initialLoading = false, report, unavailable, 
 
   const pendingNote = pendingToolChanges && pendingToolChanges > 0 ? (
     <p className="caps-group-note" data-testid="caps-mcp-pending">
-      {pendingToolChanges} tool {pendingToolChanges === 1 ? 'change' : 'changes'} pending: an MCP server changed or added a tool this session uses; it is off until you decide on the{' '}
+      {pendingToolChanges} tool {pendingToolChanges === 1 ? 'change' : 'changes'} pending: an MCP server changed or added a tool this workspace uses; it is off until you decide on the{' '}
       <a href="/proposals">Proposals page</a>.
     </p>
   ) : null
@@ -143,7 +144,7 @@ export function CapabilitiesView({ initialLoading = false, report, unavailable, 
   } else if (!payload) {
     body = (
       <p className="caps-empty" data-testid="caps-none">
-        Nothing reported yet. Engines that report what they load send a snapshot when the session
+        Nothing reported yet. Engines that report what they load send a snapshot when the workspace
         starts or its tools become ready. Some engines do not expose this information.
       </p>
     )
@@ -283,10 +284,10 @@ function HeaderCard({ payload, ts }: { payload: CapabilitiesPayload; ts: string 
   const t = Date.parse(ts)
   const full = Number.isFinite(t) ? new Date(t).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : ''
 
-  const about = `${payload.note ?? 'What the session reported it loaded.'} It reflects what was loaded at start; changes on disk since then aren’t shown until the engine reports again.`
+  const about = `${payload.note ?? 'What the agent reported it loaded.'} It reflects what was loaded at start; changes on disk since then aren’t shown until the engine reports again.`
 
   return (
-    <section ref={card} className="rail-item caps-card" data-testid="caps-header" aria-label="What the session reported">
+    <section ref={card} className="rail-item caps-card" data-testid="caps-header" aria-label="What the workspace reported">
       <div className="caps-card-line">
         {engineKey && <RunGlyph label={`Engine: ${engineName || engineKey}`}>{ENGINE_SHORT[engineKey] ?? engineKey.charAt(0).toUpperCase()}</RunGlyph>}
         <span className="caps-card-title" data-testid="caps-meta">

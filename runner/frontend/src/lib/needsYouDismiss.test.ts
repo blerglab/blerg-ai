@@ -2,6 +2,7 @@
 // for an item already closed (M3).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { canDismissAsk, dismissWithUndo, DISMISS_UNDO_MS, flushPendingDismissals, useDismissStore } from './needsYouDismiss'
+import { useMessageStore } from '../hooks/useMessageStore'
 import { useToastStore } from '../hooks/useToastStore'
 
 vi.mock('../apiFetch', () => ({ apiFetch: vi.fn() }))
@@ -30,6 +31,7 @@ describe('dismissWithUndo', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     fetchMock.mockReset()
+    useMessageStore.setState({messages:[]})
     useDismissStore.setState({ hidden: new Set() })
     useToastStore.setState({ toasts: [] })
   })
@@ -81,4 +83,13 @@ describe('dismissWithUndo', () => {
     await vi.waitFor(() => expect(useToastStore.getState().toasts.some(t => t.title === 'Could not dismiss')).toBe(true))
     expect(useDismissStore.getState().hidden.has('ask:m4')).toBe(false)
   })
+  it('keeps the revision seen at Dismiss through the Undo delay',async()=>{
+    fetchMock.mockResolvedValue(new Response('{}',{status:200}))
+    useMessageStore.setState({messages:[{id:'revision',session_id:'s',kind:'ask',body:'Old?',status:'open',created_at:'2026-11-05T12:00:00Z',question_revision:4}]})
+    dismissWithUndo('ask:revision','Question: Old?')
+    useMessageStore.setState(state=>({messages:state.messages.map(message=>({...message,body:'New?',question_revision:5}))}))
+    await vi.advanceTimersByTimeAsync(DISMISS_UNDO_MS+10)
+    expect(JSON.parse(fetchMock.mock.calls[0][1]!.body as string)).toEqual({revision_seq:4})
+  })
+
 })

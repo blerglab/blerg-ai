@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/blerglab/blerg-ai/runner/internal/workbranch"
 	"path"
 	"time"
 
@@ -132,7 +133,7 @@ func (a *API) settleClusterStop(ctx context.Context, id string) error {
 		}
 		results := make([]protocol.WorkspaceMemberResult, 0, len(current.Manifest.Members))
 		for _, member := range current.Manifest.Members {
-			v := protocol.WorkspaceMemberResult{WorkspaceMemberRef: protocol.WorkspaceMemberRef{MemberID: member.ID, LaunchGeneration: ref.LaunchGeneration}, Branch: "wip/" + id, RecoveryLocation: path.Join("projects", member.Path)}
+			v := protocol.WorkspaceMemberResult{WorkspaceMemberRef: protocol.WorkspaceMemberRef{MemberID: member.ID, LaunchGeneration: ref.LaunchGeneration}, Branch: workbranch.Effective(row.ID, row.WorkBranch), RecoveryLocation: path.Join("projects", member.Path)}
 			for _, old := range current.Results {
 				if old.MemberID == member.ID {
 					v = old

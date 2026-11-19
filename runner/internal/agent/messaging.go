@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"strings"
+	"time"
 )
 
 // Messenger delivers session→user messages. Phase 1b implements it against
@@ -12,14 +15,12 @@ type Messenger interface {
 	SendUpdate(body string) error
 	SendNote(body string) error
 	// SendAsk registers the question and returns a message ID; the answer
-	// arrives via Loop.Enqueue (any user message while blocked is treated as
-	// the answer).
+	// arrives only via Loop.AnswerAsk, after the server commits its result.
 	SendAsk(body string) (msgID string, err error)
 }
 
-// AskCloser is a Messenger that can mark an ask answered with an answer that reached the loop some
-// other way (typed in the chat while the ask waited), so the ask's card stops asking and its answer
-// is not delivered a second time. Optional.
+// AskCloser withdraws an interrupted ask without recording a conversational
+// message as its answer. The second argument is retained for native adapters.
 type AskCloser interface {
 	CloseAsk(msgID, answer string)
 }
@@ -100,7 +101,7 @@ func (t askTool) Execute(ctx context.Context, in json.RawMessage) (string, error
 		l.mu.Unlock()
 		return "", errors.New("another ask is already waiting for an answer; ask one question at a time")
 	}
-	ch := make(chan Input, 1)
+	ch := make(chan AskAnswer, 1)
 	l.askCh = ch
 	l.mu.Unlock()
 
@@ -109,51 +110,53 @@ func (t askTool) Execute(ctx context.Context, in json.RawMessage) (string, error
 		l.clearAsk()
 		return "", err
 	}
+	if id == "" {
+		l.clearAsk()
+		return "", errors.New("question has no id")
+	}
+	l.mu.Lock()
+	l.askID = id
+	if early, ok := l.earlyAnswers[id]; ok {
+		ch <- early
+	}
+	l.earlyAnswers = nil
+	l.mu.Unlock()
 	// With its message id, so the ask's card can be answered in place.
-	l.emit("ask", MessagingPayload{Body: args.Question, MessageID: id})
+	l.cfg.Emitter.Emit(Event{ClientEventID: protocol.SessionMessageEventID(id, "ask"), Ts: time.Now(), Kind: "ask", Payload: MessagingPayload{Body: args.Question, MessageID: id}})
 	l.emit("status_changed", StatusPayload{Status: "waiting", Reason: "blocked on ask"})
 	defer l.emit("status_changed", StatusPayload{Status: "running", Reason: "ask answered"})
 	select {
 	case ans := <-ch:
 		if !l.beforeRecoveryInput(ctx) {
-			l.clearAsk()
+			ch <- ans
+			l.endInterruptedAsk(id, ch)
 			return "", errors.New("ask interrupted")
 		}
 		l.clearAsk()
-		// The answer is recorded when it is taken, as the person's answer to this ask: it never
-		// starts a turn of its own, so nothing else would record it.
-		p := ans.Payload()
-		if ans.Source == "session" {
-			p.AnsweredBy = "session" // the parent answered its child, not the person
-		}
-		p.Source, p.MessageID = "ask_answer", id
-		l.emit("user_message", p)
-		if ans.Source != "ask_answer" {
-			// Typed in the chat rather than on the ask: answer the ask's message too.
-			if c, ok := l.cfg.Messenger.(AskCloser); ok && id != "" {
-				c.CloseAsk(id, ans.Text)
+		if ans.Outcome == "" || ans.Outcome == "answered" {
+			by := ""
+			if strings.HasPrefix(ans.AnsweredBy, "session:") {
+				by = "session"
 			}
+			l.cfg.Emitter.Emit(Event{ClientEventID: protocol.SessionMessageEventID(id, "answer"), Ts: time.Now(), Kind: "user_message", Payload: UserMessagePayload{Text: ans.Text, Source: "ask_answer", MessageID: id, AnsweredBy: by, ClientID: ans.ClientID}})
+		} else {
+			l.cfg.Emitter.Emit(Event{ClientEventID: protocol.SessionMessageEventID(id, "closed"), Ts: time.Now(), Kind: "update", Payload: MessagingPayload{Body: ans.Text, MessageID: id}})
 		}
-		return ans.ModelText(l.cfg.MarkerNonce), nil
+		return (Input{Text: ans.Label + ans.Text, Source: "ask_answer"}).ModelText(l.cfg.MarkerNonce), nil
 	case <-ctx.Done():
-		l.clearAsk()
+		l.endInterruptedAsk(id, ch)
+		if closer, ok := l.cfg.Messenger.(AskCloser); ok {
+			closer.CloseAsk(id, "")
+		}
 		return "", errors.New("ask interrupted")
 	}
 }
 
 func (l *Loop) clearAsk() {
 	l.mu.Lock()
-	ch := l.askCh
 	l.askCh = nil
-	if ch != nil {
-		// A message may have raced into the buffer between the ask's receive
-		// (or interrupt) and this teardown — preserve it as a queued message.
-		select {
-		case leftover := <-ch:
-			l.queue = append(l.queue, leftover)
-		default:
-		}
-	}
+	l.askID = ""
+	l.earlyAnswers = nil
 	l.mu.Unlock()
 }
 

@@ -66,3 +66,10 @@ func (a *API) fetchCoreChildLimits(ctx context.Context) (childlimits.Limits, err
 	err = json.Unmarshal(raw, &l)
 	return l, err
 }
+
+// accountRunningLimit is the running-children cap across one account's sessions.
+// It never undercuts the admin's per-agent "workers at once" setting: the hidden
+// default (maxRunningChildrenPerAccount) refused the owner's 8th worker on 2026-11-05.
+func accountRunningLimit(limits childStartLimits) int {
+	return max(maxRunningChildrenPerAccount, limits.parallel)
+}

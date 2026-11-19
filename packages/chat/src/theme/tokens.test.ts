@@ -29,10 +29,13 @@ function cssFiles(dir: string): string[] {
 const sheets: Record<string, string> = Object.fromEntries(
   cssFiles(SRC.replace(/\/$/, '')).map(p => [p.slice(SRC.length), fs.readFileSync(p, 'utf8')]),
 )
-const EXEMPT = new Set(['theme/blerg.css'])
+const EXEMPT = new Set(['theme/blerg.css', 'theme/brand.css'])
 
+const MODE_INVARIANT = ['document-bg', 'media-bg', 'backdrop', 'shadow-overlay']
 const CONTRACT = [
-  'bg', 'surface', 'surface-2', 'fg', 'muted', 'muted-2', 'accent', 'accent-fg',
+  ...MODE_INVARIANT,
+  'chart-sequential-low', 'chart-sequential-high',
+  'button-bg', 'bg', 'surface', 'surface-2', 'fg', 'muted', 'muted-2', 'accent', 'accent-fg',
   'selected-border', 'selected-bg', 'selected-text',
   'success', 'warning', 'info', 'danger', 'border', 'radius', 'font', 'font-mono', 'font-display',
   'text-xs', 'text-sm', 'density',
@@ -64,7 +67,7 @@ describe('theme tokens', () => {
     const css = sheets['theme/blerg.css']
     for (const t of CONTRACT) {
       const hits = css.match(new RegExp(`--chat-${t}\\s*:`, 'g')) ?? []
-      expect(hits.length, `--chat-${t}`).toBeGreaterThanOrEqual(2)
+      expect(hits.length, `--chat-${t}`).toBeGreaterThanOrEqual(MODE_INVARIANT.includes(t) ? 1 : 2)
     }
     expect(css).toMatch(/prefers-color-scheme:\s*light/)
   })

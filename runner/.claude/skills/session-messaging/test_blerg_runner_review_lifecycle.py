@@ -294,6 +294,14 @@ class TestReviewLifecycle(unittest.TestCase):
         self.assertIn("you reopened it: Which limit, 3 or 5? (waiting on the person)", self.cli["_review_line"](req))
         self.assertEqual(len(self.cli["_open_requests"](merged)), 1)
 
+    def test_child_reopen_reports_parent_recipient(self):
+        namespace = self.cli["cmd_review_reply"].__globals__
+        out = io.StringIO()
+        with mock.patch.dict(namespace, {"_post": lambda *_: {"id": "q-1", "recipient": "parent"}}), contextlib.redirect_stdout(out):
+            self.cli["_ask_after_reopen"]("changes.diff", [("request-one", {}, "Which limit?")])
+        self.assertIn("sent to your parent", out.getvalue())
+        self.assertNotIn("Needs you", out.getvalue())
+
     def test_reopen_refuses_an_open_thread(self):
         namespace = self.cli["cmd_review_reply"].__globals__
         with mock.patch.dict(namespace, {"_load_reviews": lambda: {"changes.diff": self.review(self.request())}}), \

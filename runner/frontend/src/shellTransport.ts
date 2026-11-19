@@ -1,7 +1,10 @@
+import { ShellReport, shellBrowserDeviceId } from './shellReport'
 import { apiFetch } from './apiFetch'
 import { ensureFreshToken, getAccessToken } from './authClient'
 
 const causes: Record<string, string> = {
+	keeper_incompatible: 'The shell keeper is incompatible with this daemon. Restart the keeper service, then reopen shells. This ends its old shells; agents keep running.',
+	keeper_unavailable: 'Host shells are reconnecting. Try again shortly; agents keep running.',
   bootstrap_read: 'The shell helper could not read its launch request.',
   bootstrap_validate: 'The shell helper rejected its launch request.',
   resolve_root: 'The shell project directory could not be resolved.',
@@ -40,7 +43,7 @@ const causes: Record<string, string> = {
   resize_sequence: 'The shell helper rejected the terminal resize sequence.',
   control_operation: 'The shell helper rejected a control operation.',
   control_apply: 'The shell helper could not apply a control operation.',
-  workspace_admission: 'The session workspace could not authorize this shell launch. Reconnect the desktop.',
+  workspace_admission: 'The workspace could not authorize this shell launch. Reconnect the desktop.',
   helper_start: 'The shell helper could not be launched. Check the service process permissions and restrictions.',
   helper_missing: 'A shell executable or its working directory is missing.',
   permission_denied: 'Permission denied starting the shell.',
@@ -67,10 +70,13 @@ export function shellEndedMessage(reason: unknown, afterSeconds: unknown): strin
 }
 
 export type ShellState = 'connecting' | 'syncing' | 'running' | 'disconnected' | 'closed'
-export type ShellInfo = { handle: string; shell_id: string; runtime: 'sandbox' | 'cluster' | 'host'; folder: string; attached?: boolean }
+export type ShellInfo = { privileged?: boolean; name?: string; opened_at?: number; handle: string; shell_id: string; runtime: 'sandbox' | 'cluster' | 'host'; folder: string; attached?: boolean; persistent?: boolean; consent_id?: string; lifetime_until?: number }
 // Rendering has no dependency on the agent socket, tmux, History, or session input.
 export interface ShellTransport {
   readonly info: ShellInfo
+  report?: ShellReport
+  rename?(name: string): Promise<void>
+  refreshDetails?(): Promise<void>
   /** replay marks output an earlier view already displayed: it must never produce terminal replies. */
   subscribe(output: (bytes: Uint8Array, replay?: boolean) => void, state: (state: ShellState) => void, error?: (message: string) => void): () => void
   input(bytes: Uint8Array, human?: boolean): void
@@ -79,8 +85,10 @@ export interface ShellTransport {
   reconnect(takeover?: boolean): Promise<void>
   disconnect(): void
   end(): Promise<void>
+  withdrawConsent?(): Promise<boolean>
   // Why the shell ended (an inactivity limit, or its authorization is gone), once one has.
   endedMessage?(): string
+  outputGap?(): boolean
   /** Whether a dropped connection is being re-established by itself (no click). */
   reconnecting?(): boolean
   /**
@@ -270,6 +278,7 @@ export class WebSocketShell implements ShellTransport {
   private replayState: 'unseen' | 'active' | 'done' = 'unseen'
   /** Bytes of the server's replay still to come on this socket. */
   private replayLeft = 0
+  private replayGap = false
   /**
    * A server replay that arrived before any view subscribed (a socket opens before
    * its view mounts). Held, bounded by the notice (at most SHELL_SCROLLBACK_BYTES),
@@ -292,10 +301,12 @@ export class WebSocketShell implements ShellTransport {
   private inputSeq = 0
   private resizeSeq = 0
   private generation = 0
+  private lastSocketAttempt = 0
   private identity = ''
   private history: Uint8Array[] = []
   private historyBytes = 0
   readonly info: ShellInfo
+  readonly report: ShellReport
   readonly owner: string
   private group: ShellRateGroup
   private lease: ShellLease
@@ -307,7 +318,7 @@ export class WebSocketShell implements ShellTransport {
   private why: 'elsewhere' | 'outage' | undefined
   /** Settles the current socket attempt: true once it opened, false once it failed. */
   private settle: ((opened: boolean) => void) | undefined
-  constructor(info: ShellInfo, group: ShellRateGroup, lease = new ShellLease(), session = '') { this.info = info; this.group = group; this.lease = lease; this.session = session; this.owner = loginIdentity(getAccessToken()) }
+  constructor(info: ShellInfo, group: ShellRateGroup, lease = new ShellLease(), session = '') { this.info = info; this.group = group; this.lease = lease; this.session = session; this.owner = loginIdentity(getAccessToken()); this.report = new ShellReport(info, session) }
   /**
    * A restore or open attempt takes ownership with its own lease; its view shares one
    * input budget across all of its shells. Only the current owner's cleanup can
@@ -336,6 +347,10 @@ export class WebSocketShell implements ShellTransport {
     while (this.historyBytes > SHELL_REPLAY_BYTES && this.history.length > 1) this.historyBytes -= this.history.shift()!.byteLength
   }
   subscribe(output: (bytes: Uint8Array, replay?: boolean) => void, state: (state: ShellState) => void, error?: (message: string) => void) {
+    const visibility = () => this.report.event(document.hidden ? 'hidden' : 'shown')
+    const online = () => this.report.event('online'), offline = () => this.report.event('offline'), wake = () => this.report.event('wake')
+    document.addEventListener('visibilitychange', visibility)
+    window.addEventListener('online', online); window.addEventListener('offline', offline); window.addEventListener('pageshow', wake)
     this.output = output; this.changed = state; this.failed = error; state(this.state)
     // Each subscriber is a fresh terminal: give it what the previous one displayed,
     // marked as replay so its historical terminal queries are not answered again.
@@ -347,14 +362,15 @@ export class WebSocketShell implements ShellTransport {
       for (const bytes of pending) { this.remember(bytes); output(bytes, true) }
     } else for (const bytes of this.history) output(bytes, true)
     if (this.failureMessage) error?.(this.failureMessage)
-    return () => { if (this.output === output) { this.output = undefined; this.changed = undefined; this.failed = undefined } }
+    return () => { document.removeEventListener('visibilitychange', visibility); window.removeEventListener('online', online); window.removeEventListener('offline', offline); window.removeEventListener('pageshow', wake); if (this.output === output) { this.output = undefined; this.changed = undefined; this.failed = undefined } }
   }
-  private status(state: ShellState) { this.state = state; this.changed?.(state) }
+  private status(state: ShellState) { this.report.event(state); this.state = state; this.changed?.(state) }
   reconnecting() { return this.recovering }
   disconnectedReason() { return this.state === 'disconnected' ? this.why : undefined }
   /** The session's inventory says another tab holds this shell. */
   controlledElsewhere() { this.why = 'elsewhere'; if (this.state === 'disconnected') this.status('disconnected') }
   async reconnect(takeover = false, signal?: AbortSignal) {
+    if (takeover) this.report.event('take_back')
     this.recovery++; this.recovering = false
     await this.connect(takeover, signal)
   }
@@ -364,12 +380,14 @@ export class WebSocketShell implements ShellTransport {
    */
   private async connect(takeover = false, signal?: AbortSignal): Promise<{ opened: Promise<boolean> }> {
     this.teardown()
+    this.report.event('reconnect')
     this.failureMessage = ''
     this.why = undefined
     let settle!: (opened: boolean) => void
     const opened = new Promise<boolean>(resolve => { settle = resolve })
     this.settle = settle
     const generation = ++this.generation
+    this.lastSocketAttempt = generation
     const owner = this.lease
     // A sign-out, sign-in or desktop change while this waits fences it: no socket is opened (#281).
     const epoch = retentionEpoch
@@ -392,6 +410,7 @@ export class WebSocketShell implements ShellTransport {
     url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
     if (takeover) url.searchParams.set('takeover', 'true')
     url.searchParams.set('replay', '1')
+    const device = shellBrowserDeviceId(); if (device) url.searchParams.set('device', device)
     this.identity = loginIdentity(token)
     const socket = new WebSocket(url, ['bearer', token]); socket.binaryType = 'arraybuffer'
     this.socket = socket; this.inputSeq = 0; this.resizeSeq = 0; this.replayState = 'unseen'; this.replayLeft = 0; this.pendingReplay = null; this.replayDiscarded = false
@@ -400,6 +419,7 @@ export class WebSocketShell implements ShellTransport {
       // The authority changed while the socket opened: it is closed, never used.
       if (epoch !== retentionEpoch || !this.sameIdentity()) { this.disconnect(); return }
       this.settle = undefined; this.recovering = false; settle(true)
+      this.report.event('attach')
       this.status('running')
       // Publishing 'running' sends held keys, and that can disconnect (a full input queue): then this
       // socket is no longer current, and nothing of it (no heartbeat) may outlive that disconnect.
@@ -410,7 +430,11 @@ export class WebSocketShell implements ShellTransport {
       if (generation !== this.generation || !this.sameIdentity()) return
       if (typeof event.data === 'string') {
         try {
-          const frame = JSON.parse(event.data) as { type?: string; phase?: string; cause?: unknown; bytes?: unknown; reason?: unknown; after_seconds?: unknown }
+          const frame = JSON.parse(event.data) as { type?: string; device?: unknown; phase?: string; cause?: unknown; bytes?: unknown; gap?: unknown; reason?: unknown; after_seconds?: unknown }
+          if (frame.type === 'control' && frame.reason === 'taken_over') {
+            this.report.device(frame.device); this.report.reason('taken_over'); this.report.event('taken_over'); this.disconnect(); this.controlledElsewhere(); return
+          }
+          if (frame.type === 'ended') this.report.reason(frame.reason)
           const ended = frame.type === 'ended' ? shellEndedMessage(frame.reason, frame.after_seconds) : undefined
           if (ended) {
             // An ended shell has no replay: its kept scrollback goes (a later view starts
@@ -432,6 +456,7 @@ export class WebSocketShell implements ShellTransport {
           }
           // The kept scrollback comes first, once per socket: exactly `bytes` bytes.
           if (frame.type === 'replay' && Number.isInteger(frame.bytes) && (frame.bytes as number) >= 0 && (frame.bytes as number) <= SHELL_SCROLLBACK_BYTES && this.replayState === 'unseen') {
+            this.replayGap = frame.gap === true
             this.replayLeft = frame.bytes as number
             this.replayState = this.replayLeft > 0 ? 'active' : 'done'
             // The terminal restarts from the server's history, so this page's kept
@@ -465,7 +490,7 @@ export class WebSocketShell implements ShellTransport {
     }
     // A close nobody asked for (a server restart, a refused socket, another tab's takeover, a
     // network blip): what the server lists now decides what follows (recover()).
-    socket.onclose = () => { this.dropped(generation) }
+    socket.onclose = event => { if (generation === this.lastSocketAttempt) this.report.close(event?.code, event?.reason ?? ''); this.dropped(generation) }
     socket.onerror = () => { this.dropped(generation) }
     return { opened }
   }
@@ -500,6 +525,7 @@ export class WebSocketShell implements ShellTransport {
       await after(delay)
       if (token !== this.recovery) return
       const found = await this.probe(Math.min(RECOVERY_PROBE_MS, left()))
+      this.report.event(`probe_${found}`)
       if (token !== this.recovery) return
       if (found === 'gone') { this.recovering = false; this.gone(`${SHELL_ENDED} ${SHELL_NO_LONGER_RUNNING}`); return }
       if (found === 'attached') { why = 'elsewhere'; break }
@@ -525,6 +551,7 @@ export class WebSocketShell implements ShellTransport {
         const infos = await response.json() as unknown
         if (!Array.isArray(infos)) return 'unknown' as const
         const listed = (infos as Partial<ShellInfo>[]).find(info => info?.handle === this.info.handle && info?.shell_id === this.info.shell_id)
+        if (listed) this.info.name = listed.name ?? ''
         return !listed ? 'gone' as const : listed.attached ? 'attached' as const : 'free' as const
       } catch { return 'unknown' as const }
     })()
@@ -560,6 +587,7 @@ export class WebSocketShell implements ShellTransport {
     this.send({ type: 'resize', seq: ++this.resizeSeq, cols: Math.min(65535, Math.max(1, cols)), rows: Math.min(65535, Math.max(1, rows)) })
   }
   disconnect() {
+    this.report.event('detach')
     this.recovery++; this.recovering = false
     this.teardown()
     if (this.state !== 'closed') this.status('disconnected')
@@ -573,52 +601,74 @@ export class WebSocketShell implements ShellTransport {
     const old = this.socket; this.socket = undefined
     old?.close()
   }
+  outputGap() { return this.replayGap }
   endedMessage() { return this.ended }
+  async withdrawConsent() {
+    if (!this.info.persistent || this.info.runtime !== 'host' || !this.info.consent_id || !this.session) throw new Error('Consent is unavailable.')
+    const response = await apiFetch(`/api/sessions/${encodeURIComponent(this.session)}/shell-consent/withdraw`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ consent_id: this.info.consent_id }) })
+    if (!response.ok) throw new Error('Consent could not be withdrawn.')
+    const result = await response.json() as { withdrawn?: boolean; cleanup_pending?: boolean }
+    if (result.withdrawn !== true || typeof result.cleanup_pending !== 'boolean') throw new Error('Withdrawal could not be confirmed.')
+    this.gone(`${SHELL_ENDED} Consent withdrawn.${result.cleanup_pending ? ' Cleanup is pending.' : ''}`)
+    return result.cleanup_pending
+  }
+  async refreshDetails() {
+    try {
+      const response = await apiFetch(`/api/shells/${encodeURIComponent(this.info.handle)}/details`, { signal: AbortSignal.timeout(3000) })
+      if (response.ok) this.report.reason((await response.json() as { reason?: unknown }).reason)
+    } catch { /* The local timeline remains available during an outage. */ }
+  }
+  async rename(name: string) {
+    const response = await apiFetch(`/api/shells/${encodeURIComponent(this.info.handle)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) })
+    if (!response.ok) throw new Error('Shell could not be renamed.')
+    const info = await response.json() as ShellInfo
+    this.info.name = info.name ?? ''
+  }
   async end() {
     const response = await apiFetch(`/api/shells/${encodeURIComponent(this.info.handle)}`, { method: 'DELETE' })
     if (!response.ok) throw new Error('Shell could not be ended.')
     this.forget(); this.disconnect(); this.status('closed')
   }
 }
-export type HostShellChallenge = { challenge_id: string; machine_id: string; account: string; uid: number; shell: string; cwd: string }
+export type HostShellChallenge = { version?: number; challenge_id: string; machine_id: string; account: string; uid: number; shell: string; cwd: string }
 export class HostShellConsentRequired extends Error {
   readonly challenge: HostShellChallenge
   constructor(challenge: HostShellChallenge) { super('Host shell requires your consent.'); this.challenge = challenge }
 }
-export async function acceptHostShell(session: string, challenge: string) {
-  const response = await apiFetch(`/api/sessions/${encodeURIComponent(session)}/shell-consent/accept`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ challenge_id: challenge, accept: true }) })
+export async function acceptHostShell(session: string, challenge: string, version?: number) {
+  const response = await apiFetch(`/api/sessions/${encodeURIComponent(session)}/shell-consent/accept`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ challenge_id: challenge, accept: true, ...(version === 2 ? { version: 2 } : {}) }) })
   if (!response.ok) throw new Error('Consent expired or the machine, account, or launch changed. Open the shell again.')
 }
-export async function openShell(session: string, group: ShellRateGroup, lease = new ShellLease()): Promise<ShellTransport> {
+export async function openShell(session: string, group: ShellRateGroup, lease = new ShellLease(), name?: string, privileged = false): Promise<ShellTransport> {
   const login = loginIdentity(getAccessToken())
   // Taken before the first wait: a sign-out, sign-in or desktop change while the shell is being
   // created fences what comes back (no transport is kept, no socket opened).
   const epoch = retentionEpoch
   const fenced = () => epoch !== retentionEpoch || loginIdentity(getAccessToken()) !== login
-  const response = await apiFetch(`/api/sessions/${encodeURIComponent(session)}/shells`, { method: 'POST' })
+  const response = await apiFetch(`/api/sessions/${encodeURIComponent(session)}/shells`, { method: 'POST', ...(name === undefined && !privileged ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, ...(privileged ? { privileged: true } : {}) }) }) })
   if (response.status === 428) {
     const challenge = await apiFetch(`/api/sessions/${encodeURIComponent(session)}/shell-consent/challenge`, { method: 'POST' })
     if (!challenge.ok) throw new Error('Host shell challenge unavailable.')
     throw new HostShellConsentRequired(await challenge.json() as HostShellChallenge)
   }
   if (!response.ok) {
-    if (response.status === 429) throw new Error('This session already has four shells.')
+    if (response.status === 429) throw new Error('This workspace already has four shells.')
     const body = await response.json().catch(() => null) as { code?: unknown; cause?: unknown } | null
     const code = typeof body?.code === 'string' ? body.code : ''
     const messages: Record<string, string> = {
-      session_not_ready: 'This session is still resuming. Wait for recovery, then open the shell again.',
+      session_not_ready: 'This workspace is still resuming. Wait for recovery, then open the shell again.',
       policy_disabled: 'Owner shells are disabled. Ask an administrator to enable them in Settings.',
       policy_unavailable: 'Shell policy is unavailable. Wait for the server to reconnect, then try again.',
       authority_refused: 'Your shell access could not be verified. Sign in again, then try again.',
-      binding_refused: 'The session runtime changed. Reconnect the desktop, then open the shell again.',
-      runtime_binding_refused: 'The session runtime changed. Reconnect the desktop, then open the shell again.',
+      binding_refused: 'The workspace runtime changed. Reconnect the desktop, then open the shell again.',
+      runtime_binding_refused: 'The workspace runtime changed. Reconnect the desktop, then open the shell again.',
       runtime_consent_refused: 'Consent no longer matches this launch. Open the shell again to review the current machine and account.',
       runtime_identity_refused: 'The host account or project directory changed. Restore the original directory, then reconnect the desktop and review consent again.',
       runtime_cleanup_refused: 'Shell cleanup could not be verified. Reconnect the desktop and check its daemon log before trying again.',
-      runtime_fenced: 'The shell is paused after a failed start or while the session recovers. Wait a few seconds and try again. If it keeps failing, reconnect the desktop or resume the session.',
+      runtime_fenced: 'The shell is paused after a failed start or while the workspace recovers. Wait a few seconds and try again. If it keeps failing, reconnect the desktop or resume the workspace.',
       runtime_capability_refused: 'This desktop does not support the required shell containment. Update the desktop and reconnect it.',
       runtime_policy_refused: 'Shell policy changed. Reconnect the desktop, then try again.',
-      runtime_busy: 'The desktop is busy opening other session workspaces. Try again in a moment.',
+      runtime_busy: 'The desktop is busy opening other workspaces. Try again in a moment.',
       runtime_start_refused: 'The desktop could not start the contained shell. Check the desktop daemon log, then reconnect the desktop and try again.',
     }
 
@@ -629,6 +679,11 @@ export async function openShell(session: string, group: ShellRateGroup, lease = 
   if (fenced()) throw new Error('Your sign-in changed. Open the shell again.')
   const info = await response.json() as ShellInfo
   if (fenced()) throw new Error('Your sign-in changed. Open the shell again.')
+  // The server can record a shell before this response reaches the client that asked for
+  // it: a returning view's inventory may already have discovered and connected it. Adopt
+  // that transport rather than opening a second connection to the same server-side shell.
+  const kept = retainedShell(session, info)
+  if (kept) return kept
   const shell = new WebSocketShell(info, group, lease, session)
   if (shell.owner !== login) throw new Error('Your sign-in changed. Open the shell again.')
   retain(session, shell)
@@ -658,6 +713,7 @@ export async function restoreShells(session: string, group: ShellRateGroup, sign
     // A session view that unmounted (the person left the session) left its shells here.
     const kept = retainedShell(session, info)
     const shell = kept ?? new WebSocketShell(info, group, lease, session)
+    Object.assign(shell.info, info)
     shell.adopt(group, lease)
     retain(session, shell)
     return shell

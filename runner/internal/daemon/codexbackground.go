@@ -18,11 +18,8 @@ func (a *codexApp) backgroundTerminals() {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	known := map[string]codexTerminal{}
-	defer func() {
-		for id, t := range known {
-			a.d.emit("background_task_done", agent.BackgroundTaskDonePayload{TaskID: id, CallID: t.ItemID, Kind: "bash", Status: "stopped", Description: t.Command, Summary: "Codex runtime disconnected"})
-		}
-	}()
+	// A disconnected app-server cannot confirm whether its tool children exited.
+
 	for {
 		select {
 		case <-a.ctx.Done():

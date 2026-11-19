@@ -44,6 +44,7 @@ type internalFetchRequest struct {
 	// specific token/session belongs to AccountID and is live; see Deps.principalLiveness.
 	TokenID   string `json:"token_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
+	Standing  bool   `json:"standing,omitempty"`
 }
 
 // internalFetchResponse is POST /internal/credentials/fetch's success body: the plaintext
@@ -110,7 +111,7 @@ func (d Deps) handleInternalFetchCredential(w http.ResponseWriter, r *http.Reque
 	// Check 2: this account's credentials are still backed by a live principal — a live human
 	// session, or the agent token the calling session runs as. This is a SEPARATE, additional
 	// gate on top of check 1 above — a valid internal key alone is never enough.
-	sessionID, tokenID, ok, err := d.principalLiveness(r.Context(), body.AccountID, body.TokenID, body.SessionID)
+	sessionID, tokenID, ok, err := d.principalLiveness(r.Context(), body.AccountID, body.TokenID, body.SessionID, body.Standing)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -159,6 +160,7 @@ type internalListRequest struct {
 	// agent token or human session that authorises the call.
 	TokenID   string `json:"token_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
+	Standing  bool   `json:"standing,omitempty"`
 }
 
 // internalListResponse is POST /internal/credentials/list's success body: the sorted names of
@@ -204,6 +206,7 @@ func (d Deps) handleInternalListCredentials(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
+	standingResponse(w, body.Standing)
 	if body.AccountID == "" {
 		http.Error(w, "account_id is required", http.StatusBadRequest)
 		return
@@ -213,10 +216,16 @@ func (d Deps) handleInternalListCredentials(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if _, _, ok, err := d.principalLiveness(r.Context(), body.AccountID, body.TokenID, body.SessionID); err != nil {
+	if _, _, ok, err := d.principalLiveness(r.Context(), body.AccountID, body.TokenID, body.SessionID, body.Standing); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	} else if !ok {
+		if body.Standing && body.SessionID != "" && body.TokenID == "" {
+			state, err := d.standingHumanState(r.Context(), body.AccountID, body.SessionID)
+			if err == nil && (state == "suspended" || state == "revoked") {
+				w.Header().Set("X-Blerg-Standing-State", state)
+			}
+		}
 		log.Printf("internal list: no live principal for account %s", body.AccountID)
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -267,16 +276,25 @@ func validateProofShape(accountID, tokenID, sessionID string) string {
 //     (identity.HumanSessionLive). Knowing an account's uuid and that it is logged in is not
 //     enough: the caller must name that account's own session.
 //
-// There is deliberately no "any live session of the account" fallback: the limit on what a
-// holder of the internal key can read is enforced here, not left to its callers.
+// Standing internal calls may retain human consent across benign chain expiry.
+// The optional flag never widens token proof or an omitted/false exact proof.
 //
 // ok=false is an ordinary outcome (dead, revoked, expired, or someone else's proof), not an
 // error — the callers turn every such case into the same anti-enumeration 404, so a key holder
 // cannot tell "no such session" from "not this account's" from "logged out".
-func (d Deps) principalLiveness(ctx context.Context, accountID, tokenID, sessionID string) (forSessionID, forTokenID string, ok bool, err error) {
+func (d Deps) principalLiveness(ctx context.Context, accountID, tokenID, sessionID string, standing ...bool) (forSessionID, forTokenID string, ok bool, err error) {
 	svc, svcOK := d.identitySvc()
 	if !svcOK {
 		return "", "", false, errors.New("identity service unavailable")
+	}
+	if sessionID != "" && tokenID == "" && len(standing) > 0 && standing[0] {
+		// The original chain remains provenance. Only benign revocations may
+		// survive, and a security reset at/after its FIRST row is permanent.
+		state, liveRow, err := d.standingHumanProof(ctx, accountID, sessionID)
+		if err != nil || state != "active" {
+			return "", "", false, err
+		}
+		return liveRow, "", true, nil
 	}
 	if sessionID != "" {
 		id, live, err := svc.HumanSessionLive(ctx, accountID, sessionID)
@@ -290,6 +308,53 @@ func (d Deps) principalLiveness(ctx context.Context, accountID, tokenID, session
 		return "", "", false, err
 	}
 	return "", tokenID, true, nil
+}
+
+// Standing responses default to unknown until a definitive authority check says otherwise.
+func standingResponse(w http.ResponseWriter, standing bool) {
+	if standing {
+		w.Header().Set("X-Blerg-Standing-State", "unavailable")
+	}
+}
+
+// standingRefusalState is safe diagnostic state for trusted component callers.
+// It is presentation only; a second read that has recovered never authorizes
+// the refused request or labels recovered authority permanently revoked.
+func (d Deps) standingRefusalState(w http.ResponseWriter, r *http.Request, account, token, session string, standing bool) {
+	if !standing || token != "" || session == "" {
+		return
+	}
+	state, err := d.standingHumanState(r.Context(), account, session)
+	if err == nil && (state == "suspended" || state == "revoked") {
+		w.Header().Set("X-Blerg-Standing-State", state)
+	}
+}
+
+// standingHumanState classifies authority without changing persisted grants.
+// All original rows must be the same person's; unknown revocation reasons deny.
+func (d Deps) standingHumanState(ctx context.Context, accountID, sessionID string) (string, error) {
+	state, _, err := d.standingHumanProof(ctx, accountID, sessionID)
+	return state, err
+}
+
+// The live authorizing row and original-chain predicate share one SQL snapshot.
+// Stored request/grant provenance remains the original chain; credential access
+// audit records the current live human row that actually authorizes the fetch.
+func (d Deps) standingHumanProof(ctx context.Context, accountID, sessionID string) (string, string, error) {
+	var state, liveRow string
+	err := d.Store.Pool().QueryRow(ctx, `SELECT CASE
+ WHEN NOT EXISTS (SELECT 1 FROM accounts WHERE id=$1::uuid AND disabled_at IS NULL)
+ OR NOT EXISTS (SELECT 1 FROM human_sessions WHERE chain_id=$2::uuid)
+ OR EXISTS (SELECT 1 FROM human_sessions WHERE chain_id=$2::uuid AND
+   (account_id<>$1::uuid OR (revoked_at IS NOT NULL AND COALESCE(revoke_reason,'') NOT IN ('rotated','superseded','logout'))))
+ OR EXISTS (SELECT 1 FROM revocations r WHERE r.kind='lineage' AND r.value=$1::text
+   AND r.revoked_at >= (SELECT min(created_at) FROM human_sessions WHERE chain_id=$2::uuid))
+ THEN 'revoked'
+ WHEN EXISTS (SELECT 1 FROM accounts WHERE id=$1::uuid AND must_change_password)
+ OR NOT EXISTS (SELECT 1 FROM human_sessions WHERE account_id=$1::uuid AND revoked_at IS NULL AND expires_at>now())
+ THEN 'suspended' ELSE 'active' END,
+ COALESCE((SELECT id::text FROM human_sessions WHERE account_id=$1::uuid AND revoked_at IS NULL AND expires_at>now() ORDER BY created_at DESC,id DESC LIMIT 1),'')`, accountID, sessionID).Scan(&state, &liveRow)
+	return state, liveRow, err
 }
 
 // logCredentialAccess inserts one credential_access_log row for a successful fetch. Exactly one

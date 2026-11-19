@@ -54,7 +54,7 @@ describe('ChatView clock ticks', () => {
       seed(...turn)
       const t = createFakeTransport()
       render(<ChatView session={SESSION} transport={t.transport} meta={meta({ status: 'running' })} />)
-      const id = streaming ? 'working-compact' : 'working'
+      const id = 'working'
       expect(time(id)).toBe('0:42')
       expect(counts.composer).toBeGreaterThan(0)
       const before = { ...counts }

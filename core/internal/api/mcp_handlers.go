@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"github.com/blerglab/blerg-ai/core/internal/mcpconn"
 )
 
@@ -97,6 +99,16 @@ func decodeMCPBody(w http.ResponseWriter, r *http.Request, limit int64, v any) b
 
 func writeMCPError(w http.ResponseWriter, err error) {
 	var ve *mcpconn.ValidationError
+	level := slog.LevelError
+	if errors.As(err, &ve) || errors.Is(err, mcpconn.ErrNameTaken) || errors.Is(err, mcpconn.ErrLimit) || errors.Is(err, mcpconn.ErrNotFound) || errors.Is(err, mcpconn.ErrRateLimited) {
+		level = slog.LevelInfo
+	}
+	cause := mcpconn.FailureCause(err)
+	if level == slog.LevelInfo {
+		slog.Info("mcp connections", "cause", cause)
+	} else {
+		failurelog.Default.Event("mcp_http:"+cause, level, "component", "core", "operation", "mcp_connections", "cause", cause)
+	}
 	switch {
 	case errors.As(err, &ve):
 		http.Error(w, ve.Msg, http.StatusBadRequest)
@@ -110,7 +122,6 @@ func writeMCPError(w http.ResponseWriter, err error) {
 		w.Header().Set("Retry-After", "60")
 		http.Error(w, "too many connection attempts: try again in a minute", http.StatusTooManyRequests)
 	default:
-		log.Printf("mcp connections: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
 }
@@ -244,6 +255,7 @@ type internalMCPProof struct {
 	AccountID string `json:"account_id"`
 	TokenID   string `json:"token_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
+	Standing  bool   `json:"standing,omitempty"`
 }
 
 // internalMCPListRequest is POST /internal/mcp/connections/list's body.
@@ -325,6 +337,7 @@ func (d Deps) internalMCPGateLimit(w http.ResponseWriter, r *http.Request, body 
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return mcpconn.Proof{}, false
 	}
+	standingResponse(w, proof.Standing)
 	if msg := validateProofShape(proof.AccountID, proof.TokenID, proof.SessionID); msg != "" {
 		http.Error(w, msg, http.StatusBadRequest)
 		return mcpconn.Proof{}, false
@@ -335,12 +348,13 @@ func (d Deps) internalMCPGateLimit(w http.ResponseWriter, r *http.Request, body 
 			return mcpconn.Proof{}, false
 		}
 	}
-	sid, tid, ok, err := d.principalLiveness(r.Context(), proof.AccountID, proof.TokenID, proof.SessionID)
+	sid, tid, ok, err := d.principalLiveness(r.Context(), proof.AccountID, proof.TokenID, proof.SessionID, proof.Standing)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return mcpconn.Proof{}, false
 	}
 	if !ok {
+		d.standingRefusalState(w, r, proof.AccountID, proof.TokenID, proof.SessionID, proof.Standing)
 		log.Printf("internal mcp: no live principal for account %s", proof.AccountID)
 		http.Error(w, "not found", http.StatusNotFound)
 		return mcpconn.Proof{}, false
@@ -357,7 +371,7 @@ func (d Deps) handleInternalListMCPConnections(w http.ResponseWriter, r *http.Re
 	}
 	list, err := d.MCPConnections.List(r.Context(), body.AccountID)
 	if err != nil {
-		log.Printf("internal mcp list: %v", err)
+		log.Printf("internal mcp list: cause=%s", mcpconn.FailureCause(err))
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -385,7 +399,11 @@ func (d Deps) handleInternalMCPToken(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := d.MCPConnections.FetchSecret(r.Context(), body.AccountID, body.ConnectionID, proof)
 	if err != nil {
+		log.Printf("internal mcp token: cause=%s", mcpconn.FailureCause(err))
 		if errors.Is(err, mcpconn.ErrNotFound) {
+			if body.Standing && body.SessionID != "" && body.TokenID == "" {
+				w.Header().Set("X-Blerg-Standing-State", "revoked")
+			}
 			// Also what an OAuth connection in needs_auth (or whose refresh was rejected) answers:
 			// the runner treats it as "connection unavailable, sign in again".
 			http.Error(w, "not found", http.StatusNotFound)
@@ -397,7 +415,6 @@ func (d Deps) handleInternalMCPToken(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		log.Printf("internal mcp token: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

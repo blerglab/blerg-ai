@@ -1,3 +1,4 @@
+import { ColumnFocusButton } from '../../../packages/board/BoardPresentation';
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { Column } from "./api";
 import { BoardFilter, countLabel, isFiltering } from "./boardFilter";
@@ -8,7 +9,8 @@ export interface ColumnCount { column: Column; shown: number; total: number }
 // at a time) and, under them, the full-width search and the active filters when there are any.
 // On a desktop the search and filters live in the toolbar and this strip only carries the
 // screen-reader announcement. `applied` is what the cards and counts follow.
-export function BoardFilterBar({ counts, activeColumn, onPickColumn, applied, children }: {
+export function BoardFilterBar({ counts, activeColumn, onPickColumn, applied, children, focused, onFocusColumn }: {
+  focused?: boolean; onFocusColumn?: () => void;
   counts: ColumnCount[];
   activeColumn: string | null;
   onPickColumn: (id: string) => void;
@@ -39,14 +41,14 @@ export function BoardFilterBar({ counts, activeColumn, onPickColumn, applied, ch
   // What the filter left, said to a screen reader once typing settles.
   const shown = counts.reduce((n, c) => n + c.shown, 0);
   const total = counts.reduce((n, c) => n + c.total, 0);
-  const summary = filtering ? `${shown} of ${total} card${total === 1 ? "" : "s"} shown` : "";
+  const summary = filtering ? `${shown} of ${total} card${total === 1 ? "" : "s"} match` : "";
   const [said, setSaid] = useState("");
   const wasFiltering = useRef(false);
   useEffect(() => {
     const cleared = wasFiltering.current && !filtering;
     wasFiltering.current = filtering;
     if (!filtering && !cleared) return;
-    const t = setTimeout(() => setSaid(summary || `All ${total} cards shown`), 700);
+    const t = setTimeout(() => setSaid(summary || `Filter cleared. ${total} cards total.`), 700);
     return () => clearTimeout(t);
     // Only a filter transition announces "All". Unfiltered count changes must neither repeat
     // that announcement nor cancel one waiting to be spoken; total is captured at Clear.
@@ -66,6 +68,7 @@ export function BoardFilterBar({ counts, activeColumn, onPickColumn, applied, ch
               aria-selected={on} tabIndex={on ? 0 : -1}
               className={`column-tab${on ? " on" : ""}`}
               onClick={() => onPickColumn(column.id)}
+              onDoubleClick={onFocusColumn}
             >
               <span className="name">{column.name}</span>
               <span className="count">{countLabel(shown, total, filtering)}</span>
@@ -73,6 +76,7 @@ export function BoardFilterBar({ counts, activeColumn, onPickColumn, applied, ch
           );
         })}
       </div>
+      {onFocusColumn && <span className="phone-column-focus"><ColumnFocusButton name={counts.find(c => c.column.id === activeColumn)?.column.name ?? 'column'} focused={focused} onClick={onFocusColumn} /></span>}
       {children}
       <div className="sr-only" aria-live="polite" role="status">{said}</div>
     </div>

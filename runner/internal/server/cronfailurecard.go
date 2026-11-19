@@ -427,7 +427,7 @@ func (h *HTTPBoardCards) PostCard(ctx context.Context, proof mcpgw.Proof, boardI
 	if h.BaseURL == "" || h.Exchanger == nil {
 		return errors.New("the board is not configured")
 	}
-	tok, err := h.Exchanger.Exchange(ctx, proof, boardID, "")
+	tok, err := h.Exchanger.Exchange(ctx, proof, boardID, "", false)
 	if err != nil {
 		return fmt.Errorf("board token exchange: %w", err)
 	}

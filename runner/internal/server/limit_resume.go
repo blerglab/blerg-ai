@@ -253,18 +253,27 @@ func withCancelledLimitResume(ctx context.Context, pool *pgxpool.Pool, id string
 		return fn()
 	}
 	return withLimitResumeActionLock(ctx, pool, id, func(conn *pgxpool.Conn) error {
-		previous, err := db.GetLimitResume(ctx, conn, id)
-		if err != nil {
+		if err := cancelLimitResumeUnlocked(ctx, pool, conn, id); err != nil {
 			return err
-		}
-		if err := db.CancelLimitResume(ctx, conn, id); err != nil {
-			return err
-		}
-		if previous.State == "pending" || previous.State == "dispatched" {
-			limitResumeAudit(ctx, nil, pool, id, newUUID(), "Automatic continuation canceled by manual intervention.")
 		}
 		return fn()
 	})
+}
+
+// Caller holds the session action lock. Parent answers call this only after the
+// guarded answer succeeds, so a refused decision preserves automatic continuation.
+func cancelLimitResumeUnlocked(ctx context.Context, pool *pgxpool.Pool, conn *pgxpool.Conn, id string) error {
+	previous, err := db.GetLimitResume(ctx, conn, id)
+	if err != nil {
+		return err
+	}
+	if err := db.CancelLimitResume(ctx, conn, id); err != nil {
+		return err
+	}
+	if previous.State == "pending" || previous.State == "dispatched" {
+		limitResumeAudit(ctx, nil, pool, id, newUUID(), "Automatic continuation canceled by manual intervention.")
+	}
+	return nil
 }
 
 func withLimitResumeActionLock(ctx context.Context, pool *pgxpool.Pool, id string, fn func(*pgxpool.Conn) error) error {

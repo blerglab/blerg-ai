@@ -25,12 +25,17 @@ func (l WorkspaceLayout) Valid() bool {
 // WorkspaceCapabilities is negotiated independently at both runtime hops.
 // An omitted value is a legacy peer and grants no workspace-v2 or shell support.
 type WorkspaceCapabilities struct {
-	LinuxHost       bool `json:"linux_host,omitempty"`
-	MacOSHost       bool `json:"macos_host,omitempty"`
-	Sandbox         bool `json:"sandbox,omitempty"`
-	Cluster         bool `json:"cluster,omitempty"`
-	ManifestVersion int  `json:"manifest_version"`
-	ShellVersion    int  `json:"shell_version"`
+	ShellPersistence  int  `json:"shell_persistence,omitempty"`
+	PersistentHost    bool `json:"persistent_host,omitempty"`
+	PersistentSandbox bool `json:"persistent_sandbox,omitempty"`
+	LinuxHost         bool `json:"linux_host,omitempty"`
+	MacOSHost         bool `json:"macos_host,omitempty"`
+	Sandbox           bool `json:"sandbox,omitempty"`
+	Cluster           bool `json:"cluster,omitempty"`
+	ManifestVersion   int  `json:"manifest_version"`
+	ShellVersion      int  `json:"shell_version"`
+	// Membership is the negotiated live repository-change version.
+	Membership int `json:"membership,omitempty"`
 }
 
 func (c WorkspaceCapabilities) Require(m WorkspaceManifest, shell bool) error {
@@ -72,14 +77,36 @@ type WorkspaceManifest struct {
 	OwnerID          string          `json:"owner_id"`
 	Runtime          string          `json:"runtime"`
 	LaunchGeneration string          `json:"launch_generation"`
+	// Revision counts authorized membership changes after launch. Zero is the
+	// launch selection, and stays out of its digest.
+	Revision int64 `json:"membership_revision,omitempty"`
 	// Root is legacy metadata only; use WorkspaceRuntimeBinding for file access.
 	Root    WorkspaceRoot     `json:"root"`
 	Digest  string            `json:"digest"`
 	Members []WorkspaceMember `json:"members"`
 }
 
+// WorkspaceReservedFolder holds repositories added beside a member at the root,
+// which keeps its path. Git never sees it: it is listed in that repository's
+// info/exclude. It is not a place for anything else.
+const WorkspaceReservedFolder = ".workspace"
+
+// ReservedMemberPath is true for exactly one safe name below the reserved folder.
+func ReservedMemberPath(p string) bool {
+	name, ok := strings.CutPrefix(p, WorkspaceReservedFolder+"/")
+	return ok && name != "" && name != "." && name != ".." && !strings.ContainsAny(name, "/\\\x00")
+}
+
+// A member at the root overlaps everything but the reserved folder.
+func memberPathsOverlap(a, b string) bool {
+	if a == "." || b == "." {
+		return a == b || !ReservedMemberPath(a) && !ReservedMemberPath(b)
+	}
+	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
+}
+
 func (m WorkspaceManifest) Validate() error {
-	if !m.Layout.Valid() || m.Version != WorkspaceVersion || (m.Kind != "repo" && m.Kind != "folder") || m.OwnerID == "" || m.LaunchGeneration == "" || m.Digest == "" {
+	if m.Revision < 0 || !m.Layout.Valid() || m.Version != WorkspaceVersion || (m.Kind != "repo" && m.Kind != "folder") || m.OwnerID == "" || m.LaunchGeneration == "" || m.Digest == "" {
 		return errors.New("invalid workspace binding")
 	}
 	if m.Runtime != "host" && m.Runtime != "sandbox" && m.Runtime != "cluster" {
@@ -97,7 +124,7 @@ func (m WorkspaceManifest) Validate() error {
 			return errors.New("invalid member path")
 		}
 		for _, prev := range m.Members[:i] {
-			if v.Path == prev.Path || strings.HasPrefix(v.Path, prev.Path+"/") || strings.HasPrefix(prev.Path, v.Path+"/") || v.Path == "." || prev.Path == "." {
+			if memberPathsOverlap(v.Path, prev.Path) {
 				return errors.New("overlapping member paths")
 			}
 		}
@@ -138,7 +165,9 @@ type WorkspaceMemberRef struct {
 }
 
 type WorkspaceMemberResult struct {
+	Summary *DeliveredSummary `json:"summary,omitempty"`
 	WorkspaceMemberRef
+	SyncNote         string `json:"sync_note,omitempty"`
 	Base             string `json:"base"`
 	Head             string `json:"head"`
 	Branch           string `json:"branch"`
@@ -151,6 +180,9 @@ type WorkspaceMemberResult struct {
 func (m WorkspaceManifest) ValidateResults(results []WorkspaceMemberResult) error {
 	seen := map[string]bool{}
 	for _, r := range results {
+		if !r.Summary.Valid() {
+			return errors.New("invalid delivered summary")
+		}
 		found := false
 		for _, v := range m.Members {
 			if v.ID == r.MemberID {

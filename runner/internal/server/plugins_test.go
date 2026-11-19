@@ -343,3 +343,9 @@ func TestResolvePluginListPreservesAllowedNativeCodexAtStartup(t *testing.T) {
 		t.Fatal("Claude startup accepted Codex identity")
 	}
 }
+
+func TestDelegatedPluginSkipIsNotAWarning(t *testing.T) {
+	if s := pluginStage(nil, pluginsNoteDelegated); s != nil {
+		t.Fatalf("routine delegated skip should be hidden: %+v", s)
+	}
+}

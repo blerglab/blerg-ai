@@ -1,6 +1,6 @@
 # Crons
 
-A cron starts an agent session on a schedule, with nobody watching: "every weekday at 07:30, read
+A cron starts an agent run on a schedule, with nobody watching: "every weekday at 07:30, read
 my notes and summarize what needs attention". It is the runner's scheduler plus the
 [MCP connections](mcp-connections.md) that give the run something to act on.
 
@@ -16,9 +16,9 @@ Changing the engine resets its saved model and effort to the new engine's defaul
 choose replacements. Existing crons keep Claude as their engine.
 
 1. The runner's scheduler wakes every 30 seconds and finds crons that are due.
-2. For each, it records the run, then starts an ordinary agent session with your prompt.
-3. The session runs **one turn** and ends. It shows in the session list with a "cron" badge and
-   streams like any other session, but only you can see it (see [below](#sessions-are-private)).
+2. For each, it records the run, then starts an agent run with your prompt.
+3. The run takes **one turn** and ends. It shows in the workspace list with a "Run" badge and
+   streams like any other workspace, but only you can see it (see [below](#runs-are-private)).
 4. The run and its outcome (started, held, skipped, failed, ran late) are listed under the cron.
    Run history is kept for 90 days. **Run now** starts one immediately.
 
@@ -85,7 +85,7 @@ slot.
 
 Catch-up is deliberate: a desktop asleep over a weekend does not wake up to a pile of runs.
 
-A run that cannot start yet (the cluster is at its session limit, or no daemon is connected) is
+A run that cannot start yet (the cluster is at its workspace limit, or no daemon is connected) is
 **held** and retried every tick. It waits up to the cron's grace period (one hour by default),
 counted from the later of its slot and the runner's start-up, so a machine that was off for a day
 still gets its catch-up run once a daemon reconnects. When the grace period ends the run is marked
@@ -95,8 +95,8 @@ or held is skipped.
 ## What an unattended run can and cannot do
 
 An unattended run reads untrusted text with nobody watching, so it is contained more tightly than an
-interactive session (a session you launch yourself keeps its tools even with connections; see
-[mcp-connections.md](mcp-connections.md#how-a-session-sees-a-connection-the-gateway)):
+interactive workspace (a workspace you launch yourself keeps its tools even with connections; see
+[mcp-connections.md](mcp-connections.md#how-a-workspace-sees-a-connection-the-gateway)):
 
 - **Where it runs.** A cluster pod or the Docker sandbox. Never the bare host.
 - **Codex support.** A Docker daemon must explicitly report `codex_restricted`; older daemons
@@ -104,7 +104,7 @@ interactive session (a session you launch yourself keeps its tools even with con
   before starting and loads only the runner's file tools and selected MCP tools, with no user
   settings, plugins, hooks or native tools. Cluster runs need the updated agent image too.
 - **Tools.** Only file tools (read, write, edit, search) plus the MCP tools you allowed for that
-  cron. No shell, web access, sub-agents or other built-ins. The runner sets this list; a session
+  cron. No shell, web access, sub-agents or other built-ins. The runner sets this list; a workspace
   cannot change it.
 - **MCP.** Only the connections and tools chosen on the cron, each tool pinned to its definition
   (see [mcp-connections.md](mcp-connections.md)). There is no "enable everything" switch.
@@ -112,11 +112,11 @@ interactive session (a session you launch yourself keeps its tools even with con
   the shared operator credential**: if yours cannot be fetched (the cron token was revoked, the
   credential was removed), the run fails without starting a pod.
 - **Limits.** One turn per run, a maximum run time (30 minutes by default; a run over it is
-  stopped), a per-session tool call budget, at most 20 crons per account and 2 cron sessions at a
+  stopped), a per-run tool call budget, at most 20 crons per account and 2 cron runs at a
   time per account.
 - **Proposals.** At most 50 pending per account; a queued call counts against the tool call budget.
 - **Failures.** Three failed runs in a row pause the cron with the reason. Deleting or pausing a cron
-  stops any session it is running and revokes its grants.
+  stops any run it is running and revokes its grants.
 
 What it can do with the board: read and write cards on its one board, through the admission gate,
 using a token that lasts minutes and is valid for that board alone. With a tool in propose mode it
@@ -127,10 +127,10 @@ the agent can be steered into misusing the other tools you allowed. Keep the all
 prefer read-only ones, and do not give a run a tool whose write access you would not give the
 sender of that content.
 
-## Sessions are private
+## Runs are private
 
-A session started by a cron, and any session with MCP connections, is visible **only to the account
-that started it**, on every surface: the session list, live updates, transcripts, terminal output,
+A scheduled run, and any workspace with MCP connections, is visible **only to the account
+that started it**, on every surface: the workspace list, live updates, transcripts, terminal output,
 screenshots, events, push notifications and completion webhooks. Other people on the same
 install, including administrators, do not see it, because its content can include the results of
 your tools.
@@ -163,7 +163,7 @@ owns it.
 | Limit | Value |
 |---|---|
 | Crons per account | 20 |
-| Concurrent cron sessions per account | 2 |
+| Concurrent cron runs per account | 2 |
 | Shortest interval | 15 minutes |
 | Prompt | 16 KiB |
 | Default grace for a held run | 1 hour |
@@ -172,3 +172,45 @@ owns it.
 | Cron token life | at most 365 days |
 | Run history kept | 90 days |
 | Pending proposals per account | 50 (expire after 7 days) |
+
+## Fixed command steps
+
+The create/edit form has an optional **Fixed command steps (JSON)** field. It accepts up to
+eight commands, in order, with a 64 KiB limit on the complete approved definition. For example:
+
+```json
+[{"argv":["kubectl","get","pods","-A"],"timeout_seconds":30,"max_output_bytes":16384}]
+```
+
+These are argument arrays, with no shell expansion. To use a script, name its executable path;
+it must already exist in the run's image. Commands run from the run's scratch workspace, inside
+its sandbox or cluster pod, using the runtime's network restrictions. The command environment contains only a fixed PATH and LANG; host environment and session ExtraEnv values are never forwarded into commands. Known credential values are scrubbed before output is bounded, with longer secrets matched first.
+They do not run on the workstation host. Install the required CLI and GNU `/usr/bin/timeout`
+in your agent image. A missing executable is visible as a failed command result.
+
+Check **I approve these exact commands for every run** before saving a changed definition.
+Editing any command, runtime, runtime target or daemon requires renewed approval. Every save that changes commands records the exact
+arguments and limits, a SHA-256 definition hash, the signed-in account, and the approval time.
+Previous definitions remain in the database audit history after edits or deletion. Do not put
+credentials in arguments; use the runtime's credential setup. Approval pins the argument arrays, limits, runtime, runtime target and daemon selection; it does not pin the image, an executable's bytes, or what an external system returns.
+
+The runner executes the approved snapshot before the first agent prompt. Messages received during steps wait behind that prompt; Stop cancels the steps and pending turn. The sum of step timeouts plus a three-second watchdog allowance per step must fit within maximum run time. Each command has a
+1–300 second timeout and a 1–65536 byte combined stdout/stderr limit. Excess output is discarded
+while the command finishes; timeouts terminate its process group inside the runtime. Results
+include the command's exit code, timeout and truncation flags, and the definition's approver and hash. Nonzero exits and timeouts do not hide subsequent
+checks: the agent receives all results as JSON explicitly marked **untrusted data**. A launch
+or validation failure ends the session instead of dropping the checks. Each result also has a
+chat disclosure. The complete prompt result block is capped at 64 KiB. Completed results remain
+visible if a later process cannot start. Fixed steps run after session registration, without
+blocking other session starts. Each run attempt records its run ID, definition hash and runtime
+placement in `cron_command_run_audit`. Fixed steps require Linux; other platforms refuse them
+with a plain explanation. No result is rendered as Markdown or executable markup.
+
+The agent cannot create or edit a cron or call these steps as a tool. The cron API remains human
+only. A changed `command_steps` array needs `approve_command_steps: true` in the same human save;
+the response's `command_steps` contains the pinned definition and audit identity. Unchanged
+commands need no new approval for a prompt or schedule edit. Clearing the list also requires
+approval. Old daemons hold the run until updated rather than silently skipping its commands.
+Resume and recovery do not rerun fixed steps. Existing runs keep their snapshot when a cron is
+edited; the next run receives the new approved definition. The existing MCP-tool workaround
+remains available for checks that need a different credential or runtime boundary.

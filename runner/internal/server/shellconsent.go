@@ -13,6 +13,7 @@ import (
 )
 
 func (a *API) HandleShellConsent(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	r = r.WithContext(ctx)
@@ -24,8 +25,12 @@ func (a *API) HandleShellConsent(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !a.ownsShellSession(ctx, actor, r.PathValue("id")) {
-		writeError(w, 403, "shell unavailable")
+	if err := a.checkShellSessionOwner(ctx, actor, r.PathValue("id")); err != nil {
+		shellError(w, err)
+		return
+	}
+	if r.PathValue("action") == "withdraw" {
+		a.handlePersistentWithdrawal(w, r, actor)
 		return
 	}
 	if a.shellRuntime == nil {
@@ -39,6 +44,10 @@ func (a *API) HandleShellConsent(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil || b.Owner != actor.Owner || b.Runtime != "host" || !b.Live {
 		writeError(w, 403, "shell unavailable")
+		return
+	}
+	if b.ShellLink.Version == 2 {
+		a.handlePersistentConsent(w, r, actor, b)
 		return
 	}
 	authority := shellAuthority{a.coreURL, a.coreInternalKey, &http.Client{Timeout: 2 * time.Second}}

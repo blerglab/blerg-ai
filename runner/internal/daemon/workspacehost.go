@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +22,7 @@ type workspaceFileBinding struct {
 	alias         string
 	info          os.FileInfo
 	live          func() bool
+	observe       func() (same, known bool)
 }
 
 func (h *AgentHost) workspaceFileBinding(id string) workspaceFileBinding {
@@ -74,36 +74,10 @@ func (m *Manager) handleReadWorkspaceFile(raw []byte) {
 	queueWorkspaceFileRead(m.client, req, m.workspaceFileBinding(req.SessionID))
 }
 func (m *Manager) workspaceFileBinding(id string) workspaceFileBinding {
-	var binding workspaceFileBinding
 	if m.agents != nil {
-		binding = m.agents.workspaceFileBinding(id)
+		return m.agents.workspaceFileBinding(id)
 	}
-	if binding.live == nil {
-		m.mu.Lock()
-		sess := m.sessions[id]
-		m.mu.Unlock()
-		if sess != nil && sess.workspace != "" && sess.workspaceInfo != nil && sess.Done() != nil {
-			alias := ""
-			if sess.sandboxed {
-				alias = sandboxWorkdir
-			}
-			binding = workspaceFileBinding{inRuntimeOnly: sess.sandboxed, root: sess.workspace, alias: alias, info: sess.workspaceInfo, live: func() bool {
-				m.mu.Lock()
-				same := m.sessions[id] == sess
-				m.mu.Unlock()
-				if !same {
-					return false
-				}
-				select {
-				case <-sess.Done():
-					return false
-				default:
-					return true
-				}
-			}}
-		}
-	}
-	return binding
+	return workspaceFileBinding{}
 }
 func queueWorkspaceFileRead(sender Sender, req protocol.ReadWorkspaceFile, binding workspaceFileBinding) {
 	if req.RequestID == "" || len(req.RequestID) > 100 || req.SessionID == "" || len(req.SessionID) > 100 {
@@ -141,11 +115,9 @@ func queueWorkspaceFileRead(sender Sender, req protocol.ReadWorkspaceFile, bindi
 		res.Type = "workspace_file_result"
 		res.RequestID = req.RequestID
 		res.SessionID = req.SessionID
-		outcome := res.ErrorCode
-		if res.OK {
-			outcome = "ok"
+		if !res.OK {
+			logDaemonFailure("workspace file result: "+safeFailureCode(res.ErrorCode), nil)
 		}
-		log.Printf("workspace_file session=%q path=%q size=%d outcome=%s", req.SessionID, res.Path, res.Size, outcome)
 		if bounded, ok := sender.(interface {
 			SendWorkspaceFileResultBy(protocol.WorkspaceFileResult, time.Time) error
 		}); ok {

@@ -526,9 +526,8 @@ export default function TicketDetail() {
             fontSize: '1rem',
             letterSpacing: '0.06em',
             flex: 1,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
+            minWidth: 0,
+            overflowWrap: 'anywhere',
           }}
         >
           {ticket?.title ?? '…'}
@@ -559,7 +558,7 @@ export default function TicketDetail() {
               data-testid="session-link"
               style={{ color: 'var(--blaze)', fontSize: '0.85rem', textDecoration: 'none' }}
             >
-              → Bound Assist session
+              → Bound Assist workspace
             </Link>
           </div>
         )}
@@ -764,7 +763,7 @@ export default function TicketDetail() {
                   zIndex: 30,
                   minWidth: 160,
                   padding: 4,
-                  boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
+                  boxShadow: '0 4px 16px var(--shadow-5)',
                 }}
               >
                 {otherColumns.map((col) => (

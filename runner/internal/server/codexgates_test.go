@@ -17,6 +17,7 @@ func TestCodexGrantTargetsRequireExplicitDaemonSupport(t *testing.T) {
 	for _, modern := range []bool{false, true} {
 		dc := &DaemonConn{}
 		dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+		dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 		dc.SetMCPGateway(true)
 		dc.SetRestrictTools(true)
 		dc.SetCodexRestricted(modern)
@@ -55,6 +56,7 @@ func TestCodexPluginsRequireNativeCapability(t *testing.T) {
 	}
 	dc := &DaemonConn{}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	dc.SetPlugins(true)
 	if dc.CanPluginsFor("codex") || !dc.CanPluginsFor("claude") {
 		t.Fatal("legacy plugin capability was widened beyond Claude")
@@ -110,8 +112,10 @@ func TestCodexCronSelectsOnlyCapableDaemons(t *testing.T) {
 	api := NewAPI(h, pool, "", nil, "")
 	old := &DaemonConn{ID: newUUID(), Name: "legacy"}
 	old.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	old.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	modern := &DaemonConn{ID: newUUID(), Name: "modern"}
 	modern.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	modern.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	for _, dc := range []*DaemonConn{old, modern} {
 		dc.SetSandboxAvailable(true)
 		dc.SetRestrictTools(true)

@@ -458,11 +458,13 @@ func TestBoardRepoChoicesNameReposAsBoardsStoreThem(t *testing.T) {
 	hub := NewHub()
 	d1 := &DaemonConn{ID: newUUID(), Name: "desk"}
 	d1.SetSandboxClones(true)
+	d1.SetWorkBranches(true) // current daemon: immutable recorded branch names
 	d1.SetCheckedOutRepos([]string{"entertainment", "scratch", "shared", "split", "has space"})
 	d1.SetRepoRemotes(map[string]string{"entertainment": "example-org/example-repo", "shared": "example-org/shared", "split": "example-org/split-a"})
 	hub.Register(d1)
 	d2 := &DaemonConn{ID: newUUID(), Name: "laptop"}
 	d2.SetSandboxClones(true)
+	d2.SetWorkBranches(true) // current daemon: immutable recorded branch names
 	d2.SetCheckedOutRepos([]string{"shared", "split"})
 	d2.SetRepoRemotes(map[string]string{"shared": "example-org/shared", "split": "example-org/split-b"})
 	hub.Register(d2)

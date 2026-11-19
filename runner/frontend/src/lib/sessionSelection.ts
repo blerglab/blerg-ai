@@ -3,7 +3,7 @@ import { useMemo } from 'react'
 import { useSessionStore } from '../hooks/useSessionStore'
 import type { SessionInfo, SessionStatus } from '../types'
 import { getFocus, setFocus } from './sidebarPrefs'
-import { nestChildren, searchTree } from './sessionTree'
+import { nestChildren, searchTree, rootSessionId } from './sessionTree'
 import { isAutomated } from './startedBy'
 
 export const ACTIVE_STATUSES = new Set<SessionStatus>(['starting', 'running', 'idle', 'waiting'])
@@ -17,18 +17,37 @@ const newest = (a: SessionInfo, b: SessionInfo) => Date.parse(b.started_at) - Da
 
 /** Both sidebar forms consume this selector; sections, search and place rules live here. */
 export function selectSessionSections(sessions: SessionInfo[], query: string, focus: string | null, current?: string) {
+  current = rootSessionId(sessions, current)
+  // Viewing finished work keeps it in its section; selection must not make it live again.
+  if (sessions.some(s => s.id === current && (s.status === 'ended' || s.status === 'stopped'))) current = undefined
   const q = query.trim().toLowerCase()
-  const tree = searchTree(nestChildren(sessions), q)
+  const liveTree = nestChildren(sessions)
+  const historyTree = nestChildren(sessions, true)
+  const byId = new Map(sessions.map(s => [s.id, s]))
+  const liveRoots = new Set(liveTree.top.map(s => s.id))
+  const childrenOf = new Map(liveTree.childrenOf)
+  for (const [parentId, children] of historyTree.childrenOf) {
+    let root = byId.get(parentId)
+    const seen = new Set<string>()
+    while (root?.parent_session_id && !liveRoots.has(root.id) && byId.has(root.parent_session_id) && !seen.has(root.id)) {
+      seen.add(root.id)
+      root = byId.get(root.parent_session_id)
+    }
+    if (!root || (!q && !root.archived_at && ACTIVE_STATUSES.has(root.status))) continue
+    const archivedChildren = children.filter(s => s.archived_at)
+    if (archivedChildren.length) childrenOf.set(parentId, [...(childrenOf.get(parentId) ?? []), ...archivedChildren])
+  }
+  const tree = searchTree({ top: [...liveTree.top, ...historyTree.top.filter(s => s.archived_at)], childrenOf }, q)
   const ids = new Set(sessions.map(s => s.id))
-  const automated = tree.top.filter(s => isAutomated(s, ids) && s.id !== current)
-  const own = tree.top.filter(s => !isAutomated(s, ids))
+  const automated = tree.top.filter(s => !s.archived_at && isAutomated(s, ids) && s.id !== current)
+  const own = tree.top.filter(s => !s.archived_at && !isAutomated(s, ids))
   const starred = own.filter(s => ACTIVE_STATUSES.has(s.status) && s.starred).sort(newest)
   const inPlace = (s: SessionInfo) => !!q || !focus || (focus === 'cluster' ? s.runtime === 'cluster' : s.runtime !== 'cluster' && s.daemon_id === focus)
   const listed = own.filter(s => ACTIVE_STATUSES.has(s.status) && !s.starred && inPlace(s))
-  const selected = sessions.find(s => s.id === current && !s.archived_at && !s.parent_session_id)
+  const selected = sessions.find(s => s.id === current && !s.archived_at && nestChildren(sessions).top.some(root => root.id === s.id))
   if (selected && !starred.some(s => s.id === current) && !listed.some(s => s.id === current)) listed.push(selected)
   listed.sort(newest)
-  const done = [...own.filter(s => !ACTIVE_STATUSES.has(s.status) && s.id !== current), ...sessions.filter(s => s.archived_at && (!q || `${s.title} ${s.repo}`.toLowerCase().includes(q)))]
+  const done = [...own.filter(s => !ACTIVE_STATUSES.has(s.status) && s.id !== current), ...tree.top.filter(s => s.archived_at)]
   return { tree, automated, starred, listed, done, main: [...starred, ...listed] }
 }
 
@@ -48,7 +67,7 @@ function sessionListSelector(query: string) {
     const next = state.sessions.map((session, i) => {
       const prior = previous[i]
       return prior && STRUCTURE_FIELDS.every(key => Object.is(prior[key], session[key])) &&
-        (!session.archived_at && !roots.has(session.id) || prior.status === session.status && prior.paused_reason === session.paused_reason) &&
+        (!session.archived_at && !roots.has(session.id) && (prior.status === 'error') === (session.status === 'error') || prior.status === session.status && prior.paused_reason === session.paused_reason) &&
         (!query || prior.title === session.title && prior.repo === session.repo) ? prior : session
     })
     if (next.length !== previous.length || next.some((session, i) => session !== previous[i])) previous = next

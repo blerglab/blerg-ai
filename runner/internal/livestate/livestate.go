@@ -28,7 +28,7 @@ const StaleRunning = 12 * time.Hour
 // Kinds are the event kinds the live state reads. The first eight match migration 042
 // in index order; MCP status is a latest-only snapshot with its own partial index (056).
 // A subagent's own rows are read separately, only for the ones still running.
-var Kinds = []string{"ask", "user_message", "turn_done", "subagent_started", "subagent_update", "subagent_done", "background_task_started", "background_task_done", protocol.MCPStatusKind}
+var Kinds = []string{"ask", "user_message", "turn_done", "subagent_started", "subagent_update", "subagent_done", "background_task_started", "background_task_done", protocol.MCPStatusKind, "bound_ask_note"}
 
 // Options: Now is server time now; Status the session row's status; Closed the message ids of asks
 // whose messages row is no longer open (answered, closed, expired); ServerAsk says whether an ask
@@ -418,7 +418,7 @@ type askAcc struct {
 // child.
 func answersLegacyAsk(source string) bool {
 	switch source {
-	case "system", "review", "proposal", "child_turn", "blerg-board", "cron", "question_answer", "plan_drift", "usage_limit":
+	case "page_result", "system", "review", "proposal", "child_turn", "blerg-board", "cron", "question_answer", "question_thread", "plan_drift", "usage_limit":
 		return false
 	}
 	return true
@@ -449,6 +449,37 @@ func openAsks(events []Event, opt Options) []Ask {
 			}
 			server := p.MessageID != "" && opt.ServerAsk != nil && opt.ServerAsk(ev.ID, p.MessageID)
 			all = append(all, &askAcc{ev: ev, id: p.MessageID, native: !server, open: true, q: p.Body, noWait: p.NoWait, ownerOnly: p.OwnerOnly})
+		case "question_thread":
+			var p struct {
+				MessageID string `json:"message_id"`
+				Kind      string `json:"kind"`
+				Body      string `json:"body"`
+				Author    string `json:"author"`
+			}
+			if json.Unmarshal(ev.Payload, &p) == nil {
+				for _, a := range all {
+					if a.id == p.MessageID {
+						if p.Kind == "revision" {
+							a.q = p.Body
+						}
+						if p.Author == "person" {
+							a.noWait = true
+						}
+					}
+				}
+			}
+		case "bound_ask_note":
+			var p struct {
+				MessageID string `json:"message_id"`
+				Text      string `json:"text"`
+			}
+			if json.Unmarshal(ev.Payload, &p) == nil {
+				for _, a := range all {
+					if a.id == p.MessageID {
+						a.q += "\n\n" + p.Text
+					}
+				}
+			}
 		case "user_message":
 			var p agent.UserMessagePayload
 			if json.Unmarshal(ev.Payload, &p) != nil {

@@ -58,7 +58,7 @@ describe('the delegation card', () => {
     seedRequest()
     mount()
     const card = screen.getByTestId('delegation-card')
-    expect(card.textContent).toContain('This session wants to start a Codex session')
+    expect(card.textContent).toContain('This agent wants to start a Codex worker')
     expect(card.textContent).toContain('gpt-5')
     expect(card.textContent).toContain('high')
     expect(card.textContent).toContain('blerg')
@@ -111,7 +111,7 @@ describe('the delegation card', () => {
     mount()
     const always = screen.getByRole('button', { name: 'Always allow Codex on this desktop (unsandboxed)' })
     expect(always.getAttribute('title')).toContain('laptop')
-    expect(screen.getByRole('button', { name: 'Allow for this session' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Allow for this workspace' })).toBeInTheDocument()
   })
 
   it('names the sandbox on the Always button for a docker request', () => {
@@ -142,7 +142,7 @@ describe('the delegation card', () => {
     const time = new Date('2026-10-14T15:12:00Z').toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
     expect(card.textContent).toContain(`Allowed once · ${time}`)
     expect(within(card).queryByRole('button', { name: 'Allow once' })).toBeNull()
-    fireEvent.click(within(card).getByRole('button', { name: 'Open the session' }))
+    fireEvent.click(within(card).getByRole('button', { name: 'Open the worker' }))
     expect(open).toHaveBeenCalledWith('child-1234567890')
   })
 
@@ -153,7 +153,7 @@ describe('the delegation card', () => {
     )
     mount()
     const card = screen.getByTestId('delegation-card')
-    expect(card.textContent).toContain('Allowed for this session')
+    expect(card.textContent).toContain('Allowed for this workspace')
     expect(card.textContent).toContain('child-12')
     expect(within(card).queryByRole('button')).toBeNull()
   })

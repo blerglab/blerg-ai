@@ -21,7 +21,10 @@ import (
 // their own). The person-facing guards are the same as the runner's own browser routes.
 
 func (a *API) registerInternalDesktopRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /internal/account-time", a.HandleInternalAccountTime)
+	mux.HandleFunc("PUT /internal/account-time", a.HandleInternalAccountTime)
 	mux.HandleFunc("GET /internal/desktops", a.HandleInternalListDesktops)
+	mux.HandleFunc("POST /internal/people/{id}/disable-desktops", a.internalDesktop(a.disablePersonDesktops))
 	mux.HandleFunc("GET /internal/desktops/{id}/enrollment-connection", a.internalDesktop(func(w http.ResponseWriter, r *http.Request, actor string, _ bool) {
 		a.desktopEnrollmentConnectionFor(w, r, actor)
 	}))
@@ -30,12 +33,12 @@ func (a *API) registerInternalDesktopRoutes(mux *http.ServeMux) {
 	}))
 	mux.HandleFunc("POST /internal/desktops/{id}/rename", a.internalDesktop(a.renameDesktopFor))
 	mux.HandleFunc("POST /internal/desktops/{id}/revoke", a.internalDesktop(a.revokeDesktopFor))
-	mux.HandleFunc("PUT /internal/desktops/{id}/owner", a.internalDesktop(func(w http.ResponseWriter, r *http.Request, _ string, admin bool) {
+	mux.HandleFunc("PUT /internal/desktops/{id}/owner", a.internalDesktop(func(w http.ResponseWriter, r *http.Request, actor string, admin bool) {
 		if !admin {
 			writeError(w, 403, "Only an administrator can assign a desktop.")
 			return
 		}
-		a.assignDesktopFor(w, r)
+		a.assignDesktopFor(w, r, actor)
 	}))
 	mux.HandleFunc("POST /api/desktops/enroll", a.HandleEnrollDesktopWithCode)
 }
@@ -313,4 +316,56 @@ func (a *API) HandleEnrollDesktopWithCode(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, 200, issued)
+}
+
+// Core first disables the person and revokes their credentials. Runner then invalidates every
+// standing desktop connection at its own fence; retries preserve ownership and are idempotent.
+func (a *API) disablePersonDesktops(w http.ResponseWriter, r *http.Request, actor string, admin bool) {
+	if !admin {
+		writeError(w, http.StatusForbidden, "Administrator sign-in required.")
+		return
+	}
+	owner := r.PathValue("id")
+	standing, err := a.fetchAccountStanding(r.Context(), owner)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "Account directory unavailable.")
+		return
+	}
+	if !standing.Exists || standing.Active {
+		writeError(w, http.StatusConflict, "Disable this person before disconnecting their desktops.")
+		return
+	}
+	desktops, err := db.ListDesktopInventory(r.Context(), a.dbPool, owner, false)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "Desktop directory unavailable.")
+		return
+	}
+	for _, desktop := range desktops {
+		if desktop.OwnerID != owner {
+			continue
+		}
+		err = db.WithDesktopFence(r.Context(), a.dbPool, desktop.ID, func(ctx context.Context) error {
+			current, err := db.GetDesktop(ctx, a.dbPool, desktop.ID)
+			if err != nil {
+				return err
+			}
+			if current == nil || current.OwnerID != owner {
+				return nil
+			}
+			if current.Generation == "" && current.StatusReason == "Owner disabled by an administrator." {
+				return nil
+			}
+			next, err := db.DisableDesktopOwner(ctx, a.dbPool, desktop.ID, owner, actor, current.Revision)
+			if err != nil {
+				return err
+			}
+			a.desktopOwnershipChanged(desktop.ID, owner, owner, next) //nolint:contextcheck // bounded broadcast outlives the current request, as in desktop reassignment
+			return nil
+		})
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "Could not disconnect every desktop. Retry this action.")
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "disabled"})
 }

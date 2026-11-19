@@ -201,8 +201,21 @@ func TestClusterConsumerSelectionToPodAndChild(t *testing.T) {
 	fake.mu.Lock()
 	last := fake.createdSecrets[len(fake.createdSecrets)-1]
 	fake.mu.Unlock()
+	// A fresh Plan, not a reuse of the parent's: Member.Token has `omitempty`, so the
+	// child's all-empty tokens are absent from its JSON entirely — unmarshaling into the
+	// parent's already-populated plan would leave its stale per-member tokens in place.
+	plan = clusterworkspace.Plan{}
 	if json.Unmarshal([]byte(last["stringData"].(map[string]any)[clusterworkspace.Env].(string)), &plan) != nil || len(plan.Members) != 1 || plan.Members[0].ID != child.Members[0].ID || plan.SessionID != childID {
 		t.Fatal("child did not reach independent subset pod")
+	}
+	// BLG-460 slice 1: a cluster worker (here, StartChild's own child launch) never gets
+	// PushAuthorized or the parent's real write-capable token, even though the parent
+	// Main's own plan member for this same repository (above) legitimately did.
+	if plan.Members[0].PushAuthorized {
+		t.Fatal("cluster worker child stored PushAuthorized: true")
+	}
+	if plan.Members[0].Token == "fixture-github-personal" || plan.Members[0].Token == "fixture-gitlab-personal" {
+		t.Fatal("cluster worker child received the parent's write-capable personal token")
 	}
 	generation, _, err = db.GetWorkspaceRuntime(t.Context(), f.pool, childID)
 	if err != nil || plan.Runtime.Generation != generation || plan.Runtime.LaunchGeneration != child.LaunchGeneration {
@@ -230,6 +243,36 @@ func TestClusterConsumerSelectionToPodAndChild(t *testing.T) {
 		row, err := db.GetSession(t.Context(), f.pool, result["session_id"])
 		if err != nil || row.ProjectPath != clusterworkspace.PublicRoot+"/same" {
 			t.Errorf("single cluster cwd is not member directory: %+v %v", row, err)
+		}
+	}
+
+	// A Board/REST contract start uses the same immutable per-member launch path,
+	// retaining Board environment and the caller's idempotency/session identity.
+	boardReq := RunnerStartRequest{Repositories: []ContractRepository{{Repo: "org/api", Provider: "github"}, {Repo: "org/web", Provider: "gitlab"}}, Runtime: "cluster", Engine: "claude", Env: map[string]string{"BLERG_BOARD_BOARD": "fixture-board"}}
+	boardStart, problem := f.api.StartSession(t.Context(), contractPrincipal(), boardReq, "board-workspace")
+	if problem != nil {
+		t.Fatal("board workspace:", problem)
+	}
+	replay, problem := f.api.StartSession(t.Context(), contractPrincipal(), boardReq, "board-workspace")
+	if problem != nil || !replay.Replayed || replay.SessionID != boardStart.SessionID {
+		t.Fatal("board workspace idempotency", replay, problem)
+	}
+	boardSaved, err := db.GetSessionWorkspace(t.Context(), f.pool, boardStart.SessionID)
+	if err != nil || boardSaved == nil || len(boardSaved.Manifest.Members) != 2 {
+		t.Fatal("board workspace not saved", err)
+	}
+	if !db.GetSessionNoOperatorFallback(t.Context(), f.pool, boardStart.SessionID) {
+		t.Fatal("board resume regained operator fallback")
+	}
+	fake.mu.Lock()
+	boardSecret := fake.createdSecrets[len(fake.createdSecrets)-1]["stringData"].(map[string]any)
+	fake.mu.Unlock()
+	if json.Unmarshal([]byte(boardSecret[clusterworkspace.Env].(string)), &plan) != nil || len(plan.Members) != 2 || plan.SessionID != boardStart.SessionID {
+		t.Fatal("board did not launch both members")
+	}
+	for _, member := range plan.Members {
+		if member.Token == "" || !member.PushAuthorized {
+			t.Fatal("board lost member credentials")
 		}
 	}
 	selection.Hosted[0].FullName = "foreign/private"

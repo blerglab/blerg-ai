@@ -394,6 +394,7 @@ function HoverAnchor({ target, children, content }: { target: HoverTarget; child
   void _mark
   return (
     <>
+      {/* button-guard-ignore: hover anchor spreads contain pointer and focus handlers only */}
       <span className="hc-anchor" {...handlers}>{chip}</span>
       {b.card}
     </>
@@ -787,7 +788,7 @@ function RunBody({ target }: { target: RunTarget }) {
 // ── Files ────────────────────────────────────────────────────────────────────────────────────────
 type FilePreviewData =
   | { kind: 'image'; blob: Blob }
-  | { kind: 'visual'; visual: 'mermaid' | 'vega-lite'; source: string }
+  | { kind: 'visual'; visual: 'mermaid' | 'vega-lite' | 'dashboard'; source: string }
   | { kind: 'diff'; files: { path: string; adds: number; dels: number }[]; adds: number; dels: number }
   | { kind: 'lines'; text: string; more: boolean }
   | { kind: 'none' }
@@ -799,7 +800,9 @@ const TEXT_VIEWS = new Set(['markdown', 'text', 'json', 'csv', 'diff'])
 const THUMBS = 4
 const thumbs = new Map<string, Promise<Blob>>()
 function readThumb(sessionId: string, a: ArtifactInfo, raw: (id: string) => Promise<Blob>): Promise<Blob> {
-  const key = `${sessionId}/${a.id}`
+  // A live file (BLG-470) keeps one id across republishes: updated_at has to be part of the key,
+  // or its hovercard thumbnail would show the first publish forever.
+  const key = a.updated_at ? `${sessionId}/${a.id}:${a.updated_at}` : `${sessionId}/${a.id}`
   let p = thumbs.get(key)
   if (p) thumbs.delete(key)
   else {
@@ -835,7 +838,7 @@ async function readFilePreview(sessionId: string, a: ArtifactInfo, files: Transp
     return { kind: 'image', blob: await readThumb(sessionId, a, raw) }
   }
   if (!TEXT_VIEWS.has(a.view) || a.size > INLINE_TEXT_MAX) return { kind: 'none' }
-  const text = await loadPreviewText(sessionId, a.id, raw)
+  const text = await loadPreviewText(sessionId, a.id, raw, a.updated_at)
   if (a.view === 'diff') {
     const p = parsePatch(text)
     return { kind: 'diff', files: p.files.map(f => ({ path: f.path, adds: f.adds, dels: f.dels })), adds: p.adds, dels: p.dels }
@@ -875,7 +878,7 @@ function FileBody({ target, sources }: { target: FileTarget; sources: HovercardS
   const fields = HOVERCARD.fields.file
   const wantPreview = fields.includes('preview') && !!a && !!files && !a.missing
   const read = useRead(wantPreview ? () => readFilePreview(target.sessionId, a!, files!) : null, [target.sessionId, a?.id, wantPreview])
-  if (!a) return <div className="hc-note" data-testid="hovercard-file-missing">This file is not in the session’s list.</div>
+  if (!a) return <div className="hc-note" data-testid="hovercard-file-missing">This file is not in the workspace’s list.</div>
   const review = target.reviewOpen ?? sources.reviewOpen?.(target.sessionId, a.id) ?? false
   const by = a.origin === 'user' ? 'you' : 'the agent'
   const when = whenLabel(a.created_at)

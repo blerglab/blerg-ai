@@ -64,7 +64,7 @@ export function reviewOutcomeLine(r: ReviewRequestPayload): string {
   switch (r.state) {
     case 'approved': return 'Approved'
     case 'changes_requested': return 'Changes requested'
-    case 'withdrawn': return r.note ? `Withdrawn · ${r.note}` : 'Withdrawn by the session'
+    case 'withdrawn': return r.note ? `Withdrawn · ${r.note}` : 'Withdrawn by the workspace'
     case 'dismissed': return 'Dismissed (maybe answered in the chat)'
     case 'superseded': return r.superseded_by ? `Superseded by v${r.superseded_by}` : 'Superseded by a newer version'
     default: return ''

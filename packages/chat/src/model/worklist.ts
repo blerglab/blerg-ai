@@ -101,10 +101,11 @@ function readItem(r: Rec): ChecklistItem {
  *  legacy identities as the server. No title/index matching across replacements. */
 export function readChecklist(payload: unknown, eventId?: string): ChecklistPayload | null {
   const p = rec(payload)
-  if (!p || !Array.isArray(p.items)) return null
+  if (!p || (!Array.isArray(p.items) && p.delta !== true)) return null
+  const sourceItems = Array.isArray(p.items) ? p.items : []
   const items: ChecklistItem[] = []
   const used = new Set<string>()
-  for (const [index, raw] of p.items.slice(0, 50).entries()) {
+  for (const [index, raw] of sourceItems.slice(0, 50).entries()) {
     const r = rec(raw)
     if (!r || typeof r.text !== 'string') continue
     const item = readItem(r)
@@ -122,7 +123,11 @@ export function readChecklist(payload: unknown, eventId?: string): ChecklistPayl
     ? { ...readItem(c), index: c.index as number, ...(workId(c.from_item_id) ? { from_item_id: workId(c.from_item_id) } : {}) }
     : undefined
   const note = typeof p.note === 'string' ? p.note.slice(0, 120) : ''
-  return { items, op: str(p.op), ...(changed ? { changed } : {}), ...(note ? { note } : {}) }
+  const delta = p.delta === true ? { delta: true, total: typeof p.total === 'number' ? Math.max(0, Math.min(50, p.total)) : 0,
+    completed: typeof p.completed === 'number' ? Math.max(0, Math.min(50, p.completed)) : 0,
+    updates: Array.isArray(p.updates) ? p.updates.slice(0, 50).flatMap(v => { const r = rec(v); return r && typeof r.text === 'string' && workId(r.id) ? [readItem(r)] : [] }) : [],
+    removed: strs(p.removed).slice(0, 50) } : {}
+  return { items, ...delta, op: str(p.op), ...(changed ? { changed } : {}), ...(note ? { note } : {}) }
 }
 
 /** Explicit association only. An absent/ambiguous target must not navigate to another row. */
@@ -190,8 +195,8 @@ export function doneCount(items: readonly { done?: boolean; status?: string }[])
 /** checklistRowText: the chat's one-line row for a checklist event, e.g.
  *  `Checklist · 3 of 7 done · ticked "Write tests"`. */
 export function checklistRowText(p: ChecklistPayload): string {
-  if (p.items.length === 0) return p.op === 'remove' && p.changed ? `Checklist · removed “${p.changed.text}”, none left` : 'Checklist cleared'
-  const head = `Checklist · ${progressText(doneCount(p.items), p.items.length)}`
+  if ((p.delta ? p.total : p.items.length) === 0) return p.op === 'remove' && p.changed ? `Checklist · removed “${p.changed.text}”, none left` : 'Checklist cleared'
+  const head = `Checklist · ${progressText(p.delta ? p.completed ?? 0 : doneCount(p.items), p.delta ? p.total ?? 0 : p.items.length)}`
   const c = p.changed
   switch (p.op) {
     case 'tick': return c ? `${head} · ticked “${c.text}”${p.note ? ` (Blerg: ${p.note.replace(/^ticked: /, '')})` : ''}` : head
@@ -282,16 +287,50 @@ export function sourceLabel(source: string): string {
   return known[source.toLowerCase()] ?? source
 }
 
+/** Apply a stored change to a known checklist, or replace it with a legacy full list. */
+export function applyChecklistDelta(before: readonly ChecklistItem[], p: ChecklistPayload): ChecklistItem[] {
+  let items = p.items
+  if (p.delta) {
+    items = [...before].filter(it => !p.removed?.includes(it.id ?? ''))
+    for (const update of p.updates ?? []) {
+      const index = items.findIndex(it => it.id === update.id)
+      if (index < 0) items.push(update); else items[index] = update
+    }
+    if (p.op === 'move' && p.changed) {
+      const index = items.findIndex(it => it.id === p.changed?.id)
+      if (index >= 0) { const [item] = items.splice(index, 1); items.splice(p.changed.index - 1, 0, item) }
+    }
+  }
+  return items
+}
+
 /** checklistFromEvents: the newest checklist held (null when there is none, or it was cleared). */
 export function checklistFromEvents(events: readonly AgentEvent[]): ChecklistLive | null {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const ev = events[i]
+  let live: ChecklistLive | null = null
+  let hasBase = false
+  for (const ev of events) {
     if (ev.kind !== 'checklist') continue
     const p = readChecklist(ev.payload, ev.client_event_id)
     if (!p) continue
-    return p.items.length ? { items: p.items, eventId: ev.client_event_id, updatedAt: parseTs(ev.ts) } : null
+    if (p.delta && !hasBase) continue
+    hasBase = true
+    const items = applyChecklistDelta(live?.items ?? [], p)
+    live = items.length ? { items, eventId: ev.client_event_id, updatedAt: parseTs(ev.ts) } : null
   }
-  return null
+  return live
+}
+
+/** A chat-local memo keeps checklist context stable while unrelated events stream. */
+export function createChecklistReader(): (events: readonly AgentEvent[]) => ChecklistLive | null {
+  let previous: readonly AgentEvent[] = []
+  let result: ChecklistLive | null = null
+  return events => {
+    const source = events.filter(ev => ev.kind === 'checklist')
+    if (source.length === previous.length && source.every((ev, i) => ev === previous[i])) return result
+    previous = source
+    result = checklistFromEvents(source)
+    return result
+  }
 }
 
 const NO_PINS: PinnedLive = { tickets: [], ticket: null }

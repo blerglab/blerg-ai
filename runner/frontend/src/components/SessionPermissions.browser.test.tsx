@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 // The Permissions summary and modal in a real browser: chips that fit the panel, the modal as a
 // dialog on a laptop and a full-screen sheet on a phone, and keyboard-first use (focus trap, arrows
 // and space on lists, Esc back to Manage).
@@ -52,7 +53,7 @@ it.each([390, 1280])('shows a compact summary with chips that fit the panel at %
   expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
 })
 
-it.each([390, 1280, 3840])('opens the modal as %s px requires: a sheet on a phone, a dialog on a laptop, a wide dialog on a 4K screen', async width => {
+it.each(browserWidths([390, 1280, 3840]))('opens the modal as %s px requires: a sheet on a phone, a dialog on a laptop, a wide dialog on a 4K screen', async width => {
   await page.viewport(width, 800)
   serve()
   render(<aside className="session-rail" style={{ width: width < 600 ? width : 340 }}><SessionPermissions sessionId="s1" active delegationGrants={grants} refreshKey="" /></aside>)
@@ -156,7 +157,7 @@ it('is keyboard-first: focus starts in the search, lists take arrows and space, 
   expect(apiFetch.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false)
 })
 
-it.each([390, 3840])('fits the three child rows of a desktop session on an install with a cluster at %i px, each saying where it runs', async width => {
+it.each(browserWidths([390, 3840]))('fits the three child rows of a desktop session on an install with a cluster at %i px, each saying where it runs', async width => {
   await page.viewport(width, 900)
   const three = { ...approval, runtimes: ['docker', 'daemon', 'cluster'].map(runtime => ({ runtime, enabled: false, partial: false, allowed_engines: ['claude', 'codex'], granted_engines: [], standing_rule_engines: [], effective_allowed_engines: [], can_enable: true, reason: '' })) }
   apiFetch.mockImplementation(async (url: string) => new Response(JSON.stringify(
@@ -173,11 +174,11 @@ it.each([390, 3840])('fits the three child rows of a desktop session on an insta
     expect(row.getBoundingClientRect().right).toBeLessThanOrEqual(right)
     expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth + 1)
   }
-  expect(within(cluster).getByRole('checkbox', { name: 'Start children on the cluster without asking' })).toBeVisible()
+  expect(within(cluster).getByRole('checkbox', { name: 'Start workers on the cluster without asking' })).toBeVisible()
   expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
 })
 
-it.each([390, 3840])('shows a started session its cap on the board row without overflowing at %i px', async width => {
+it.each(browserWidths([390, 3840]))('shows a started session its cap on the board row without overflowing at %i px', async width => {
   await page.viewport(width, 800)
   const child = { ...perms,
     boards: [{ board_id: 'b1', board_name: LONG, level: 'read', own_level: 'full', parent_level: 'read', grant_id: 'g9', created_via: 'parent', created_at: '2026-10-20T10:00:00Z', active: true }],
@@ -195,3 +196,50 @@ it.each([390, 3840])('shows a started session its cap on the board row without o
   expect(within(dialog).getByRole('combobox', { name: `Access to ${LONG}` }).getBoundingClientRect().right).toBeLessThanOrEqual(dialog.getBoundingClientRect().right + 0.5)
   expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
 })
+
+for (const width of [390, 3840]) for (const theme of ['dark', 'colorblind-dark'] as const) {
+  it(`shows standing authority states without renewal at ${width}px in ${theme}`, async () => {
+    await page.viewport(width, width === 390 ? 844 : 2160)
+    const { setTheme } = await import('../../../../packages/settings/theme')
+    setTheme(theme)
+    const view = { ...perms,
+      boards: [
+        { ...perms.boards[0], board_name: 'Blerg', active: true },
+        { ...perms.boards[0], board_id: 'b2', grant_id: 'g3', board_name: 'Operations', active: false, inactive: 'suspended' },
+        { ...perms.boards[0], board_id: 'b3', grant_id: 'g4', board_name: 'Archive', active: false, inactive: 'revoked' },
+        { ...perms.boards[0], board_id: 'b4', grant_id: 'g5', board_name: 'Research', active: false, inactive: 'unavailable' },
+        { ...perms.boards[0], board_id: 'b5', grant_id: 'g6', board_name: 'Legacy', active: false, inactive: 'board_owner_missing' },
+      ], grants: [],
+    }
+    apiFetch.mockImplementation(async (url: string) => new Response(JSON.stringify(
+      url.endsWith('/child-approval') ? approval : url === '/api/session-boards' ? { configured: true, boards: view.boards.map(b => ({ id: b.board_id, name: b.board_name })) } : view)))
+    render(<aside className="session-rail panel" style={{ width: width === 390 ? width : 340, boxSizing: 'border-box' }}><SessionPermissions sessionId="standing" active delegationGrants={[]} refreshKey="" /></aside>)
+    const active = await screen.findByTestId('perm-active')
+    expect(active).toHaveTextContent('Ticket board: Blerg')
+    const inactive = screen.getByTestId('perm-inactive')
+    expect(inactive).toHaveTextContent('Suspended')
+    expect(inactive).toHaveTextContent('Expired')
+    expect(inactive).toHaveTextContent('Unavailable')
+    expect(within(inactive).getByTitle(/no recorded owner.*administrator to assign an owner/)).toHaveTextContent('No owner')
+    for (const why of inactive.querySelectorAll<HTMLElement>('.perm-why')) {
+      const revoke = why.closest('li')!.querySelector('button')!
+      expect(why.getBoundingClientRect().right).toBeLessThanOrEqual(revoke.getBoundingClientRect().left)
+    }
+    expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
+    const dir = import.meta.env.VITE_LAUNCH_SHOTS_DIR
+    if (dir) await page.screenshot({ path: `${dir}/permissions-${theme}-${width}.png` })
+    await userEvent.click(screen.getByRole('button', { name: 'Manage' }))
+    const dialog = screen.getByRole('dialog', { name: 'Permissions' })
+    await within(dialog).findByRole('combobox', { name: 'Access to Operations' })
+    expect(within(dialog).queryByRole('button', { name: 'Renew access to Operations' })).toBeNull()
+    expect(within(dialog).queryByRole('button', { name: 'Renew access to Research' })).toBeNull()
+    expect(within(dialog).getByText('The board has no recorded owner. Ask the owner or an administrator to assign an owner.')).toBeVisible()
+    expect(within(dialog).queryByRole('button', { name: 'Renew access to Legacy' })).toBeNull()
+    if (dir) {
+      within(dialog).getByText('The board has no recorded owner. Ask the owner or an administrator to assign an owner.').scrollIntoView({ block: 'center' })
+      await page.screenshot({ path: `${dir}/permissions-owner-missing-${theme}-${width}.png` })
+    }
+    expect(within(dialog).getByRole('button', { name: 'Renew access to Archive' })).toBeVisible()
+    setTheme('dark')
+  })
+}

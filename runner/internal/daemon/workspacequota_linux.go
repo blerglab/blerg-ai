@@ -43,7 +43,7 @@ func (s *FilesystemWorkspaceStorage) allocate(ctx context.Context, session strin
 		return "", errors.New("quota allocation directory is not private")
 	}
 
-	record, err := readWorkspaceQuota(directory)
+	record, err := s.readQuota(directory)
 	if os.IsNotExist(err) {
 		return "", err
 	} // read helper deliberately conceals unsafe/missing records
@@ -56,7 +56,7 @@ func (s *FilesystemWorkspaceStorage) allocate(ctx context.Context, session strin
 			return "", errors.New("unrecorded quota allocation retained")
 		}
 		record = workspaceQuotaRecord{Version: 1, Session: session, Budget: budget, Phase: "create"}
-		if err := saveWorkspaceQuota(directory, record); err != nil {
+		if err := s.saveQuota(directory, record); err != nil {
 			return "", err
 		}
 	}
@@ -88,7 +88,7 @@ func (s *FilesystemWorkspaceStorage) allocate(ctx context.Context, session strin
 			return "", err
 		}
 		record.Phase = "format"
-		if err := saveWorkspaceQuota(directory, record); err != nil {
+		if err := s.saveQuota(directory, record); err != nil {
 			return "", err
 		}
 	}
@@ -111,7 +111,7 @@ func (s *FilesystemWorkspaceStorage) allocate(ctx context.Context, session strin
 			return "", err
 		}
 		record.Phase = "mount"
-		if err := saveWorkspaceQuota(directory, record); err != nil {
+		if err := s.saveQuota(directory, record); err != nil {
 			return "", err
 		}
 	}
@@ -158,8 +158,23 @@ func (s *FilesystemWorkspaceStorage) allocate(ctx context.Context, session strin
 	if err := os.MkdirAll(tree, 0o700); err != nil {
 		return "", err
 	}
+	stage := filepath.Join(mount, "staging")
+	if err := os.MkdirAll(stage, 0o700); err != nil {
+		return "", err
+	}
+	treeInfo, err := os.Lstat(tree)
+	if err != nil {
+		return "", err
+	}
+	owner, ok := treeInfo.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", errors.New("quota tree owner unavailable")
+	}
+	if err := os.Chown(stage, int(owner.Uid), int(owner.Gid)); err != nil {
+		return "", err
+	}
 	record.Phase = "ready"
-	if err := saveWorkspaceQuota(directory, record); err != nil {
+	if err := s.saveQuota(directory, record); err != nil {
 		return "", err
 	}
 	return tree, nil
@@ -172,7 +187,7 @@ func (s *FilesystemWorkspaceStorage) release(ctx context.Context, session, root 
 	if root != tree {
 		return errors.New("quota release root mismatch")
 	}
-	record, err := readWorkspaceQuota(directory)
+	record, err := s.readQuota(directory)
 	if err != nil {
 		return err
 	}
@@ -188,14 +203,14 @@ func (s *FilesystemWorkspaceStorage) release(ctx context.Context, session, root 
 				return errors.New("removed image still mounted or unavailable")
 			}
 			record.Phase = "released"
-			return saveWorkspaceQuota(directory, record)
+			return s.saveQuota(directory, record)
 		}
 	}
 	if err := validateQuotaImage(image, record); err != nil {
 		return err
 	}
 	record.Phase = "releasing"
-	if err := saveWorkspaceQuota(directory, record); err != nil {
+	if err := s.saveQuota(directory, record); err != nil {
 		return err
 	}
 	mounted, err := quotaMountSource(mount, image)
@@ -214,7 +229,7 @@ func (s *FilesystemWorkspaceStorage) release(ctx context.Context, session, root 
 		return err
 	}
 	record.Phase = "released"
-	return saveWorkspaceQuota(directory, record)
+	return s.saveQuota(directory, record)
 }
 func quotaCommand(ctx context.Context, name string, args ...string) error {
 	if err := ctx.Err(); err != nil {

@@ -19,9 +19,9 @@ export function pluginApplication(p: ProposalInfo): string {
     case 'installing':
       return 'Installing plugin.'
     case 'applied':
-      return 'Loaded in this session.'
+      return 'Loaded in this workspace.'
     case 'new_sessions':
-      return 'Saved for new sessions; this session is unchanged.'
+      return 'Saved for new workspaces; this workspace is unchanged.'
   }
   return p.state === 'executing' ? 'Queued or installing; the current turn can finish.' : p.state
 }

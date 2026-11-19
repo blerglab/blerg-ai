@@ -6,9 +6,9 @@
 // the two-column layout), not the pinned copy.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
-import { cdp, page } from 'vitest/browser'
+import { cdp, commands, page } from 'vitest/browser'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { HOVERCARD, clearHovercardCache, resetRefStoresForTest, useTranscriptStore, type AgentEvent } from '@blerglab/chat'
+import { HOVERCARD, getHovercardClock, clearHovercardCache, resetRefStoresForTest, useTranscriptStore, type AgentEvent } from '@blerglab/chat'
 import '../index.css'
 import { seedRichRail } from '../test/railFixture'
 import { RAIL_PREF_KEY } from '../lib/sessionRail'
@@ -77,10 +77,11 @@ async function hover(el: Element) {
   const r = el.getBoundingClientRect()
   const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2)
   await moveTo(x, y - 1)
-  await moveTo(x, y)
-  await opened()
+  await opened(moveTo(x, y))
 }
-async function opened() {
+async function opened(inputDelivered: Promise<unknown>) {
+  // pending() includes the rail's board-read wait, so it cannot prove mouse delivery.
+  await inputDelivered
   await expect.poll(() => clock.pending()).toBeGreaterThan(0)
   clock.advance(HOVERCARD.openDelayMs)
   await expect.poll(hovercard).not.toBeNull()
@@ -110,10 +111,31 @@ function renderPage() {
 }
 
 async function rows(): Promise<HTMLElement[]> {
-  return waitFor(() => {
+  const found = await waitFor(() => {
     const found = [...document.querySelectorAll<HTMLElement>('.ticket-row')]
     if (found.length < 5) throw new Error(`only ${found.length} pin rows`)
     return found
+  })
+  // Initial transcript placement runs through ResizeObserver. Let that layout
+  // commit before scrolling a chip into view and taking real pointer coordinates.
+  await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+  return found
+}
+
+async function reveal(row: HTMLElement) {
+  const timeline = document.querySelector<HTMLElement>('.agent-timeline')!
+  const before = timeline.scrollTop
+  // A reader scroll stops live following. A programmatic scrollIntoView alone
+  // does not express reader intent and can be superseded by the next layout.
+  if (before > 0) {
+    await commands.transcriptInput('wheel')
+    await waitFor(() => expect(timeline.scrollTop).toBeLessThan(before))
+  }
+  row.scrollIntoView({ block: 'center' })
+  const chip = within(row).getByTestId('ticket-chip')
+  await waitFor(() => {
+    const r = chip.getBoundingClientRect()
+    expect(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)?.closest('[data-testid="ticket-chip"]')).toBe(chip)
   })
 }
 
@@ -162,21 +184,31 @@ for (const [width, height] of [[390, 800], [3840, 2000]] as const) {
     it('waits for a pinned chip hover delivered on a later frame before advancing time', async () => {
       renderPage()
       const [single] = await rows()
-      single.scrollIntoView({ block: 'center' })
+      await reveal(single)
       const chip = within(single).getByTestId('ticket-chip')
       const r = chip.getBoundingClientRect()
+      // The rail shares this clock. An unrelated pending timer must not count as input delivery.
+      const hoverClock = getHovercardClock()
+      const unrelated = hoverClock.setTimeout(() => {}, 1500)
+      const beforeMove = hoverClock.now()
       const moved = new Promise<void>((resolve, reject) => {
-        requestAnimationFrame(() => { void moveTo(r.left + r.width / 2, r.top + r.height / 2).then(resolve, reject) })
+        requestAnimationFrame(() => {
+          if (hoverClock.now() !== beforeMove) {
+            reject(new Error('hover clock advanced before delayed pointer delivery'))
+            return
+          }
+          void moveTo(r.left + r.width / 2, r.top + r.height / 2).then(resolve, reject)
+        })
       })
-      await opened()
-      await moved
+      await opened(moved)
+      hoverClock.clearTimeout(unrelated)
       expect(hovercard()!.textContent).toContain('#160')
     })
 
     it('#N is the card chip: its hovercard, and a click opens the live ticket dialog (#96), not the pinned copy', async () => {
       renderPage()
       const [single] = await rows()
-      single.scrollIntoView({ block: 'center' })
+      await reveal(single)
       const chip = within(single).getByTestId('ticket-chip')
       if (shotsDir) await page.screenshot({ path: `${shotsDir}/pins-${width}.png` })
       await hover(chip)

@@ -8,8 +8,8 @@ export function RestrictedMarker({ sensitive }: { sensitive?: boolean }) {
 export function CardOrigin({ origin }: { origin?: CardOriginInfo | null }) {
   if (!origin) return null;
   return <section aria-label="Ticket origin" style={{ marginTop: 12, fontSize: 13 }}>
-    <h4>Filed from a session</h4>
-    <SafeAnchor href={origin.session_url}>Originating session</SafeAnchor>
+    <h4>Filed from a workspace</h4>
+    <SafeAnchor href={origin.session_url}>Originating workspace</SafeAnchor>
     <dl className="settings-grid">
       {origin.repo && <><dt>Repository</dt><dd>{origin.repo}</dd></>}
       {origin.commit && <><dt>Commit</dt><dd className="mono">{origin.commit}</dd></>}

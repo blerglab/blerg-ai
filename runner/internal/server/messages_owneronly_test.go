@@ -14,7 +14,7 @@ import (
 // An engine's command approval (posted owner_only) is answered only by the
 // session's signed-in owner: not the daemon token, not a board token of the
 // session's board, not an agent token acting for the owner, and not another
-// person who can see the session. A plain question keeps its wider repliers.
+// person who can see the session.
 func TestOwnerOnlyAskAcceptsOnlyTheSignedInOwner(t *testing.T) {
 	f := newPrivFixture(t)
 	ctx := context.Background()
@@ -73,7 +73,7 @@ func TestOwnerOnlyAskAcceptsOnlyTheSignedInOwner(t *testing.T) {
 		t.Fatalf("owner reply = %d %s", rec.Code, rec.Body.String())
 	}
 
-	// Plain questions are unchanged: the daemon token and another person still answer them.
+	// Plain explicit replies keep their existing authorized repliers.
 	for _, tok := range []string{spawnTokenDaemonTok, otherTok} {
 		plain := create(false)
 		if rec := privDo(f.api.HandlePostMessageReply, "POST", "/x", plain, tok, `{"answer":"blue"}`); rec.Code != http.StatusOK {
@@ -101,19 +101,22 @@ func TestOwnerOnlyAskIsNotAnsweredFromAnotherAccountsChat(t *testing.T) {
 	if row, _ := db.GetMessage(ctx, f.pool, approval); row == nil || row.Status != "open" {
 		t.Fatalf("approval answered by a non-owner: %+v", row)
 	}
-	if !answerAskFromChatAs(ctx, f.hub, f.pool, f.pubSession, "1", newUUID(), "", privAcctA) {
+	if !answerAskFromChatAs(ctx, f.hub, f.pool, f.pubSession, "1", newUUID(), approval, privAcctA) {
 		t.Fatal("the owner's chat reply did not answer the approval")
 	}
 	if row, _ := db.GetMessage(ctx, f.pool, approval); row == nil || row.Status != "answered" || row.Answer == nil || *row.Answer != "1" {
 		t.Fatalf("approval = %+v, want answered 1", row)
 	}
-	// A plain question is still answered from chat with no known answerer.
+	// Plain questions also require the authenticated owner.
 	plain, err := db.CreateMessage(ctx, f.pool, f.pubSession, "ask", "color?")
 	if err != nil {
 		t.Fatal(err)
 	}
 	recordServerAgentEvent(ctx, f.hub, f.pool, f.pubSession, messageEventID(plain, "ask"), "ask", messagingPayload{Body: "color?", MessageID: plain})
-	if !answerAskFromChat(ctx, f.hub, f.pool, f.pubSession, "blue", newUUID(), "") {
+	if answerAskFromChat(ctx, f.hub, f.pool, f.pubSession, "blue", newUUID(), "") {
+		t.Fatal("unknown sender answered plain question")
+	}
+	if !answerAskFromChatAs(ctx, f.hub, f.pool, f.pubSession, "blue", newUUID(), plain, privAcctA) {
 		t.Fatal("plain question no longer answered from chat")
 	}
 }
@@ -124,20 +127,25 @@ func TestOwnerOnlyAskIsNotAnsweredFromAnotherAccountsChat(t *testing.T) {
 // deny. That close must succeed for an owner-only ask, while the daemon still
 // cannot answer one, and the owner's next chat message must then reach the
 // agent as an ordinary message instead of answering the dead approval.
-func TestOwnerOnlyAskIsClosedByTheDaemonAndFreesTheChat(t *testing.T) {
+// A daemon cannot close an approval: it stops being waited on and stays with the owner, and the
+// owner's next chat message still reaches the session instead of being swallowed by it.
+func TestOwnerOnlyAskIsHeldByTheDaemonAndFreesTheChat(t *testing.T) {
 	f := newPrivFixture(t)
 	ctx := context.Background()
+	if _, err := db.AnswerMessage(ctx, f.pool, f.pubMsg, "fixture complete"); err != nil {
+		t.Fatal(err)
+	}
 	approval, err := db.CreateAsk(ctx, f.pool, f.pubSession, "approve?", true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	recordServerAgentEvent(ctx, f.hub, f.pool, f.pubSession, messageEventID(approval, "ask"), "ask", messagingPayload{Body: "approve?", MessageID: approval})
-	if rec := privDo(f.api.HandlePostMessageReply, "POST", "/x", approval, spawnTokenDaemonTok, `{"answer":""}`); rec.Code != http.StatusOK {
+	if rec := privDo(f.api.HandlePostMessageReply, "POST", "/x", approval, spawnTokenDaemonTok, `{"answer":""}`); rec.Code != http.StatusForbidden {
 		t.Fatalf("daemon close of an owner-only approval = %d %s", rec.Code, rec.Body.String())
 	}
 	row, err := db.GetMessage(ctx, f.pool, approval)
-	if err != nil || row == nil || row.Status != "answered" || row.Answer == nil || *row.Answer != "" {
-		t.Fatalf("approval after daemon close = %+v %v, want answered with an empty answer", row, err)
+	if err != nil || row == nil || row.Status != "open" || !row.WaiterEnded {
+		t.Fatalf("approval after daemon close = %+v %v, want open with no waiter", row, err)
 	}
 	if answerAskFromChatAs(ctx, f.hub, f.pool, f.pubSession, "try a different approach", newUUID(), "", privAcctA) {
 		t.Fatal("the owner's chat message was swallowed by a closed approval")

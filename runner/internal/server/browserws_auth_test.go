@@ -17,7 +17,7 @@ import (
 // /ws/browser test in this package. Those tests exercise the socket's protocol
 // behaviour, not its auth gate — the gate itself is covered here, by tests that
 // wire the real (*API).AuthorizeBrowserWS.
-func allowWSForTest(*http.Request) (string, string, bool) { return "", "", true }
+func allowWSForTest(*http.Request) (identity.Principal, bool) { return identity.Principal{}, true }
 
 // browserWSTestAPI builds an API wired to a fake blerg-core, plus a helper that
 // mints browser access tokens that API will accept.

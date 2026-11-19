@@ -1,0 +1,85 @@
+.inbox-host { container-type: inline-size; height: 100%; min-height: 0; }
+.inbox-screen { display: grid; grid-template-columns: minmax(240px, 26%) minmax(0, 1fr); height: 100%; min-height: 0; color: var(--chalk); background: var(--slate); }
+.inbox-list { overflow: auto; border-inline-end: 1px solid var(--stone); min-width: 0; }
+.inbox-items { list-style: none; padding: 0; margin: 0; }
+.inbox-items .workspace-row { min-height: 44px; width: 100%; }
+.inbox-items .workspace-row[aria-pressed="true"] { background: var(--ash); }
+.inbox-subject { min-width: 0; overflow: hidden; flex: 1; text-align: start; font-weight: 400; }
+.inbox-subject-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; white-space: normal; overflow-wrap: anywhere; }
+.inbox-unread { font-weight: 650; }
+.inbox-preview { display: block; white-space: nowrap; font-weight: 400; font-size: 12px; color: var(--fog); overflow: hidden; text-overflow: ellipsis; }
+.inbox-state { color: var(--chalk); flex: none; }
+.inbox-items time, .inbox-document > time { font-size: 12px; color: var(--fog); white-space: nowrap; }
+.inbox-reading-pane { min-width: 0; overflow: auto; }
+.inbox-toolbar { display: flex; justify-content: flex-end; gap: 8px; padding: 8px 16px; position: sticky; top: 0; background: var(--slate); }
+.inbox-toolbar .inbox-back { display: none; }
+.inbox-document { padding: 8px clamp(16px, 3cqw, 96px) 48px; overflow-wrap: anywhere; }
+.inbox-document h1 { margin-top: 0; font-size: 24px; }
+.inbox-document > .md { margin-top: 24px; }
+.inbox-empty, .inbox-list > p, .inbox-compact > p { color: var(--fog); padding: 16px; }
+.inbox-compact { min-width: 0; }
+@container (max-width: 700px) {
+ .inbox-screen { display: block; }
+ .inbox-screen .inbox-list { border: 0; height: 100%; }
+ .inbox-screen .inbox-reading-pane { display: none; height: 100%; }
+ .inbox-screen.inbox-reading .inbox-list { display: none; }
+ .inbox-screen.inbox-reading .inbox-reading-pane { display: block; }
+ .inbox-toolbar .inbox-back { display: inline-flex; margin-inline-end: auto; }
+}
+@media (min-width: 2000px) { .inbox-document > .md { column-width: 720px; column-gap: 64px; } }
+
+@container (min-width: 701px) {
+ [data-session-root]:has(.explorer-dock:not([hidden]) .session-view-target:not([hidden]) .inbox-compact) .inbox-screen { grid-template-columns: minmax(0, 1fr); }
+ [data-session-root]:has(.explorer-dock:not([hidden]) .session-view-target:not([hidden]) .inbox-compact) .inbox-screen > .inbox-list { display: none; }
+}
+/* Compact dock list, read like a mail client: flat rows with hairline dividers. Unread is bold
+   and bright; read is muted. The whole row is the click target. */
+.inbox-compact-bar { display: flex; justify-content: flex-end; padding: 4px 6px 0; }
+.inbox-cards { list-style: none; margin: 0; padding: 0; }
+.inbox-cards > li + li { border-top: 1px solid var(--scree-2); }
+.inbox-card { display: flex; align-items: baseline; gap: 10px; width: 100%; box-sizing: border-box; padding: 7px 10px; border: 0; background: transparent; color: var(--fog-dim); font: inherit; text-align: start; cursor: pointer; transition: background 120ms ease; }
+.inbox-card:hover { background: var(--scree); }
+.inbox-card:focus-visible { outline: 2px solid var(--selected-border); outline-offset: -2px; }
+.inbox-card.unread { color: var(--chalk); }
+.inbox-card-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.inbox-card-sender { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.inbox-card-line time { flex: none; font-size: 11px; }
+.inbox-card-subject { flex: 1; min-width: 0; font-size: 13px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inbox-card > time { flex: none; font-size: 11px; }
+.inbox-card.unread > time { color: var(--chalk); }
+.inbox-card.unread .inbox-card-subject { font-weight: 650; }
+.inbox-card.unread .inbox-card-line time { color: var(--chalk); }
+.inbox-card-kind { padding: 1px 6px; border-radius: 99px; background: var(--scree-2); color: var(--fog); }
+.inbox-empty-compact { color: var(--fog); padding: 12px 14px; font-size: 12px; line-height: 1.45; }
+@media (prefers-reduced-motion: reduce) { .inbox-card { transition: none; } }
+.inbox-toolbar { gap: 6px; }
+.inbox-action { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: var(--fog); font: inherit; font-size: 12px; text-decoration: none; cursor: pointer; }
+.inbox-action:hover { background: var(--scree); color: var(--chalk); }
+.inbox-action:focus-visible { outline: 2px solid var(--selected-border); outline-offset: 1px; }
+.inbox-doc-head { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 12px; color: var(--fog-dim); }
+.inbox-document > h1 { margin: 10px 0 0; }
+.inbox-action.icon-only { padding: 0; width: 28px; justify-content: center; }
+.inbox-document > h1 { font-weight: 650; }
+/* The open item reads like a mail client's selected row: a filled, rounded row inset from the
+   pane's edges; no accent bar, which means an active tab elsewhere. */
+.inbox-cards { padding: 2px 4px; }
+.inbox-card { border-radius: 6px; }
+.inbox-card.selected, .inbox-card.selected:hover { background: var(--scree-2); color: var(--chalk); }
+
+.inbox-items > li, .inbox-cards > li { position: relative; }
+.inbox-row-delete { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); visibility: hidden; background: var(--slate); }
+.inbox-items > li:hover .inbox-row-delete, .inbox-items > li:focus-within .inbox-row-delete,
+.inbox-cards > li:hover .inbox-row-delete, .inbox-cards > li:focus-within .inbox-row-delete { visibility: visible; }
+.inbox-items > li:hover .workspace-row, .inbox-items > li:focus-within .workspace-row,
+.inbox-cards > li:hover .inbox-card, .inbox-cards > li:focus-within .inbox-card { padding-right: 36px; }
+.inbox-toolbar { flex-wrap: wrap; }
+@media (hover: none) { .inbox-row-delete { visibility: visible; } .inbox-items .workspace-row { padding-right: 86px; } .inbox-card { padding-right: 36px; } }
+.inbox-cards .inbox-row-delete { width: 26px; height: 26px; padding: 0; justify-content: center; background: transparent; }
+.inbox-hover { display: flex; flex-direction: column; gap: 6px; max-width: 360px; }
+.inbox-hover-meta { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--fog-dim); }
+.inbox-hover-subject { font-size: 13px; color: var(--chalk); }
+.inbox-hover-preview { margin: 0; font-size: 12px; line-height: 1.45; color: var(--fog); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; }
+/* The Inbox tab is the reader; the list lives in the dock. */
+.inbox-screen { grid-template-columns: minmax(0, 1fr); }
+.inbox-screen > .inbox-reading-pane { display: block; }
+.inbox-toolbar { justify-content: flex-end; }

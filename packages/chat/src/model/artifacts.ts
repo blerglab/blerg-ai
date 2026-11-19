@@ -62,7 +62,11 @@ export function groupArtifacts(items: ArtifactInfo[]): ArtifactGroup[] {
     else groups.set(key, [a])
   }
   return [...groups].map(([key, list]) => {
-    const [latest, ...earlier] = [...list].sort((x, y) => (y.version ?? 0) - (x.version ?? 0))
+    // A live file (BLG-470) is "latest" by being the one live row, not by version number: an old
+    // server mid rolling-update can still insert an ordinary version over a live name (it does
+    // not know the live column), and that version's number can outrank the live row's. Preferring
+    // live here means that mistake is buried in "earlier", not mistaken for the current file.
+    const [latest, ...earlier] = [...list].sort((x, y) => (y.live ? 1 : 0) - (x.live ? 1 : 0) || (y.version ?? 0) - (x.version ?? 0))
     return { key, name: latest.name, origin: latest.origin === 'user' ? 'user' : 'agent', latest, earlier }
   })
 }

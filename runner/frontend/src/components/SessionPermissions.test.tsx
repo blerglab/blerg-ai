@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import SessionPermissions from './SessionPermissions'
+import { syncViewCacheSessions } from '../lib/sessionViewCache'
+import * as authClient from '../authClient'
 import type { LiveDelegationGrant } from '../lib/liveState'
 
 const request = vi.fn()
@@ -44,7 +46,7 @@ describe('the panel summary', () => {
     expect(within(block).getByRole('heading', { name: 'Permissions' })).toBeInTheDocument()
     expect(await within(block).findByTestId('perm-count')).toHaveTextContent('3 active')
     const chips = within(within(block).getByTestId('perm-active')).getAllByRole('listitem')
-    expect(chips.map(c => c.textContent)).toEqual(['⑂Codex · Local sandbox×', '▦Product · File without asking×', '▦Ops · Full×'])
+    expect(chips.map(c => c.textContent)).toEqual(['⑂Codex · Local sandbox×', '▦Ticket board: Product · File without asking×', '▦Ticket board: Ops · Full×'])
     // No long list of toggles in the panel any more.
     expect(within(block).queryByRole('checkbox')).toBeNull()
   })
@@ -66,7 +68,7 @@ describe('the panel summary', () => {
     expect(child.getAttribute('title')).toMatch(/without asking/)
     const dialog = await openModal()
     expect(dialog.textContent).not.toContain('↳')
-    expect(within(dialog).getByRole('heading', { name: 'Child sessions' }).textContent).toBe('⑂Child sessions')
+    expect(within(dialog).getByRole('heading', { name: 'Workers' }).textContent).toBe('⑂Workers')
   })
 
   it('counts one permission per kind of child and place, however many engines it covers', async () => {
@@ -151,7 +153,7 @@ describe('the Permissions modal over a running session', () => {
     expect(within(dialog).getByRole('checkbox', { name: 'Run Mail · delete without asking' })).toBeInTheDocument()
     expect(within(dialog).queryByRole('checkbox', { name: 'Run Mail · send without asking' })).toBeNull()
     fireEvent.change(within(dialog).getByRole('searchbox'), { target: { value: 'codex' } })
-    expect(within(dialog).getByRole('checkbox', { name: 'Start sandboxed children without asking' })).toBeInTheDocument()
+    expect(within(dialog).getByRole('checkbox', { name: 'Start sandboxed workers without asking' })).toBeInTheDocument()
   })
 
   it('sets one level per board, counts the boards with access, and Save sets exactly the changed ones', async () => {
@@ -208,7 +210,7 @@ describe('the Permissions modal over a running session', () => {
     // The chip says what the session acts at; its title says why.
     const chip = (await screen.findAllByTestId('perm-board'))[0]
     expect(chip).toHaveTextContent('Product · Read')
-    expect(chip.getAttribute('title')).toContain('capped at Read by the session that started it (its own level is Full)')
+    expect(chip.getAttribute('title')).toContain('capped at Read by the workspace that started it (its own level is Full)')
     const dialog = await openModal()
     expect(await within(dialog).findByTestId('pm-board-cap-note')).toHaveTextContent('Started by Batch runner')
     const product = await within(dialog).findByRole('combobox', { name: 'Access to Product' })
@@ -251,7 +253,7 @@ describe('the Permissions modal over a running session', () => {
     serve(state, (url, init) => init?.method === 'PUT' && url.endsWith('/child-approval') ? ok(approval({ revision: 'rev-b', runtimes: [runtime('docker', { enabled: true, granted_engines: ['claude', 'codex'] }), runtime('daemon')] })) : undefined)
     mount()
     const dialog = await openModal()
-    fireEvent.click(await within(dialog).findByRole('checkbox', { name: 'Start sandboxed children without asking' }))
+    fireEvent.click(await within(dialog).findByRole('checkbox', { name: 'Start sandboxed workers without asking' }))
     fireEvent.change(within(dialog).getByRole('combobox', { name: 'Access to Product' }), { target: { value: 'propose' } })
     fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Run Tracker · create_issue without asking' }))
     expect(within(dialog).getByTestId('pm-summary')).toHaveTextContent('Grant 2, revoke 1')
@@ -415,13 +417,13 @@ describe('the Permissions modal over a running session', () => {
     serve(state, (url, init) => init?.method === 'PUT' && url.endsWith('/child-approval') ? ok(approval({ revision: 'rev-b', runtimes: [runtime('docker'), runtime('daemon'), runtime('cluster', { enabled: true, allowed_engines: ['claude'], granted_engines: ['claude'] })] })) : undefined)
     mount()
     const dialog = await openModal()
-    const box = await within(dialog).findByRole('checkbox', { name: 'Start children on the cluster without asking' })
+    const box = await within(dialog).findByRole('checkbox', { name: 'Start workers on the cluster without asking' })
     expect(box).toBeEnabled()
     expect(within(dialog).getByTestId('pm-children-cluster')).toHaveTextContent('On the cluster.')
     expect(within(dialog).getByTestId('pm-children-docker')).toHaveTextContent('On this desktop.')
     expect(within(dialog).getByTestId('pm-children-daemon')).toHaveTextContent('On this desktop.')
     // No wholesale "on this desktop" for every row.
-    expect(dialog.textContent).not.toMatch(/Children of this session on this desktop/)
+    expect(dialog.textContent).not.toMatch(/Children of this workspace on this desktop/)
     fireEvent.click(box)
     fireEvent.click(within(dialog).getByRole('button', { name: /^Save/ }))
     await waitFor(() => expect(posts()).toContainEqual(['/api/sessions/s1/child-approval', { runtime: 'cluster', enabled: true, revision: 'rev-a' }]))
@@ -431,15 +433,15 @@ describe('the Permissions modal over a running session', () => {
     serve({ perms: perms() })
     mount()
     const dialog = await openModal()
-    await within(dialog).findByRole('checkbox', { name: 'Start sandboxed children without asking' })
-    expect(within(dialog).queryByRole('checkbox', { name: 'Start children on the cluster without asking' })).toBeNull()
+    await within(dialog).findByRole('checkbox', { name: 'Start sandboxed workers without asking' })
+    expect(within(dialog).queryByRole('checkbox', { name: 'Start workers on the cluster without asking' })).toBeNull()
   })
 
   it('shows a runtime the server will not enable as disabled, with its reason', async () => {
     serve({ perms: perms(), approval: approval({ runtimes: [runtime('docker'), runtime('daemon', { can_enable: false, reason: 'A sandboxed parent cannot pre-approve unsandboxed children.' })] }) })
     mount()
     const dialog = await openModal()
-    const box = await within(dialog).findByRole('checkbox', { name: 'Start unsandboxed children without asking' })
+    const box = await within(dialog).findByRole('checkbox', { name: 'Start unsandboxed workers without asking' })
     expect(box).toBeDisabled()
     expect(within(dialog).getByTestId('pm-children-daemon')).toHaveTextContent('A sandboxed parent cannot pre-approve unsandboxed children.')
   })
@@ -456,16 +458,16 @@ describe('the Permissions modal over a running session', () => {
     serve({ perms: perms() })
     mount([], 1)
     const dialog = await screen.findByRole('dialog', { name: 'Permissions' })
-    const box = await within(dialog).findByRole('checkbox', { name: 'Start sandboxed children without asking' })
+    const box = await within(dialog).findByRole('checkbox', { name: 'Start sandboxed workers without asking' })
     await waitFor(() => expect(document.activeElement).toBe(box))
   })
 
   it('still manages children when board and tool permissions cannot be read, and says why the rest is missing', async () => {
     serve({ perms: perms() }, url => url.endsWith('/permissions') ? { ok: false, status: 500, json: async () => ({}) } : undefined)
     mount()
-    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load the session permissions.')
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load the workspace permissions.')
     const dialog = await openModal()
-    expect(await within(dialog).findByRole('checkbox', { name: 'Start sandboxed children without asking' })).toBeEnabled()
+    expect(await within(dialog).findByRole('checkbox', { name: 'Start sandboxed workers without asking' })).toBeEnabled()
     expect(within(dialog).getByTestId('pm-grant-reason')).toHaveTextContent('could not be loaded')
   })
 
@@ -491,4 +493,33 @@ describe('the Permissions modal over a running session', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(posts()).toEqual([])
   })
+})
+
+it('shows the cached first render while refreshing after a route return', async () => {
+  const account = vi.spyOn(authClient, 'getAccessToken').mockReturnValue(`x.${btoa(JSON.stringify({ sub: 'person-a', exp: 9999999999 }))}.x`)
+  syncViewCacheSessions([{ id: 'returning', status: 'idle' }])
+  serve({ perms: perms({ boards: [boardFile] }) })
+  const props = { sessionId: 'returning', active: true, delegationGrants: [], refreshKey: '' }
+  const first = render(<SessionPermissions {...props} />)
+  expect(await screen.findByTestId('perm-active')).toHaveTextContent('Product')
+  first.unmount()
+  request.mockImplementation(() => new Promise(() => {}))
+  render(<SessionPermissions {...props} />)
+  // This is cached presentation; all mutation/execution requests still authorize on the server.
+  expect(screen.getByTestId('perm-active')).toHaveTextContent('Product')
+  expect(screen.queryByText('Loading permissions')).toBeNull()
+  account.mockRestore()
+})
+
+it('preserves an open modal and its draft across Live tab switches', async () => {
+  serve({ perms: perms({ boards: [boardFile] }) })
+  const props = { sessionId: 'live-return', active: true, delegationGrants: [], refreshKey: '' }
+  const { rerender } = render(<SessionPermissions {...props} />)
+  const dialog = await openModal()
+  const search = within(dialog).getByRole('searchbox', { name: 'Search permissions' })
+  fireEvent.change(search, { target: { value: 'Ops' } })
+  rerender(<SessionPermissions {...props} active={false} />)
+  rerender(<SessionPermissions {...props} />)
+  expect(screen.getByRole('dialog', { name: 'Permissions' })).toBe(dialog)
+  expect(search).toHaveValue('Ops')
 })

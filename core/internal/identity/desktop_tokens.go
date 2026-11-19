@@ -73,7 +73,7 @@ type DesktopOwner struct {
 }
 
 func (s *Service) DesktopOwners(ctx context.Context) ([]DesktopOwner, error) {
-	rows, err := s.st.Pool().Query(ctx, `SELECT id::text,provider_subject FROM accounts WHERE disabled_at IS NULL ORDER BY created_at,id`)
+	rows, err := s.st.Pool().Query(ctx, `SELECT id::text,coalesce(nullif(display_name,''),provider_subject) FROM accounts WHERE disabled_at IS NULL ORDER BY created_at,id`)
 	if err != nil {
 		return nil, err
 	}

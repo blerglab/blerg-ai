@@ -45,9 +45,10 @@ func browserFileActor(p identity.Principal) fileActor {
 
 // accountStanding is core's answer about a named account (POST /internal/accounts/standing).
 type accountStanding struct {
-	Exists bool `json:"exists"`
-	Active bool `json:"active"`
-	Admin  bool `json:"admin"`
+	Username string `json:"username,omitempty"`
+	Exists   bool   `json:"exists"`
+	Active   bool   `json:"active"`
+	Admin    bool   `json:"admin"`
 }
 
 // runnerFileActor is the contract principal's person: the account an agent or human token acts
@@ -80,13 +81,21 @@ func (a *API) runnerFileActor(r *http.Request, p runnerPrincipal, sid string) fi
 // fetchAccountStanding asks core about one account; an error when core is not configured or
 // cannot answer, so callers fail closed.
 func (a *API) fetchAccountStanding(ctx context.Context, account string) (accountStanding, error) {
+	return a.fetchAccountStandingName(ctx, account, false)
+}
+
+func (a *API) fetchAccountStandingName(ctx context.Context, account string, includeUsername bool) (accountStanding, error) {
 	var st accountStanding
 	if a.coreURL == "" || a.coreInternalKey == "" {
 		return st, errors.New("core is not configured")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	raw, _ := json.Marshal(map[string]string{"account": account})
+	requestBody := map[string]any{"account": account}
+	if includeUsername {
+		requestBody["include_username"] = true
+	}
+	raw, _ := json.Marshal(requestBody)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.coreURL+"/internal/accounts/standing", bytes.NewReader(raw))
 	if err != nil {
 		return st, err

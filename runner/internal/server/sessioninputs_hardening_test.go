@@ -243,6 +243,7 @@ func TestSessionInputForeignDaemonCannotReplay(t *testing.T) {
 	}
 	foreign := &DaemonConn{ID: newUUID(), send: make(chan []byte, 8)}
 	foreign.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	foreign.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	replayPendingSessionInputs(f.ctx, f.hub, f.pool, foreign, []string{f.sessionID})
 	if len(foreign.send) != 0 {
 		t.Fatal("input disclosed to a daemon that does not own its session")

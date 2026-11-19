@@ -1,3 +1,6 @@
+// The workspace board button opens native previews through the mounted tab host.
+// Links retain an Open in Board fallback outside a workspace host.
+import { openSessionBoard } from '../lib/openSessionBoard'
 // The tab bar's board button: shown only when the session is associated with a board (its launch
 // board, or a board it has access to). One board: a link that opens it in a new tab, as the
 // palette's "Open board" does. Several: a small menu on the shared popover surface, launch board
@@ -21,18 +24,43 @@ export default function SessionBoardButton({ sessionId, refreshKey }: { sessionI
   if (links.length === 0) return null
   if (links.length === 1) {
     const label = `Open board: ${links[0].name}`
-    return <a className="icon-btn session-board-toggle" data-testid="session-board-button" href={boardPageUrl(origin, links[0].id)} target="_blank" rel="noopener" aria-label={label} title={label}><BoardIcon /></a>
+    return <a className="icon-btn session-board-toggle" data-testid="session-board-button" onClick={e => { if (openSessionBoard(sessionId, links[0].id, links[0].name)) e.preventDefault() }} href={boardPageUrl(origin, links[0].id)} target="_blank" rel="noopener" aria-label={label} title={label}><BoardIcon /></a>
   }
   return <>
     <button ref={trigger} type="button" className="icon-btn session-board-toggle" data-testid="session-board-button" aria-label="Open a board" title="Open a board" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(o => !o)}><BoardIcon /></button>
-    {open && <BoardMenu anchor={trigger} links={links} origin={origin} onClose={() => setOpen(false)} />}
+    {open && <BoardMenu anchor={trigger} links={links} sessionId={sessionId} origin={origin} onClose={() => setOpen(false)} />}
   </>
+}
+
+/** The board opener, as (one or more) menu items inside the header's collapsed "Open" menu (card
+ *  BLG-450): one real link per board, same href/target/rel/testid as the icon button's single-link
+ *  form — a menu inside a menu would be one popover too many, so several boards list here instead of
+ *  opening the icon button's own BoardMenu. Absent with no board, same as the icon button.
+ *  Its accessible name stays "Open board: <name>" (so several boards still read apart); its visible
+ *  row follows the menu's one shape (card BLG-450, review round 2): an icon, a plain "Open board"
+ *  label, and the board's own name as quiet secondary text underneath — never a separate caption
+ *  line, never styled as a link. */
+export function SessionBoardMenuItem({ sessionId, refreshKey, onSelect }: { sessionId: string; refreshKey?: string; onSelect(): void }) {
+  const links = useSessionBoardLinks(sessionId, refreshKey)
+  const origin = useBoardOrigin()
+  if (!links.length) return null
+  return <>{links.map(l => {
+    const label = `Open board: ${l.name}`
+    return <a key={l.id} role="menuitem" className="icon-menu-item" data-testid={links.length === 1 ? 'session-board-button' : undefined} href={boardPageUrl(origin, l.id)} target="_blank" rel="noopener" aria-label={label} title={label}
+      onClick={e => { if (openSessionBoard(sessionId, l.id, l.name)) e.preventDefault(); onSelect() }}>
+      <span className="icon-menu-icon" aria-hidden="true"><BoardIcon /></span>
+      <span className="icon-menu-text">
+        <span className="icon-menu-label">Open board</span>
+        <span className="icon-menu-hint">{l.name}{l.launch ? ' · launch board' : ''}</span>
+      </span>
+    </a>
+  })}</>
 }
 
 const GAP = 6
 const EDGE = 8
 
-function BoardMenu({ anchor, links, origin, onClose }: { anchor: React.RefObject<HTMLButtonElement | null>; links: BoardLink[]; origin: string; onClose: () => void }) {
+function BoardMenu({ anchor, links, sessionId, origin, onClose }: { anchor: React.RefObject<HTMLButtonElement | null>; links: BoardLink[]; sessionId: string; origin: string; onClose: () => void }) {
   const box = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
   // Under the button, right edges aligned, kept inside the window (the phone's bottom sheet ignores it).
@@ -86,7 +114,7 @@ function BoardMenu({ anchor, links, origin, onClose }: { anchor: React.RefObject
       }}>
       <h2 className="confirm-popover-title">Open a board</h2>
       <div role="menu" aria-label="Open a board">
-        {links.map(l => <a key={l.id} role="menuitem" href={boardPageUrl(origin, l.id)} target="_blank" rel="noopener" title={`Open board: ${l.name}`} onClick={() => close(false)}>
+        {links.map(l => <a key={l.id} role="menuitem" href={boardPageUrl(origin, l.id)} target="_blank" rel="noopener" title={`Open board: ${l.name}`} onClick={e => { if (openSessionBoard(sessionId, l.id, l.name)) e.preventDefault(); close(false) }}>
           <span className="session-board-name">{l.name}</span>{l.launch && <span className="session-board-launch">launch board</span>}
         </a>)}
       </div>

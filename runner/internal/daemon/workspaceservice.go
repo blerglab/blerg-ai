@@ -4,12 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/blerglab/blerg-ai/runner/internal/shellruntime"
@@ -20,6 +24,11 @@ import (
 // before any agent or shell starts; no capability advertisement is added here.
 type LocalWorkspaceService struct {
 	RecoverableHost func(string) bool // persisted agent recovery owns live host sessions
+	TurnIdle        func(string) bool // an engine is between turns; nil refuses every membership change
+	Discovery       func() membershipDiscovery
+
+	membershipShells membershipShellSeam
+	membershipClock  func() time.Time
 
 	capabilityReady func() bool                                      // installed manager, not merely allocated callback closures
 	HostExecutable  string                                           // trusted writer helper image, never decoded from requests
@@ -36,12 +45,16 @@ type LocalWorkspaceService struct {
 	Signal          func(string, string)
 	CommitFinal     func(context.Context, protocol.SupervisorLaunch, WorkspaceFinalization) (WorkspaceFinalReceipt, error)
 	Results         func(context.Context, string, protocol.WorkspaceRuntimeBinding, []protocol.WorkspaceMemberResult) error
+	recoveryRetries map[string]workspaceRecoveryRetry // protected by recoverMu
 	recoverMu       sync.Mutex
 	mu              sync.Mutex
 	sessions        map[string]*LocalWorkspace
 }
 
 func (s *LocalWorkspaceService) Prepare(ctx context.Context, msg protocol.SpawnSession) (*LocalWorkspace, error) {
+	if err := recordWorkBranch(msg); err != nil {
+		return nil, err
+	}
 	if s == nil || s.Resolve == nil || s.Authority == nil || s.Supervisor == nil || s.Results == nil || s.CommitFinal == nil {
 		return nil, errors.New("sandbox workspace-v2 requires trusted selection and P0b runtime authority")
 	}
@@ -181,18 +194,32 @@ func (s *LocalWorkspaceService) Report(ctx context.Context, w *LocalWorkspace) e
 		return errors.New("unbound workspace results")
 	}
 	if err := w.authorize(ctx); err != nil {
-		return err
+		return fmt.Errorf("authorize workspace result report: %w", err)
 	}
 	results := w.results()
 	if err := w.state.Launch.ValidateResults(results); err != nil {
 		return err
 	}
 	if s.Results != nil {
-		return s.Results(ctx, w.state.Session, *w.state.Binding, results)
+		if err := s.Results(ctx, w.state.Session, *w.state.Binding, results); err != nil {
+			return fmt.Errorf("send workspace result report: %w", err)
+		}
 	}
 	return nil
 }
 func (s *LocalWorkspaceService) RecoverAll(ctx context.Context, report func(protocol.SessionEnded) error) error {
+	return s.recoverSelected(ctx, "", report)
+}
+
+// A stop for one session must not retry every unrelated retained journal.
+func (s *LocalWorkspaceService) RecoverSession(ctx context.Context, id string, report func(protocol.SessionEnded) error) error {
+	if id == "" {
+		return nil
+	}
+	return s.recoverSelected(ctx, id, report)
+}
+
+func (s *LocalWorkspaceService) recoverSelected(ctx context.Context, id string, report func(protocol.SessionEnded) error) error {
 	if s == nil {
 		return nil
 	}
@@ -210,12 +237,24 @@ func (s *LocalWorkspaceService) RecoverAll(ctx context.Context, report func(prot
 	}
 	var combined error
 	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".workspace.json") || !entry.Type().IsRegular() {
+		if (id != "" && entry.Name() != id+".workspace.json") || !strings.HasSuffix(entry.Name(), ".workspace.json") || !entry.Type().IsRegular() {
 			continue
 		}
 		state, err := readPrivateWorkspace(filepath.Join(sandboxCloneRoot(), entry.Name()))
 		if err != nil {
 			combined = errors.Join(combined, err)
+			continue
+		}
+		if !validWorkspaceSessionID(state.Session) || entry.Name() != state.Session+".workspace.json" {
+			failurelog.Default.Event("storage:journal_filename_mismatch", slog.LevelWarn, "component", "daemon", "operation", "workspace_recovery", "cause", "journal_filename_mismatch")
+			combined = errors.Join(combined, errors.New("workspace journal filename mismatch"))
+			continue
+		}
+		if retry := s.recoveryRetries[state.Session]; retry.token == state.RuntimeToken && retry.digest == state.Launch.Digest && time.Now().Before(retry.next) {
+			continue
+		}
+		refusalState := state
+		if state.AuthorityRefused {
 			continue
 		}
 		if state.Host {
@@ -233,7 +272,30 @@ func (s *LocalWorkspaceService) RecoverAll(ctx context.Context, report func(prot
 				recoveryErr = s.recoverHost(ctx, state, filepath.Join(sandboxCloneRoot(), entry.Name()), report)
 			}
 			admission.Unlock()
-			combined = errors.Join(combined, recoveryErr)
+			combined = errors.Join(combined, s.recordRecoveryRefusal(refusalState, recoveryErr))
+			continue
+		}
+		if workspaceFinalComplete(state) {
+			if state.StorageReleased && (state.StorageConfirmation == "" || state.StorageAcknowledged) {
+				storage := s.Storage
+				if storage == nil {
+					storage = defaultWorkspaceStorage()
+				}
+				w := &LocalWorkspace{state: state, record: filepath.Join(sandboxCloneRoot(), entry.Name())}
+				lock := workspaceLock(state.Session)
+				s.mu.Lock()
+				if hosted := s.sessions[state.Session]; hosted != nil {
+					lock = hosted.mu
+				}
+				s.mu.Unlock()
+				lock.Lock()
+				pruneErr := pruneWorkspaceStorage(w, storage)
+				lock.Unlock()
+				if err := pruneErr; err != nil {
+					failurelog.Default.Event("storage:pruning_failed", slog.LevelWarn, "component", "daemon", "operation", "release_storage", "cause", "journal_or_allocation_incomplete", "error_type", failurelog.Cause(err))
+					combined = errors.Join(combined, err)
+				}
+			}
 			continue
 		}
 		// A registry entry belongs to this process, not an orphan. Rebind the
@@ -243,7 +305,7 @@ func (s *LocalWorkspaceService) RecoverAll(ctx context.Context, report func(prot
 		s.mu.Unlock()
 		if hosted != nil {
 			if err := s.reconnectHosted(ctx, hosted, report); err != nil {
-				combined = errors.Join(combined, err)
+				combined = errors.Join(combined, s.recordRecoveryRefusal(refusalState, err))
 			}
 			continue
 		}
@@ -253,22 +315,25 @@ func (s *LocalWorkspaceService) RecoverAll(ctx context.Context, report func(prot
 		if state.FinalDelivery != nil && state.ResultsAcknowledged {
 			w := &LocalWorkspace{mu: workspaceLock(state.Session), state: state, record: filepath.Join(sandboxCloneRoot(), entry.Name())}
 			if err := s.Finalize(ctx, w, *state.FinalDelivery, report); err != nil {
-				combined = errors.Join(combined, err)
+				combined = errors.Join(combined, s.recordRecoveryRefusal(refusalState, err))
 			}
 			continue
 		}
+		if state, err = s.reconcileMembershipJournal(ctx, state, filepath.Join(sandboxCloneRoot(), entry.Name())); err != nil {
+			combined = errors.Join(combined, s.recordRecoveryRefusal(refusalState, err))
+			continue
+		}
+
 		launch, err := s.TrustedLaunch(ctx, state.Session)
 		if err != nil {
-			combined = errors.Join(combined, err)
+			combined = errors.Join(combined, s.recordRecoveryRefusal(refusalState, err))
 			continue
 		}
-		if workspaceFinalComplete(state) {
-			continue
-		}
+
 		if state.Binding == nil && state.RuntimeIdentity != "" && !state.RuntimePreparing {
 			pending := &LocalWorkspace{mu: workspaceLock(state.Session), state: state, record: filepath.Join(sandboxCloneRoot(), entry.Name())}
 			if err := s.abortRootOnly(ctx, pending); err != nil {
-				combined = errors.Join(combined, err)
+				combined = errors.Join(combined, s.recordRecoveryRefusal(refusalState, err))
 				continue
 			}
 			state = pending.state
@@ -276,7 +341,7 @@ func (s *LocalWorkspaceService) RecoverAll(ctx context.Context, report func(prot
 		if state.RuntimePreparing {
 			pending := &LocalWorkspace{mu: workspaceLock(state.Session), state: state, record: filepath.Join(sandboxCloneRoot(), entry.Name())}
 			if err := s.abortRuntime(ctx, pending); err != nil {
-				combined = errors.Join(combined, err)
+				combined = errors.Join(combined, s.recordRecoveryRefusal(refusalState, err))
 				continue
 			}
 			state = pending.state
@@ -291,12 +356,12 @@ func (s *LocalWorkspaceService) RecoverAll(ctx context.Context, report func(prot
 		if state.RuntimeIdentity == "" && state.Stopped && state.StopRequested && state.Binding != nil {
 			w := &LocalWorkspace{mu: workspaceLock(state.Session), state: state, record: filepath.Join(sandboxCloneRoot(), entry.Name()), storage: storage}
 			if err := w.validateAllocation(ctx); err != nil {
-				combined = errors.Join(combined, err)
+				combined = errors.Join(combined, s.recordRecoveryRefusal(refusalState, err))
 				continue
 			}
 			w.authorize = func(ctx context.Context) error { return s.currentWorkspace(ctx, w) }
 			if err := s.Finalize(ctx, w, protocol.SessionEnded{Type: "session_ended", SessionID: state.Session}, report); err != nil {
-				combined = errors.Join(combined, err)
+				combined = errors.Join(combined, s.recordRecoveryRefusal(refusalState, err))
 			}
 			continue
 		}
@@ -314,11 +379,11 @@ func (s *LocalWorkspaceService) RecoverAll(ctx context.Context, report func(prot
 			peer = d
 			if !state.Stopped {
 				if absent, err := d.Absent(ctx); err != nil {
-					combined = errors.Join(combined, err)
+					combined = errors.Join(combined, s.recordRecoveryRefusal(refusalState, err))
 					continue
 				} else if !absent {
 					if err := d.validateEntryAuthority(ctx); err != nil {
-						combined = errors.Join(combined, err)
+						combined = errors.Join(combined, s.recordRecoveryRefusal(refusalState, err))
 						continue
 					}
 				}
@@ -329,19 +394,19 @@ func (s *LocalWorkspaceService) RecoverAll(ctx context.Context, report func(prot
 			}
 			resumed, resumeErr := workspaceRecoverCleanup(ctx, s.Authority, state.SupervisorLaunch, *state.Binding)
 			if resumeErr != nil || resumed.Validate() != nil || resumed.SessionID != state.SupervisorLaunch.SessionID || resumed.LaunchGeneration != state.SupervisorLaunch.LaunchGeneration || resumed.RuntimeGeneration != state.SupervisorLaunch.RuntimeGeneration || resumed.Runtime != state.SupervisorLaunch.Runtime {
-				combined = errors.Join(combined, resumeErr, errors.New("recovery incarnation not authorized"))
+				combined = errors.Join(combined, s.recordRecoveryRefusal(refusalState, resumeErr), errors.New("recovery incarnation not authorized"))
 				continue
 			}
 			if resumed != state.SupervisorLaunch {
 				state.SupervisorLaunch = resumed
 				rebound := &LocalWorkspace{state: state, record: filepath.Join(sandboxCloneRoot(), entry.Name())}
 				if err := rebound.save(); err != nil {
-					combined = errors.Join(combined, err)
+					combined = errors.Join(combined, s.recordRecoveryRefusal(refusalState, err))
 					continue
 				}
 			}
 			if err := workspaceCurrentAuthority(cleanupContext(ctx), s.Authority, state.SupervisorLaunch, *state.Binding); err != nil {
-				combined = errors.Join(combined, err)
+				combined = errors.Join(combined, s.recordRecoveryRefusal(refusalState, err))
 				continue
 			}
 			d.Supervisor = s.Supervisor
@@ -372,13 +437,13 @@ func (s *LocalWorkspaceService) RecoverAll(ctx context.Context, report func(prot
 		}
 		w, err := recoverLocalWorkspace(cleanupContext(ctx), state.Session, launch, storage, peer, authorize, before)
 		if err != nil {
-			combined = errors.Join(combined, err)
+			combined = errors.Join(combined, s.recordRecoveryRefusal(refusalState, err))
 			continue
 		}
 		if w.state.RuntimeIdentity == "" {
 			if _, ok := s.Authority.(workspacePreparationCleanupAuthority); ok {
 				if err := s.cleanupPrepared(ctx, w, report); err != nil {
-					combined = errors.Join(combined, err)
+					combined = errors.Join(combined, s.recordRecoveryRefusal(refusalState, err))
 				}
 			} else {
 				s.mu.Lock()
@@ -392,7 +457,7 @@ func (s *LocalWorkspaceService) RecoverAll(ctx context.Context, report func(prot
 		}
 		if w.state.FinalDelivery != nil {
 			if err := s.Finalize(ctx, w, *w.state.FinalDelivery, report); err != nil {
-				combined = errors.Join(combined, err)
+				combined = errors.Join(combined, s.recordRecoveryRefusal(refusalState, err))
 			}
 			continue
 		}
@@ -402,10 +467,10 @@ func (s *LocalWorkspaceService) RecoverAll(ctx context.Context, report func(prot
 		if stopErr != nil {
 			message = "workspace recovery retained unresolved work"
 			exit = 1
-			combined = errors.Join(combined, stopErr)
+			combined = errors.Join(combined, s.recordRecoveryRefusal(refusalState, stopErr))
 		}
 		if err := s.Finalize(ctx, w, protocol.SessionEnded{Type: "session_ended", SessionID: state.Session, ExitCode: exit, Message: message}, report); err != nil {
-			combined = errors.Join(combined, err)
+			combined = errors.Join(combined, s.recordRecoveryRefusal(refusalState, err))
 		}
 
 	}
@@ -420,7 +485,7 @@ func workspaceGuide(manifest *protocol.WorkspaceManifest) string {
 	for _, m := range manifest.Members {
 		fmt.Fprintf(&b, "- %s: /workspace/%s\n", m.ID, m.Path)
 	}
-	b.WriteString("Commit in each affected member repository. Folder children may select only launch members; shell grants are never inherited.\n")
+	b.WriteString("Work in the affected member path. This selection grants no shell permission. Commit in each affected member repository and report every commit ID. Newly discovered repositories are not launch members. Folder children may select only launch members; shell grants are never inherited.\n")
 	return b.String()
 }
 
@@ -428,9 +493,11 @@ func defaultWorkspaceStorage() WorkspaceStorage {
 	return &DockerWorkspaceStorage{Root: filepath.Join(DaemonStateDir(), "workspace-volumes")}
 }
 
-// PendingIDs is deliberately available before recovery/hello. Invalid records
-// never claim ownership; valid pending transactions remain live until a durable
-// completion receipt is saved, even after the agent left the in-memory map.
+// PendingIDs is available before recovery/hello. Valid pending transactions
+// can own a live session even after the agent leaves the in-memory map.
+// Failed preparations, durable stop intents and refused records retain work
+// without claiming liveness; QueuedSpawnIDs covers preparation in flight.
+// Cleanup retry ownership is independent of agent liveness.
 func (s *LocalWorkspaceService) PendingIDs() []string {
 	if s == nil {
 		return nil
@@ -445,9 +512,85 @@ func (s *LocalWorkspaceService) PendingIDs() []string {
 			continue
 		}
 		state, err := readPrivateWorkspace(filepath.Join(sandboxCloneRoot(), e.Name()))
-		if err == nil && state.Version == privateWorkspaceVersion && e.Name() == state.Session+".workspace.json" && !workspaceFinalComplete(state) {
+		if err == nil && state.Version == privateWorkspaceVersion && e.Name() == state.Session+".workspace.json" && !workspaceFinalComplete(state) && !state.AuthorityRefused && !state.Preparing && !state.StopRequested {
 			ids = append(ids, state.Session)
 		}
 	}
 	return ids
+}
+
+// A definitive, correlated refusal cannot be repaired by another heartbeat.
+// Retain the journal and all storage; refusal is not proof of successful cleanup.
+func (s *LocalWorkspaceService) recordRecoveryRefusal(expected workspacePrivateManifest, err error) (result error) {
+	id := expected.Session
+	defer func() {
+		if result != nil {
+			result = fmt.Errorf("workspace %s recovery: %w", id, result)
+		}
+	}()
+	if err == nil {
+		delete(s.recoveryRetries, id)
+		return nil
+	}
+	var refused *WorkspaceRefusedError
+	if !errors.As(err, &refused) {
+		if s.recoveryRetries == nil {
+			s.recoveryRetries = map[string]workspaceRecoveryRetry{}
+		}
+		retry := s.recoveryRetries[id]
+		if retry.token != expected.RuntimeToken || retry.digest != expected.Launch.Digest {
+			retry = workspaceRecoveryRetry{}
+		}
+		if retry.delay == 0 && expected.StopRequested {
+			cause := failurelog.Cause(err)
+			var unavailable *WorkspaceUnavailableError
+			if errors.As(err, &unavailable) && unavailable.Cause == protocol.WorkspaceControlStorage {
+				cause = "storage_unavailable"
+			}
+			failurelog.Default.Event("storage:cleanup_retained:"+id, slog.LevelWarn,
+				"component", "daemon", "stage", "workspace cleanup retained",
+				"session_id", id, "cause", cause)
+		}
+		retry.delay *= 2
+		if retry.delay < time.Second {
+			retry.delay = time.Second
+		}
+		if retry.delay > time.Minute {
+			retry.delay = time.Minute
+		}
+		retry.token, retry.digest, retry.next = expected.RuntimeToken, expected.Launch.Digest, time.Now().Add(retry.delay)
+		s.recoveryRetries[id] = retry
+		return err
+	}
+	s.mu.Lock()
+	hosted := s.sessions[id]
+	s.mu.Unlock()
+	lock := workspaceLock(id)
+	if hosted != nil {
+		lock = hosted.mu
+	}
+	lock.Lock()
+	defer lock.Unlock()
+	record := filepath.Join(sandboxCloneRoot(), id+".workspace.json")
+	state, readErr := readPrivateWorkspace(record)
+	if readErr != nil {
+		return errors.Join(err, readErr)
+	}
+	// A refusal belongs to the incarnation that made the RPC. A concurrent
+	// preparation or membership change may have replaced its journal meanwhile.
+	if state.RuntimeToken != expected.RuntimeToken || !reflect.DeepEqual(state.Launch, expected.Launch) || state.SupervisorLaunch.RuntimeGeneration != expected.SupervisorLaunch.RuntimeGeneration {
+		return err
+	}
+	state.AuthorityRefused = true
+	if hosted != nil {
+		hosted.state.AuthorityRefused = true
+	}
+	w := &LocalWorkspace{state: state, record: record}
+	return errors.Join(err, w.save())
+}
+
+type workspaceRecoveryRetry struct {
+	token, digest string
+	delay         time.Duration
+	next          time.Time
 }

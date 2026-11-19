@@ -1,5 +1,8 @@
 # Isolated 0.5.0 cluster smoke
 
+[Local failure campaign](OFFLINE.md) runs selected production fixtures without a
+cluster and lists the BLG-180 work still requiring isolated cluster acceptance.
+
 Prepared for controller review/run only; **no lab contact or execution**.
 [RUNBOOK.md](RUNBOOK.md) contains exact commands. The owner deferred the full
 failure/measurement campaign to **#180 / 0.5.1**. Every entry in `cases.json`
@@ -11,7 +14,7 @@ HEADs. Through the production P1 selection consumer and P3 Job manager it launch
 one multi-repo pod, checks distinct member paths and initial HEADs, queries
 protected explorer list/search/status over the outbound socket, opens/closes a
 P5 shell, sends a scripted turn, and verifies each committed marker arrives on
-`wip/<session>` in its bare mirror. Stop must complete real Job/Pod/Secret removal
+the branch returned by `blerg-runner session result <id>` in its bare mirror. Stop must complete real Job/Pod/Secret removal
 and durable token revocation. The controller checks effective runner SA denial
 of `pods/exec` and required/actual node exclusion before and after the run.
 If exec is permitted, impersonated `auth can-i` probes for unrelated Secret reads
@@ -42,8 +45,9 @@ another. They must accept credential-free pushes; use the fixture-only mode
 otherwise. No source repository receives a push. Results distinguish both modes.
 
 The observed **default** StorageClass is recorded by name, UID and provisioner;
-it must have Delete reclaim. The lab's `microk8s-hostpath` and `local-path` classes
-**do not enforce byte/inode quotas**. PVC sizes/ResourceQuota are allocation
+it must have Delete reclaim. Storage classes used for capacity-safety acceptance must enforce both byte and
+inode quotas. Classes backed by unbounded host directories **do not establish
+those limits**. PVC sizes/ResourceQuota are allocation
 requests, not physical limits. No exhaustion runs. Production correctly rejects
 such volumes. Only the disposable pod image uses a narrowly checked Go build
 overlay omitting `NewDiskGit`'s capacity admission, retaining its other checks.
@@ -111,3 +115,8 @@ fixed codes such as `session_not_ready`, `policy_unavailable`, `policy_disabled`
 `binding_refused`, `authority_refused` or `runtime_refused` in the receipt. HTTP
 shell denials retain the generic message and add a safe `code` field. Raw response
 bodies, policy credentials and runtime error text are excluded.
+
+[Disposable restart drill tooling and case contracts](RESTART-DRILLS.md) track
+BLG-433. The Go driver installs the private stack and ingress, runs the existing
+session regressions and three scripted restart/upgrade drills, and records
+ownership-checked teardown. It is offline-tested; the first live run is owner-run.

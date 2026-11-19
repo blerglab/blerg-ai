@@ -32,7 +32,11 @@ const GROUP_CHANNELS = ['color', 'fill', 'stroke', 'detail', 'opacity', 'fillOpa
 // Keys whose string value names a data field.
 const FIELD_KEYS = new Set(['field', 'argmin', 'argmax'])
 
-const MARKS = new Set(['bar', 'line', 'point', 'circle', 'square', 'rect', 'area', 'tick', 'rule', 'text', 'trail', 'arc'])
+// BLG-452: 'boxplot' is a deliberate policy change (design doc §3.1, case 2b) — it carries the
+// same inline-data-only limits as every other mark; config.boxplot and its sub-mark override
+// objects (box/median/outliers/rule/ticks) need no code change beyond this entry, since
+// checkConfig's MARKS.has(key) branch and checkValue's generic recursion already generalize.
+export const MARKS = new Set(['bar', 'line', 'point', 'circle', 'square', 'rect', 'area', 'tick', 'rule', 'text', 'trail', 'arc', 'boxplot'])
 const PROTO = new Set(['__proto__', 'prototype', 'constructor'])
 const COMPOSE = new Set(['layer', 'concat', 'hconcat', 'vconcat'])
 const COMPOUND = ['concat', 'hconcat', 'vconcat', 'facet', 'repeat']
@@ -65,9 +69,11 @@ const FONT = /^[\p{L}\p{N} _'",-]{1,200}$/u
 // What a literal config string may never contain.
 const UNSAFE_STRING = /(?:https?|ftp|data|file|blob|javascript|vbscript):|\/\/|url\s*\(|image-set\s*\(|expression\s*\(|@import|[<\\]/i
 
-const AXIS_CONFIG = /^axis(?:[XY]?(?:Band|Discrete|Point|Quantitative|Temporal)?|Top|Bottom|Left|Right)$/
-const LITERAL_CONFIG = new Set(['legend', 'header', 'headerColumn', 'headerRow', 'headerFacet', 'title', 'view'])
-const RANGE_NAMES = new Set(['category', 'diverging', 'heatmap', 'ordinal', 'ramp', 'symbol'])
+// Exported so BLG-452's classifier (visual/blerg/classify.ts) checks config keys against the
+// same sets this file already enforces, rather than a second, driftable copy (design doc §3.3).
+export const AXIS_CONFIG = /^axis(?:[XY]?(?:Band|Discrete|Point|Quantitative|Temporal)?|Top|Bottom|Left|Right)$/
+export const LITERAL_CONFIG = new Set(['legend', 'header', 'headerColumn', 'headerRow', 'headerFacet', 'title', 'view'])
+export const RANGE_NAMES = new Set(['category', 'diverging', 'heatmap', 'ordinal', 'ramp', 'symbol'])
 const AUTOSIZE_TYPES = new Set(['pad', 'fit', 'fit-x', 'fit-y', 'none'])
 const VIEW_SIZES = new Set(['continuousWidth', 'continuousHeight', 'discreteWidth', 'discreteHeight'])
 
@@ -123,7 +129,7 @@ function isPrototypeField(name: string): boolean {
 }
 
 /** Parses and checks a Vega-Lite spec; returns the spec to draw, with bounded outer size. */
-export function parseVegaLite(source: string): Record<string, unknown> {
+export function parseVegaLite(source: string, themeOnly = false): Record<string, unknown> {
   if (!source.trim()) throw new ChartRefused('Chart refused: the chart is empty')
   if (source.length > MAX_CHART_SOURCE) throw new ChartRefused(`Chart refused: the chart is too large (${source.length} characters; the limit is ${MAX_CHART_SOURCE})`)
   const root: unknown = JSON.parse(source)
@@ -145,6 +151,9 @@ export function parseVegaLite(source: string): Record<string, unknown> {
 
   /** Checks applied to every key outside inline data. */
   function checkKey(key: string, value: unknown, path: string) {
+    if (themeOnly && key === 'value' && /\.(?:color|fill|stroke)(?:\.|$)/i.test(path)) refuse(path, 'colors come from the theme', key)
+    if (themeOnly && /color$/i.test(key) && !(key === 'color' && isObject(value) && !('value' in value))) refuse(path, 'colors come from the theme', key)
+    if (themeOnly && ['fill', 'stroke', 'background', 'scheme', 'range'].includes(key) && value !== undefined) refuse(path, 'colors come from the theme', key)
     if (PROTO.has(key)) refuse(path, 'reserved object key', key)
     const why = REFUSED.get(key.toLowerCase())
     if (why) refuse(path, why, key)
@@ -400,6 +409,7 @@ export function parseVegaLite(source: string): Record<string, unknown> {
 
   function checkRange(value: unknown, path: string, depth: number) {
     tick(path, depth)
+    if (themeOnly && value !== undefined) refuse(path, 'ranges come from the theme', 'range')
     if (!isObject(value)) refuse(path, 'range must be an object of color or size lists', 'range')
     const here = at(path, 'range')
     for (const [key, item] of Object.entries(value)) {
@@ -437,6 +447,8 @@ export function parseVegaLite(source: string): Record<string, unknown> {
       } else if (key === 'autosize') {
         if (typeof item === 'string') oneOf(AUTOSIZE_TYPES)(item, here, key)
         else checkShape(item, at(here, key), {type: oneOf(AUTOSIZE_TYPES), contains: oneOf(['content', 'padding']), resize: bool}, [])
+      } else if (key === 'concat') {
+        checkShape(item, at(here, key), {spacing: num(0, 128)}, [])
       } else if (key === 'range') {
         checkRange(item, here, depth + 1)
       } else if (key === 'mark' || MARKS.has(key)) {

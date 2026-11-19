@@ -23,7 +23,7 @@ describe('CommitViewer at 390 px and 3840 px', () => {
       expect(box.right).toBeLessThanOrEqual(width)
       // It takes most of the screen, not a small fixed box.
       expect(box.width).toBeGreaterThan(width >= 3840 ? 1200 : width * 0.8)
-      const max = dialog.querySelector<HTMLButtonElement>('button.artifact-maximize')!
+      const max = dialog.querySelector<HTMLButtonElement>('button[aria-label="Maximize"]')!
       expect(max.getAttribute('aria-label')).toBe('Maximize')
       max.click()
       await waitFor(() => expect(dialog.getBoundingClientRect().width).toBeGreaterThanOrEqual(width - 1))

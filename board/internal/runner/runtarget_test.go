@@ -31,7 +31,7 @@ func TestBlergRunnerStartSendsChosenTarget(t *testing.T) {
 	if _, err := k.Start(context.Background(), StartRequest{Repo: "app", Token: "automation-tok"}); err != nil {
 		t.Fatal(err)
 	}
-	if got["runtime"] != "cluster" || got["daemon_id"] != nil {
+	if got["runtime"] != "cluster" || got["daemon_id"] != nil || got["runtime_target_id"] != "cluster" {
 		t.Fatalf("default start changed: %v", got)
 	}
 	if k.DefaultRuntime() != "cluster" {

@@ -1,0 +1,2 @@
+.repository-header-status { display: inline-flex; align-items: center; gap: 4px; color: var(--fog); flex: 0 0 auto; }
+.repository-header-status [role="img"] { padding: 4px; }

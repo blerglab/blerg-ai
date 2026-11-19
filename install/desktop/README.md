@@ -1,7 +1,12 @@
 # Blerg on your desktop
 
+Get a session's recorded branch with `blerg-runner session result <id>` and use
+its `branch` value wherever `<work-branch>` appears below. For a child, pass the
+child's ID. Branch names stay fixed after a rename; never derive them from IDs
+or titles. Workspace results also report each member's branch.
+
 One developer, one machine, Docker. The stack (core, board, runner, Postgres) runs in Docker
-Compose; a small daemon runs on your machine, as you, and launches sessions in a sandbox
+Compose; a small daemon runs on your machine, as you, and launches workspaces in a sandbox
 container. A team sharing one Blerg belongs on the [Kubernetes install](../k8s/README.md).
 
 ## Requirements
@@ -12,8 +17,9 @@ container. A team sharing one Blerg belongs on the [Kubernetes install](../k8s/R
 - Docker with Compose v2 (Docker Desktop with WSL integration turned on for your distro, or the
   docker engine on Linux with the `docker-compose-plugin` package from Docker's own apt repository;
   `blerg-up.sh` prints the exact steps if `docker compose` is missing), plus `git`, `curl` and
-  `openssl`. The daemon is built with your host Go 1.26 or newer if you have it, and inside a
-  container if you don't. Unsandboxed terminal sessions use the host's `tmux`.
+  `openssl`, and Python 3 (for desktop enrollment). On Debian/Ubuntu, install Python with
+  `sudo apt install python3`. The daemon is built with your host Go 1.26 or newer if you have it, and inside a
+  container if you don't.
 - **Claude Code or Codex installed and logged in before your first session.** The installer does
   not do this for you. Run `claude` (or `codex`) once and sign in, or run `claude setup-token` and
   export the result as `CLAUDE_CODE_OAUTH_TOKEN` before `./blerg-up.sh`. Sessions use that login
@@ -31,11 +37,18 @@ cd install/desktop
 ```
 
 What that does, once: generates `install/desktop/.env` with random secrets, builds the three
-service images, builds the local-sandbox session image (`blerg-runner-sandbox:latest`, roughly
-6–7 GB; this step takes several minutes, longer on a slow connection), installs the runner daemon
-as a background service (systemd on Linux, launchd on macOS), then prints the next steps and opens
+service images, builds the local-sandbox workspace image (`blerg-runner-sandbox:latest`, roughly
+6–7 GB; this step takes several minutes, longer on a slow connection), and prepares the runner
+daemon. Once enrolled to your account, it runs as a background service (systemd on Linux,
+launchd on macOS). The installer prints the next steps and opens
 `http://localhost:8081/setup` on a fresh install (`http://localhost:8081` once you have an account).
-It exits back to your shell when everything's up; that is success.
+Run it in a terminal so it can ask where your repositories live. For an unattended install,
+set `BLERG_RUNNER_REPOS_ROOT` in `.env` first.
+
+On a fresh install, desktop enrollment needs the account you create next. The stack is ready,
+but the installer exits with code 7 until you finish account setup and run
+`./daemon/install.sh install` again. Exit 0 means installation completed; any other nonzero
+exit needs the repair shown in the output.
 
 ## First login
 
@@ -69,29 +82,28 @@ one-time one (or `docker compose exec blerg-core /blerg-core users set-password 
 Log in at exactly `http://localhost:8081`. The desktop stack turns the cookie `Secure` flag off for
 that origin so every browser (Safari included) works; `127.0.0.1` or a LAN IP will not.
 
-## First session
+## First workspace
 
 Open **Runner** (`http://localhost:8083`) → **+ New** → pick a repo under your repos root, or type
 any `owner/name` or paste a repository URL (a public one like `torvalds/linux`, or, in the Local
 sandbox, a private one your GitHub/GitLab token in Settings can reach; it is cloned into your
 repos root first, see [DAEMON.md](DAEMON.md#cloning-a-repository-you-name)) → Launch.
 
-The button reads **Launch Session** for a repo already in your repos root, **Clone & Launch →**
+The button reads **Launch Workspace** for a repo already in your repos root, **Clone & Launch →**
 when the repo has to be cloned first, and **Create & Launch →** when you are starting a new folder
 (or, with Cluster pod selected, a **New repository** the runner creates on GitHub or GitLab with
 your token, see [CLUSTER-RUNTIME.md](../k8s/CLUSTER-RUNTIME.md#new-repository)).
 
 The Run column shows every choice at once; on a desktop install it defaults to an **Agent**
-session in the **Local sandbox**, a container on your daemon. Pick **Terminal** instead for a tmux
-session you can watch and type in; that one keeps permission prompts ON, so Claude will ask you to
-trust the folder (press `y`) the first time. Sessions the Board starts (a card, the board chat,
+workspace in the **Local sandbox**, a container on your daemon. Agent workspaces stream their work
+into the chat. Workspaces the Board starts (a card, the board chat,
 **Run board**) are started by the board through the runner's API and get the same default: an agent-kind
-session in the Local sandbox when your daemon has the sandbox image, on the host only when it
+workspace in the Local sandbox when your daemon has the sandbox image, on the host only when it
 doesn't, or when you opt out (below).
 
-## Before the Board can start sessions
+## Before the Board can start workspaces
 
-**Run this card works out of the box on a single-user install.** A board starts sessions as the
+**Run this card works out of the box on a single-user install.** A board starts workspaces as the
 person whose automation token it holds, and the board gets that token for you: a new board has
 **Run this board's cards as me** checked when you create it, and a board without a token offers
 **Run as me** in its settings panel (the **model** chip in the header → **Automation**) and next
@@ -101,7 +113,7 @@ core **Settings → Agent tokens** as "Board <name> automation", where you can r
 other. Pick the engine (Claude, Codex or Hermes) in the same panel. To use a token of a service
 account instead, choose **Use a different token…** and paste one with preset `run-sessions`.
 
-Every session that board starts then runs as you: on a cluster install on the engine credential
+Every workspace that board starts then runs as you: on a cluster install on the engine credential
 you connected in Settings (for Hermes, your own endpoint), on the desktop on your daemon's engine
 login. The token expires (90 days by default; the panel says when, and offers **Run as me**
 again). Anyone who can write cards
@@ -119,18 +131,18 @@ read-write so the engine can use them, so it does NOT protect those credentials 
 Claude settings. A repo you launch a session in is code the agent will run: don't point it at
 something you wouldn't run yourself.
 
-From the launch sheet both session kinds, Terminal and Agent, default to the sandbox, so the
+Workspaces from the launch sheet default to the sandbox, so the
 agent sees `/workspace` (a clone of its own of the repo: never your checkout or its `.git`; its
-commits land on `wip/<session-id>` in your repo) and your mounted logins and nothing else of the
+commits land on `<work-branch>` in your repo) and your mounted logins and nothing else of the
 machine. **This machine,
 unsandboxed** is the third card in its Run column: it runs on the host as you with full filesystem
-access (and, for an Agent session, no permission prompts), it is never a default, and Launch stays
+access (and, for an Agent workspace, no permission prompts), it is never a default, and Launch stays
 disabled until you tick the acknowledgement.
 
-Sessions the board starts through the runner's API get the same default: the sandbox when the daemon has its image, where the agent reaches the board and runner
+Workspaces the board starts through the runner's API get the same default: the sandbox when the daemon has its image, where the agent reaches the board and runner
 over the `blerg-sandbox` network but has no git credentials (it can commit, not push). Opt out
 onto the host with `runtime: daemon`; a board runs on a host only where its owner chose it in Where it runs. A v1
-start never *asks* to bypass permission prompts, but an Agent session runs non-interactively and
+start never *asks* to bypass permission prompts, but an Agent workspace runs non-interactively and
 its engine bypasses them regardless, on either runtime.
 
 **Usage meters.** The sidebar shows how much of your Claude and Codex limits the account on this
@@ -151,11 +163,8 @@ a call for its limit.
 
 **Stop everything:** `systemctl --user stop blerg-runner-daemon` (macOS:
 `launchctl bootout gui/$(id -u)/dev.blerg.runner-daemon`), then
-`tmux ls -F '#{session_name}' 2>/dev/null | grep '^blerg-' | while read -r s; do tmux kill-session -t "=$s"; done`
-and `docker rm -f $(docker ps -q -f name=blerg-sandbox-)`. The tmux line ends only the daemon's
-own `blerg-<id>` sessions on this machine and leaves your other tmux sessions running (one of
-yours whose name starts with `blerg-` would go too); a Local sandbox session's tmux lives in its
-container and ends with the `docker rm`.
+`docker rm -f $(docker ps -q -f name=blerg-sandbox-)` to remove running Local sandbox
+containers. This stops their engine processes and any tools still running inside them.
 
 ## Day to day
 
@@ -168,10 +177,9 @@ container and ends with the `docker rm`.
   handle distro boot separately. See [WSL startup prerequisites and diagnostics](DAEMON.md#wsl2-return-after-windows-restart).
 - **Start again:** `./blerg-up.sh` (rebuilds by default so a `git pull` takes effect; `--no-build`
   to skip, `--no-open` to keep the browser closed).
-- **Upgrade:** `git pull && ./blerg-up.sh`. That is the whole upgrade: it rebuilds the stack,
-  database migrations run automatically, and it reinstalls the daemon too (if agent sessions have
-  work running that the restart would cut off, it lists them and asks first; `--yes` skips the
-  question). On a large database the runner's first start after an upgrade can take a while:
+- **Upgrade:** `./blerg-up.sh --upgrade` (or `./blerg-up.sh --upgrade vX.Y.Z`). This backs up the existing install, selects a published stable release, and rebuilds the stack,
+  database migrations run automatically, and it reinstalls the daemon too. Stop live sessions
+  first; the upgrade refuses to interrupt them. On a large database the runner's first start after an upgrade can take a while:
   migrations 041, 042 and 049 build indexes on its event table, and the daemon's events wait until
   they are done. `./daemon/install.sh install` reinstalls just the daemon, for example after
   `blerg-up.sh --no-daemon`. The daemon matters on every upgrade: much of what a session shows comes from it (the
@@ -208,7 +216,7 @@ daemon's state folder, this stack's `.env` and the sandbox image; `--yes` skips 
 hand: first *Stop everything* (above), then `docker compose down -v --rmi local`
 (the containers, the database volume and the three `desktop-blerg-*` images),
 `./daemon/install.sh uninstall` (the service, and the `~/.local/bin/blerg-runner` and
-`~/.claude/skills/managing-tickets` links the daemon made), `docker rmi blerg-runner-sandbox:latest`
+`managing-tickets`, `coordinating` and `test-driven-development` skill links under `~/.claude`, `~/.codex`, `~/.agents` and `~/.hermes` that the daemon made), `docker rmi blerg-runner-sandbox:latest`
 and `rm -rf ../../bin`. These are left for you to remove by hand, on purpose:
 
 - `<repos root>/.blerg-runner/` and `~/.blerg-runner-daemon/`: session recovery records (they
@@ -227,20 +235,95 @@ and `rm -rf ../../bin`. These are left for you to remove by hand, on purpose:
   markers in `~/.claude/CLAUDE.md`.
 - Repositories cloned into your repos root: they are yours and stay.
 
-## Workspace 0.5.0 upgrade status
+## One-step desktop upgrade
 
-Update core, runner and the desktop daemon together and retain database backups.
-Core migrations 026/027 add desktop credentials and shell policy; runner migrations
-076–083 add selection, ownership, runtime, settlement, consent and completion state.
-The installer builds the contained Linux workspace worker (protocol 3). Sandbox
-builds use the repository root as their Docker build context.
+From this checkout's `install/desktop` directory:
 
-Workspace v2 and owner shells remain gated off. Existing single-repository sessions
-retain scalar contracts. A discovery-capable peer without workspace v2 refuses
-checked-out selections, including a single repository, rather than losing source
-identity through a bare-name downgrade. Sandbox file viewing requires an in-container
-reader and returns unavailable when that binding is absent. Do not enable a
-capability from discovery availability or a successful image build. See
-[workspace integration](../../docs/workspace-integration.md) for remaining gates,
-including physical Mac and Docker engine restart acceptance. Reinstalling does
-not authorize deleting retained workspace allocations.
+```sh
+./blerg-up.sh --upgrade            # newest published stable release
+./blerg-up.sh --upgrade vX.Y.Z     # a specific published stable release
+```
+
+Finish or stop all live sessions first, including idle sessions. Keep the terminal
+open until the command finishes. Do not start an upgrade from an agent session on
+this install: restarting its daemon would interrupt the worker. The web release
+notice still links to release information; starting an upgrade from the UI is not
+implemented yet. Kubernetes remains on its documented deploy command.
+
+The command requires the official public repository as `origin`, a clean checkout
+(including staged and untracked files), Git, and Go 1.26 or newer or Docker. It
+accepts only published, non-draft stable releases; candidates and downgrades refuse.
+It fetches into isolated refs without replacing local tags, keeps the original
+branch pointer, and installs the resolved commit in detached HEAD. Do not combine
+`--upgrade` with other installer flags, including `--yes` or `--no-daemon`.
+Installations predating this command must first update their checkout to a release
+that includes it, using the previous manual procedure.
+
+Before changing the checkout or running migrations, the worker stops the three
+services and daemon, dumps all three databases, and copies `.env` plus available
+daemon settings and personal desktop credentials. Backups and the private
+`operation.json` live under `~/.blerg-upgrades/<install-id>/`, outside the checkout;
+the command prints the recovery-record location. A `complete.json` file written
+last identifies a complete backup. Backup failure restarts the old services and
+refuses the upgrade. Backups are retained after success. Runner data volumes and
+retained workspaces are preserved; keep your usual backups of those files too.
+
+The selected release's installer rebuilds the stack, applies migrations on startup,
+and reinstalls the daemon automatically. Success requires service version checks,
+the daemon's exact build commit, and a new accepted daemon connection. Installer
+output is withheld because it may contain credentials; progress reports phases.
+
+If installation or checking fails, inspect `operation.json` for the old commit,
+branch, selected commit and backup location. A killed worker leaves its lock and
+phase for recovery. Do not remove that lock until you have confirmed the worker
+is gone and completed recovery. Never restart old binaries against migrated
+databases. Follow [backup and restore](../../docs/backup-and-restore.md), restoring
+all three dumps with the matching `env`, daemon settings and any saved
+`desktop-credential.json`, then reinstall the recorded old commit. Restore discards
+writes made after the backup. Preserve the recovery record before clearing it for
+a new attempt. There is no automatic rollback or automatic retry of an uncertain
+installation.
+
+The Linux/macOS previous-release upgrade and restore drills are still required
+before release; fake-service tests do not prove a real backup can be restored.
+
+### Upgrade failure records
+
+Upgrades keep `operation.json`, a private install outcome log, and a migration
+boundary marker in the private upgrade state directory. Installer stdout and
+stderr are redacted in full because they can contain setup credentials. The log
+records whether installation completed or failed; it is not a full diagnostic
+transcript. SIGINT, SIGTERM, and SIGHUP cancel the worker through its recovery path.
+
+Before migrations begin, a failure restores the old Git checkout and restarts
+its existing service containers and daemon. Once the installer marks that
+migrations may have begun, automatic restart of old binaries is refused: use the
+matching database/settings backup and the restore runbook. An interrupted
+operation's marker also records this boundary even if `operation.json` was not
+updated before exit. Installers without migration tracking are refused.
+
+Each dump must have PostgreSQL's completion trailer. Successful upgrades keep
+the current complete backup plus two complete predecessors. Incomplete backups
+and backups from an unresolved recovery operation are not automatically pruned.
+Remove incomplete backups manually after inspecting recovery state.
+
+### Scoped MCP internal transport
+
+Remote MCP sign-in control-plane requests carrying the shared internal key require
+HTTPS, except for literal loopback addresses, `localhost`, qualified Kubernetes
+Service names (`service.namespace.svc` or `service.namespace.svc.cluster.local`),
+and the exact built-in Docker service aliases: `blerg-core` for gateway-to-Core
+requests and `blerg-runner` for Core-to-Runner authority requests. Arbitrary short
+names, public plaintext hosts, user information, query strings and fragments are
+refused before the key is sent; refusal logs contain a classified cause.
+Existing account MCP clients keep their current operator configuration behavior.
+Production session authority and lifecycle wiring remain disabled until the
+BLG-145 lifecycle increment passes its security review.
+
+Scoped MCP internal clients always bypass environment and configured standard HTTP
+proxies, including `HTTP_PROXY` and `HTTPS_PROXY`; credentials never rely on
+`NO_PROXY`. Kubernetes Service suffixes permit plaintext only when the operator
+sets `BLERG_MCP_CLUSTER_DEPLOYMENT=true` (default false). The Kubernetes ConfigMap
+and Core/Runner deployments set and consume this flag; desktop installations
+leave it unset and use their exact Docker aliases or loopback. Authority wiring
+must explicitly pass this deployment flag to the Core authority client.

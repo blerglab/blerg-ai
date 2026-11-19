@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -487,5 +488,95 @@ func TestWorkspaceIntentRetriesNeverOverwriteCorruptAuthority(t *testing.T) {
 	raw, err := os.ReadFile(w.record)
 	if err != nil || string(raw) != string(corrupt) {
 		t.Fatal("corrupt authority was silently replaced", err)
+	}
+}
+
+func TestWorkspaceTerminalRefusalStopsCleanupRetries(t *testing.T) {
+	for _, definitive := range []bool{false, true} {
+		t.Run(fmt.Sprint(definitive), func(t *testing.T) {
+			w, s := finalWorkspaceFixture(t)
+			calls := 0
+			s.CommitFinal = func(context.Context, protocol.SupervisorLaunch, WorkspaceFinalization) (WorkspaceFinalReceipt, error) {
+				calls++
+				if definitive {
+					return WorkspaceFinalReceipt{}, &WorkspaceRefusedError{Reason: "session discarded"}
+				}
+				return WorkspaceFinalReceipt{}, errors.New("authority disconnected")
+			}
+			message := protocol.SessionEnded{Type: "session_ended", SessionID: w.state.Session}
+			if err := s.Finalize(t.Context(), w, message, nil); err == nil {
+				t.Fatal("refusal accepted as completion")
+			}
+			if got := slices.Contains(s.PendingIDs(), w.state.Session); got == definitive {
+				t.Fatalf("pending after refusal = %t", got)
+			}
+			saved, err := readPrivateWorkspace(w.record)
+			if err != nil || workspaceFinalComplete(saved) {
+				t.Fatal("refusal fabricated a receipt", err)
+			}
+			w.state = saved // restart retains the refusal, without deleting work
+			_ = s.Finalize(t.Context(), w, message, nil)
+			want := 2
+			if definitive {
+				want = 1
+			}
+			if calls != want {
+				t.Fatalf("final calls = %d, want %d", calls, want)
+			}
+			if _, err := os.Stat(w.state.Members[0].Clone); err != nil {
+				t.Fatal("retained work removed", err)
+			}
+		})
+	}
+}
+
+func TestWorkspaceRecoveryRefusalStopsHeartbeatCleanup(t *testing.T) {
+	for _, definitive := range []bool{false, true} {
+		t.Run(fmt.Sprint(definitive), func(t *testing.T) {
+			w, s := finalWorkspaceFixture(t)
+			calls := 0
+			s.Authority = &testWorkspaceAuthority{}
+			s.Supervisor = &testWorkspaceSupervisor{}
+			s.CommitFinal = acknowledgeWorkspaceFinal
+			s.TrustedLaunch = func(context.Context, string) (protocol.WorkspaceManifest, error) {
+				calls++
+				if definitive {
+					return protocol.WorkspaceManifest{}, &WorkspaceRefusedError{Reason: "session discarded"}
+				}
+				return protocol.WorkspaceManifest{}, errors.New("authority disconnected")
+			}
+			if err := s.RecoverAll(t.Context(), nil); err == nil {
+				t.Fatal("missing refusal")
+			}
+			// The next attempt is due only after transient recovery backoff.
+			if retry, ok := s.recoveryRetries[w.state.Session]; ok {
+				retry.next = time.Time{}
+				s.recoveryRetries[w.state.Session] = retry
+			}
+			_ = s.RecoverAll(t.Context(), nil)
+			want := 2
+			if definitive {
+				want = 1
+			}
+			if calls != want {
+				t.Fatalf("recovery calls = %d, want %d", calls, want)
+			}
+			if got := slices.Contains(s.PendingIDs(), w.state.Session); got == definitive {
+				t.Fatalf("pending = %t", got)
+			}
+		})
+	}
+}
+
+func TestWorkspaceStaleRefusalKeepsReplacementPending(t *testing.T) {
+	w, s := finalWorkspaceFixture(t)
+	old := w.state
+	w.state.RuntimeToken = "replacement-token"
+	if err := w.save(); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.recordRecoveryRefusal(old, &WorkspaceRefusedError{Reason: "old incarnation refused"})
+	if !slices.Contains(s.PendingIDs(), w.state.Session) {
+		t.Fatal("stale refusal retired replacement")
 	}
 }

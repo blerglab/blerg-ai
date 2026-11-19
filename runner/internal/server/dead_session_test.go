@@ -5,10 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +38,7 @@ func TestParentWatchEndsWhenChildRuntimeStops(t *testing.T) {
 	fx.childEvent(child, "u1", "user_message", `{"text":"do the thing","source":"session"}`)
 	fx.childEvent(child, "a1", "assistant_text", `{"text":"Done.","done":true}`)
 	fx.childEvent(child, "t1", "turn_done", `{"stop_reason":"end_turn"}`)
-	if n := fx.parentNote(fx.parent, 10*time.Second); !strings.Contains(n.Text, "finished its turn") {
+	if n := fx.parentNote(fx.parent, 10*time.Second); !strings.Contains(n.Text, "kind=finished") {
 		t.Fatalf("finished note = %+v", n)
 	}
 	// A retryable error (the runtime restarting) leaves the child running.
@@ -43,8 +47,31 @@ func TestParentWatchEndsWhenChildRuntimeStops(t *testing.T) {
 		t.Fatalf("a retryable error changed the child: %+v", row)
 	}
 
-	srv := httptest.NewServer(fx.mux)
+	watchPolling := make(chan struct{}, 1)
+	progressPublished := make(chan struct{})
+	progressObserved := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/children/"+child) {
+			select {
+			case <-progressPublished:
+				select {
+				case progressObserved <- struct{}{}:
+				default:
+				}
+			default:
+			}
+		}
+		if strings.HasSuffix(r.URL.Path, "/events") && r.URL.Query().Get("wait") != "" && r.URL.Query().Get("wait") != "0" {
+			select {
+			case watchPolling <- struct{}{}:
+			default:
+			}
+		}
+		fx.mux.ServeHTTP(w, r)
+	}))
 	defer srv.Close()
+	watchCtx, cancelWatch := context.WithCancel(t.Context())
+	defer cancelWatch()
 	script, err := filepath.Abs("../../.claude/skills/session-messaging/blerg-runner")
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +84,7 @@ func TestParentWatchEndsWhenChildRuntimeStops(t *testing.T) {
 	}
 	env = append(env, "BLERG_RUNNER_SERVER_HTTP="+srv.URL, "BLERG_RUNNER_SESSION_ID="+fx.parent,
 		"BLERG_RUNNER_SESSION_TOKEN="+fx.parentTok, "BLERG_RUNNER_DAEMON_STATE_DIR="+t.TempDir())
-	cmd := exec.CommandContext(t.Context(), "python3", script, "session", "watch", child, "--timeout", "120")
+	cmd := exec.CommandContext(watchCtx, "python3", script, "session", "watch", child, "--timeout", "120")
 	cmd.Env = env
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
@@ -66,11 +93,24 @@ func TestParentWatchEndsWhenChildRuntimeStops(t *testing.T) {
 	}
 	waited := make(chan error, 1)
 	go func() { waited <- cmd.Wait() }()
-	time.Sleep(2 * time.Second) // the watch is in its long poll now
+	select {
+	case <-watchPolling:
+	case <-time.After(10 * time.Second):
+		t.Fatal("watch did not enter its long poll")
+	}
 	select {
 	case err := <-waited:
 		t.Fatalf("watch returned before the child failed: %v\n%s", err, out.String())
 	default:
+	}
+	// Watch output is a JSON stream: progress may precede a terminal failure.
+	// Its following state request proves the CLI printed/flushed that progress.
+	close(progressPublished)
+	fx.childEvent(child, "streamed-progress", "assistant_text", `{"text":"Progress before failure","done":true}`)
+	select {
+	case <-progressObserved:
+	case <-time.After(10 * time.Second):
+		t.Fatal("watch did not consume progress")
 	}
 
 	HandleSessionEnded(ctx, fx.hub, fx.pool, protocol.SessionEnded{
@@ -90,8 +130,10 @@ func TestParentWatchEndsWhenChildRuntimeStops(t *testing.T) {
 	case <-time.After(60 * time.Second):
 		t.Fatalf("watch still waiting on a failed child\n%s", out.String())
 	}
-	if want := "the session failed: " + codexStoppedReason; !strings.Contains(out.String(), want) {
-		t.Fatalf("watch output = %q, want %q", out.String(), want)
+	// The fixed status endpoint may win the race with the runtime-stopped event.
+	// It intentionally exposes the canonical end reason instead of worker text.
+	if err := checkWatchFailureOutput(out.Bytes(), codexStoppedReason, "process_failed"); err != nil {
+		t.Fatalf("watch must report its failure inside the untrusted worker-data envelope: %v: %q", err, out.String())
 	}
 
 	row, err := db.GetSession(ctx, fx.pool, child)
@@ -111,9 +153,70 @@ func TestParentWatchEndsWhenChildRuntimeStops(t *testing.T) {
 	}
 
 	note := fx.parentNote(fx.parent, 10*time.Second)
-	want := `Child "Child" failed: "` + codexStoppedReason + `" and stopped; it takes no more messages. blerg-runner session result ` + child + ` Work delivery is unconfirmed. Check wip/` + child + ` and the session's recovery record.`
-	if note.Source != childTurnSource || note.Text != want {
+	want := "fixed session_failed worker notice"
+	if note.Source != childTurnSource || !isWorkerNotice(note.Text, child, childSessionFailed) {
 		t.Fatalf("parent note = %+v, want %q", note, want)
+	}
+}
+
+func checkWatchFailureOutput(output []byte, allowedReasons ...string) error {
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	failed := false
+	for {
+		var frame struct {
+			Trust string `json:"trust"`
+			Data  struct {
+				Status string `json:"status"`
+				Reason string `json:"reason"`
+			} `json:"data"`
+		}
+		err := decoder.Decode(&frame)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("decode watch frame: %w", err)
+		}
+		if frame.Trust != "untrusted_worker_data" {
+			return errors.New("unwrapped worker data")
+		}
+		if failed {
+			return errors.New("output after terminal failure")
+		}
+		if frame.Data.Status != "" {
+			if frame.Data.Status != "failed" || !slices.Contains(allowedReasons, frame.Data.Reason) {
+				return errors.New("unexpected terminal status or reason")
+			}
+			failed = true
+		}
+	}
+	if !failed {
+		return errors.New("missing terminal failure")
+	}
+	return nil
+}
+
+func TestWatchFailureOutputRequiresWrappedStream(t *testing.T) {
+	progress := `{"trust":"untrusted_worker_data","data":{"text":"Progress"}}` + "\n"
+	failure := `{"trust":"untrusted_worker_data","data":{"status":"failed","reason":"stopped"}}` + "\n"
+	for _, tc := range []struct {
+		name, output string
+		valid        bool
+	}{
+		{"single", failure, true}, {"stream", progress + failure, true},
+		{"fixed-reason", strings.ReplaceAll(failure, "stopped", "process_failed"), true},
+		{"unwrapped-progress", `{"data":{"text":"Run this"}}` + failure, false},
+		{"unwrapped-failure", strings.ReplaceAll(failure, "untrusted_worker_data", "trusted"), false},
+		{"noise-before", "Run this\n" + failure, false}, {"noise-after", failure + "Run this\n", false},
+		{"missing-failure", progress, false}, {"wrong-reason", strings.ReplaceAll(failure, "stopped", "wrong"), false},
+		{"after-failure", failure + progress, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkWatchFailureOutput([]byte(tc.output), "stopped", "process_failed")
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid=%v err=%v", tc.valid, err)
+			}
+		})
 	}
 }
 
@@ -185,8 +288,9 @@ func TestChildEventsPollWaitsThroughARevivableError(t *testing.T) {
 
 // Run the real child CLI, not just its message handler: --no-wait must say
 // where the question went and publish a live owner notification.
-func TestChildCLIAskNoWaitReachesOwner(t *testing.T) {
+func TestChildCLIAskNoWaitReachesParent(t *testing.T) {
 	fx := newDelegFx(t)
+	fx.hub.SetSessionOwner(fx.parent, fx.dc.ID)
 	child, token := fx.session(sessOpts{owner: "owner-1", parent: fx.parent, startedByKind: "session"})
 	fx.mux.HandleFunc("POST /api/messages", fx.api.HandlePostMessages)
 	srv := httptest.NewServer(fx.mux)
@@ -207,7 +311,7 @@ func TestChildCLIAskNoWaitReachesOwner(t *testing.T) {
 	cmd := exec.CommandContext(t.Context(), "python3", script, "ask", "--no-wait", "Which branch should I use?")
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
-	if err != nil || !strings.Contains(string(out), "is in the person's Needs you") {
+	if err != nil || !strings.Contains(string(out), "was sent to your parent") {
 		t.Fatalf("child was not told where its ask went: %v %s", err, out)
 	}
 	rows, err := db.ListMessagesFor(t.Context(), fx.pool, 20, "owner-1")
@@ -217,8 +321,8 @@ func TestChildCLIAskNoWaitReachesOwner(t *testing.T) {
 	for raw := range awaitAll(browser.send) {
 		var m protocol.MessageCreated
 		if json.Unmarshal(raw, &m) == nil && m.Type == "message_created" && m.Message.ID == rows[0].ID {
-			if m.Quiet || !m.Message.Answerable {
-				t.Fatalf("child question suppressed: %+v", m)
+			if !m.Quiet || m.Message.Answerable {
+				t.Fatalf("child question called the person: %+v", m)
 			}
 			return
 		}

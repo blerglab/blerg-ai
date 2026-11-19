@@ -18,9 +18,10 @@ const REPO = (expect.getState().testPath ?? '').replace(/\/runner\/frontend\/src
 const ROOTS = ['runner/frontend/src', 'board/web/src', 'core/web/src', 'packages/chat/src', 'brand']
 
 // "file :: selector" → why the accent is right there.
+// The status chip rules moved from brand/tokens.css into core with the shared theme presets.
 const ALLOWED: Record<string, string> = {
-  'brand/tokens.css :: .chip.active': 'a status chip ("active" = running work), not a selection; the dot carries the state',
-  'brand/tokens.css :: .chip.active .dot': 'the status chip\'s running dot',
+  'core/web/src/styles.css :: .chip.active': 'a status chip ("active" = running work), not a selection; the dot carries the state',
+  'core/web/src/styles.css :: .chip.active .dot': 'the status chip\'s running dot',
 }
 
 const STATE = /\[aria-(?:selected|pressed|expanded)=["']?true["']?\]|\[aria-current(?:=[^\]]*)?\]|\.(?:active|selected|on)\b|:checked\b/

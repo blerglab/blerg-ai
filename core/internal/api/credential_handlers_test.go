@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -249,6 +252,255 @@ func TestCredentialsGitProviderKinds(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCredentialsGitReadOnlyOwnerKinds: BLG-460's one-token-per-owner shape. An account can
+// hold more than one of these at once (one per GitHub/GitLab owner), unlike the single-slot
+// "github"/"gitlab" kind tested above — storing a second owner must not replace the first, and
+// deleting one must leave the other.
+func TestCredentialsGitReadOnlyOwnerKinds(t *testing.T) {
+	deps, pool, idSvc := newCredentialsTestDeps(t)
+	// A fake GitHub host: finding 2's validation call must succeed for POST to store the
+	// credential at all, and must never reach the real api.github.com in a test.
+	fakeGitHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer fakeGitHub.Close()
+	deps.GitHubAPIBase = fakeGitHub.URL
+	srv := httptest.NewServer(api.NewRouter(deps))
+	defer srv.Close()
+
+	accountID := insertCredAccount(t, pool, "cred-user-git-readonly")
+	token, err := idSvc.MintHumanAccessToken(context.Background(), accountID, "blerg-core")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	authed := func(method, path string, body []byte) *http.Response {
+		var r io.Reader
+		if body != nil {
+			r = bytes.NewReader(body)
+		}
+		req, _ := http.NewRequest(method, srv.URL+path, r)
+		req.Header.Set("Authorization", "Bearer "+token)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	for _, owner := range []string{"acme-corp", "personal-account"} {
+		engine := "git-readonly:github:" + owner
+		body, _ := json.Marshal(map[string]string{"engine": engine, "credential": "FAKE-readonly-" + owner})
+		resp := authed(http.MethodPost, "/api/credentials", body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /api/credentials engine=%s = %d, want 200", engine, resp.StatusCode)
+		}
+	}
+
+	listResp := authed(http.MethodGet, "/api/credentials", nil)
+	defer listResp.Body.Close()
+	var listed []map[string]any
+	if err := json.NewDecoder(listResp.Body).Decode(&listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("expected both owners' tokens listed, got %+v", listed)
+	}
+	seen := map[string]bool{}
+	for _, entry := range listed {
+		seen[entry["engine"].(string)] = true
+		if _, hasToken := entry["credential"]; hasToken {
+			t.Fatalf("credential value must never be listed: %+v", entry)
+		}
+	}
+	if !seen["git-readonly:github:acme-corp"] || !seen["git-readonly:github:personal-account"] {
+		t.Fatalf("expected both owner engines present, got %+v", listed)
+	}
+
+	// Deleting one owner's token must not touch the other's.
+	delResp := authed(http.MethodDelete, "/api/credentials/"+url.PathEscape("git-readonly:github:acme-corp"), nil)
+	delResp.Body.Close()
+	if delResp.StatusCode != http.StatusOK {
+		t.Fatalf("DELETE acme-corp = %d, want 200", delResp.StatusCode)
+	}
+	listResp2 := authed(http.MethodGet, "/api/credentials", nil)
+	defer listResp2.Body.Close()
+	var listed2 []map[string]any
+	if err := json.NewDecoder(listResp2.Body).Decode(&listed2); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed2) != 1 || listed2[0]["engine"] != "git-readonly:github:personal-account" {
+		t.Fatalf("expected only personal-account's token to remain, got %+v", listed2)
+	}
+}
+
+// TestCredentialsGitReadOnlyKindShapeRejectsInvalid: a malformed owner, or a provider other
+// than github/gitlab, must be refused rather than silently stored under an unvalidated key.
+func TestCredentialsGitReadOnlyKindShapeRejectsInvalid(t *testing.T) {
+	deps, pool, idSvc := newCredentialsTestDeps(t)
+	srv := httptest.NewServer(api.NewRouter(deps))
+	defer srv.Close()
+
+	accountID := insertCredAccount(t, pool, "cred-user-git-readonly-invalid")
+	token, err := idSvc.MintHumanAccessToken(context.Background(), accountID, "blerg-core")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	for _, engine := range []string{
+		"git-readonly:bitbucket:acme", // not a supported provider
+		"git-readonly:github:",        // empty owner
+		"git-readonly:github",         // missing owner segment entirely
+	} {
+		body, _ := json.Marshal(map[string]string{"engine": engine, "credential": "FAKE-token"})
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/credentials", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("POST /api/credentials engine=%q = %d, want 400", engine, resp.StatusCode)
+		}
+	}
+}
+
+// TestCredentialsGitReadOnlyRefusesClassicGitHubToken: BLG-460 security re-review finding 2.
+// A classic token (the "ghp_" prefix alone is enough) must be refused end to end — never stored,
+// never even reaching the fake GitHub host, since the prefix check runs before the request.
+func TestCredentialsGitReadOnlyRefusesClassicGitHubToken(t *testing.T) {
+	deps, pool, idSvc := newCredentialsTestDeps(t)
+	calls := 0
+	fakeGitHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer fakeGitHub.Close()
+	deps.GitHubAPIBase = fakeGitHub.URL
+	srv := httptest.NewServer(api.NewRouter(deps))
+	defer srv.Close()
+
+	accountID := insertCredAccount(t, pool, "cred-user-git-readonly-classic")
+	token, err := idSvc.MintHumanAccessToken(context.Background(), accountID, "blerg-core")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	body, _ := json.Marshal(map[string]string{"engine": "git-readonly:github:acme-corp", "credential": "ghp_classictoken1234567890"})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/credentials", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST classic token = %d, want 400; body=%s", resp.StatusCode, respBody)
+	}
+	if !strings.Contains(string(respBody), "Classic GitHub tokens can't be limited to read") {
+		t.Fatalf("expected the short refusal reason, got %q", respBody)
+	}
+	if strings.Contains(string(respBody), "fine-grained token's permissions") {
+		t.Fatalf("the refusal must not repeat the section's whole description paragraph, got %q", respBody)
+	}
+	if calls != 0 {
+		t.Fatalf("expected the ghp_ prefix to short-circuit before any call to GitHub, got %d calls", calls)
+	}
+
+	listResp, err := authedGet(t, srv, token, "/api/credentials")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listResp.Body.Close()
+	var listed []map[string]any
+	if err := json.NewDecoder(listResp.Body).Decode(&listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("a refused token must never be stored, got %+v", listed)
+	}
+}
+
+// TestCredentialsGitReadOnlyOwnerLowercasedOnStoreAndLookup: BLG-460 security re-review finding
+// 3. Storing "Acme-Corp" and later deleting "acme-corp" (or vice versa) must act on the exact
+// same row — the owner is always lowercased before it touches the vault.
+func TestCredentialsGitReadOnlyOwnerLowercasedOnStoreAndLookup(t *testing.T) {
+	deps, pool, idSvc := newCredentialsTestDeps(t)
+	fakeGitHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer fakeGitHub.Close()
+	deps.GitHubAPIBase = fakeGitHub.URL
+	srv := httptest.NewServer(api.NewRouter(deps))
+	defer srv.Close()
+
+	accountID := insertCredAccount(t, pool, "cred-user-git-readonly-case")
+	token, err := idSvc.MintHumanAccessToken(context.Background(), accountID, "blerg-core")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	body, _ := json.Marshal(map[string]string{"engine": "git-readonly:github:Acme-Corp", "credential": "github_pat_fixture"})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/credentials", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST mixed-case owner = %d, want 200", resp.StatusCode)
+	}
+
+	listResp, err := authedGet(t, srv, token, "/api/credentials")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed []map[string]any
+	if err := json.NewDecoder(listResp.Body).Decode(&listed); err != nil {
+		t.Fatal(err)
+	}
+	listResp.Body.Close()
+	if len(listed) != 1 || listed[0]["engine"] != "git-readonly:github:acme-corp" {
+		t.Fatalf("expected the stored engine key to be lowercased, got %+v", listed)
+	}
+
+	// Delete using the ORIGINAL mixed-case owner: must still find and remove the (lowercased) row.
+	delReq, _ := http.NewRequest(http.MethodDelete, srv.URL+"/api/credentials/"+url.PathEscape("git-readonly:github:Acme-Corp"), nil)
+	delReq.Header.Set("Authorization", "Bearer "+token)
+	delResp, err := srv.Client().Do(delReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delResp.Body.Close()
+	if delResp.StatusCode != http.StatusOK {
+		t.Fatalf("DELETE mixed-case owner = %d, want 200", delResp.StatusCode)
+	}
+	listResp2, err := authedGet(t, srv, token, "/api/credentials")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listResp2.Body.Close()
+	var listed2 []map[string]any
+	if err := json.NewDecoder(listResp2.Body).Decode(&listed2); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed2) != 0 {
+		t.Fatalf("expected the row to be gone after deleting by its mixed-case owner, got %+v", listed2)
+	}
+}
+
+func authedGet(t *testing.T, srv *httptest.Server, token, path string) (*http.Response, error) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	return srv.Client().Do(req)
 }
 
 // TestCredentialsCrossAccountIsolation is the load-bearing proof of the §5 security

@@ -2,9 +2,12 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/blerglab/blerg-ai/runner/internal/db"
 )
 
 // runnerOpenAPISpec is the subset of the document these tests reason about.
@@ -70,6 +73,8 @@ func TestRunnerOpenAPICoversEveryManifestOperation(t *testing.T) {
 func TestRunnerOpenAPIPathsAreRegisteredOnTheMux(t *testing.T) {
 	spec := parseRunnerOpenAPI(t)
 	mux := agentContractMux(&API{})
+	// Inbox browser routes are registered alongside the agent contract in production.
+	(&API{}).registerInboxRoutes(mux)
 	for path, methods := range spec.Paths {
 		for method := range methods {
 			// A concrete request cannot carry a wildcard segment; "x" stands in for an id.
@@ -99,4 +104,14 @@ func TestRunnerOpenAPIIdempotencyKey(t *testing.T) {
 		return
 	}
 	t.Fatal("Idempotency-Key header is undocumented")
+}
+
+func TestRunnerOpenAPIArtifactVersionCap(t *testing.T) {
+	spec := parseRunnerOpenAPI(t)
+	operation := spec.Paths["/api/runner/sessions/{id}/uploads"]["post"].(map[string]any)
+	description := operation["description"].(string)
+	want := fmt.Sprintf("%d versions per name", db.MaxArtifactVersions)
+	if !strings.Contains(description, want) {
+		t.Errorf("upload description must include %q", want)
+	}
 }

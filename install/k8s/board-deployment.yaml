@@ -22,6 +22,8 @@ spec:
       labels:
         app: blerg-board
     spec:
+      serviceAccountName: blerg-board
+      automountServiceAccountToken: false
       containers:
         - name: blerg-board
           image: "${REGISTRY}/blerg-board:${TAG}"
@@ -150,3 +152,12 @@ spec:
     - name: http
       port: 8080
       targetPort: 8080
+
+---
+# This service only uses application protocols; it needs no Kubernetes API token.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: blerg-board
+  namespace: blerg
+automountServiceAccountToken: false

@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { useState } from 'react'
 import { beforeEach, afterEach, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -12,6 +13,7 @@ import '../index.css'
 import '@blerglab/chat/blerg.css'
 const read = vi.hoisted(() => vi.fn())
 const computations = vi.hoisted(() => ({ decorated: vi.fn(), chain: vi.fn() }))
+vi.mock('../ws', () => import('../test/wsMock'))
 vi.mock('../apiFetch', () => ({ apiFetch: read }))
 vi.mock('../lib/liveBoardCard', () => ({ signedInAccount: () => 'person-a' }))
 vi.mock('../lib/chatTransport', () => ({ blergTransport: () => ({ files: null }) }))
@@ -157,7 +159,7 @@ it('reuses decorated listings and row chains when only selection changes', async
   expect(computations.decorated).not.toHaveBeenCalled()
   expect(computations.chain).not.toHaveBeenCalled()
 })
-for (const width of [390, 3840]) it.each([true, false])(`supports a 25-level single-child path at ${width}px (compact=%s)`, async compact => {
+for (const width of browserWidths([390, 3840])) it.each([true, false])(`supports a 25-level single-child path at ${width}px (compact=%s)`, async compact => {
   await page.viewport(width, 844); await saveCompactFolders(compact); clearViews()
   const parts = Array.from({ length: 25 }, (_, i) => `long-folder-${i}`)
   const paths = parts.map((_, i) => parts.slice(0, i + 1).join('/'))

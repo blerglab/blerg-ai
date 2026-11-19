@@ -3,8 +3,6 @@ package daemon
 import (
 	"context"
 	"fmt"
-	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
-	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 )
 
 func TestHermesNamedProviderDiscovery(t *testing.T) {
@@ -200,20 +200,6 @@ func TestHermesStaleStartupAcknowledgmentDoesNotEraseNewSelection(t *testing.T) 
 	r.info([]byte(`{"model":"same-model","provider":"custom:local-b"}`))
 	if countKind(em, "model_changed") != 0 || d.model != "custom:local-a/same-model" {
 		t.Fatal("stale startup acknowledgment replaced newer requested provider")
-	}
-}
-
-func TestHermesQualifiedTerminalSelectionRefused(t *testing.T) {
-	for _, kind := range []string{"", "tmux"} {
-		if spawnModelProblem(protocol.SpawnSession{Engine: "hermes", Kind: kind, Model: "custom:local-b/model"}) == "" {
-			t.Fatal("qualified terminal selection accepted")
-		}
-	}
-	if spawnModelProblem(protocol.SpawnSession{Engine: "hermes", Kind: "agent", Model: "custom:local-b/model"}) != "" {
-		t.Fatal("agent selection rejected")
-	}
-	if spawnModelProblem(protocol.SpawnSession{Engine: "hermes", Kind: "tmux", Model: "old-model"}) != "" {
-		t.Fatal("legacy terminal selection changed")
 	}
 }
 
@@ -433,21 +419,6 @@ func TestHermesCatalogCannotPublishEndpointAsModel(t *testing.T) {
 	list, err := parseOpenAIModels([]byte(`{"data":[{"id":"http://example.invalid/v1"},{"id":"custom:foreign/model"},{"id":"qwen:latest"}]}`), "")
 	if err != nil || !slices.Equal(modelIDs(list), []string{"qwen:latest"}) {
 		t.Fatal("endpoint/routing data escaped as model IDs")
-	}
-}
-func TestHermesNamedTerminalRecoveryRefuses(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	sender := newRecordingSender(4)
-	m := &Manager{client: sender}
-	m.recoverSession(SessionRecord{SessionID: "terminal-owned", Engine: "hermes", Model: "custom:local-b/model", ProjectPath: t.TempDir()})
-	select {
-	case msg := <-sender.ch:
-		state, ok := msg.(protocol.SessionStateChanged)
-		if !ok || state.Status != "error" || state.Message == nil || !strings.Contains(*state.Message, "Use agent mode") {
-			t.Fatal("terminal route not refused clearly")
-		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("terminal recovery refusal timeout")
 	}
 }
 

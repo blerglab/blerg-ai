@@ -1,3 +1,4 @@
+import { IconButton } from '@blerglab/chat'
 import { useState } from 'react'
 import { apiFetch } from '../apiFetch'
 import { useSessionBoards } from '../lib/sessionBoards'
@@ -16,6 +17,9 @@ export default function BoardFileDraft({ proposal, onSaved, onCancel }: { propos
   const [type, setType] = useState(text(proposal.arguments.type))
   const [sensitive, setSensitive] = useState(proposal.arguments.sensitive === true)
   const [repos, setRepos] = useState(() => Array.isArray(proposal.arguments.repos) ? proposal.arguments.repos.filter(r => typeof r === 'string').join(', ') : '')
+  const [size, setSize] = useState(text(proposal.arguments.size))
+  const [risk, setRisk] = useState(text(proposal.arguments.risk))
+  const [complexity, setComplexity] = useState(text(proposal.arguments.complexity))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const verified = boards.state === 'ready' && boards.configured && boards.boards.some(b => b.id === board)
@@ -25,7 +29,7 @@ export default function BoardFileDraft({ proposal, onSaved, onCancel }: { propos
     try {
       const response = await apiFetch(`/api/proposals/${encodeURIComponent(proposal.id)}/draft`, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ expected_arguments_raw: expected, draft: { board_id: board, title, body, type, sensitive, repos: [...new Set(repos.split(',').map(r => r.trim()).filter(Boolean))] } }),
+        body: JSON.stringify({ expected_arguments_raw: expected, draft: { board_id: board, title, body, type, sensitive, ...(size ? { size } : {}), ...(risk ? { risk } : {}), ...(complexity ? { complexity } : {}), repos: [...new Set(repos.split(',').map(r => r.trim()).filter(Boolean))] } }),
       })
       if (!response.ok) {
         const failure = await response.json().catch(() => ({}))
@@ -45,10 +49,23 @@ export default function BoardFileDraft({ proposal, onSaved, onCancel }: { propos
         {board && !boards.boards.some(b => b.id === board) && <option value={board}>Previously selected board (unverified)</option>}
         {boards.state === 'ready' && boards.configured && boards.boards.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
       </select></label>
-      {!verified && <div role="status">{boards.state === 'loading' ? 'Checking board access…' : 'Choose an available board before saving.'}{' '}{boards.state === 'failed' && <button type="button" className="btn small" onClick={boards.retry}>Retry boards</button>}</div>}
+      {!verified && <div role="status">{boards.state === 'loading' ? 'Checking board access…' : 'Choose an available board before saving.'}{' '}{boards.state === 'failed' && <IconButton label="Retry boards" onClick={boards.retry} />}</div>}
       <label>Ticket title<input value={title} maxLength={200} onChange={e => setTitle(e.target.value)} style={control} /></label>
       <label>Reproduction and details<textarea value={body} rows={8} maxLength={65536} onChange={e => setBody(e.target.value)} style={control} /></label>
       <label>Ticket type<input value={type} maxLength={64} onChange={e => setType(e.target.value)} style={control} /></label>
+      <label>Size<select value={size} onChange={e => setSize(e.target.value)} style={control}>
+        <option value="">Not estimated</option>
+        {size === 'XS' && <option value="XS">XS (legacy)</option>}
+        {['S', 'M', 'L', 'XL'].map(value => <option key={value} value={value}>{value}</option>)}
+      </select></label>
+      <label>Risk<select value={risk} onChange={e => setRisk(e.target.value)} style={control}>
+        <option value="">Not estimated</option>
+        {['low', 'medium', 'high'].map(value => <option key={value} value={value}>{value}</option>)}
+      </select></label>
+      <label>Complexity<select value={complexity} onChange={e => setComplexity(e.target.value)} style={control}>
+        <option value="">Not estimated</option>
+        {['low', 'medium', 'high'].map(value => <option key={value} value={value}>{value}</option>)}
+      </select></label>
       <label>Target repositories (optional)<input value={repos} onChange={e => setRepos(e.target.value)} style={control} /></label>
       <small>Comma-separated repositories on the target board. The originating repository stays unchanged in the ticket's origin.</small>
       <label><input type="checkbox" checked={sensitive} onChange={e => setSensitive(e.target.checked)} /> Restrict reproduction details to board admins</label>

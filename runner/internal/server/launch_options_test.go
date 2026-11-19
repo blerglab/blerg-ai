@@ -184,15 +184,15 @@ func TestLaunchOptionsTerminalRequiresCLIAndCannotBeRestricted(t *testing.T) {
 	if len(options.Engines) != 1 || options.Engines[0].ID != "claude" {
 		t.Fatal("API-backed agent not available")
 	}
-	options, _ = a.DiscoverLaunchOptions(context.Background(), workspaceFixturePrincipal(), LaunchOptionsRequest{Runtime: "daemon", DaemonID: host.ID, Kind: "tmux"})
-	if len(options.Engines) != 0 {
-		t.Fatal("API key advertised as terminal executable")
+	options, problem := a.DiscoverLaunchOptions(context.Background(), workspaceFixturePrincipal(), LaunchOptionsRequest{Runtime: "daemon", DaemonID: host.ID, Kind: "tmux"})
+	if problem == nil || len(options.Engines) != 0 {
+		t.Fatal("removed terminal kind was not refused")
 	}
 	host.SetSandboxAvailable(true)
 	host.SetAvailableEngines([]string{"claude", "codex"})
-	options, _ = a.DiscoverLaunchOptions(context.Background(), workspaceFixturePrincipal(), LaunchOptionsRequest{Runtime: "docker", DaemonID: host.ID, Kind: "tmux", Restricted: true})
-	if len(options.Engines) != 0 {
-		t.Fatal("restricted terminal advertised")
+	options, problem = a.DiscoverLaunchOptions(context.Background(), workspaceFixturePrincipal(), LaunchOptionsRequest{Runtime: "docker", DaemonID: host.ID, Kind: "tmux", Restricted: true})
+	if problem == nil || len(options.Engines) != 0 {
+		t.Fatal("restricted terminal was not refused")
 	}
 }
 
@@ -331,11 +331,13 @@ func TestLaunchOptionsTargetsReportRepoPresence(t *testing.T) {
 	hub := NewHub()
 	a1 := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006f", Name: "A", send: make(chan []byte, 8)}
 	a1.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	a1.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	a1.SetCheckedOutRepos([]string{"app"})
 	a1.SetRepoRemotes(map[string]string{"app": "example-org/app"})
 	hub.Register(a1)
 	b := &DaemonConn{ID: "00000000-0000-4000-8000-000000000070", Name: "B", send: make(chan []byte, 8)}
 	b.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	b.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	b.SetCheckedOutRepos([]string{"other"})
 	hub.Register(b)
 	a := ownedInventoryAPI(t, hub, "fixture-daemon", nil, "")
@@ -371,11 +373,13 @@ func TestLaunchOptionsReportOnlyTheNamedDesktopsRemote(t *testing.T) {
 	hub := NewHub()
 	mine := &DaemonConn{ID: "00000000-0000-4000-8000-00000000006f", Name: "A", send: make(chan []byte, 8)}
 	mine.SetSandboxClones(true)
+	mine.SetWorkBranches(true) // current daemon: immutable recorded branch names
 	mine.SetCheckedOutRepos([]string{"app", "scratch"})
 	mine.SetRepoRemotes(map[string]string{"app": "example-org/app"})
 	hub.Register(mine)
 	other := &DaemonConn{ID: "00000000-0000-4000-8000-000000000070", Name: "B", send: make(chan []byte, 8)}
 	other.SetSandboxClones(true)
+	other.SetWorkBranches(true) // current daemon: immutable recorded branch names
 	other.SetCheckedOutRepos([]string{"app", "scratch"})
 	other.SetRepoRemotes(map[string]string{"app": "someone/app", "scratch": "someone/scratch"})
 	hub.Register(other)

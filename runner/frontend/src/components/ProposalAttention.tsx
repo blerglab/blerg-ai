@@ -1,12 +1,13 @@
 import { PROPOSAL_CAP_REASON, actorLabel, proposalExpiring, proposalExtension } from '../lib/proposalAttention'
 import { useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { useTicker } from '@blerglab/chat'
+import { Hover, TicketModal, proposalNeedsConfirmation, useTicker } from '@blerglab/chat'
 import { apiFetch } from '../apiFetch'
 import { proposalsChanged } from '../hooks/useProposalInbox'
 import { approveFailureMessage } from '../lib/proposals'
 import type { ProposalInfo } from '../types'
 import ProposalPreview from './ProposalPreview'
+import BoardFileDraft from './BoardFileDraft'
 import BoardCreateAccess from './BoardCreateAccess'
 import { requestedBoardAccess } from '../lib/boardCreate'
 import type { BoardLevel } from '../lib/permissionsModal'
@@ -46,14 +47,38 @@ export function ProposalExpiry({ proposal: p, onChanged }: { proposal: ProposalI
   </div>
 }
 
-export function PendingProposal({ proposal: p, refresh }: { proposal: ProposalInfo; refresh: () => void }) {
-  const [confirm, setConfirm] = useState(false)
+// Filing drafts use the same ticket dialog as filed cards. No card exists until approval.
+export function PendingProposal({ proposal, refresh }: { proposal: ProposalInfo; refresh: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [saved, setSaved] = useState<{ base: string | undefined; proposal: ProposalInfo } | null>(null)
+  const p = saved && proposal.state === 'pending' && saved.base === proposal.arguments_raw ? saved.proposal : proposal
+  if (proposal.kind !== 'board_file') return <ProposalDecision proposal={proposal} refresh={refresh} />
+  const title = typeof p.arguments.title === 'string' ? p.arguments.title : 'Untitled card'
+  const ticket = { source: 'blerg-board', key: 'DRAFT', status: 'DRAFT', title }
+  return <div className="pending-proposal proposal-row" data-testid={`pending-proposal-${p.id}`}>
+    <Hover target={{ kind: 'card', source: 'blerg-board', key: p.id, title, status: 'DRAFT' }} content={<ProposalPreview proposal={p} />}>
+      <button type="button" className="proposal-row-open" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(true)}><span className="ticket-chip">DRAFT</span> {title}</button>
+    </Hover>
+    <ProposalExpiry proposal={p} onChanged={refresh} />
+    {open && <TicketModal ticket={ticket} onClose={() => setOpen(false)} body={editing
+      ? <BoardFileDraft proposal={p} onSaved={updated => { setSaved({ base: proposal.arguments_raw, proposal: updated }); setEditing(false); refresh() }} onCancel={() => setEditing(false)} />
+      : <>
+        <ProposalDecision proposal={p} refresh={refresh} />
+        {p.state === 'pending' && <button type="button" className="btn" disabled={!p.arguments_raw} onClick={() => setEditing(true)}>Edit ticket draft</button>}
+      </>} />}
+  </div>
+}
+
+function ProposalDecision({ proposal: p, refresh }: { proposal: ProposalInfo; refresh: () => void }) {
+  const [confirmation, setConfirmation] = useState<{ raw: string | undefined } | null>(null)
+  const confirm = confirmation !== null && confirmation.raw === p.arguments_raw
   const [busy, setBusy] = useState(false)
   const inFlight = useRef(false)
   const [error, setError] = useState('')
   const boardCreate = p.kind === 'board_create'
   const [access, setAccess] = useState<BoardLevel>(() => requestedBoardAccess(p))
-  const exact = p.kind === 'board_file' || p.kind === 'plugin_request' || boardCreate
+  const exact = p.kind === 'board_file' || p.kind === 'board_metadata' || p.kind === 'plugin_request' || boardCreate
   async function decide(action: 'approve' | 'reject') {
     if (inFlight.current) return
     inFlight.current = true; setBusy(true); setError('')
@@ -65,7 +90,7 @@ export function PendingProposal({ proposal: p, refresh }: { proposal: ProposalIn
       if (!res.ok) throw new Error(action === 'approve' ? approveFailureMessage(res.status, await responseError(res)) : await responseError(res))
       proposalsChanged(); refresh()
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not decide the proposal.'); refresh() }
-    finally { inFlight.current = false; setBusy(false); setConfirm(false) }
+    finally { inFlight.current = false; setBusy(false); setConfirmation(null) }
   }
   return <div className="pending-proposal" data-testid={`pending-proposal-${p.id}`}>
     <ProposalPreview proposal={p} complete={confirm} />
@@ -73,15 +98,15 @@ export function PendingProposal({ proposal: p, refresh }: { proposal: ProposalIn
     <div className="proposal-attention-actions">
       {confirm ? <>
         {boardCreate && <BoardCreateAccess proposal={p} value={access} onChange={setAccess} disabled={busy} />}
-        <p>{boardCreate ? 'Create this board with your access?' : <>Approve this exact request{p.kind === 'plugin_request' ? p.plugin_session_apply ? ' for this session only' : ' for new sessions' : ''}?</>}</p>
+        <p>{boardCreate ? 'Create this board with your access?' : <>Approve this exact request{p.kind === 'plugin_request' ? p.plugin_session_apply ? ' for this workspace only' : ' for new workspaces' : ''}?</>}</p>
         <button type="button" disabled={busy} onClick={() => void decide('approve')}>Confirm approve</button>
-        <button type="button" disabled={busy} onClick={() => setConfirm(false)}>Cancel</button>
+        <button type="button" disabled={busy} onClick={() => setConfirmation(null)}>Cancel</button>
       </> : <>
-        <button type="button" disabled={busy || exact && !p.arguments_raw} onClick={() => setConfirm(true)}>Approve</button>
+        <button type="button" disabled={busy || exact && !p.arguments_raw} onClick={() => proposalNeedsConfirmation(p) ? setConfirmation({ raw: p.arguments_raw }) : void decide('approve')}>Approve</button>
         <button type="button" disabled={busy} onClick={() => void decide('reject')}>Reject</button>
         <Link to={`/proposals?id=${encodeURIComponent(p.id)}`}>Review{p.kind === 'board_file' ? ' or edit' : ''}</Link>
       </>}
-      {p.session_id && <Link to={`/sessions/${encodeURIComponent(p.session_id)}`}>Open session</Link>}
+      {p.session_id && <Link to={`/sessions/${encodeURIComponent(p.session_id)}`}>Open workspace</Link>}
     </div>
     {error && <p role="alert">{error}</p>}
   </div>

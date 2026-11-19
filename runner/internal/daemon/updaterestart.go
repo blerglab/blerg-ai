@@ -19,11 +19,18 @@ func (k *recordKeeper) observeUpdateLocked() { updateObserver.Observe(k.updateCa
 func (k *recordKeeper) updateCandidateLocked() updatehandoff.Request {
 	r := k.rec
 	observed := updatehandoff.Request{SessionID: r.SessionID}
+	if len(r.OpenCalls)+len(r.OpenTasks)+len(r.OpenSubagents) == 0 && r.PlannedUpdate != nil && k.liveUpdate != nil && *r.PlannedUpdate == *k.liveUpdate && !r.StopRequested {
+		observed.Call, _ = json.Marshal(*r.PlannedUpdate)
+		observed.TimerUnit = r.PlannedUpdate.TimerUnit
+		observed.EnginePID, observed.EngineStart = r.EnginePID, updatehandoff.ProcessStart(r.EnginePID)
+		return observed
+	}
 	if r.TurnActive && len(r.OpenCalls) == 1 && len(r.OpenTasks)+len(r.OpenSubagents) == 0 && !r.Waiting {
 		call := r.OpenCalls[0]
 		if k.liveCalls[call.CallID] == call && strings.EqualFold(call.Tool, "Bash") && call.CallID != "" {
 			observed.Call, _ = json.Marshal(call)
 			observed.EnginePID = r.EnginePID
+			observed.TimerUnit = call.TimerUnit
 			observed.EngineStart = updatehandoff.ProcessStart(r.EnginePID)
 		}
 	}
@@ -41,10 +48,18 @@ func WithUpdateReceipt(c RestartCause, r *updatehandoff.Receipt) RestartCause {
 }
 func (c RestartCause) updateSucceeded(rec AgentRecord) bool {
 	r := c.update
-	if !c.Planned || !r.Fresh(time.Now()) || rec.SessionID != r.Request.SessionID || !rec.TurnActive || len(rec.OpenCalls) != 1 || len(rec.OpenTasks)+len(rec.OpenSubagents) != 0 {
+	if !c.Planned || !r.Fresh(time.Now()) || rec.SessionID != r.Request.SessionID || len(rec.OpenTasks)+len(rec.OpenSubagents) != 0 {
 		return false
 	}
-	call := rec.OpenCalls[0]
+	var call OpenCall
+	switch {
+	case rec.TurnActive && len(rec.OpenCalls) == 1:
+		call = rec.OpenCalls[0]
+	case len(rec.OpenCalls) == 0 && rec.PlannedUpdate != nil && rec.PlannedUpdate.TimerUnit != "":
+		call = *rec.PlannedUpdate
+	default:
+		return false
+	}
 	if !strings.EqualFold(call.Tool, "Bash") || call.CallID == "" || (call.CommandHash == "" || !call.UpdateSafe) {
 		return false
 	}

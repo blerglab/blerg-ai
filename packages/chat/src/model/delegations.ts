@@ -83,7 +83,7 @@ export function decidedLine(s: DelegationState, expired: boolean): string {
   const at = clock(s.decidedAt)
   const tail = at ? ` · ${at}` : ''
   if (d.status === 'denied') return `Denied${tail}`
-  if (d.choice === 'session') return `Allowed for this session${tail}`
+  if (d.choice === 'session') return `Allowed for this workspace${tail}`
   if (d.choice === 'always') return `Always allowed${tail}`
   return `Allowed once${tail}`
 }

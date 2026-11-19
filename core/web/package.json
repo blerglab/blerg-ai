@@ -9,8 +9,10 @@
     "preview": "vite preview",
     "lint": "tsc -b --noEmit && eslint src --max-warnings 0",
     "test": "vitest run",
+    "test:themes-browser": "node tests/themes.mjs",
     "test:upgrade-notice-browser": "node tests/upgrade-notice.mjs",
-    "test:child-limits-browser": "node tests/child-limits.mjs"
+    "test:child-limits-browser": "node tests/child-limits.mjs",
+    "test:managed-connections-browser": "node tests/managed-connections.mjs"
   },
   "dependencies": {
     "react": "^19.2.6",

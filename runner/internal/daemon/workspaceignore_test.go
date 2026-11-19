@@ -97,7 +97,7 @@ func TestWorkspaceSearchGitIgnores(t *testing.T) {
 		})
 	}
 }
-func TestWorkspaceSearchFallbackIgnores(t *testing.T) {
+func TestWorkspaceSearchUnavailableGit(t *testing.T) {
 	for _, mode := range []string{"non-git", "missing", "timeout"} {
 		t.Run(mode, func(t *testing.T) {
 			e, root, req := ignoreRepoFixture(t, "host")
@@ -115,15 +115,28 @@ func TestWorkspaceSearchFallbackIgnores(t *testing.T) {
 				}
 				t.Cleanup(hostgit.SetBinaryForTest(binary))
 			}
+			if mode != "non-git" {
+				ignoreFile(t, root, ".gitignore", "custom-build/\n")
+				ignoreFile(t, root, "custom-build/match-hidden.txt", "")
+			}
 			for _, name := range []string{"node_modules", ".git", ".hg", ".svn", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", ".cache", ".next", ".nuxt", ".turbo", ".gradle", "target", "bower_components"} {
+				// Keep the non-Git fixture non-Git: recreating its removed .git
+				// directory would instead exercise a replaced metadata identity.
+				if mode == "non-git" && name == ".git" {
+					continue
+				}
 				ignoreFile(t, root, name+"/match-hidden.txt", "")
 			}
 			ignoreFile(t, root, "src/deep/match-real.txt", "")
 			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 			defer cancel()
 			res := e.Explore(ctx, req)
-			if !res.OK || len(res.Entries) != 1 || res.Entries[0].Path != "member/src/deep/match-real.txt" {
-				t.Fatalf("fallback search: %+v", res)
+			if mode == "non-git" {
+				if !res.OK || len(res.Entries) != 1 || res.Entries[0].Path != "member/src/deep/match-real.txt" {
+					t.Fatalf("non-Git fallback search: %+v", res)
+				}
+			} else if res.OK || res.ErrorCode != "unavailable" || len(res.Entries) != 0 {
+				t.Fatalf("unavailable Git must not broaden search: %+v", res)
 			}
 		})
 	}

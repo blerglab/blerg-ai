@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { afterEach, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { page, userEvent } from 'vitest/browser'
@@ -6,7 +7,7 @@ import { installHoverClock } from '../test/hoverClock'
 import '../index.css'
 
 afterEach(() => { cleanup(); resetRefStoresForTest(); clearHovercardCache() })
-it.each([390, 3840])('renders cross-board keys and rename aliases with hovercards at %i px', async width => {
+it.each(browserWidths([390, 3840]))('renders cross-board keys and rename aliases with hovercards at %i px', async width => {
   await page.viewport(width, width === 390 ? 844 : 2160)
   const clock = installHoverClock()
   try {
@@ -29,3 +30,20 @@ it.each([390, 3840])('renders cross-board keys and rename aliases with hovercard
     for (const chip of chips) expect(chip.getBoundingClientRect().right).toBeLessThanOrEqual(width)
   } finally { clock.uninstall() }
 })
+
+it.each(browserWidths([390, 3840]))('links a card created after its first lookup at %i px without remounting', async width => {
+  await page.viewport(width, width === 390 ? 844 : 2160)
+  let exists = false
+  const read = vi.fn(async (_board: string, ns: number[]) => new Map(ns.filter(() => exists).map(n => [n, {
+    kind: 'card' as const, source: 'blerg-board', boardId: 'board-a', key: `BLG-${n}`, title: 'New card',
+  }])))
+  render(<ReferenceScope sessionId={`new-card-${width}`} refs={{ boardCards: read, openCard: vi.fn() }}>
+    <ReferenceText text="See BLG-7." />
+  </ReferenceScope>)
+  await waitFor(() => expect(document.querySelector('[data-ref-state="none"]')).not.toBeNull())
+  expect(screen.queryByTestId('md-ref')).toBeNull()
+  exists = true
+  await waitFor(() => expect(screen.getByTestId('md-ref')).toHaveTextContent('BLG-7'), { timeout: 8000 })
+  expect(read).toHaveBeenCalledTimes(2)
+  expect(screen.getByTestId('md-ref').getBoundingClientRect().right).toBeLessThanOrEqual(width)
+}, 15000)

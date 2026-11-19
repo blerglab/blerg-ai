@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"github.com/blerglab/blerg-ai/contracts/identity"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 )
@@ -139,7 +140,7 @@ func (fx *artFx) upload(tok, sess string, body []byte, o upOpts) *httptest.Respo
 		req.Header.Set(k, v)
 	}
 	rec := httptest.NewRecorder()
-	fx.mux.ServeHTTP(rec, req)
+	failurelog.Default.HTTP("runner", fx.mux).ServeHTTP(rec, req)
 	return rec
 }
 
@@ -150,7 +151,7 @@ func (fx *artFx) get(method, path, tok string) *httptest.ResponseRecorder {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	rec := httptest.NewRecorder()
-	fx.mux.ServeHTTP(rec, req)
+	failurelog.Default.HTTP("runner", fx.mux).ServeHTTP(rec, req)
 	return rec
 }
 
@@ -161,6 +162,7 @@ type artMeta struct {
 	ContentType string `json:"content_type"`
 	View        string `json:"view"`
 	URL         string `json:"url"`
+	SHA256      string `json:"sha256"`
 }
 
 func (fx *artFx) publish(tok, sess, name string, body []byte) artMeta {
@@ -325,7 +327,7 @@ func TestArtifactsUploadLimits(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer "+fx.sessTok)
 		req.ContentLength = 5000
 		rec := httptest.NewRecorder()
-		fx.mux.ServeHTTP(rec, req)
+		failurelog.Default.HTTP("runner", fx.mux).ServeHTTP(rec, req)
 		if rec.Code != http.StatusRequestEntityTooLarge {
 			t.Fatalf("status = %d", rec.Code)
 		}
@@ -350,6 +352,20 @@ func TestArtifactsUploadLimits(t *testing.T) {
 		// Another session is unaffected.
 		if rec := fx.upload(fx.otherTok, fx.otherSess, []byte("x"), upOpts{name: "a.txt"}); rec.Code != 201 {
 			t.Errorf("another session = %d", rec.Code)
+		}
+	})
+	// BLG-479 design §4 / failure matrix row 10: a cluster worker's result bundle is just
+	// another artifact at publish time — the existing per-file cap applies unchanged, with the
+	// existing 413 sentence, not a bundle-specific limit or message.
+	t.Run("an oversized result bundle is refused by the same cap, same sentence", func(t *testing.T) {
+		before, _ := db.CountArtifacts(context.Background(), fx.api.dbPool, fx.otherSess)
+		body := append([]byte("# v2 git bundle\n"), bytes.Repeat([]byte("a"), 1024)...)
+		rec := fx.upload(fx.otherTok, fx.otherSess, body, upOpts{name: "member.bundle"})
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+		if after, _ := db.CountArtifacts(context.Background(), fx.api.dbPool, fx.otherSess); after != before {
+			t.Errorf("a refused bundle left a row behind: %d -> %d", before, after)
 		}
 	})
 }
@@ -829,6 +845,29 @@ func TestArtifactsRemoveSessionFiles(t *testing.T) {
 	}
 	removeSessionArtifactFiles("../../etc") // not a session id: a no-op, never a path walk
 	removeSessionArtifactFiles("")
+}
+
+// TestArtifactsUploadReplySurfacesServerComputedSHA256: BLG-479's `session import` checks a
+// downloaded result bundle against the server's own recorded SHA-256 before running any git
+// command over it (design §4 step 2) — this must be the hash of the bytes the server actually
+// received, never anything a client claimed, and it must reach the caller through the listing
+// and upload-reply JSON, not just live in the database.
+func TestArtifactsUploadReplySurfacesServerComputedSHA256(t *testing.T) {
+	fx := newArtFx(t)
+	body := []byte("hello, bundle\n")
+	sum := sha256.Sum256(body)
+	want := hex.EncodeToString(sum[:])
+	rec := fx.upload(fx.sessTok, fx.sess, body, upOpts{name: "result.bundle"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var m artMeta
+	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.SHA256 != want {
+		t.Fatalf("upload reply sha256 = %q, want %q", m.SHA256, want)
+	}
 }
 
 func TestArtifactsNoDatabase(t *testing.T) {

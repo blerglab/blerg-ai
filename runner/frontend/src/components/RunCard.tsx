@@ -25,6 +25,8 @@ export interface RunCardProps {
   /** Line 2: the current step (mono, cut) and the glyphs. */
   step?: ReactNode
   glyphs?: ReactNode
+  /** Keep metadata below the title even when the worker has no current step. */
+  glyphsBelow?: boolean
   /** Controls of their own on line 1, right of the clock (Dismiss). */
   controls?: ReactNode
   /** The card the worker is on ("↳ <plan item> · #122"): a third line, only when there is one. */
@@ -54,6 +56,7 @@ export default function RunCard(p: RunCardProps) {
     p.onActivate()
   }
   return (<>
+    {/* button-guard-ignore: row spreads contain only data attributes and hovercard event handlers */}
     <li className={`rail-item rail-run${p.nested ? ' rail-nested' : ''}${p.className ? ` ${p.className}` : ''}`} data-testid={p.testId} {...data} onClick={onClick} {...rowProps}>
       <div className="rail-run-line">
         {p.nested && <span className="rail-run-nest" aria-hidden="true">↳</span>}
@@ -63,12 +66,12 @@ export default function RunCard(p: RunCardProps) {
           aria-description={`${p.nested ? 'Runs inside Main. ' : ''}${p.action}. ${p.tooltip}`} onClick={p.onActivate}>
           {p.title}
         </button>
-        {/* With no step, the glyphs stay on the first line and the card is one line. */}
-        {!p.step && p.glyphs && <span className="rail-run-glyphs">{p.glyphs}</span>}
+        {/* Compact rows keep metadata on the title line when there is no step. */}
+        {!p.step && !p.glyphsBelow && p.glyphs && <span className="rail-run-glyphs">{p.glyphs}</span>}
         {p.elapsed}
         {p.controls}
       </div>
-      {p.step && (
+      {(p.step || p.glyphsBelow && p.glyphs) && (
         <div className="rail-run-line rail-run-second">
           <span className="rail-run-step">{p.step}</span>
           {p.glyphs && <span className="rail-run-glyphs">{p.glyphs}</span>}
@@ -93,6 +96,7 @@ export function RunStep({ text, full, testId, className }: { text: string; full?
   const [open, setOpen] = useState(false)
   const whole = full ?? text
   return (
+    // button-guard-ignore: rail-run-stepbtn supplies the surface; reviewed callers add only bad or rail-cmd
     <button type="button" className={`rail-run-doing rail-run-stepbtn${className ? ` ${className}` : ''}`} data-testid={testId}
       aria-expanded={open} title={whole} onClick={() => setOpen(o => !o)}>
       {open ? <span className="rail-run-whole">{whole}</span> : text}

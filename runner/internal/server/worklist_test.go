@@ -14,6 +14,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/blerglab/blerg-ai/runner/internal/checklist"
+	"github.com/blerglab/blerg-ai/runner/internal/db"
 )
 
 func newWorkFx(t *testing.T) *topicFx {
@@ -150,17 +153,17 @@ func TestPostChecklistCredentialsEndedAndCap(t *testing.T) {
 	if code, _ := fx.postWork("checklist", fx.sess, fx.sessTok, `{"op":"set","items":["`+strings.Repeat("a", 70<<10)+`"]}`); code != http.StatusRequestEntityTooLarge {
 		t.Errorf("huge body: %d", code)
 	}
-	// No lifetime cap: 600 old events do not stop a long-running session.
+	// No lifetime cap: 5,000 old events do not stop a long-running session.
 	if _, err := fx.pool.Exec(context.Background(), `INSERT INTO agent_events (session_id, seq, client_event_id, kind, payload, ts)
-		SELECT $1, 1000 + g, gen_random_uuid(), 'checklist', '{"items":[],"op":"clear"}', now() - interval '2 hours' FROM generate_series(1, 600) g`, fx.sess); err != nil {
+		SELECT $1, 1000 + g, gen_random_uuid(), 'checklist', '{"items":[],"op":"clear"}', now() - interval '2 hours' FROM generate_series(1, 5000) g`, fx.sess); err != nil {
 		t.Fatal(err)
 	}
 	if code, body := fx.postWork("checklist", fx.sess, fx.sessTok, set); code != http.StatusCreated {
-		t.Errorf("after 600 old events: %d %v", code, body)
+		t.Errorf("after 5,000 old events: %d %v", code, body)
 	}
 	// A loop is stopped: a full minute's worth of recent events refuses the next one.
 	if _, err := fx.pool.Exec(context.Background(), `INSERT INTO agent_events (session_id, seq, client_event_id, kind, payload)
-		SELECT $1, 5000 + g, gen_random_uuid(), 'checklist', '{"items":[],"op":"clear"}' FROM generate_series(1, 60) g`, fx.sess); err != nil {
+		SELECT $1, 10000 + g, gen_random_uuid(), 'checklist', '{"items":[],"op":"clear"}' FROM generate_series(1, 60) g`, fx.sess); err != nil {
 		t.Fatal(err)
 	}
 	if code, body := fx.postWork("checklist", fx.sess, fx.sessTok, set); code != http.StatusTooManyRequests || !strings.Contains(fmt.Sprint(body["error"]), "last minute") {
@@ -185,10 +188,19 @@ func TestPostChecklistConcurrentTicksLoseNothing(t *testing.T) {
 		}(i + 1)
 	}
 	wg.Wait()
-	got := fx.kindPayloads(fx.sess, "checklist")
-	if last := itemsLine(got[len(got)-1]["items"]); strings.Contains(last, "☐") {
-		t.Fatalf("a tick was lost: %s", last)
+	latest, err := db.LatestChecklist(t.Context(), fx.pool, fx.sess, 1<<62)
+	if err != nil || latest == nil {
+		t.Fatalf("latest: %v %v", latest, err)
 	}
+	p, ok := checklist.Read([]byte(latest.Payload))
+	if !ok || len(p.Items) != 8 || checklist.Done(p.Items) != 8 {
+		t.Fatalf("a tick was lost: %+v", p)
+	}
+	got := fx.kindPayloads(fx.sess, "checklist")
+	if got[len(got)-1]["delta"] != true || got[len(got)-1]["items"] != nil {
+		t.Fatal("tick must store only its change")
+	}
+
 }
 
 func jiraTicket(status, title string) map[string]any {
@@ -379,5 +391,27 @@ func TestPinnedBoardCardIsAddressedByTheRunner(t *testing.T) {
 	_ = json.Unmarshal(r.Body.Bytes(), &live)
 	if len(live.Tickets) != 1 || live.Tickets[0]["board_id"] != "board-a" || live.Tickets[0]["url"] != "https://board.example.test/boards/board-a/cards/12" {
 		t.Fatalf("live tickets = %s", r.Body.String())
+	}
+}
+
+func TestPinsNoLifetimeCapAndRateLimit(t *testing.T) {
+	fx := newWorkFx(t)
+	_, err := fx.pool.Exec(t.Context(), `INSERT INTO agent_events(session_id,seq,client_event_id,kind,payload,ts) SELECT $1,g,gen_random_uuid(),'ticket','{"action":"pin","ticket":{"source":"jira","key":"ABC-1","title":"Old"}}'::jsonb,now()-interval '2 minutes' FROM generate_series(1,500) g`, fx.sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]any{"action": "pin", "ticket": jiraTicket("Open", "Continue")}
+	if code, out := fx.postWork("tickets", fx.sess, fx.sessTok, body); code != http.StatusCreated {
+		t.Fatalf("%d %v", code, out)
+	}
+	_, err = fx.pool.Exec(t.Context(), `INSERT INTO agent_events(session_id,seq,client_event_id,kind,payload) SELECT $1,1000+g,gen_random_uuid(),'ticket','{"action":"pin","ticket":{"source":"jira","key":"ABC-1","title":"Old"}}'::jsonb FROM generate_series(1,60) g`, fx.sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := fx.postWork("tickets", fx.sess, fx.sessTok, body); code != http.StatusTooManyRequests {
+		t.Fatalf("rate %d", code)
+	}
+	if code, _ := fx.postWork("tickets", fx.sess, fx.sessTok, map[string]any{"action": "unpin"}); code != http.StatusCreated {
+		t.Fatalf("unpin %d", code)
 	}
 }

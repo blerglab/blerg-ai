@@ -1,3 +1,6 @@
+import ShellDetails from './ShellDetails'
+import ShellRenameDialog from './ShellRenameDialog'
+import HostShellConsentWithdrawal from './HostShellConsentWithdrawal'
 import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { ShellLease, ShellRateGroup, disconnectOwned, openShell, HostShellConsentRequired, acceptHostShell, type HostShellChallenge, restoreShells as restoreSessionShells, retainedShellsFor, type ShellTransport, SHELL_ENDED, SHELL_NO_LONGER_RUNNING } from '../shellTransport'
@@ -11,12 +14,12 @@ import { ConfirmPopover } from '@blerglab/chat'
 import { ownsAppShortcut } from '../commands/shortcutOwnership'
 import './ShellWorkspace.css'
 
-export const SHELL_LIMIT_REASON = 'This session already has four shells. Close a shell tab to open another.'
+export const SHELL_LIMIT_REASON = 'This workspace already has four shells. Close a shell tab to open another.'
 export const SHELL_UNREACHABLE = 'This shell could not be reached.'
 /** A failed inventory is asked again after these waits, then left to Try again. */
 const INVENTORY_RETRY_MS = [1000, 2000, 4000, 8000, 10000, 10000, 10000]
 export type ShellWorkspaceHandle = { open(): void; toggle(): void; select(id: string): { pending: boolean; shellId?: string } }
-type Props = { tabs: SessionTabs; enabled?: boolean; capabilityPending?: boolean; sessionId: string; accountId: string; children: React.ReactNode; ref?: React.Ref<ShellWorkspaceHandle>; createShell?: (session: string, group: ShellRateGroup, lease?: ShellLease) => Promise<ShellTransport>; restoreShells?: (session: string, group: ShellRateGroup, signal?: AbortSignal, existing?: ShellTransport[], closedIds?: string[], lease?: ShellLease) => Promise<ShellTransport[]> }
+type Props = { tabs: SessionTabs; enabled?: boolean; capabilityPending?: boolean; sessionId: string; accountId: string; children: React.ReactNode; ref?: React.Ref<ShellWorkspaceHandle>; createShell?: (session: string, group: ShellRateGroup, lease?: ShellLease, name?: string, privileged?: boolean) => Promise<ShellTransport>; restoreShells?: (session: string, group: ShellRateGroup, signal?: AbortSignal, existing?: ShellTransport[], closedIds?: string[], lease?: ShellLease) => Promise<ShellTransport[]> }
 export default function ShellWorkspace({ tabs, enabled = true, capabilityPending = false, sessionId, children, ref, createShell = openShell, restoreShells = restoreSessionShells }: Props) {
   const { open: openTab, select: selectTab, restoreShellTabs, replaceShellTab, registerShell, closedShellIds, isShellClosed, reconcileClosedShells, setShellCount, targetFor } = tabs
   const tabsRef = useRef(tabs)
@@ -33,12 +36,16 @@ export default function ShellWorkspace({ tabs, enabled = true, capabilityPending
     ? retainedShellsFor(sessionId).filter(p => !isShellClosed(`shell:${p.info.shell_id}`)).map(p => { p.adopt(group.current, new ShellLease()); return p })
     : [])
   const [panes, setPanes] = useState<ShellTransport[]>(seeded)
+  const [slowUnavailableSession, setSlowUnavailableSession] = useState('')
+  useEffect(() => { if (enabled) return; const timer = setTimeout(() => setSlowUnavailableSession(sessionId), 1000); return () => clearTimeout(timer) }, [enabled, sessionId])
   const panesRef = useRef<ShellTransport[]>([])
   const ending = useRef(new Map<string, Promise<void>>())
   const listedHandles = useRef(new Set<string>())
   const [restored, setRestored] = useState(false)
   const restoring = useRef<Promise<void>>(Promise.resolve())
   const [busy, setBusy] = useState(false)
+  const [privilegeConsent, setPrivilegeConsent] = useState(false)
+  const privilegedOpening = useRef(false)
   const opening = useRef(false)
   const launching = useRef<Promise<void>>(Promise.resolve())
   const mounted = useRef(true)
@@ -47,6 +54,12 @@ export default function ShellWorkspace({ tabs, enabled = true, capabilityPending
   const retryError = useRef<() => void>(() => {})
   const [error, setError] = useState('')
   const [errorTitle, setErrorTitle] = useState("Shell didn't start")
+  const [renaming, setRenaming] = useState<string | null>(null)
+  useEffect(() => {
+    const rename = (event: Event) => { const detail = (event as CustomEvent).detail; if (detail.scope === tabs.scope) setRenaming(detail.id) }
+    window.addEventListener('blerg-rename-shell', rename)
+    return () => window.removeEventListener('blerg-rename-shell', rename)
+  }, [tabs.scope])
   const [consent, setConsent] = useState<HostShellChallenge | null>(null)
   const [consenting, setConsenting] = useState(false)
   // Tabs this page shows without a shell behind them, once restored: the server no longer lists their
@@ -69,12 +82,13 @@ export default function ShellWorkspace({ tabs, enabled = true, capabilityPending
   }, [])
   const shellView = useCallback((transport: ShellTransport, index: number): ShellTabView => {
     const saved = tabsRef.current.tabs.find(t => t.id === `shell:${transport.info.shell_id}`)
-    return { kind: 'shell', shellId: transport.info.shell_id, runtime: transport.info.runtime, folder: transport.info.folder, label: saved ? tabLabel(saved.view) : index === 1 ? 'Shell' : `Shell ${index}` }
+    const defaultLabel = saved?.view.kind === 'shell' ? saved.view.defaultLabel ?? tabLabel(saved.view) : index === 1 ? 'Shell' : `Shell ${index}`
+    return { kind: 'shell', privileged: transport.info.privileged, shellId: transport.info.shell_id, handle: transport.info.handle, runtime: transport.info.runtime, folder: transport.info.folder, defaultLabel, label: transport.info.name || defaultLabel }
   }, [])
   const end = useCallback((p: ShellTransport) => {
     if (ending.current.has(p.info.handle)) return ending.current.get(p.info.handle)!
     p.disconnect()
-    const attempt = p.end().then(() => { listedHandles.current.delete(p.info.handle); setShellCount(listedHandles.current.size) }).catch(() => {}).finally(() => { ending.current.delete(p.info.handle) })
+    const attempt = p.end().then(() => { listedHandles.current.delete(p.info.handle); setShellCount(listedHandles.current.size) }).catch(() => { console.warn('Shell close failed', { cause: 'request_failed' }) }).finally(() => { ending.current.delete(p.info.handle) })
     ending.current.set(p.info.handle, attempt)
     return attempt
   }, [setShellCount])
@@ -152,14 +166,15 @@ export default function ShellWorkspace({ tabs, enabled = true, capabilityPending
     return () => { mounted.current = false; new Set([...panesRef.current, ...seeded]).forEach(p => disconnectOwned(p, owner)) }
   }, [seeded])
   /** Opens a shell in a new tab or, given a gone shell's tab, in that tab's place (the same start path). */
-  const open = useCallback(async function openShellTab(replace?: string) {
+  const open = useCallback(async function openShellTab(replace?: string, privileged = false) {
     if (!enabled || opening.current) return
     anchor()
     opening.current = true; setBusy(true); setError('')
     replacing.current = replace
+    privilegedOpening.current = privileged
     let finishLaunch!: () => void
     launching.current = new Promise<void>(resolve => { finishLaunch = resolve })
-    retryError.current = () => { void openShellTab(replace) }
+    retryError.current = () => { void openShellTab(replace, privileged) }
     setErrorTitle("Shell didn't start")
     try {
       await restoring.current
@@ -169,7 +184,9 @@ export default function ShellWorkspace({ tabs, enabled = true, capabilityPending
       const handles = [...listedHandles.current].filter(h => h !== old?.info.handle)
       if (Math.max(handles.length, panesRef.current.filter(p => p !== old).length, tabsRef.current.tabs.filter(t => t.view.kind === 'shell' && t.id !== replace).length) >= 4) { setError(SHELL_LIMIT_REASON); return }
       const lease = new ShellLease()
-      const transport = await createShell(sessionId, group.current, lease)
+      const replacedView = replace ? tabsRef.current.tabs.find(tab => tab.id === replace)?.view : undefined
+      const replacementName = old?.info.name || (replacedView?.kind === 'shell' && replacedView.defaultLabel && replacedView.label !== replacedView.defaultLabel ? replacedView.label : undefined)
+      const transport = await createShell(sessionId, group.current, lease, replacementName, privileged)
       // The person closed the tab this shell was to replace while it started: it goes too, also when
       // the view went away meanwhile (its last tabs say so), so it is never kept for a return.
       // Its close intent is recorded first, so a failed DELETE never brings it back: a later inventory
@@ -207,9 +224,10 @@ export default function ShellWorkspace({ tabs, enabled = true, capabilityPending
     return { pending: false, shellId: pane?.info.shell_id }
   } }), [open, focusShell, ready, selectTab, enabled])
   const commands = useMemo(() => enabled ? [
+    { id: 'privileged-shell', title: 'New privileged host shell', destructive: true, keywords: 'terminal sudo', run: () => { anchor(); setPrivilegeConsent(true) } },
     { id: 'toggle-shell', title: 'New shell', destructive: true, here: 2, detail: tabs.shellCount >= 4 ? SHELL_LIMIT_REASON : busy ? 'Opening shell…' : undefined, keywords: 'terminal', run: () => { void open() } },
-    { id: 'focus-shell', title: 'Focus shell', destructive: true, keywords: 'terminal', shortcut: 'Ctrl / ⌘ `', run: focusShell },
-  ] : [], [enabled, tabs.shellCount, busy, open, focusShell])
+    { id: 'focus-shell', title: 'Focus shell', destructive: true, keywords: 'terminal', shortcutGroup: 'Shell' as const, shortcut: 'Ctrl/⌘+`', run: focusShell },
+  ] : [], [enabled, tabs.shellCount, busy, open, focusShell, anchor])
   usePaletteCommands(commands)
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
@@ -225,18 +243,26 @@ export default function ShellWorkspace({ tabs, enabled = true, capabilityPending
       // Closing is local and immediate, including after a network failure. DELETE is
       // best effort; the existing lease/reaper remains responsible for an unreachable shell.
       panesRef.current = panesRef.current.filter(shell => shell !== p); setPanes(panesRef.current)
+      setGone(previous => new Map(previous).set(`shell:${p.info.shell_id}`, 'ended'))
       void end(p)
     }))
     return () => cleanups.forEach(cleanup => cleanup())
   }, [panes, registerShell, end])
+  const finishRename = () => {
+    const id = renaming
+    setRenaming(null)
+    if (id) document.getElementById(`session-tab-${encodeURIComponent(id)}`)?.focus()
+  }
+  const renameTransport = panes.find(p => `shell:${p.info.shell_id}` === renaming)
   return <div ref={root} data-shells-restored={ready} className="shell-workspace">
+    {!enabled && slowUnavailableSession === sessionId && !panes.length && !tabs.tabs.some(tab => tab.view.kind === 'shell') && <HostShellConsentWithdrawal key={sessionId} session={sessionId} />}
     <div className="shell-chat" inert={!!consent}>{children}</div>
     {!ready && tabs.tabs.filter(tab => tab.view.kind === 'shell' && !panes.some(p => `shell:${p.info.shell_id}` === tab.id)).map(tab => createPortal(
       <InitialLoader loading active={tabs.visible.includes(tab.id)} loadKey={`${sessionId}:${tab.id}`} label="shell" shape="terminal" />, targetFor(tab.id), `loading:${tab.id}`,
     ))}
     {panes.map(p => {
       const id = `shell:${p.info.shell_id}`
-      return createPortal(<ShellView transport={p} keepSession={sessionId} restoring={!restored} visible={tabs.visible.includes(id)} selected={tabs.active === id} focusVersion={tabs.shellFocus.id === id ? tabs.shellFocus.version : 0} onNewShell={enabled ? () => { void open(id) } : undefined} newShellBusy={busy} onError={message => {
+      return createPortal(<ShellView name={tabs.tabs.find(tab => tab.id === id)?.view.kind === 'shell' ? tabLabel(tabs.tabs.find(tab => tab.id === id)!.view) : undefined} transport={p} keepSession={sessionId} restoring={!restored} visible={tabs.visible.includes(id)} selected={tabs.active === id} focusVersion={tabs.shellFocus.id === id ? tabs.shellFocus.version : 0} onNewShell={enabled ? () => { void open(id) } : undefined} newShellBusy={busy} onError={message => {
         // A live failure ended the shell: Retry starts a new one in its place.
         anchor(p.info.shell_id); setErrorTitle('Shell stopped'); retryError.current = () => { void open(id) }; setError(message)
       }} />, targetFor(id), id)
@@ -244,15 +270,25 @@ export default function ShellWorkspace({ tabs, enabled = true, capabilityPending
     {ready && tabs.tabs.filter(tab => tab.view.kind === 'shell' && !panes.some(p => `shell:${p.info.shell_id}` === tab.id)).map(tab => createPortal(
       <div className="shell-terminal shell-gone" data-shell-id={tab.view.kind === 'shell' ? tab.view.shellId : undefined}>
         <div className="shell-connection" role="status">
-          <span>{gone.get(tab.id) === 'ended' ? <EndedLine message={`${SHELL_ENDED} ${SHELL_NO_LONGER_RUNNING}`} /> : SHELL_UNREACHABLE}</span>
+          <span><strong className="shell-display-name" title={tabLabel(tab.view)}>{tabLabel(tab.view)}: </strong>{gone.get(tab.id) === 'ended' ? <EndedLine message={`${SHELL_ENDED} ${SHELL_NO_LONGER_RUNNING}`} /> : SHELL_UNREACHABLE}</span>
           {enabled && gone.get(tab.id) !== 'ended' && <button onClick={() => { inventoryRetries.current = 0; setInventoryAttempt(n => n + 1) }}>Try again</button>}
           {enabled && <button disabled={busy} onClick={() => { void open(tab.id) }}>New shell</button>}
+          {tab.view.kind === 'shell' && <ShellDetails session={sessionId} transport={{ info: { shell_id: tab.view.shellId, handle: tab.view.handle ?? '', runtime: tab.view.runtime, folder: '' } }} />}
         </div>
+        {gone.get(tab.id) !== 'ended' && <HostShellConsentWithdrawal key={sessionId} session={sessionId} />}
       </div>, targetFor(tab.id), `gone:${tab.id}`,
     ))}
-    {consent && <HostShellConsentDialog challenge={consent} busy={consenting} onCancel={() => setConsent(null)} onAllow={() => {
+    {renaming && renameTransport && <ShellRenameDialog name={renameTransport.info.name ?? ''} onCancel={finishRename} onSave={async name => {
+      if (!renameTransport.rename) throw new Error('Shell naming is unavailable.')
+      await renameTransport.rename(name)
+      const tab = tabs.tabs.find(t => t.id === renaming)
+      tabs.setShellLabel(renaming, renameTransport.info.name || (tab?.view.kind === 'shell' ? tab.view.defaultLabel ?? 'Shell' : 'Shell'))
+      finishRename()
+    }} />}
+    {privilegeConsent && <ConfirmPopover placement="anchor" anchor={errorAnchor} title="Open a privileged host shell?" description="This privileged shell can use sudo where the machine allows it. It is not frozen at turn end. The turn's copy may include in-flight writes. A stolen Blerg login may gain root access on this machine." danger confirmLabel="Open privileged shell" cancelLabel="Cancel" onConfirm={() => { setPrivilegeConsent(false); void open(undefined, true) }} onCancel={() => setPrivilegeConsent(false)} testId="privileged-shell-consent" />}
+    {consent && <HostShellConsentDialog challenge={consent} privileged={privilegedOpening.current} busy={consenting} onCancel={() => setConsent(null)} onAllow={() => {
       setConsenting(true)
-      void acceptHostShell(sessionId, consent.challenge_id).then(() => { setConsent(null); void open(replacing.current) }).catch(e => { setError(e instanceof Error ? e.message : 'Consent unavailable.'); setConsent(null) }).finally(() => setConsenting(false))
+      void acceptHostShell(sessionId, consent.challenge_id, consent.version).then(() => { setConsent(null); void open(replacing.current, privilegedOpening.current) }).catch(e => { setError(e instanceof Error ? e.message : 'Consent unavailable.'); setConsent(null) }).finally(() => setConsenting(false))
     }} />}
     {error && <ConfirmPopover placement="anchor" anchor={errorAnchor} title={errorTitle} description={error} danger={false} confirmLabel="Retry" cancelLabel="Dismiss" onConfirm={() => { setError(''); retryError.current() }} onCancel={() => setError('')} testId="shell-error" />}
   </div>

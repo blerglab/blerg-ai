@@ -34,6 +34,6 @@ export function useExplorerLayout(enabled: boolean, sessionId = '') {
   const mobileTriggerRef = useRef<HTMLButtonElement>(null)
   const closePane = pane.close
   const close = useCallback(() => { if (mobile && history.state?.blergSheet === 'explorer') history.back(); closePane(); if (mobile) mobileTriggerRef.current?.focus() }, [mobile, closePane])
-  return { ...pane, columnsRef, mobileTriggerRef, mobile, triggerRef: mobile ? mobileTriggerRef : pane.triggerRef, close }
+  return { ...pane, columnsRef, mobileTriggerRef, mobile, closeForNavigation: pane.close, triggerRef: mobile ? mobileTriggerRef : pane.triggerRef, close }
 }
 export type ExplorerLayout = ReturnType<typeof useExplorerLayout>

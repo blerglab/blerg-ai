@@ -50,6 +50,15 @@ describe('FilesList rows', () => {
     expect(screen.getByText('Delete this file?')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Yes, delete' })).toBeInTheDocument()
   })
+
+  it('shows no version badge for a live file, saying Updated ... ago instead (BLG-470)', () => {
+    setup([file(0, { name: 'chart.png', view: 'image', version: 2, live: true, updated_at: '2026-09-30T23:00:00Z', created_at: undefined })])
+    const row = screen.getByTestId('artifact-row')
+    expect(row.querySelector('[data-testid="artifact-version"]')).toBeNull()
+    expect(row.querySelector('[data-testid="artifact-updated"]')).toHaveTextContent(/Updated/)
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    expect(screen.getByText('Delete this file?')).toBeInTheDocument()
+  })
 })
 
 describe('FilesList search, sort and origin', () => {

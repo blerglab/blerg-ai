@@ -1,0 +1,164 @@
+{
+  "runner": {
+    "dark": {
+      ".btn.primary": {
+        "color": "rgb(255, 255, 255)"
+      },
+      ".pm-primary": {
+        "color": "rgb(255, 255, 255)"
+      },
+      ".si-s-1": {
+        "color": "rgb(0, 0, 0)",
+        "backgroundColor": "rgb(255, 106, 61)"
+      },
+      ".si-s-2": {
+        "color": "rgb(0, 0, 0)",
+        "backgroundColor": "rgb(232, 177, 61)"
+      },
+      ".si-s-3": {
+        "color": "rgb(0, 0, 0)",
+        "backgroundColor": "rgb(99, 214, 139)"
+      },
+      ".activity-tests": {
+        "backgroundColor": "rgb(255, 106, 61)"
+      },
+      ".activity-build_lint": {
+        "backgroundColor": "rgb(232, 177, 61)"
+      },
+      ".activity-git": {
+        "backgroundColor": "rgb(99, 214, 139)"
+      },
+      ".activity-read": {
+        "backgroundColor": "rgb(108, 168, 201)"
+      },
+      ".activity-edit": {
+        "backgroundColor": "rgb(163, 147, 204)"
+      },
+      ".activity-other": {
+        "backgroundColor": "rgb(170, 130, 146)"
+      },
+      ".activity-model": {
+        "backgroundColor": "rgb(124, 171, 176)"
+      },
+      ".activity-waiting_on_person": {
+        "backgroundColor": "rgb(196, 167, 104)"
+      },
+      ".activity-idle": {
+        "backgroundColor": "rgb(49, 61, 79)"
+      }
+    },
+    "light": {
+      ".btn.primary": {
+        "color": "rgb(255, 255, 255)"
+      },
+      ".pm-primary": {
+        "color": "rgb(255, 255, 255)"
+      },
+      ".si-s-1": {
+        "color": "rgb(0, 0, 0)",
+        "backgroundColor": "rgb(217, 83, 30)"
+      },
+      ".si-s-2": {
+        "color": "rgb(0, 0, 0)",
+        "backgroundColor": "rgb(183, 121, 31)"
+      },
+      ".si-s-3": {
+        "color": "rgb(0, 0, 0)",
+        "backgroundColor": "rgb(47, 138, 82)"
+      },
+      ".activity-tests": {
+        "backgroundColor": "rgb(217, 83, 30)"
+      },
+      ".activity-build_lint": {
+        "backgroundColor": "rgb(183, 121, 31)"
+      },
+      ".activity-git": {
+        "backgroundColor": "rgb(47, 138, 82)"
+      },
+      ".activity-read": {
+        "backgroundColor": "rgb(70, 137, 185)"
+      },
+      ".activity-edit": {
+        "backgroundColor": "rgb(114, 77, 178)"
+      },
+      ".activity-other": {
+        "backgroundColor": "rgb(176, 79, 157)"
+      },
+      ".activity-model": {
+        "backgroundColor": "rgb(61, 148, 141)"
+      },
+      ".activity-waiting_on_person": {
+        "backgroundColor": "rgb(130, 141, 58)"
+      },
+      ".activity-idle": {
+        "backgroundColor": "rgb(212, 219, 229)"
+      }
+    }
+  },
+  "board": {
+    "dark": {
+      ".btn": {
+        "color": "rgb(255, 255, 255)"
+      },
+      ".dl.add": {
+        "color": "rgb(185, 212, 154)"
+      },
+      ".dl.del": {
+        "color": "rgb(226, 163, 163)"
+      }
+    },
+    "light": {
+      ".btn": {
+        "color": "rgb(255, 255, 255)"
+      },
+      ".dl.add": {
+        "color": "rgb(47, 138, 82)"
+      },
+      ".dl.del": {
+        "color": "rgb(207, 75, 75)"
+      }
+    }
+  },
+  "settings": {
+    "dark": {
+      ".settings-toggle-control::before": {
+        "backgroundColor": "rgb(255, 255, 255)"
+      }
+    },
+    "light": {
+      ".settings-toggle-control::before": {
+        "backgroundColor": "rgb(255, 255, 255)"
+      }
+    }
+  },
+  "chat": {
+    "dark": {
+      "button": {
+        "color": "rgb(242, 246, 250)"
+      },
+      ".diff-comment-add": {
+        "color": "rgb(242, 246, 250)"
+      },
+      ".markup-pin-badge": {
+        "color": "rgb(242, 246, 250)"
+      },
+      ".markup-send": {
+        "color": "rgb(242, 246, 250)"
+      }
+    },
+    "light": {
+      "button": {
+        "color": "rgb(19, 24, 32)"
+      },
+      ".diff-comment-add": {
+        "color": "rgb(19, 24, 32)"
+      },
+      ".markup-pin-badge": {
+        "color": "rgb(19, 24, 32)"
+      },
+      ".markup-send": {
+        "color": "rgb(19, 24, 32)"
+      }
+    }
+  }
+}

@@ -4,6 +4,14 @@
    dark follows whatever the app's values do. The values here are only a fallback: a neutral dark
    scheme so a chat with no theme at all still reads. */
 :root {
+  --chat-chart-sequential-low: var(--chat-code-title);
+  --chat-chart-sequential-high: var(--chat-fg);
+  --chat-data-transition-ms: 180;
+  --chat-document-bg: #ffffff;
+  --chat-media-bg: #000000;
+  --chat-backdrop: rgba(0, 0, 0, 0.35);
+  --chat-shadow-overlay: rgba(0, 0, 0, 0.45);
+  --chat-button-bg: var(--chat-border);
   /* Surfaces, from the page back to the raised card. */
   --chat-bg: #0f1217;
   --chat-surface: #171b22;
@@ -69,4 +77,15 @@
   --chat-code-operator: var(--chat-muted);
   --chat-diff-add: #8ed6a6;
   --chat-diff-del: #ff9d94;
+
+  /* Seti's quiet single-color file-type icon palette (FileIcon.tsx), mixed with --chat-fg at the
+     render site so the final icon color still adapts per theme. */
+  --chat-icon-blue: #519aba;
+  --chat-icon-yellow: #cbcb41;
+  --chat-icon-purple: #a074c4;
+  --chat-icon-green: #8dc149;
+  --chat-icon-orange: #e37933;
+  --chat-icon-pink: #f55385;
+  --chat-icon-red: #cc3e44;
+  --chat-icon-tan: #b8a36a;
 }

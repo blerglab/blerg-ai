@@ -52,3 +52,34 @@ func InstallFilter() error {
 	runtime.KeepAlive(filters)
 	return nil
 }
+
+// installExecFilter gives the tracer a stop at every exec, before de_thread can free a TID, and at
+// every syscall that can start a task, before it exists (the process limit). The architecture was
+// checked by InstallFilter's filter, which the shim inherited. Inherited in turn by the whole tree, and
+// it needs TRACESECCOMP: such a syscall by a task nobody seized fails with ENOSYS.
+//
+// The kernel takes the strictest answer of all a task's filters, and a filter of the tree's own that
+// answers USER_NOTIF outranks TRACE: a listener replying CONTINUE would carry an exec past the stop.
+// So seccomp(2) may not create a listener here, which also makes nested runtimes that need one fail
+// with EPERM (see the design). Only seccomp(2) takes flags, in a 32-bit argument.
+func installExecFilter() error {
+	filters := []unix.SockFilter{{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 0}}
+	for _, syscall := range append([]uint32{unix.SYS_EXECVE, unix.SYS_EXECVEAT}, creators...) {
+		filters = append(filters,
+			unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, K: syscall, Jf: 1},
+			unix.SockFilter{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_TRACE})
+	}
+	filters = append(filters,
+		unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, K: unix.SYS_SECCOMP, Jf: 3},
+		unix.SockFilter{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 24}, // low half of args[1], little-endian on every supported arch
+		unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JSET | unix.BPF_K, K: unix.SECCOMP_FILTER_FLAG_NEW_LISTENER, Jf: 1},
+		unix.SockFilter{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM)},
+		unix.SockFilter{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ALLOW})
+	program := unix.SockFprog{Len: uint16(len(filters)), Filter: &filters[0]} //nolint:gosec // a handful of instructions
+	//nolint:gosec // fixed, bounded kernel sock_fprog and live backing filter slice
+	if err := unix.Prctl(unix.PR_SET_SECCOMP, unix.SECCOMP_MODE_FILTER, uintptr(unsafe.Pointer(&program)), 0, 0); err != nil {
+		return fmt.Errorf("%w: install exec filter: %w", ErrUnproven, err)
+	}
+	runtime.KeepAlive(filters)
+	return nil
+}

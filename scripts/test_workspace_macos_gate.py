@@ -93,31 +93,36 @@ class NativeGateTests(unittest.TestCase):
                     self.validate()
                 self.events.pop()
 
-    def test_exact_timing_waiver_is_accepted_and_reported(self):
+    def test_exact_contention_skip_is_waived_and_reported(self):
         name = 'TestWorkspaceSearchLargeIndexUnderContention'
         self.events.append(dict(Action='skip', Test=name, Package=self.docker['Package']))
+        self.events = [event for event in self.events if not (event.get('Test') == name and event['Action'] == 'pass')]
         output = self.validate()
         self.assertTrue(self.meta['accepted'])
-        self.assertTrue(self.meta['native_host_accepted'])
-        self.assertEqual(self.meta['pending'], [])
-        self.assertIn('waived: BLG-319', output)
-        self.assertNotIn('none skipped', output)
+        self.assertEqual(self.meta['waived'], [name])
+        self.assertIn('BLG-319', output)
+        self.assertNotIn('all non-Docker cases passed', output)
+        self.events.append(dict(Action='fail', Test=name, Package=self.docker['Package']))
+        with self.assertRaises(SystemExit):
+            self.validate()
 
-    def test_timing_waivers_are_exact_and_never_required(self):
-        self.assertFalse(gate.timing_waivers.keys() & gate.required)
-        name = 'TestWorkspaceSearchLargeIndexUnderContention'
-        for test, package in [(name + '/child', self.docker['Package']), (name, 'another/package'),
-                              (name + 'X', self.docker['Package'])]:
-            with self.subTest(test=test, package=package):
-                self.events.append(dict(Action='skip', Test=test, Package=package))
+    def test_contention_waiver_cannot_cover_other_packages_or_subtests(self):
+        for name, package in [('TestWorkspaceSearchLargeIndexUnderContention/child', self.docker['Package']),
+                              ('TestWorkspaceSearchLargeIndexUnderContention', 'another/package')]:
+            with self.subTest(name=name, package=package):
+                self.events.append(dict(Action='skip', Test=name, Package=package))
                 with self.assertRaisesRegex(SystemExit, 'unlisted skip'):
                     self.validate()
                 self.events.pop()
 
-    def test_a_waived_test_that_fails_still_fails(self):
-        self.events.append(dict(Action='fail', Test='TestWorkspaceSearchLargeIndexUnderContention', Package=self.docker['Package']))
-        with self.assertRaises(SystemExit):
-            self.validate()
+    def test_native_rss_and_contention_evidence_is_required(self):
+        for name in ('TestDarwinNativeGroupRSS', 'TestWorkspaceSearchLargeIndexUnderContention'):
+            with self.subTest(name=name):
+                events = self.events
+                self.events = [event for event in events if event.get('Test') != name]
+                with self.assertRaisesRegex(SystemExit, 'missing native macOS evidence'):
+                    self.validate()
+                self.events = events
 
     def test_linux_quota_guest_does_not_gain_a_native_docker_skip_waiver(self):
         self.meta['docker_present'] = False

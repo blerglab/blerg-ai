@@ -279,9 +279,9 @@ describe('what the working line says the agent is on', () => {
     arrive(t, live('thinking_progress', { tokens: 999, parent_call_id: 'child' }))
     expect(screen.getByTestId('working')).not.toHaveTextContent('999')
     arrive(t, live('assistant_text', { text: 'Ready', done: false }))
-    expect(screen.getByTestId('working-compact')).not.toHaveTextContent('tokens')
+    expect(screen.getByTestId('working')).not.toHaveTextContent('tokens')
     arrive(t, live('thinking_started'))
-    expect(screen.getByTestId('working-compact')).not.toHaveTextContent('tokens')
+    expect(screen.getByTestId('working')).not.toHaveTextContent('tokens')
   })
 
   it('shows the clock, not the count, to a viewer who may not see token counts', () => {

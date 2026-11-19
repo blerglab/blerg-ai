@@ -121,11 +121,12 @@ type PatchInput struct {
 	PinPolicy    *string // "strict" or "auto_accept"
 }
 
-// Proof names the live principal that authorised a secret fetch (exactly one is set); it is
-// recorded in the audit row.
+// Proof attributes a credential lookup to its principal, or to an independently
+// authorized live-data attempt. Internal HTTP session routes never accept the latter.
 type Proof struct {
-	SessionID string
-	TokenID   string
+	LiveAttemptID string
+	SessionID     string
+	TokenID       string
 }
 
 // SecretResult is what the runner receives to reach the upstream server.
@@ -163,10 +164,13 @@ func validatePinPolicy(p string) error {
 
 // Service owns the mcp_connections lifecycle.
 type Service struct {
-	oauthNow func() time.Time // immutable after construction; access-token expiry only
-	st       db.Store
-	backend  keybackend.Backend
-	policy   netguard.Policy
+	sessionAuthority     SessionOAuthAuthority
+	sessionDispatchMu    sync.Mutex
+	sessionDispatchCache map[[32]byte]time.Time
+	oauthNow             func() time.Time // immutable after construction; OAuth expiry and scoped authority cache
+	st                   db.Store
+	backend              keybackend.Backend
+	policy               netguard.Policy
 	// httpc makes every outbound OAuth request (discovery, registration, token, revocation): the
 	// netguard client, so the policy, no-redirect, no-proxy, size and time limits always apply.
 	httpc   *http.Client
@@ -360,7 +364,7 @@ func lockAccount(ctx context.Context, tx pgx.Tx, accountID string) error {
 // nameCollides reports whether another connection (not exceptID) of the account normalises to the
 // same tool prefix as name.
 func nameCollides(ctx context.Context, tx pgx.Tx, accountID, name, exceptID string) (bool, error) {
-	rows, err := tx.Query(ctx, `SELECT name FROM mcp_connections WHERE account_id = $1 AND ($2 = '' OR id::text <> $2)`, accountID, exceptID)
+	rows, err := tx.Query(ctx, `SELECT name FROM mcp_connections WHERE runner_session_id IS NULL AND account_id = $1 AND ($2 = '' OR id::text <> $2)`, accountID, exceptID)
 	if err != nil {
 		return false, err
 	}
@@ -437,7 +441,7 @@ func (s *Service) insert(ctx context.Context, accountID, name, rawURL, kind stri
 		return Connection{}, err
 	}
 	var count int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM mcp_connections WHERE account_id = $1`, accountID).Scan(&count); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM mcp_connections WHERE account_id = $1 AND lifecycle IS DISTINCT FROM 'deleted'`, accountID).Scan(&count); err != nil {
 		return Connection{}, err
 	}
 	if count >= MaxPerAccount {
@@ -469,7 +473,7 @@ func (s *Service) insert(ctx context.Context, accountID, name, rawURL, kind stri
 // List returns the account's connections, oldest first. Never carries a secret.
 func (s *Service) List(ctx context.Context, accountID string) ([]Connection, error) {
 	rows, err := s.st.Pool().Query(ctx,
-		`SELECT `+cols+` FROM mcp_connections WHERE account_id = $1 ORDER BY created_at, name`, accountID)
+		`SELECT `+cols+` FROM mcp_connections WHERE runner_session_id IS NULL AND account_id = $1 ORDER BY created_at, name`, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -491,7 +495,7 @@ func (s *Service) Get(ctx context.Context, accountID, id string) (Connection, er
 		return Connection{}, ErrNotFound
 	}
 	c, err := scan(s.st.Pool().QueryRow(ctx,
-		`SELECT `+cols+` FROM mcp_connections WHERE id = $1 AND account_id = $2`, id, accountID))
+		`SELECT `+cols+` FROM mcp_connections WHERE runner_session_id IS NULL AND id = $1 AND account_id = $2`, id, accountID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Connection{}, ErrNotFound
 	}
@@ -533,7 +537,7 @@ func (s *Service) Patch(ctx context.Context, accountID, id string, in PatchInput
 		return Connection{}, err
 	}
 	var kind, policy string
-	err = tx.QueryRow(ctx, `SELECT auth_kind, pin_policy FROM mcp_connections WHERE id = $1 AND account_id = $2 FOR UPDATE`, id, accountID).Scan(&kind, &policy)
+	err = tx.QueryRow(ctx, `SELECT auth_kind, pin_policy FROM mcp_connections WHERE runner_session_id IS NULL AND id = $1 AND account_id = $2 FOR UPDATE`, id, accountID).Scan(&kind, &policy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Connection{}, ErrNotFound
 	}
@@ -552,7 +556,7 @@ func (s *Service) Patch(ctx context.Context, accountID, id string, in PatchInput
 		} else if taken {
 			return Connection{}, ErrNameTaken
 		}
-		if _, err := tx.Exec(ctx, `UPDATE mcp_connections SET name = $1, updated_at = now() WHERE id = $2`, *in.Name, id); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE mcp_connections SET name = $1, updated_at = now() WHERE runner_session_id IS NULL AND id = $2`, *in.Name, id); err != nil {
 			if isUnique(err) {
 				return Connection{}, ErrNameTaken
 			}
@@ -560,7 +564,7 @@ func (s *Service) Patch(ctx context.Context, accountID, id string, in PatchInput
 		}
 	}
 	if tools != nil {
-		if _, err := tx.Exec(ctx, `UPDATE mcp_connections SET default_tools = $1, updated_at = now() WHERE id = $2`, tools, id); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE mcp_connections SET default_tools = $1, updated_at = now() WHERE runner_session_id IS NULL AND id = $2`, tools, id); err != nil {
 			return Connection{}, err
 		}
 	}
@@ -568,7 +572,7 @@ func (s *Service) Patch(ctx context.Context, accountID, id string, in PatchInput
 		if err := validateHeaderName(*in.HeaderName); err != nil {
 			return Connection{}, err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE mcp_connections SET header_name = $1, updated_at = now() WHERE id = $2`, *in.HeaderName, id); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE mcp_connections SET header_name = $1, updated_at = now() WHERE runner_session_id IS NULL AND id = $2`, *in.HeaderName, id); err != nil {
 			return Connection{}, err
 		}
 	}
@@ -582,13 +586,13 @@ func (s *Service) Patch(ctx context.Context, accountID, id string, in PatchInput
 		}
 		// A new secret has not been verified against the server yet.
 		if _, err := tx.Exec(ctx,
-			`UPDATE mcp_connections SET secret_ciphertext = $1, key_id = $2, status = 'ok', updated_at = now() WHERE id = $3`,
+			`UPDATE mcp_connections SET secret_ciphertext = $1, key_id = $2, status = 'ok', updated_at = now() WHERE runner_session_id IS NULL AND id = $3`,
 			ct, kid, id); err != nil {
 			return Connection{}, err
 		}
 	}
 	if in.PinPolicy != nil && *in.PinPolicy != policy {
-		if _, err := tx.Exec(ctx, `UPDATE mcp_connections SET pin_policy = $1, updated_at = now() WHERE id = $2`, *in.PinPolicy, id); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE mcp_connections SET pin_policy = $1, updated_at = now() WHERE runner_session_id IS NULL AND id = $2`, *in.PinPolicy, id); err != nil {
 			return Connection{}, err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO mcp_connection_events (account_id, connection_id, action, from_value, to_value)
@@ -596,7 +600,7 @@ func (s *Service) Patch(ctx context.Context, accountID, id string, in PatchInput
 			return Connection{}, err
 		}
 	}
-	c, err := scan(tx.QueryRow(ctx, `SELECT `+cols+` FROM mcp_connections WHERE id = $1`, id))
+	c, err := scan(tx.QueryRow(ctx, `SELECT `+cols+` FROM mcp_connections WHERE runner_session_id IS NULL AND id = $1`, id))
 	if err != nil {
 		return Connection{}, err
 	}
@@ -647,7 +651,7 @@ func (s *Service) Delete(ctx context.Context, accountID, id string) error {
 	var ct []byte
 	var keyID *string
 	err := s.st.Pool().QueryRow(ctx,
-		`DELETE FROM mcp_connections WHERE id = $1 AND account_id = $2 RETURNING auth_kind, secret_ciphertext, key_id`,
+		`DELETE FROM mcp_connections WHERE runner_session_id IS NULL AND id = $1 AND account_id = $2 RETURNING auth_kind, secret_ciphertext, key_id`,
 		id, accountID).Scan(&kind, &ct, &keyID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
@@ -678,7 +682,7 @@ func (s *Service) FetchSecret(ctx context.Context, accountID, id string, proof P
 	var ct []byte
 	var keyID *string
 	err := s.st.Pool().QueryRow(ctx,
-		`SELECT url, auth_kind, status, header_name, secret_ciphertext, key_id, pin_policy FROM mcp_connections WHERE id = $1 AND account_id = $2`,
+		`SELECT url, auth_kind, status, header_name, secret_ciphertext, key_id, pin_policy FROM mcp_connections WHERE runner_session_id IS NULL AND id = $1 AND account_id = $2`,
 		id, accountID).Scan(&url, &kind, &status, &header, &ct, &keyID, &policy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SecretResult{}, ErrNotFound
@@ -694,9 +698,9 @@ func (s *Service) FetchSecret(ctx context.Context, accountID, id string, proof P
 	}
 
 	if _, err := s.st.Pool().Exec(ctx,
-		`INSERT INTO mcp_secret_access_log (account_id, connection_id, fetched_by_session_id, fetched_by_token_id, fetched_at)
-		 VALUES ($1, $2, $3, $4, now())`,
-		accountID, id, nullable(proof.SessionID), nullable(proof.TokenID)); err != nil {
+		`INSERT INTO mcp_secret_access_log (account_id, connection_id, fetched_by_session_id, fetched_by_token_id, fetched_by_live_attempt_id, fetched_at)
+		 VALUES ($1, $2, $3, $4, $5, now())`,
+		accountID, id, nullable(proof.SessionID), nullable(proof.TokenID), nullable(proof.LiveAttemptID)); err != nil {
 		return SecretResult{}, fmt.Errorf("mcpconn: audit log write: %w", err)
 	}
 

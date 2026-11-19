@@ -3,20 +3,23 @@ import { detectFileIcon } from '../model/fileIcon'
 import { fileIconPaths, type FileIconKind } from './fileIconPaths'
 import './FileIcon.css'
 
-// Seti's quiet single-color palette. Mixing with the host's foreground below
-// preserves its language hues while providing contrast in either theme.
+// Seti's quiet single-color palette, as the --chat-icon-* tokens. Mixing with the host's
+// foreground below preserves its language hues while providing contrast in either theme.
+const BLUE = 'var(--chat-icon-blue)', YELLOW = 'var(--chat-icon-yellow)', PURPLE = 'var(--chat-icon-purple)'
+const GREEN = 'var(--chat-icon-green)', ORANGE = 'var(--chat-icon-orange)', PINK = 'var(--chat-icon-pink)'
+const RED = 'var(--chat-icon-red)', TAN = 'var(--chat-icon-tan)'
 const colors: Partial<Record<FileIconKind, string>> = {
-  go: '#519aba', markdown: '#519aba', json: '#cbcb41', yaml: '#a074c4',
-  typescript: '#519aba', javascript: '#cbcb41', react: '#519aba', python: '#cbcb41',
-  shell: '#8dc149', powershell: '#519aba', docker: '#519aba', makefile: '#e37933', lock: '#a074c4',
-  image: '#a074c4', svg: '#cbcb41', html: '#e37933', css: '#519aba', sass: '#f55385', less: '#519aba',
-  rust: '#e37933', c: '#519aba', cpp: '#a074c4', csharp: '#519aba', java: '#cc3e44', kotlin: '#e37933',
-  swift: '#e37933', ruby: '#cc3e44', php: '#a074c4', vue: '#8dc149', svelte: '#e37933',
-  npm: '#cc3e44', database: '#f55385', csv: '#8dc149', pdf: '#cc3e44', archive: '#e37933',
-  audio: '#a074c4', video: '#f55385', font: '#cc3e44', git: '#e37933', license: '#cbcb41',
-  terraform: '#a074c4', lua: '#519aba', xml: '#e37933', notebook: '#e37933',
-  folder: '#b8a36a', 'folder-src': '#519aba', 'folder-docs': '#519aba', 'folder-github': '#a074c4',
-  'folder-test': '#8dc149', 'folder-node': '#cc3e44', 'folder-public': '#a074c4',
+  go: BLUE, markdown: BLUE, json: YELLOW, yaml: PURPLE,
+  typescript: BLUE, javascript: YELLOW, react: BLUE, python: YELLOW,
+  shell: GREEN, powershell: BLUE, docker: BLUE, makefile: ORANGE, lock: PURPLE,
+  image: PURPLE, svg: YELLOW, html: ORANGE, css: BLUE, sass: PINK, less: BLUE,
+  rust: ORANGE, c: BLUE, cpp: PURPLE, csharp: BLUE, java: RED, kotlin: ORANGE,
+  swift: ORANGE, ruby: RED, php: PURPLE, vue: GREEN, svelte: ORANGE,
+  npm: RED, database: PINK, csv: GREEN, pdf: RED, archive: ORANGE,
+  audio: PURPLE, video: PINK, font: RED, git: ORANGE, license: YELLOW,
+  terraform: PURPLE, lua: BLUE, xml: ORANGE, notebook: ORANGE,
+  folder: TAN, 'folder-src': BLUE, 'folder-docs': BLUE, 'folder-github': PURPLE,
+  'folder-test': GREEN, 'folder-node': RED, 'folder-public': PURPLE,
 }
 
 export interface FileIconProps {

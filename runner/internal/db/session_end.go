@@ -214,7 +214,11 @@ func RecordSessionEnd(ctx context.Context, conn *pgxpool.Pool, sessionID string,
 // attribution land in one statement. The first real end is kept; a recoverable
 // lost/unreported observation cannot mask a subsequent confirmed stop or exit.
 func EndSessionStatus(ctx context.Context, conn *pgxpool.Pool, sessionID, status string, endedAt *time.Time, end SessionEnd) error {
-	return endSessionStatus(ctx, conn, sessionID, status, endedAt, end)
+	if err := endSessionStatus(ctx, conn, sessionID, status, endedAt, end); err != nil {
+		return err
+	}
+	logInsightRefresh(RefreshInsightTiming(ctx, conn, sessionID))
+	return nil
 }
 
 func endSessionStatus(ctx context.Context, conn sessionWriteExecutor, sessionID, status string, endedAt *time.Time, end SessionEnd) error {

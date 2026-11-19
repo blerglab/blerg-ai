@@ -5,7 +5,7 @@
 .session-tab-insert{position:absolute;top:4px;bottom:4px;width:2px;margin-left:-1px;background:var(--selected-border);pointer-events:none;z-index:1}
 .session-tab{display:flex;flex-shrink:0;border-right:1px solid var(--scree-2);border-bottom:2px solid transparent;max-width:260px;color:var(--fog-dim);padding:0 8px;gap:6px;font-size:12px;min-width:0}
 .session-tab.active{border-bottom-color:var(--selected-border);color:var(--chalk);background:var(--scree)}
-.session-tab button{border:0;background:transparent;color:inherit;font:inherit;cursor:pointer}.session-tab>[role=tab]{display:flex;gap:6px;align-items:center;min-width:0;white-space:nowrap;padding:0;height:100%}.session-tab>[role=tab]>span{overflow:hidden;text-overflow:ellipsis}.session-tab.preview>[role=tab]>span{font-style:italic}.session-tab-close{padding:2px}.session-tab-pin{color:var(--fog-dim)}
+.session-tab button{border:0;background:transparent;color:inherit;font:inherit;cursor:pointer}.session-tab>[role=tab]{display:flex;gap:6px;align-items:center;min-width:0;white-space:nowrap;padding:0;height:100%}.session-tab>[role=tab]>span{overflow:hidden;text-overflow:ellipsis}.session-tab.preview>[role=tab]>span{font-style:italic}.session-tab-close{padding:2px}
 .session-tab-unread{border-radius:99px;background:var(--blaze);color:var(--basalt);font-size:10px;font-weight:700;padding:0 5px;line-height:16px}
 .session-file-view{position:relative;display:flex;flex:1;min-height:0;min-width:0;flex-direction:column;overflow:clip}.session-file-view[hidden],.hosted-view[hidden]{display:none}.session-keep-bar{display:flex;gap:12px;align-items:center;padding:6px 12px;border-bottom:1px solid var(--stone);font-size:12px;color:var(--fog)}.session-keep-bar span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.session-file-target,.hosted-view{display:flex;flex-direction:column;flex:1;min-height:0;overflow:clip}
 .session-mobile-tools{box-sizing:border-box;position:relative;display:flex;border-bottom:1px solid var(--stone);flex-shrink:0}.session-mobile-tools .icon-btn{height:34px;min-width:34px}.session-back-chat{flex:1;border:0;background:none;text-align:left;color:var(--selected-text);font:inherit;font-size:13px;min-height:36px}.session-kept{position:absolute;right:8px;top:44px;max-width:calc(100vw - 16px);background:var(--scree);border:1px solid var(--stone);border-radius:8px;z-index:30;padding:8px;box-shadow:var(--shadow)}.session-kept>div{display:flex}.session-kept button{border:0;background:none;color:var(--chalk);padding:8px;text-align:left;font:inherit;font-size:12px;overflow-wrap:anywhere}
@@ -52,3 +52,22 @@
 .session-tab-menu-item:hover,.session-tab-menu-item:focus-visible{background:var(--scree-2);outline:2px solid var(--selected-border);outline-offset:-2px}
 .session-tab-menu-item[aria-checked=true]{color:var(--selected-text)}
 @media(max-width:899px){.session-tab-menu-item{min-height:44px;font-size:13px}}
+
+.session-explorer-toggle { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+/* Dock tool tabs: glyph + label at natural width, left-aligned, so tabs stay put as others are added or moved. The label
+   truncates first; only a tab too narrow for any useful text keeps just its glyph (tooltip
+   and aria-label still name it). */
+.dock-tool-tabbar .session-tabstrip .dock-tool-tab{flex:0 0 auto;max-width:none;padding:0;border-right:0}
+.dock-tool-tab>[role=tab]{width:100%;justify-content:flex-start;gap:6px;padding:0 10px;font-size:12px;font-weight:500;border-radius:6px 6px 0 0}
+.dock-tool-tab:not(.active)>[role=tab]:hover{color:var(--chalk);background:var(--scree)}
+.dock-tool-tab>[role=tab]:focus-visible{outline:2px solid var(--selected-border);outline-offset:-2px}
+.dock-tool-tab>[role=tab]>.dock-tool-glyph{display:flex;flex:none;overflow:visible}
+.dock-tool-tab>[role=tab]>.dock-tool-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dock-tool-tab>[role=tab]>.dock-tool-count{flex:none;min-width:16px;box-sizing:border-box;padding:0 5px;border-radius:99px;line-height:16px;font-size:10px;font-weight:700;text-align:center;background:var(--scree-2);color:var(--chalk)}
+.dock-tool-tab>[role=tab]>.dock-tool-count.attention{background:var(--blaze);color:var(--basalt)}
+/* ToolTabBar measures the strip: labels drop from the other tabs first, then from the selected one. */
+.dock-tool-tabbar[data-labels="active"] .dock-tool-tab:not(.active)>[role=tab]>.dock-tool-label,
+.dock-tool-tabbar[data-labels="none"] .dock-tool-tab>[role=tab]>.dock-tool-label{display:none}
+.dock-tool-tabbar[data-labels="active"] .dock-tool-tab:not(.active)>[role=tab],
+.dock-tool-tabbar[data-labels="none"] .dock-tool-tab>[role=tab]{padding:0 8px}
+

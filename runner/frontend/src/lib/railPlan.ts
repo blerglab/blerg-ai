@@ -91,5 +91,5 @@ export function assigneeName(
     : children.find(c => c.id === a.id)?.title
   // The chat's placeholder for a subagent it never saw start says nothing more than the kind.
   if (live && !live.startsWith('Subagent · ')) return live
-  return a.kind === 'subagent' ? 'a subagent' : 'a started session'
+  return a.kind === 'subagent' ? 'a subagent' : 'a worker'
 }

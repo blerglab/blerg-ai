@@ -63,6 +63,7 @@ func (d Deps) handleInternalTokenExchange(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
+	standingResponse(w, body.Standing)
 	if msg := validateProofShape(body.AccountID, body.TokenID, body.SessionID); msg != "" {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
@@ -93,12 +94,13 @@ func (d Deps) handleInternalTokenExchange(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
-	_, _, live, err := d.principalLiveness(r.Context(), body.AccountID, body.TokenID, body.SessionID)
+	_, _, live, err := d.principalLiveness(r.Context(), body.AccountID, body.TokenID, body.SessionID, body.Standing)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	if !live {
+		d.standingRefusalState(w, r, body.AccountID, body.TokenID, body.SessionID, body.Standing)
 		log.Printf("internal tokens exchange: no live principal for account %s", body.AccountID)
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -110,6 +112,7 @@ func (d Deps) handleInternalTokenExchange(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if state.Disabled || state.MustChangePassword {
+		d.standingRefusalState(w, r, body.AccountID, body.TokenID, body.SessionID, body.Standing)
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -145,6 +148,7 @@ func (d Deps) handleInternalTokenExchange(w http.ResponseWriter, r *http.Request
 		http.Error(w, "the proof token holds no capability for this target", http.StatusForbidden)
 		return
 	case errors.Is(err, identity.ErrAccountDisabled):
+		d.standingRefusalState(w, r, body.AccountID, body.TokenID, body.SessionID, body.Standing)
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	case errors.Is(err, identity.ErrTooManyTokens):
@@ -167,10 +171,11 @@ func (d Deps) handleInternalTokenExchange(w http.ResponseWriter, r *http.Request
 		}
 	}
 	if code == http.StatusOK {
-		_, _, stillLive, liveErr := d.principalLiveness(r.Context(), body.AccountID, body.TokenID, body.SessionID)
+		_, _, stillLive, liveErr := d.principalLiveness(r.Context(), body.AccountID, body.TokenID, body.SessionID, body.Standing)
 		if liveErr != nil {
 			code = http.StatusServiceUnavailable
 		} else if !stillLive {
+			d.standingRefusalState(w, r, body.AccountID, body.TokenID, body.SessionID, body.Standing)
 			code = http.StatusNotFound
 		}
 	}

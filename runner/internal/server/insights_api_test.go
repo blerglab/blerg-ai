@@ -234,50 +234,18 @@ func TestInsightsCountsSubagentUsageUnderItsModel(t *testing.T) {
 	}
 }
 
-func TestInsightsAnAdministratorSeesEverythingButNotPrivateSessionsByName(t *testing.T) {
+func TestInsightsAdministratorStaysInOwnScope(t *testing.T) {
 	f := newInsightsFixture(t)
 	admin := f.mint("root", "session.start", insightsAdminCap)
-	r := f.insights(t, "/api/insights?range=7d", admin)
-	if r.Scope != "all" || !r.IsAdmin {
-		t.Fatalf("scope/admin = %s/%v", r.Scope, r.IsAdmin)
-	}
-	if r.Sessions.Started != 3 {
-		t.Errorf("started = %d, want all 3", r.Sessions.Started)
-	}
-	// the private session's tokens are in the totals (7M input from bob's cron session)...
-	if r.Tokens.Totals.Input != 110+1_000_000+7_000_000 {
-		t.Errorf("total input = %d, want the private session's tokens included", r.Tokens.Totals.Input)
-	}
-	// ...but it is not named anywhere
-	raw, _ := json.Marshal(r)
-	if strings.Contains(string(raw), f.ids.bobPrivate) {
-		t.Error("the private session's id appears in the administrator's report")
-	}
-	for _, s := range r.Tokens.TopSessions {
-		if s.SessionID == f.ids.bobPrivate {
-			t.Error("top sessions names a private session")
+	for _, query := range []string{"", "&scope=all", "&scope=mine"} {
+		r := f.insights(t, "/api/insights?range=7d"+query, admin)
+		if r.Scope != "mine" || !r.IsAdmin || r.Sessions.Started != 0 || r.Tokens.Totals.Input != 0 {
+			t.Fatalf("admin scope: %+v", r)
 		}
 	}
-	for _, s := range r.Startup.Slowest {
-		if s.SessionID == f.ids.bobPrivate {
-			t.Error("slowest starts names a private session")
-		}
-	}
-	// the owner sees their own private session by name
-	own := f.insights(t, "/api/insights?range=7d", f.mint("bob", "session.start"))
-	found := false
-	for _, s := range own.Tokens.TopSessions {
-		if s.SessionID == f.ids.bobPrivate {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("bob should see his own private session in his top sessions")
-	}
-	// an administrator can ask for their own view
-	mine := f.insights(t, "/api/insights?range=7d&scope=mine", admin)
-	if mine.Scope != "mine" || mine.Sessions.Started != 0 || mine.Tokens.Totals.Turns != 0 {
-		t.Errorf("scope=mine for an admin with no sessions = %+v", mine.Sessions)
+	own := f.insights(t, "/api/insights", f.mint("bob", "session.start"))
+	if own.Sessions.Started != 2 {
+		t.Fatalf("own sessions: %d", own.Sessions.Started)
 	}
 }
 
@@ -523,4 +491,118 @@ func TestPromEscapingAndFormatting(t *testing.T) {
 		t.Errorf("promFloat = %q", got)
 	}
 	_ = fmt.Sprint()
+}
+
+func TestInsightsWorkspaceScopeAndAuthorization(t *testing.T) {
+	f := newInsightsFixture(t)
+	alice := f.mint("alice", "session.start")
+	r := f.insights(t, "/api/insights?workspace="+f.ids.aliceA, alice)
+	if r.Sessions.Started != 1 || r.Tokens.Totals.Input != 110 {
+		t.Fatalf("workspace report: %+v", r)
+	}
+	for _, token := range []string{f.mint("bob", "session.start"), f.mint("root", "session.start", insightsAdminCap)} {
+		if code, _ := f.get(t, "/api/insights?workspace="+f.ids.aliceA, token); code != 404 {
+			t.Fatalf("foreign workspace status = %d", code)
+		}
+	}
+	admin := f.insights(t, "/api/insights?scope=all", f.mint("root", "session.start", insightsAdminCap))
+	if admin.Sessions.Started != 0 || admin.Tokens.Totals.Input != 0 {
+		t.Fatal("admin escaped own scope")
+	}
+}
+
+// TestInsightsSessionsSplitByRole: BLG-466 — "started" alone conflates a workspace root (Main),
+// a person-started channel and a worker (or cron run); each must be counted by its real role for
+// the selected range, from the session tree's own fields, not a guess from today's live state.
+func TestInsightsSessionsSplitByRole(t *testing.T) {
+	f := newInsightsFixture(t)
+	ctx := t.Context()
+	const daemon = "00000000-0000-4000-8000-0000000000da"
+	now := time.Now().UTC()
+	channel := seedSession(t, f.pool, daemon, "alice", "cluster", "idle", false, now.Add(-time.Hour), nil)
+	worker := seedSession(t, f.pool, daemon, "alice", "cluster", "idle", false, now.Add(-time.Hour), nil)
+	cronRun := seedSession(t, f.pool, daemon, "alice", "cluster", "idle", false, now.Add(-time.Hour), nil)
+	if _, err := f.pool.Exec(ctx, `UPDATE sessions SET parent_session_id=$2, started_by_kind='' WHERE id=$1`, channel, f.ids.aliceA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.pool.Exec(ctx, `UPDATE sessions SET parent_session_id=$2, started_by_kind='agent' WHERE id=$1`, worker, f.ids.aliceA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.pool.Exec(ctx, `UPDATE sessions SET parent_session_id=$2, started_by_kind='cron' WHERE id=$1`, cronRun, f.ids.aliceA); err != nil {
+		t.Fatal(err)
+	}
+	r := f.insights(t, "/api/insights?workspace="+f.ids.aliceA, f.mint("alice", "session.start"))
+	// aliceA itself (no parent) is Main; channel is a person-started channel; worker and cronRun both count
+	// as workers (BLG-466 shows three roles, not four).
+	if r.Sessions.Started != 4 || r.Sessions.Main != 1 || r.Sessions.Channels != 1 || r.Sessions.Workers != 2 {
+		t.Fatalf("role split = %+v", r.Sessions)
+	}
+}
+
+// BLG-464 round 2: the chart draws one line per conversation, naming and typing each one so Main
+// can be emphasized and the rest ranked; those names must still go through the same visible()
+// privacy gate as every other per-session Insights list.
+func TestInsightsContextFillNamesRoleAndRespectsPrivacy(t *testing.T) {
+	f := newInsightsFixture(t)
+	ctx := t.Context()
+	const daemon = "00000000-0000-4000-8000-0000000000da"
+	now := time.Now().UTC()
+	channel := seedSession(t, f.pool, daemon, "alice", "cluster", "idle", false, now.Add(-time.Hour), nil)
+	if _, err := f.pool.Exec(ctx, `UPDATE sessions SET parent_session_id=$2, started_by_kind='' WHERE id=$1`, channel, f.ids.aliceA); err != nil {
+		t.Fatal(err)
+	}
+	at := now.Add(-time.Minute)
+	seedEvent(t, f.pool, f.ids.aliceA, at, "turn_done", map[string]any{"context": map[string]any{"tokens": 50000, "window": 100000}})
+	seedEvent(t, f.pool, channel, at, "turn_done", map[string]any{"context": map[string]any{"tokens": 25000, "window": 100000}})
+	seedEvent(t, f.pool, f.ids.bobPrivate, at, "turn_done", map[string]any{"context": map[string]any{"tokens": 90000, "window": 100000}})
+	r := f.insights(t, "/api/insights?workspace="+f.ids.aliceA, f.mint("alice", "session.start"))
+	byID := map[string]contextFillReading{}
+	for _, cf := range r.ContextFill {
+		byID[cf.SessionID] = cf
+	}
+	if len(byID) != 2 {
+		t.Fatalf("bob's private reading should not leak into alice's workspace report: %+v", r.ContextFill)
+	}
+	if main := byID[f.ids.aliceA]; main.Role != "main" || main.Title != "title-alice" || main.Percent != 50 {
+		t.Fatalf("main reading = %+v", main)
+	}
+	if ch := byID[channel]; ch.Role != "channel" || ch.Percent != 25 {
+		t.Fatalf("channel reading = %+v", ch)
+	}
+}
+
+func TestInsightsWorkspaceIncludesOnlyOwnedDescendants(t *testing.T) {
+	f := newInsightsFixture(t)
+	ctx := t.Context()
+	const daemon = "00000000-0000-4000-8000-0000000000da"
+	now := time.Now().UTC()
+	worker := seedSession(t, f.pool, daemon, "alice", "cluster", "idle", false, now.Add(-time.Hour), nil)
+	channel := seedSession(t, f.pool, daemon, "alice", "cluster", "idle", false, now.Add(-time.Hour), nil)
+	unrelated := seedSession(t, f.pool, daemon, "alice", "cluster", "idle", false, now.Add(-time.Hour), nil)
+	for _, link := range [][2]string{{worker, f.ids.aliceA}, {channel, worker}, {f.ids.bobB, f.ids.aliceA}} {
+		if _, err := f.pool.Exec(ctx, `UPDATE sessions SET parent_session_id=$2 WHERE id=$1`, link[0], link[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, sid := range []string{worker, channel, unrelated} {
+		seedSuccessfulStart(t, f.pool, sid, now.Add(-time.Hour))
+		seedEvent(t, f.pool, sid, now.Add(-time.Minute), "turn_done", turnDonePayload("m-one", 200, 100, 0, 0))
+	}
+	r := f.insights(t, "/api/insights?workspace="+f.ids.aliceA, f.mint("alice", "session.start"))
+	if r.Sessions.Started != 3 || r.Tokens.Totals.Input != 510 {
+		t.Fatalf("cohort totals: sessions=%d input=%d", r.Sessions.Started, r.Tokens.Totals.Input)
+	}
+	if len(r.Startup.Groups) != 1 || r.Startup.Groups[0].Attempts != 3 {
+		t.Fatalf("startup cohort: %+v", r.Startup)
+	}
+	childReport := f.insights(t, "/api/insights?workspace="+channel, f.mint("alice", "session.start"))
+	if childReport.WorkspaceID != f.ids.aliceA || childReport.Sessions.Started != 3 || childReport.Tokens.Totals.Input != 510 {
+		t.Fatalf("descendant workspace root: %+v", childReport)
+	}
+	raw, _ := json.Marshal(r)
+	for _, sid := range []string{unrelated, f.ids.bobB, f.ids.bobPrivate} {
+		if strings.Contains(string(raw), sid) {
+			t.Fatalf("foreign id %s", sid)
+		}
+	}
 }

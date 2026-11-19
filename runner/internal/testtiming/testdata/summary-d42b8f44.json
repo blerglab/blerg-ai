@@ -1,0 +1,114 @@
+{
+  "seconds": 4330.576,
+  "workers": 4,
+  "concurrent_suites": 1,
+  "changed": "2b9dfb37",
+  "complete": true,
+  "suites": [
+    {
+      "suite": "core-go",
+      "started_at": "2026-11-03T23:01:29.183847Z",
+      "seconds": 109.645,
+      "workers": 4,
+      "exit_code": 0,
+      "outcome": "pass",
+      "tests": {
+        "counts": {
+          "pass": 827,
+          "fail": 0,
+          "skip": 6
+        },
+        "slowest": [
+          {
+            "package": "github.com/blerglab/blerg-ai/core/internal/mcpconn",
+            "test": "TestOAuthRefreshResponseClasses",
+            "seconds": 4.36,
+            "result": "pass"
+          },
+          {
+            "package": "github.com/blerglab/blerg-ai/core/internal/api",
+            "test": "TestApprovedBoardCreateExchangeRefusesBoardAndMidflightRevocation",
+            "seconds": 2.37,
+            "result": "pass"
+          },
+          {
+            "package": "github.com/blerglab/blerg-ai/core/internal/api",
+            "test": "TestBoardDiscoveryRejectsMalformedAndRedirectedResponses",
+            "seconds": 2.22,
+            "result": "pass"
+          }
+        ]
+      }
+    },
+    {
+      "suite": "board-go",
+      "started_at": "2026-11-03T23:03:22.596859Z",
+      "seconds": 114.997,
+      "workers": 4,
+      "exit_code": 0,
+      "outcome": "pass",
+      "tests": {
+        "counts": {
+          "pass": 902,
+          "fail": 0,
+          "skip": 1
+        },
+        "slowest": [
+          {
+            "package": "github.com/blerglab/blerg-ai/board/internal/api",
+            "test": "TestEveryStartUsesTheBoardAutomationIdentity",
+            "seconds": 4.86,
+            "result": "pass"
+          },
+          {
+            "package": "github.com/blerglab/blerg-ai/board/internal/mcp",
+            "test": "TestDifferential_EveryToolEveryEncodingScopeAndDispatchAgree",
+            "seconds": 3,
+            "result": "pass"
+          },
+          {
+            "package": "github.com/blerglab/blerg-ai/board/internal/api",
+            "test": "TestSearchCursorPagingAndKeys",
+            "seconds": 2.55,
+            "result": "pass"
+          }
+        ]
+      }
+    },
+    {
+      "suite": "runner-go",
+      "started_at": "2026-11-03T22:17:14.332450Z",
+      "seconds": 1066.492,
+      "workers": 4,
+      "exit_code": 0,
+      "outcome": "pass",
+      "tests": {
+        "counts": {
+          "pass": 10399,
+          "fail": 0,
+          "skip": 160
+        },
+        "slowest": [
+          {
+            "package": "github.com/blerglab/blerg-ai/runner/internal/db",
+            "test": "TestBlackboardAgentFloodOneMinutePersonProgress",
+            "seconds": 60.44,
+            "result": "pass"
+          },
+          {
+            "package": "github.com/blerglab/blerg-ai/runner/internal/processcontainment",
+            "test": "TestTIDReuseAcrossPendingExec",
+            "seconds": 48.87,
+            "result": "pass"
+          },
+          {
+            "package": "github.com/blerglab/blerg-ai/runner/internal/processcontainment",
+            "test": "TestLimitHoldsThroughFreezes",
+            "seconds": 48.6,
+            "result": "pass"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+import { IconButton } from '@blerglab/chat'
 import { useEffect, useState } from 'react'
 import { apiFetch } from '../apiFetch'
 import type { ClusterStatusApi, DaemonApiInfo } from '../lib/launchCache'
@@ -46,7 +47,7 @@ export default function DelegationRulesSection() {
       const [data, machines] = await Promise.all([rules.json() as Promise<Reply>, hosts.json() as Promise<DaemonApiInfo[]>])
       if (!Array.isArray(data.rules) || !data.limits) throw new Error()
       if (active) { setReply(data); setDaemons(Array.isArray(machines) ? machines.filter(d => d.mode !== 'runner') : []); setError('') }
-    }).catch(() => { if (active) setError('Could not load session-starting rules. Try again.') })
+    }).catch(() => { if (active) setError('Could not load workspace-starting rules. Try again.') })
     return () => { active = false }
   }, [reload])
   const mutate = async (url: string, init: RequestInit) => {
@@ -55,18 +56,18 @@ export default function DelegationRulesSection() {
       const r = await apiFetch(url, init)
       if (!r.ok) throw new Error()
       setReload(n => n + 1)
-    } catch { setError('Could not save session-starting rules. Try again.') }
+    } catch { setError('Could not save workspace-starting rules. Try again.') }
     finally { setBusy(false) }
   }
-  return <section className="settings-section st-chat" aria-label="Sessions starting sessions" data-testid="delegation-rules">
-    <h3 className="settings-heading st-heading">Sessions starting sessions</h3>
-    <p className="settings-description">Choose when agents may start other sessions without asking you.</p>
-    {error && <p role="alert" className="st-note">{error} <button type="button" className="settings-action btn small" onClick={() => setReload(n => n + 1)}>Retry</button></p>}
+  return <section className="settings-section st-chat" aria-label="Starting workers" data-testid="delegation-rules">
+    <h3 className="settings-heading st-heading">Starting workers</h3>
+    <p className="settings-description">Choose when agents may start workers without asking you.</p>
+    {error && <p role="alert" className="st-note">{error} <IconButton label="Retry" onClick={() => setReload(n => n + 1)} /></p>}
     {!reply && !error && <p className="st-note">Loading rules…</p>}
     {reply && <>
-      {!reply.rules.length && <p className="st-note">No standing rules. Sessions ask before starting another session.</p>}
+      {!reply.rules.length && <p className="st-note">No standing rules. Agents ask before starting another worker.</p>}
       <ul className="st-rules">{reply.rules.map(r => <li key={r.id} className="st-rule"><span className="st-rule-text">{ENGINE_LABELS[r.engine] ?? r.engine} · {runtimeName(r.runtime)}{r.runtime === 'cluster' ? '' : ` · ${r.daemon_name || r.daemon_id}`}{r.local_only ? ' · local only' : ''} · {new Date(r.created_at).toLocaleDateString()}</span> <button type="button" className="settings-action btn small danger" disabled={busy} onClick={() => { void mutate(`/api/delegation-rules/${encodeURIComponent(r.id)}`, { method: 'DELETE' }) }}>Remove</button></li>)}</ul>
-      <p className="st-hint">Each session can run {reply.limits.per_parent_running} started sessions at once and start {reply.limits.per_parent_starts_per_hour} an hour; your account can run {reply.limits.per_account_running} at once and start {reply.limits.per_account_starts_per_hour} an hour.</p>
+      <p className="st-hint">Each agent can run {reply.limits.per_parent_running} workers at once and start {reply.limits.per_parent_starts_per_hour} an hour; your account can run {reply.limits.per_account_running} at once and start {reply.limits.per_account_starts_per_hour} an hour.</p>
       {!daemons.length && !cluster && <p className="st-note">No workstation daemon is available. Connect one to add a rule.</p>}
       <form className="st-form" onSubmit={e => {
         e.preventDefault()
@@ -78,8 +79,8 @@ export default function DelegationRulesSection() {
         <label className="settings-field st-field">Runtime <select className="settings-field select" aria-label="Rule runtime" value={effectiveRuntime} onChange={e => setRuntime(e.target.value)}><option value="docker" disabled={selectedEngine === 'openclaw' || !daemons.length}>desktop sandbox</option><option value="daemon" disabled={!daemons.length}>desktop, unsandboxed</option>{cluster && <option value="cluster">on the cluster</option>}</select></label>
         {!onCluster && <label className="settings-field st-field">Daemon <select className="settings-field select" aria-label="Rule daemon" value={effectiveDaemon} onChange={e => setDaemonId(e.target.value)}>{daemons.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}</select></label>}
         <label className="settings-field st-check"><input className="settings-toggle-control" type="checkbox" checked={localOnly} onChange={e => setLocalPreference(e.target.checked)} />Local only</label>
-        {effectiveRuntime === 'daemon' && <p className="st-hint">Unsandboxed sessions run as you with full filesystem access.</p>}
-        {onCluster && <p className="st-hint">Cluster children run as pods with your engine credentials, for any of your sessions that can start them.</p>}
+        {effectiveRuntime === 'daemon' && <p className="st-hint">Unsandboxed workspaces run as you with full filesystem access.</p>}
+        {onCluster && <p className="st-hint">Cluster children run as pods with your engine credentials, for any of your workspaces that can start them.</p>}
         <button type="submit" className="settings-action btn primary" disabled={busy || !canAdd}>Add rule</button>
       </form>
     </>}

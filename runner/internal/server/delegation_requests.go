@@ -484,6 +484,8 @@ func decidedParentProblem(parent *db.SessionRow, r db.DelegationRequest) string 
 		return msgDelegateEnded
 	case derefOrEmpty(parent.SpawningAccountID) == "" || derefOrEmpty(parent.SpawningAccountID) != r.AccountID:
 		return msgDelegateNoOwner
+	case parent.DelegationVia == "person":
+		return msgChannelNoWorkers
 	case isChildSession(parent):
 		return msgDelegateDepth
 	case !onDesktopDaemon(parent) && !onClusterParent(parent) || !requestDaemonOK(parent, r.DaemonID):

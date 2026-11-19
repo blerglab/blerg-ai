@@ -159,3 +159,31 @@ python3 -m unittest discover -s scripts -p e2e_sessions_test.py -v
 bash -n scripts/e2e-sessions.sh
 scripts/e2e-sessions.sh --help
 ```
+
+## Named credential-free regression suite (BLG-342)
+
+From `runner/`, run `GOWORK=off go run ./cmd/session-suite -logs /path/to/new-private-directory`.
+`pre_merge.py` runs this as **session-regressions** for runner Go changes and
+full/release gates. It builds its own daemon helper, limits Go package concurrency
+to two, removes its helper directory, and retains raw JSON events, stderr,
+build output and `summary.json`. The table reports each scenario's duration.
+The initial budget is five minutes per scenario (four minutes inside Go tests).
+A missing test receipt or any skip fails the suite, including absent Postgres.
+It uses `TEST_DATABASE_URL` with the normal isolated database fixtures.
+
+The suite reuses existing proofs instead of adding another engine simulation:
+process shapes, concurrent commits, idle respawn, recovery after failed freeze,
+child allocation recovery, worktree lifecycle cleanup, discard delivery retries,
+child attention and escalation recovery. These are layer **2** daemon/kernel
+implementation tests and layer **3b** server/SQL integration tests under the
+[testing audit](testing-audit.md#layer-doctrine), not layer 4 installed sessions.
+Expected injected freeze failures are asserted by their regression tests; scanning
+all their logs for the word “freeze” would incorrectly reject successful proofs.
+
+Ptrace scenarios still need the external host launcher when the session is itself
+traced; the command does not bypass containment. The pre-merge tracing preflight
+remains mandatory. Local Hermes and paid Claude/Codex installation campaigns stay
+explicitly opt-in using the existing `scripts/e2e-sessions.sh` command; this suite
+does not claim model availability or silently substitute a stub for that campaign.
+Daemon restart mid-turn across a complete installed stack remains an open layer 4
+case; allocation and failed-freeze recovery here are narrower implementation proofs.

@@ -32,10 +32,25 @@ func TestP6EnabledProductionStack(t *testing.T) {
 func TestLegacyProductionRecovery(t *testing.T) {
 	p6ProductionStack(t, os.Getenv("BLERG_HOST_HELPER_TEST_BINARY"), true)
 }
+
+func TestAgentProductionRestartResumesConversation(t *testing.T) {
+	p6ProductionStackMode(t, os.Getenv("BLERG_HOST_HELPER_TEST_BINARY"), true, true)
+}
+
 func p6ProductionStack(t *testing.T, binary string, legacy ...bool) {
-	legacyOnly := len(legacy) > 0 && legacy[0]
+	p6ProductionStackMode(t, binary, len(legacy) > 0 && legacy[0], false)
+}
+
+func p6ProductionStackMode(t *testing.T, binary string, legacyOnly, agentRestart bool) {
 	if binary == "" {
 		t.Skip("build the production daemon and supply BLERG_HOST_HELPER_TEST_BINARY")
+	}
+	image := os.Getenv("BLERG_RUNNER_SANDBOX_IMAGE")
+	if !legacyOnly {
+		if image == "" {
+			image = "blerg-runner-sandbox:latest"
+		}
+		image = p6SandboxImage(t, image)
 	}
 	if !protocol.ClusterWorkspaceEnabled || protocol.MacOSHostWorkspaceEnabled {
 		t.Fatal("cluster must ship enabled; macOS host must remain disabled")
@@ -99,7 +114,7 @@ func p6ProductionStack(t *testing.T, binary string, legacy ...bool) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
 	repos := filepath.Join(root, "repos")
-	for _, path := range []string{home, repos, filepath.Join(root, "tmux")} {
+	for _, path := range []string{home, repos} {
 		if err := os.MkdirAll(path, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -155,7 +170,7 @@ func p6ProductionStack(t *testing.T, binary string, legacy ...bool) {
 		t.Fatal(err)
 	}
 	cmd := exec.CommandContext(ctx, binary)
-	cmd.Env = []string{"TMUX_TMPDIR=" + filepath.Join(root, "tmux"), "ANTHROPIC_API_KEY=fixture-api-key", "HOME=" + home, "PATH=" + engineDir + ":" + os.Getenv("PATH"), "LANG=C.UTF-8", "TMPDIR=" + os.Getenv("TMPDIR"), daemon.DaemonStateDirEnv + "=" + filepath.Join(root, "state"), "BLERG_RUNNER_SERVER_URL=ws" + strings.TrimPrefix(server.URL, "http") + "/ws/daemon", "BLERG_RUNNER_SERVER_HTTP=" + server.URL, "BLERG_RUNNER_DAEMON_TOKEN=" + token, "BLERG_RUNNER_DESKTOP_ID=" + id, "BLERG_RUNNER_REPOS_ROOT=" + repos, "BLERG_RUNNER_DAEMON_NAME=enablement-desktop", "BLERG_RUNNER_CLAUDE_USAGE=0", "BLERG_RUNNER_SANDBOX_NETWORK=", "BLERG_RUNNER_SANDBOX_IMAGE=" + os.Getenv("BLERG_RUNNER_SANDBOX_IMAGE")}
+	cmd.Env = []string{"ANTHROPIC_API_KEY=fixture-api-key", "HOME=" + home, "PATH=" + engineDir + ":" + os.Getenv("PATH"), "LANG=C.UTF-8", "TMPDIR=" + os.Getenv("TMPDIR"), daemon.DaemonStateDirEnv + "=" + filepath.Join(root, "state"), "BLERG_RUNNER_SERVER_URL=ws" + strings.TrimPrefix(server.URL, "http") + "/ws/daemon", "BLERG_RUNNER_SERVER_HTTP=" + server.URL, "BLERG_RUNNER_DAEMON_TOKEN=" + token, "BLERG_RUNNER_DESKTOP_ID=" + id, "BLERG_RUNNER_REPOS_ROOT=" + repos, "BLERG_RUNNER_DAEMON_NAME=enablement-desktop", "BLERG_RUNNER_CLAUDE_USAGE=0", "BLERG_RUNNER_SANDBOX_NETWORK=", "BLERG_RUNNER_SANDBOX_IMAGE=" + image}
 	log, err := os.Create(filepath.Join(root, "daemon.log"))
 	if err != nil {
 		t.Fatal(err)
@@ -283,6 +298,44 @@ func p6ProductionStack(t *testing.T, binary string, legacy ...bool) {
 					return e == nil && row != nil && row.Status != "disconnected" && row.Status != "starting" && current != nil && current != previous && f.hub.FindDaemonForSession(legacyID) == current
 				})
 			}
+			if agentRestart {
+				// Exercise agent work on both sides of the real daemon restart, rather
+				// than treating a reconnect or a working owner shell as agent recovery.
+				clientID := newUUID()
+				request(t, "POST", "/api/runner/sessions/"+legacyID+"/message", map[string]string{"text": "commit both members", "client_id": clientID}, 202)
+				p6EnabledWait(t, 30*time.Second, "agent turn across daemon restart", func() bool {
+					events, err := db.ListAgentEvents(ctx, f.pool, legacyID, 0, 1000)
+					if err != nil {
+						return false
+					}
+					seen := false
+					for _, event := range events {
+						if event.Kind == "user_message" && strings.Contains(event.Payload, clientID) {
+							seen = true
+						}
+						if seen && event.Kind == "turn_done" {
+							var turn struct {
+								StopReason string `json:"stop_reason"`
+							}
+							return json.Unmarshal([]byte(event.Payload), &turn) == nil && turn.StopReason == "end_turn"
+						}
+					}
+					return false
+				})
+				for _, member := range []string{"one", "two"} {
+					work, err := os.ReadFile(filepath.Join(repos, "project", member, "synced.txt"))
+					if err != nil || strings.Count(string(work), "enabled sync\n") != attempt+1 {
+						t.Fatalf("agent work must execute once per turn in %s: %q, %v", member, work, err)
+					}
+				}
+				if attempt > 0 {
+					args, err := os.ReadFile(filepath.Join(home, "engine-invocations"))
+					if err != nil || !strings.Contains(string(args), "--resume enabled-fixture") {
+						t.Fatalf("restarted daemon did not resume the saved conversation: %s, %v", args, err)
+					}
+				}
+				continue
+			}
 			raw := request(t, "GET", "/api/sessions/"+legacyID+"/shell-capability", nil, 200)
 			var capability struct{ Available bool }
 			if json.Unmarshal(raw, &capability) != nil || !capability.Available {
@@ -332,6 +385,7 @@ func p6ProductionStack(t *testing.T, binary string, legacy ...bool) {
 				}
 			}
 			request(t, "DELETE", "/api/shells/"+shell.Handle, nil, 204)
+
 		}
 		request(t, "DELETE", "/api/sessions/"+legacyID, nil, 204)
 		p6EnabledWait(t, 10*time.Second, "legacy session stop", func() bool {
@@ -381,6 +435,26 @@ func p6ProductionStack(t *testing.T, binary string, legacy ...bool) {
 			}
 			sid := launch.SessionID
 			sessions = append(sessions, sid)
+			t.Cleanup(func() {
+				if !t.Failed() {
+					return
+				}
+				call, stop := context.WithTimeout(context.Background(), 5*time.Second)
+				defer stop()
+				row, err := db.GetSession(call, f.pool, sid)
+				if err == nil && row != nil {
+					t.Logf("runtime status=%s", row.Status)
+					if row.ErrorReason != nil {
+						t.Logf("runtime failure: %s", *row.ErrorReason)
+					}
+				}
+				_, binding, err := db.GetWorkspaceRuntime(call, f.pool, sid)
+				t.Logf("runtime binding=%+v error=%v", binding, err)
+				w, err := db.GetSessionWorkspace(call, f.pool, sid)
+				if err == nil && w != nil {
+					t.Logf("member outcomes=%+v", w.Results)
+				}
+			})
 			p6EnabledWait(t, 60*time.Second, "prepared runtime", func() bool {
 				_, binding, e := db.GetWorkspaceRuntime(ctx, f.pool, sid)
 				row, rowErr := db.GetSession(ctx, f.pool, sid)
@@ -468,19 +542,32 @@ const p6EnabledEngine = `#!/bin/sh
 set -e
 if [ "$1" = "--version" ]; then echo '2.1.47 (Claude Code)';exit;fi
 if [ "$1" = "--help" ];then echo '--include-partial-messages --forward-subagent-text';exit;fi
+{ mkdir -p "$HOME/.claude/projects/fixture" && true > "$HOME/.claude/projects/fixture/enabled-fixture.jsonl" && printf '%s\n' "$*" >> "$HOME/engine-invocations"; } 2>/dev/null || true
 base="$PWD"
 if [ -d "$base/../two/.git" ];then base="$base/..";fi
-for member in one two;do
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"enabled-fixture"}'
+while IFS= read -r message;do
+case "$message" in *'"type":"control_request"'*)
+ request=$(printf '%s' "$message" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+ printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"mcpServers":[]}}}\n' "$request"
+ if [ -z "$settled" ];then settled=1;printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"enabled-fixture","result":""}';fi
+ continue;;esac
+case "$message" in *'"type":"user"'*) ;; *) continue ;; esac
+printf '%s\n' "$message" | sed 's/^{/{"isReplay":true,/'
+members='one two'
+if [ -d "$base/.workspace/two/.git" ];then members='. .workspace/two';fi
+for member in $members;do
+ [ -d "$base/$member" ] || continue
  cd "$base/$member"
  printf 'enabled sync\n' >> synced.txt
  git add synced.txt
  git -c user.name=Example -c user.email=developer@example.com commit -qm enabled
  done
 cat <<'JSON'
-{"type":"system","subtype":"init","session_id":"enabled-fixture"}
 {"type":"assistant","message":{"content":[{"type":"text","text":"Committed both members."}]}}
 {"type":"result","subtype":"success","is_error":false,"session_id":"enabled-fixture","result":"Committed both members."}
 JSON
+done
 `
 
 func p6EnabledGit(t *testing.T, path string, args ...string) string {

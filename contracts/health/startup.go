@@ -21,8 +21,10 @@ const SustainedFailures = 5
 // Gate serves liveness immediately, and refuses traffic until initialization completes.
 // Its zero value is ready for use.
 type Gate struct {
-	handler  atomic.Pointer[http.Handler]
-	draining atomic.Bool
+	handler      atomic.Pointer[http.Handler]
+	draining     atomic.Bool
+	warning      atomic.Pointer[string]
+	warningCheck atomic.Pointer[func() string]
 
 	mu       sync.Mutex
 	failures int
@@ -49,7 +51,21 @@ func (g *Gate) notReady() string {
 
 func (g *Gate) SetHandler(handler http.Handler) { g.handler.Store(&handler) }
 
+// SetWarning reports a degraded optional feature without failing application readiness.
+func (g *Gate) SetWarning(cause string)             { g.warning.Store(&cause) }
+func (g *Gate) SetWarningCheck(check func() string) { g.warningCheck.Store(&check) }
+
 func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/readyz" {
+		if warning := g.warning.Load(); warning != nil && *warning != "" {
+			w.Header().Set("X-Blerg-Readiness-Warning", *warning)
+		}
+		if check := g.warningCheck.Load(); check != nil {
+			if cause := (*check)(); cause != "" {
+				w.Header().Set("X-Blerg-Readiness-Warning", cause)
+			}
+		}
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/livez" {
 		_, _ = w.Write([]byte("ok"))
 		return

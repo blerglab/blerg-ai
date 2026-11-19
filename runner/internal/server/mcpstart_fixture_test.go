@@ -271,7 +271,12 @@ const mcpGatewayURL = "http://gateway.internal:9090"
 
 func newMCPFx(t *testing.T) *mcpFx {
 	t.Helper()
-	fx := &mcpFx{t: t, pool: runnerContractPool(t), k8s: &fakeK8s{}, up: newMCPTestUpstream(t), connID: newUUID()}
+	return newMCPFxWithPool(t, runnerContractPool(t))
+}
+
+func newMCPFxWithPool(t *testing.T, pool *pgxpool.Pool) *mcpFx {
+	t.Helper()
+	fx := &mcpFx{t: t, pool: pool, k8s: &fakeK8s{}, up: newMCPTestUpstream(t), connID: newUUID()}
 	fx.hub = NewHub()
 	jm := newTestJobManager(t, fx.k8s)
 	jm.GitHubOrg = "acme"
@@ -283,6 +288,7 @@ func newMCPFx(t *testing.T) *mcpFx {
 	}
 	fx.dc = &DaemonConn{ID: daemonID, Name: "laptop", ReposRoot: "/repos", send: make(chan []byte, 8)}
 	fx.dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	fx.dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	fx.dc.SetMCPGateway(true)
 	fx.dc.SetRestrictTools(true)
 	fx.dc.SetSandboxAvailable(true)

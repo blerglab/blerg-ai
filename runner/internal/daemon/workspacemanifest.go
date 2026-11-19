@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/workbranch"
 )
 
 const privateWorkspaceVersion = 2
@@ -57,6 +58,7 @@ type WorkspaceContainer interface {
 }
 
 type WorkspaceSource struct {
+	Base           string
 	CommonPath     string
 	RootIdentity   protocol.WorkspaceRoot
 	CommonIdentity protocol.WorkspaceRoot
@@ -88,6 +90,11 @@ type workspacePrivateMember struct {
 }
 
 type workspacePrivateManifest struct {
+	HostKeeperNeverOpened    bool                              `json:"host_keeper_never_opened,omitempty"`
+	AuthorityRefused         bool                              `json:"authority_refused,omitempty"`
+	WorkBranch               string                            `json:"work_branch,omitempty"`
+	Membership               *workspaceMembershipJournal       `json:"membership,omitempty"`
+	ReservedRetired          []workspaceReservedRetired        `json:"reserved_retired,omitempty"`
 	HostChild                bool                              `json:"host_child"`
 	HostChildren             []hostChildAllocation             `json:"host_children,omitempty"`
 	HostHelpersJournaled     bool                              `json:"host_helpers_journaled"`
@@ -119,6 +126,9 @@ type workspacePrivateManifest struct {
 	AllocationReleasePending bool                              `json:"allocation_release_pending"`
 	Sources                  []WorkspaceSource                 `json:"sources"`
 	WorkerRoot               protocol.WorkspaceRoot            `json:"worker_root"`
+	StorageAcknowledged      bool                              `json:"storage_acknowledged,omitempty"`
+	StorageReleasePreview    *protocol.WorkspaceStoragePreview `json:"storage_release_preview,omitempty"`
+	StorageConfirmation      string                            `json:"storage_confirmation,omitempty"`
 	StorageReleased          bool                              `json:"storage_released"`
 	RuntimeRoot              protocol.WorkspaceRoot            `json:"runtime_root"`
 	RuntimeIdentity          string                            `json:"runtime_identity"`
@@ -136,13 +146,16 @@ type workspacePrivateManifest struct {
 // LocalWorkspace exposes no mutable manifest state. One mutex serializes sync,
 // stop, recovery and deletion, including the runtime adapter's operations.
 type LocalWorkspace struct {
-	host      *hostWorkspace
-	authorize func(context.Context) error
-	mu        *sync.Mutex
-	state     workspacePrivateManifest
-	record    string
-	storage   WorkspaceStorage
-	runtime   WorkspaceContainer
+	keeperWaitSince time.Time // guarded by mu; a restart starts a fresh bounded observation wait
+	cloneOnly       bool      // allocation-only worker; source pins are checked by the daemon
+	host            *hostWorkspace
+	authorize       func(context.Context) error
+	mu              *sync.Mutex
+	state           workspacePrivateManifest
+	record          string
+	storage         WorkspaceStorage
+	runtime         WorkspaceContainer
+	reader          *boundWorkspaceExplorer
 }
 
 // Admission precedes registry/P2 locks while a durable handoff is created.
@@ -241,7 +254,7 @@ func PrepareLocalWorkspace(ctx context.Context, session string, launch protocol.
 	budget := protocol.DefaultWorkspaceBudget()
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(budget.PrepareSeconds)*time.Second)
 	defer cancel()
-	w := &LocalWorkspace{mu: mu, record: record, storage: storage, state: workspacePrivateManifest{Version: privateWorkspaceVersion, Session: session, Launch: launch, Sources: sources, Preparing: true}}
+	w := &LocalWorkspace{mu: mu, record: record, storage: storage, state: workspacePrivateManifest{Version: privateWorkspaceVersion, Session: session, WorkBranch: sandboxBranch(session), Launch: launch, Sources: sources, Preparing: true}}
 	if err := w.save(); err != nil {
 		return nil, err
 	}
@@ -254,6 +267,7 @@ func PrepareLocalWorkspace(ctx context.Context, session string, launch protocol.
 	}
 	root, err := storage.Allocate(ctx, session, budget)
 	if err != nil {
+		logDaemonFailure("workspace quota allocation", err)
 		return nil, fmt.Errorf("workspace quota allocation: %w", err)
 	}
 	w.state.Root = root
@@ -387,6 +401,9 @@ func recoverLocalWorkspace(ctx context.Context, session string, launch protocol.
 	if err := launch.Validate(); err != nil {
 		return nil, err
 	}
+	if !workbranch.Valid(workbranch.Effective(state.Session, state.WorkBranch)) {
+		return nil, errors.New("invalid recorded work branch")
+	}
 	if state.Version != privateWorkspaceVersion || state.Session != session || !reflect.DeepEqual(state.Launch, launch) || len(state.Members) > len(launch.Members) || (!state.Preparing && len(state.Members) != len(launch.Members)) {
 		return nil, errors.New("private workspace launch mismatch")
 	}
@@ -404,6 +421,21 @@ func recoverLocalWorkspace(ctx context.Context, session string, launch protocol.
 	if state.ActiveWorker != "" {
 		if err := w.worker().Cleanup(ctx, state.ActiveWorker, state.WorkerContext); err != nil {
 			return nil, err
+		}
+		if _, dockerWorker := w.worker().(dockerWorkspaceWorker); dockerWorker && !state.Host && !state.Preparing {
+			if err := storage.Validate(ctx, session, state.Root, protocol.DefaultWorkspaceBudget()); err != nil {
+				return nil, err
+			}
+			actual, err := w.allocationIdentity(ctx)
+			if err != nil || actual != state.RootIdentity {
+				return nil, errors.New("staging cleanup allocation changed")
+			}
+			cleanup, cancel := context.WithTimeout(ctx, workspaceWorkerCleanup)
+			_, cleanupErr := w.worker().Run(cleanup, workspaceWorkerRequest{Action: "stage-clean", State: state})
+			cancel()
+			if cleanupErr != nil {
+				return nil, cleanupErr
+			}
 		}
 		w.state.ActiveWorker = ""
 		if err := w.save(); err != nil {
@@ -557,7 +589,7 @@ func (w *LocalWorkspace) validateAllocation(ctx context.Context) error {
 		return errors.New("workspace preparation incomplete")
 	}
 	for i, m := range w.state.Members {
-		if !reflect.DeepEqual(m.Member, w.state.Launch.Members[i]) || m.Clone != filepath.Join(w.state.Root, filepath.FromSlash(m.Member.Path)) || m.Source.Repo == "" || m.Result.MemberID != m.Member.ID || m.Result.LaunchGeneration != w.state.Launch.LaunchGeneration || m.Result.Branch != sandboxBranch(w.state.Session) {
+		if !reflect.DeepEqual(m.Member, w.state.Launch.Members[i]) || m.Clone != filepath.Join(w.state.Root, filepath.FromSlash(m.Member.Path)) || m.Source.Repo == "" || m.Result.MemberID != m.Member.ID || m.Result.LaunchGeneration != w.state.Launch.LaunchGeneration || m.Result.Branch != w.branch() {
 			return errors.New("private member binding mismatch")
 		}
 	}
@@ -578,13 +610,16 @@ func (w *LocalWorkspace) validateMember(m workspacePrivateMember) error {
 		return nil
 	}
 
-	for _, pin := range []struct {
+	for i, pin := range []struct {
 		path     string
 		identity protocol.WorkspaceRoot
 	}{
 		{m.Clone, m.CloneIdentity}, {filepath.Join(m.Clone, ".git"), m.GitIdentity},
 		{filepath.Join(m.Clone, ".git", "objects"), m.ObjectsIdentity}, {m.Source.Repo, m.SourceIdentity}, {m.Source.Objects, m.SourceObjectsIdentity}, {m.SourceCommon, m.SourceCommonIdentity},
 	} {
+		if w.cloneOnly && i >= 3 {
+			continue
+		}
 		id, err := workspaceDirectoryIdentity(pin.path)
 		if err != nil || id != pin.identity {
 			return errors.New("workspace member directory replaced or unavailable")
@@ -905,6 +940,11 @@ type workspaceEnvelope struct {
 }
 
 func workspaceManifestKey() ([]byte, error) {
+	return workspaceManifestKeyWithStat(os.Lstat)
+}
+
+// The host owns this check: Docker Desktop rewrites bind-mounted UID/GID.
+func workspaceManifestKeyWithStat(lstat func(string) (os.FileInfo, error)) ([]byte, error) {
 	root := sandboxCloneRoot()
 	if root == "" {
 		return nil, errors.New("workspace private state unavailable")
@@ -931,7 +971,7 @@ func workspaceManifestKey() ([]byte, error) {
 	if !os.IsExist(err) {
 		return nil, err
 	}
-	st, err := os.Lstat(name)
+	st, err := lstat(name)
 	if err != nil || !safeSandboxGitInfo(st, false) || st.Mode().Perm() != 0o600 || st.Size() != 32 {
 		return nil, errors.New("workspace integrity authority unavailable")
 	}
@@ -1078,7 +1118,7 @@ func (w *LocalWorkspace) resumePreparation(ctx context.Context) error {
 			return errors.New("source/common identity changed or duplicated")
 		}
 		commonSeen[m.SourceCommon] = true
-		m.Result = protocol.WorkspaceMemberResult{WorkspaceMemberRef: protocol.WorkspaceMemberRef{MemberID: source.Member.ID, LaunchGeneration: w.state.Launch.LaunchGeneration}, Base: m.Source.Base, Head: m.Source.Base, Branch: sandboxBranch(w.state.Session), Pending: true, RecoveryLocation: clone}
+		m.Result = protocol.WorkspaceMemberResult{WorkspaceMemberRef: protocol.WorkspaceMemberRef{MemberID: source.Member.ID, LaunchGeneration: w.state.Launch.LaunchGeneration}, Base: m.Source.Base, Head: m.Source.Base, Branch: w.branch(), Pending: true, RecoveryLocation: clone}
 		w.state.WorkerRoot = response.State.WorkerRoot
 		w.state.Members = append(w.state.Members, m)
 		if err := w.save(); err != nil {
@@ -1156,4 +1196,8 @@ func (w *LocalWorkspace) allocationIdentity(ctx context.Context) (protocol.Works
 		return s.Identity(ctx, w.state.Session, w.state.Root)
 	}
 	return workspaceDirectoryIdentity(w.state.Root)
+}
+
+func (w *LocalWorkspace) branch() string {
+	return workbranch.Effective(w.state.Session, w.state.WorkBranch)
 }

@@ -131,3 +131,55 @@ func TestClusterMemberPaths(t *testing.T) {
 		t.Fatal("desktop single repository changed", got)
 	}
 }
+
+func TestAdditionPath(t *testing.T) {
+	member := func(path string) protocol.WorkspaceMember { return protocol.WorkspaceMember{Path: path} }
+	for _, tc := range []struct {
+		name     string
+		existing []protocol.WorkspaceMember
+		source   protocol.DiscoverySource
+		want     string
+		ok       bool
+	}{
+		{name: "named folder", existing: []protocol.WorkspaceMember{member("api")}, source: protocol.DiscoverySource{ID: "id", Name: "web"}, want: "web", ok: true},
+		{name: "case collision keeps the existing path", existing: []protocol.WorkspaceMember{member("App")}, source: protocol.DiscoverySource{ID: "id", Name: "app"}, want: "app-2", ok: true},
+		{name: "virtual folder of a structure layout", existing: []protocol.WorkspaceMember{member("dev/api")}, source: protocol.DiscoverySource{ID: "id", Name: "dev"}, want: "dev-2", ok: true},
+		{name: "unsafe name uses the stable id", existing: []protocol.WorkspaceMember{member("api")}, source: protocol.DiscoverySource{ID: "id", Name: "../bad"}, want: "id", ok: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := AdditionPath(tc.existing, tc.source)
+			if got != tc.want || ok != tc.ok {
+				t.Fatalf("path=%q ok=%v; want %q %v", got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+func TestAdditionPathBesideARootMemberUsesTheReservedFolder(t *testing.T) {
+	root := protocol.WorkspaceMember{ID: "root", Path: "."}
+	taken := protocol.WorkspaceMember{ID: "two", Path: ".workspace/two"}
+	cases := []struct {
+		name     string
+		existing []protocol.WorkspaceMember
+		source   protocol.DiscoverySource
+		want     string
+	}{
+		{"plain", []protocol.WorkspaceMember{root}, protocol.DiscoverySource{ID: "abc", Name: "two"}, ".workspace/two"},
+		{"same name gets a suffix", []protocol.WorkspaceMember{root, taken}, protocol.DiscoverySource{ID: "abc", Name: "two"}, ".workspace/two-2"},
+		{"case-folded collision", []protocol.WorkspaceMember{root, taken}, protocol.DiscoverySource{ID: "abc", Name: "TWO"}, ".workspace/TWO-2"},
+		{"traversal falls back to the id", []protocol.WorkspaceMember{root}, protocol.DiscoverySource{ID: "abc", Name: ".."}, ".workspace/abc"},
+		{"a protected name falls back to the id", []protocol.WorkspaceMember{root}, protocol.DiscoverySource{ID: "abc", Name: ".git"}, ".workspace/abc"},
+		{"a separator falls back to the id", []protocol.WorkspaceMember{root}, protocol.DiscoverySource{ID: "abc", Name: "a/b"}, ".workspace/abc"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := AdditionPath(tc.existing, tc.source)
+			if !ok || got != tc.want {
+				t.Fatalf("path=%q ok=%v; want %q", got, ok, tc.want)
+			}
+			if !protocol.ReservedMemberPath(got) {
+				t.Fatalf("%q is not a reserved member path", got)
+			}
+		})
+	}
+}

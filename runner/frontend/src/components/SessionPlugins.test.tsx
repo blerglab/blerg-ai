@@ -43,7 +43,7 @@ describe('session plugin controls', () => {
     apiFetch.mockImplementation((_url: string, init?: RequestInit) =>
       init?.method === 'POST' ? reply({ id: 'p1', state: 'executing' }, 202) : reply(settings),
     )
-    fireEvent.click(screen.getByRole('button', { name: 'Add to session' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add to workspace' }))
     await waitFor(() =>
       expect(apiFetch).toHaveBeenCalledWith(
         '/api/sessions/s1/plugins',
@@ -54,7 +54,7 @@ describe('session plugin controls', () => {
     )
   })
   it.each([
-    { sessionApply: true, scope: 'session', action: 'Add to session' },
+    { sessionApply: true, scope: 'session', action: 'Add to workspace' },
     { sessionApply: true, scope: 'always', action: 'Save always on' },
     { sessionApply: false, scope: 'always', action: 'Save always on' },
   ])('submits native Codex sources for $scope with live loading $sessionApply', async ({ sessionApply, scope, action }) => {
@@ -85,7 +85,7 @@ describe('session plugin controls', () => {
     const marketplace = await screen.findByLabelText('Marketplace')
     fireEvent.change(marketplace, { target: { value: source } })
     fireEvent.change(screen.getByLabelText('Plugin name'), { target: { value: 'helper' } })
-    const add = screen.getByRole('button', { name: 'Add to session' })
+    const add = screen.getByRole('button', { name: 'Add to workspace' })
     expect(add).toBeDisabled()
     expect(add).toHaveAccessibleDescription(reason)
     expect(screen.getByText(reason)).toBeVisible()
@@ -97,9 +97,9 @@ describe('session plugin controls', () => {
     const view = render(<PluginAddForm model={model} />)
     fireEvent.change(screen.getByLabelText('Marketplace'), { target: { value: 'codex:openai-curated' } })
     fireEvent.change(screen.getByLabelText('Plugin name'), { target: { value: 'helper' } })
-    expect(screen.getByRole('button', { name: 'Add to session' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Add to workspace' })).toBeEnabled()
     view.rerender(<PluginAddForm model={{ ...model, data: { ...model.data, any_marketplace: false } }} />)
-    const add = screen.getByRole('button', { name: 'Add to session' })
+    const add = screen.getByRole('button', { name: 'Add to workspace' })
     expect(add).toBeDisabled()
     expect(add).toHaveAccessibleDescription('This marketplace is not allowed by this install.')
     expect(screen.getByText('This marketplace is not allowed by this install.')).toBeVisible()
@@ -117,7 +117,7 @@ describe('session plugin controls', () => {
     )
     render(<Harness />)
     fireEvent.click(await screen.findByRole('button', { name: 'Add plugin or skill' }))
-    expect(screen.getByRole('option', { name: 'This session only' })).toBeDisabled()
+    expect(screen.getByRole('option', { name: 'This workspace only' })).toBeDisabled()
     expect(screen.getByText('Changes apply to new Codex sessions.')).toBeInTheDocument()
     expect(screen.getByLabelText('Apply plugin')).toHaveValue('always')
     expect(screen.getByRole('button', { name: 'Save always on' })).toBeDisabled()
@@ -192,7 +192,7 @@ describe('plugin scope and chat privacy', () => {
         }),
       ),
     )
-    expect(await screen.findByRole('status')).toHaveTextContent('Saved for new sessions')
+    expect(await screen.findByRole('status')).toHaveTextContent('Saved for new workspaces')
   })
   it('keeps a failed human add editable and never reports it as applied', async () => {
     apiFetch.mockImplementation((_url: string, init?: RequestInit) =>
@@ -201,10 +201,10 @@ describe('plugin scope and chat privacy', () => {
     render(<Harness />)
     fireEvent.click(await screen.findByRole('button', { name: 'Add plugin or skill' }))
     fireEvent.change(await screen.findByLabelText('Plugin name'), { target: { value: 'helper' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Add to session' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add to workspace' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('not accepted')
     expect(screen.getByLabelText('Plugin name')).toHaveValue('helper')
-    expect(screen.queryByText('Loaded in this session.')).toBeNull()
+    expect(screen.queryByText('Loaded in this workspace.')).toBeNull()
   })
 })
 
@@ -255,8 +255,8 @@ describe('wildcard marketplace policy', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Add plugin or skill' }))
     const source = await screen.findByLabelText('Marketplace')
     fireEvent.change(screen.getByLabelText('Plugin name'), { target: { value: 'helper' } })
-    expect(screen.getByRole('button', { name: 'Add to session' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Add to workspace' })).toBeDisabled()
     fireEvent.change(source, { target: { value: 'example/plugins' } })
-    expect(screen.getByRole('button', { name: 'Add to session' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Add to workspace' })).toBeEnabled()
   })
 })

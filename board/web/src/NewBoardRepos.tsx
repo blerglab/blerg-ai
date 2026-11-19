@@ -43,7 +43,7 @@ export function NewBoardRepos({ value, onChange }: { value: string[]; onChange: 
   };
   return (
     <fieldset className="new-board-repos">
-      <legend>Repositories <span className="dim">(optional; the first is where the board's sessions start)</span></legend>
+      <legend>Repositories <span className="dim">(optional; the first is where the board's workspaces start)</span></legend>
       {value.length > 0 && (
         <ol className="new-board-picked" aria-label="Chosen repositories">
           {value.map((r, i) => (

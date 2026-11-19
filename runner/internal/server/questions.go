@@ -22,7 +22,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -34,37 +36,61 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// questionOwners maps each session of rows that holds an open no_wait question to its owner (the
-// spawning account), "" when it has none. Read once per session.
+// anySignedInPerson owns an escalation of a session started with a runner key: nobody holds it
+// alone, and actorDecidesForSession lets any signed-in person who can see it answer.
+const anySignedInPerson = "\x00any"
+
+// questionOwners maps each child or no_wait ask to its owner. Cache session lookups,
+// but decide per message: a session can have both blocking and no_wait questions.
 func questionOwners(ctx context.Context, pool *pgxpool.Pool, rows []db.MessageRow) map[string]string {
+	return questionOwnersWithLookups(pool, rows, func(id string) (*db.SessionRow, error) { return db.GetSession(ctx, pool, id) }, func(id string) (bool, error) { return failureAlertMessage(ctx, pool, id) })
+}
+
+func questionOwnersWithLookups(pool *pgxpool.Pool, rows []db.MessageRow, session func(string) (*db.SessionRow, error), failureAlert func(string) (bool, error)) map[string]string {
 	owners := map[string]string{}
 	if pool == nil {
 		return owners
 	}
+	sessions := map[string]*db.SessionRow{}
 	for _, r := range rows {
-		if !r.NoWait || r.Kind != "ask" {
+		if r.Kind != "ask" {
 			continue
 		}
-		if _, ok := owners[r.SessionID]; ok {
-			continue
+		sess, known := sessions[r.SessionID]
+		if !known {
+			var err error
+			sess, err = session(r.SessionID)
+			if err != nil {
+				sess = nil
+			}
+			sessions[r.SessionID] = sess
 		}
-		sess, err := db.GetSession(ctx, pool, r.SessionID)
-		owners[r.SessionID] = ""
-		if err == nil && sess != nil {
-			owners[r.SessionID] = derefOrEmpty(sess.SpawningAccountID)
+		alert := false
+		if sess != nil && derefOrEmpty(sess.ParentSessionID) != "" && !r.ChildEscalated {
+			alert, _ = failureAlert(r.ID)
+		}
+		switch {
+		case questionCallsOwner(sess, r) || (alert && sess != nil):
+			owners[r.ID] = derefOrEmpty(sess.SpawningAccountID)
+		case sess != nil && !sess.Private && (r.ChildEscalated || (!hasCoordinator(sess) && r.PersonRequired)) && derefOrEmpty(sess.SpawningAccountID) == "":
+			owners[r.ID] = anySignedInPerson
 		}
 	}
 	return owners
 }
 
-// messageInfosFor is the messages as viewer sees them: a no_wait question is answerable only by
-// its session's owner (account "" is nobody).
+// messageInfosFor marks child and no_wait questions for the owner's global Needs you. Only
+// the session's owner receives that entry (account "" is nobody).
 func messageInfosFor(ctx context.Context, pool *pgxpool.Pool, rows []db.MessageRow, viewer string) []protocol.MessageInfo {
 	owners := questionOwners(ctx, pool, rows)
+	return messageInfosWithOwners(rows, viewer, owners)
+}
+
+func messageInfosWithOwners(rows []db.MessageRow, viewer string, owners map[string]string) []protocol.MessageInfo {
 	out := make([]protocol.MessageInfo, 0, len(rows))
 	for _, r := range rows {
 		info := messageRowToInfo(r)
-		if r.NoWait && viewer != "" && owners[r.SessionID] == viewer {
+		if r.Kind == "ask" && viewer != "" && (owners[r.ID] == viewer || owners[r.ID] == anySignedInPerson) {
 			info.Answerable = true
 		}
 		out = append(out, info)
@@ -109,11 +135,26 @@ func questionAnswerText(row db.MessageRow, answer string) string {
 	return "Answer to your question " + row.ID + " (" + questionQuote(row) + "): " + answer
 }
 
+// childAnswerLabel tells a child's model who answered. A top-level session has
+// only its person, so its answers stay unlabelled.
+func childAnswerLabel(ctx context.Context, pool *pgxpool.Pool, row db.MessageRow) string {
+	session, err := db.GetSession(ctx, pool, row.SessionID)
+	if err != nil || session == nil || derefOrEmpty(session.ParentSessionID) == "" {
+		return ""
+	}
+	if strings.HasPrefix(row.AnsweredBy, "session:") {
+		return "[Answered by the parent session.]\n"
+	}
+	if strings.HasPrefix(row.AnsweredBy, "person:") {
+		return "[Answered by the person.]\n"
+	}
+	return "[Answer source not recorded.]\n"
+}
+
 // questionQuote is the question as it is quoted back: one line, at most questionQuoteMax.
 func questionQuote(row db.MessageRow) string { return quotedLine(row.Body, questionQuoteMax) }
 
-// SetQuestionAnswered registers what the hub does once a question the agent did not wait on is
-// answered (the API's deliverQuestionAnswer). Called once, by NewAPI.
+// SetQuestionAnswered registers committed question delivery and parent notices.
 func (h *Hub) SetQuestionAnswered(fn func(row db.MessageRow, answer, answerer string)) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -138,11 +179,10 @@ func (h *Hub) QuestionSessionEnded(sessionID string) {
 	}
 }
 
-// QuestionAnswered hands a just-answered (or dismissed) question to the registered delivery. A no-op
-// for an ask the agent waits on (its CLI reads the answer), an empty answer (closed, not answered,
-// unless the person dismissed it) or without a registered delivery.
+// QuestionAnswered hands a committed answer, dismissal, or withdrawal to delivery.
+// Blocking asks use the poll; their parent still receives a resolution notice.
 func (h *Hub) QuestionAnswered(row db.MessageRow, answer, answerer string) {
-	if !row.NoWait || row.Kind != "ask" || (answer == "" && !row.Dismissed) {
+	if row.Kind != "ask" {
 		return
 	}
 	h.mu.RLock()
@@ -158,10 +198,47 @@ func (h *Hub) QuestionAnswered(row db.MessageRow, answer, answerer string) {
 // (replayed when the daemon reconnects) for an agent session whose host takes receipts; a note
 // reply for a terminal session.
 func (a *API) deliverQuestionAnswer(row db.MessageRow, answer, answerer string) {
+	if a.dbPool != nil && !row.NoWait && !row.CLIWaitReleased {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := db.ReleaseExpiredCLIWaiters(ctx, a.dbPool, row.SessionID); err != nil {
+			failurelog.Default.Event("cli_waiter_release", slog.LevelWarn, "component", "runner", "cause", failurelog.Cause(err))
+			return
+		}
+		current, err := db.GetMessage(ctx, a.dbPool, row.ID)
+		if err != nil {
+			failurelog.Default.Event("cli_waiter_read", slog.LevelWarn, "component", "runner", "cause", failurelog.Cause(err))
+			return
+		}
+		if current != nil {
+			row.CLIWaitReleased = current.CLIWaitReleased
+		}
+	}
+
+	relay := row.NoWait || row.CLIWaitReleased
+	canceled := false
+	if a.dbPool != nil && relay && row.Status == "answered" && answer == "" && !row.Dismissed {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		receipt, bound, err := a.boundReceipt(ctx, row.ID)
+		cancel()
+		if err != nil {
+			failurelog.Default.Event("bound_ask_receipt_delivery", slog.LevelWarn, "component", "runner", "cause", failurelog.Cause(err))
+			return
+		}
+		canceled = bound && receipt["status"] == "canceled" && receipt["cause"] != nil
+	}
+	if !row.ChildEscalated && row.Status != "withdrawn" && (!relay || (answer == "" && !row.Dismissed && !canceled)) {
+		return
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		a.sendQuestionAnswer(ctx, row, answer, answerer)
+		if err := a.notifyResolvedChildQuestionParent(ctx, row.ID); err != nil {
+			log.Printf("child question resolution %s: %v", row.ID, err)
+		}
+		if relay && row.Status != "withdrawn" && (answer != "" || row.Dismissed || canceled) {
+			a.sendQuestionAnswer(ctx, row, answer, answerer)
+		}
 	}()
 }
 
@@ -173,7 +250,14 @@ func (a *API) sendQuestionAnswer(ctx context.Context, row db.MessageRow, answer,
 		return
 	}
 
-	text := questionAnswerText(row, answer)
+	text := childAnswerLabel(ctx, a.dbPool, row) + questionAnswerText(row, answer)
+	if receipt, bound, err := a.boundReceipt(ctx, row.ID); err != nil {
+		failurelog.Default.Event("bound_ask_receipt_delivery", slog.LevelWarn, "component", "runner", "cause", failurelog.Cause(err))
+		return
+	} else if bound {
+		raw, _ := json.Marshal(receipt)
+		text = "Decision receipt from the server: " + string(raw)
+	}
 	if row.Dismissed {
 		text = questionDismissedText(row)
 	}
@@ -463,11 +547,19 @@ func (a *API) HandlePostMessageDismiss(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "message not found")
 		return
 	}
+	if childQuestionPending(ctx, a.dbPool, *row) {
+		if problem := parentResumeProblem(ctx, a.dbPool, row.SessionID); problem != nil {
+			writeAPIError(w, problem)
+			return
+		}
+		writeError(w, http.StatusForbidden, "only the parent session can resolve this question before escalation")
+		return
+	}
 	if row.OwnerOnly && !row.NoWait {
 		writeError(w, http.StatusConflict, "an approval is allowed or denied, not dismissed")
 		return
 	}
-	if row.OwnerOnly && !a.actorOwnsMessageSession(ctx, actor, row.SessionID) {
+	if questionNeedsPerson(*row) && !a.actorDecidesForSession(ctx, actor, row.SessionID) {
 		writeError(w, http.StatusForbidden, "only the session's owner can dismiss this question")
 		return
 	}
@@ -478,6 +570,16 @@ func (a *API) HandlePostMessageDismiss(w http.ResponseWriter, r *http.Request) {
 	}
 	if alert {
 		a.dismissMessageUnlocked(w, r, id, person)
+		return
+	}
+	if orphanedChildQuestion(ctx, a.dbPool, *row) {
+		err = withLimitResumeActionLock(ctx, a.dbPool, row.SessionID, func(_ *pgxpool.Conn) error {
+			a.dismissMessageUnlocked(w, r, id, person)
+			return nil
+		})
+		if err != nil {
+			writeError(w, 503, "question dismissal is busy; retry shortly")
+		}
 		return
 	}
 	// Under the same locks as a reply: a discarded child's or an ended parent's question is refused
@@ -498,14 +600,25 @@ func (a *API) HandlePostMessageDismiss(w http.ResponseWriter, r *http.Request) {
 // dismissMessageUnlocked closes the question as dismissed by person and tells whoever waits.
 func (a *API) dismissMessageUnlocked(w http.ResponseWriter, r *http.Request, id, person string) {
 	ctx := r.Context()
-	changed, err := db.DismissMessage(ctx, a.dbPool, id, person)
+	var req postMessageReplyRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, 400, "invalid request")
+			return
+		}
+	}
+	changed, err := db.DismissMessage(ctx, a.dbPool, id, person, replyRevision(req.RevisionSeq)...)
 	if err != nil {
 		log.Printf("api dismiss %s: %v", id, err)
 		writeError(w, http.StatusInternalServerError, "update failed")
 		return
 	}
 	if !changed {
-		writeError(w, http.StatusConflict, "message already answered or not open")
+		message := "message already answered or not open"
+		if current, loadErr := db.GetMessage(ctx, a.dbPool, id); loadErr == nil && current != nil && req.RevisionSeq != nil && current.QuestionRevision != *req.RevisionSeq {
+			message = "Main revised this question; reload before dismissing"
+		}
+		writeError(w, http.StatusConflict, message)
 		return
 	}
 	a.waiters.signal(id)
@@ -520,8 +633,28 @@ func (a *API) dismissMessageUnlocked(w http.ResponseWriter, r *http.Request, id,
 	// A question the agent did not wait on hears of it in a Blerg message, delivered like an answer:
 	// queued in the session's outbox, and redelivered on a heartbeat if it never got there
 	// (db.UndeliveredQuestionAnswers). One it waits on hears from its CLI (exit code 4).
-	a.hub.QuestionAnswered(*row, "", person)
+	if !orphanedChildQuestion(ctx, a.dbPool, *row) {
+		a.hub.QuestionAnswered(*row, "", person)
+	}
 	a.hub.BroadcastJSON(protocol.MessageAnswered{Type: "message_answered", Message: messageRowToInfo(*row)}) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 	a.hub.ChildActivity(row.SessionID)
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "dismissed": true})
+}
+
+// relayLateAnswer sends a committed answer whose waiter left without reading it to the session as
+// a message, and reports whether it took this question. The session's outbox is the durable queue:
+// one client id per question, and a heartbeat retries what never landed (redeliverQuestionAnswers).
+func (a *API) relayLateAnswer(ctx context.Context, id string) (bool, error) {
+	changed, err := db.EndAnswerWaiter(ctx, a.dbPool, id)
+	if err != nil || !changed {
+		return false, err
+	}
+	row, err := db.GetMessage(ctx, a.dbPool, id)
+	if err != nil {
+		return true, err
+	}
+	if row != nil && !orphanedChildQuestion(ctx, a.dbPool, *row) {
+		a.hub.QuestionAnswered(*row, derefOrEmpty(row.Answer), strings.TrimPrefix(row.AnsweredBy, "person:"))
+	}
+	return true, nil
 }

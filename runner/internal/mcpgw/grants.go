@@ -30,6 +30,7 @@ var connectionName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
 // GrantSpec describes one connection a session may use.
 type GrantSpec struct {
+	SessionScope *db.MCPSessionScope `json:"-"`
 	ConnectionID string
 	Name         string               // the connection name; it is the gateway path segment
 	URL          string               // the connection URL at grant time (url_snapshot)
@@ -138,8 +139,19 @@ func buildGrants(sessionID, accountID string, proof Proof, specs []GrantSpec) ([
 				tools[n] = t
 			}
 		}
+		var scoped *db.MCPSessionScope
+		if sp.SessionScope != nil {
+			frozen := *sp.SessionScope
+			frozen.GrantTokenHash = hex.EncodeToString(hashToken(raw))
+			if sp.Builtin != "" || proof.TokenID != "" || frozen.AccountID != accountID || frozen.RunnerSessionID != sessionID || frozen.HumanSessionID != proof.SessionID || !frozen.Valid() {
+				_ = sessionCoreFailure("grant_scope")
+				return nil, nil, db.ErrMCPSessionScope
+			}
+			scoped = &frozen
+		}
 		rows = append(rows, db.MCPGrant{
-			SessionID: sessionID, ConnectionID: sp.ConnectionID, Name: sp.Name, AccountID: accountID,
+			SessionScope: scoped,
+			SessionID:    sessionID, ConnectionID: sp.ConnectionID, Name: sp.Name, AccountID: accountID,
 			Tools: tools, URLSnapshot: sp.URL, ProofKind: proof.Kind(), ProofValue: proof.Value(),
 			TokenHash: hashToken(raw), CallBudget: budget, Builtin: sp.Builtin, BuiltinRef: sp.BuiltinRef,
 			Preset: sp.Preset, KnownTools: sp.KnownTools,

@@ -78,14 +78,14 @@ describe('ToolChanges', () => {
     expect(within(card).getByTestId('desc-diff').textContent).toContain('and deletes them')
     expect(within(card).getAllByTestId('diff-add').length).toBeGreaterThan(0)
     expect(within(card).getByTestId('schema-diff').textContent).toContain('"id"')
-    expect(within(card).getByRole('link', { name: /open session/i })).toBeTruthy()
+    expect(within(card).getByRole('link', { name: /open workspace/i })).toBeTruthy()
   })
 
   it('leads with a sentence that says what happened and what each button does (changed, pending)', async () => {
     items = [change()]
     mount()
     const lead = (await screen.findByTestId('tool-change-lead')).textContent
-    expect(lead).toBe('calendar changed what read_events does after this session pinned it. Calls are blocked until you decide: Accept updates this session\'s grant to the new definition below; Keep off leaves it blocked.')
+    expect(lead).toBe('calendar changed what read_events does after this workspace pinned it. Calls are blocked until you decide: Accept updates this workspace\'s grant to the new definition below; Keep off leaves it blocked.')
     const card = screen.getByTestId('tool-change-c1')
     expect(within(card).queryByText('changed', { selector: 'span' })).toBeNull()
   })
@@ -94,7 +94,7 @@ describe('ToolChanges', () => {
     items = [change({ old_definition: null })]
     mount()
     const lead = (await screen.findByTestId('tool-change-lead')).textContent
-    expect(lead).toContain('Accept updates this session\'s grant to the definition below (the previous text was not kept); Keep off leaves it blocked.')
+    expect(lead).toContain('Accept updates this workspace\'s grant to the definition below (the previous text was not kept); Keep off leaves it blocked.')
     expect(screen.getByTestId('tool-change-c1').textContent).not.toMatch(/previous text is not available/)
   })
 
@@ -102,7 +102,7 @@ describe('ToolChanges', () => {
     items = [change({ kind: 'new', old_hash: '', old_definition: null, tool: 'send_mail', new_definition: def('send_mail', 'Sends mail') })]
     mount()
     const lead = (await screen.findByTestId('tool-change-lead')).textContent
-    expect(lead).toBe('calendar now offers send_mail, which the session did not have when it started. It is off until you decide: Grant authorizes it in the mode you choose; Keep off leaves it off.')
+    expect(lead).toBe('calendar now offers send_mail, which the workspace did not have when it started. It is off until you decide: Grant authorizes it in the mode you choose; Keep off leaves it off.')
     const card = screen.getByTestId('tool-change-c1')
     expect(within(card).getByText('Definition')).toBeTruthy()
     expect(within(card).queryByTestId('change-summary')).toBeNull()
@@ -118,7 +118,7 @@ describe('ToolChanges', () => {
     }
     mount()
     const lead = (await screen.findByTestId('tool-change-lead')).textContent ?? ''
-    expect(lead).toMatch(/^You kept this off .+\. Later changes to this tool in this session are listed without a badge\.$/)
+    expect(lead).toMatch(/^You kept this off .+\. Later changes to this tool in this workspace are listed without a badge\.$/)
     expect(within(screen.getByTestId('tool-change-c1')).queryByRole('button', { name: /keep off/i })).toBeNull()
   })
 
@@ -320,11 +320,11 @@ describe('tool schema refresh guidance', () => {
     items = [change({ tool_schema_refresh: 'new_session' })]
     mount()
     const card = await screen.findByTestId('tool-change-c1')
-    expect(within(card).getByTestId('tool-schema-guidance').textContent).toContain('Start a new session and select the current MCP connections and tools')
+    expect(within(card).getByTestId('tool-schema-guidance').textContent).toContain('Start a new workspace and select the current MCP connections and tools')
     expect(within(card).getByTestId('tool-schema-guidance').textContent).toContain('Keep this conversation')
     fireEvent.click(within(card).getByRole('button', { name: 'Accept updated grant' }))
     await waitFor(() => expect(within(card).getByTestId('tool-change-lead').textContent).toContain('grant now authorizes'))
-    expect(within(card).getByTestId('tool-change-lead').textContent).not.toContain('session uses the new definition')
+    expect(within(card).getByTestId('tool-change-lead').textContent).not.toContain('workspace uses the new definition')
     expect(calls.filter(c => c.method === 'POST')).toHaveLength(1)
   })
 

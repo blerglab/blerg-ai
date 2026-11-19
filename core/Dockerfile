@@ -32,6 +32,7 @@ COPY core/web/package.json core/web/package-lock.json ./
 RUN npm ci
 COPY core/web/ ./
 COPY packages/settings/ /src/packages/settings/
+RUN ln -s /src/core/web/node_modules /src/node_modules
 ARG VITE_CORE_URL=""
 ARG VITE_CORE_PORT=""
 ENV VITE_CORE_URL=$VITE_CORE_URL

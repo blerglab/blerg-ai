@@ -13,10 +13,15 @@ import (
 
 // SearchParams — one board, text + structured filters.
 type SearchParams struct {
+	Numbers         []int // exact card numbers on BoardID
+	ReleaseID       string
 	BoardID         string
 	Query           string // tsquery + trigram over title/body
 	Type            string
 	Tag             string
+	Size            string
+	Risk            string
+	Complexity      string
 	Priority        string
 	Columns         []string          // OR of exact case-insensitive column names or UUIDs on BoardID
 	ArchivedOnly    bool              // legacy REST archived=1; takes precedence over IncludeArchived
@@ -100,6 +105,17 @@ func searchCards(ctx context.Context, pool *pgxpool.Pool, p SearchParams, limit 
 		args = append(args, v)
 		where = append(where, fmt.Sprintf(cond, len(args)))
 	}
+	if p.Numbers != nil {
+		if p.BoardID == "" || len(p.Numbers) == 0 || len(p.Numbers) > 100 {
+			return nil, &FieldError{Key: "numbers", Msg: "requires a board and 1 to 100 positive card numbers"}
+		}
+		for _, n := range p.Numbers {
+			if n <= 0 {
+				return nil, &FieldError{Key: "numbers", Msg: "must be positive"}
+			}
+		}
+		add("c.number = ANY($%d::int[])", p.Numbers)
+	}
 	if p.ArchivedOnly {
 		where = append(where, "c.archived_at IS NOT NULL")
 	} else if !p.IncludeArchived {
@@ -112,8 +128,18 @@ func searchCards(ctx context.Context, pool *pgxpool.Pool, p SearchParams, limit 
 		}
 		add("c.column_id = ANY($%d::uuid[])", ids)
 	}
+	if p.ReleaseID == "none" {
+		where = append(where, "c.release_id IS NULL")
+	} else if p.ReleaseID != "" {
+		add("c.release_id::text = $%d", p.ReleaseID)
+	}
 	if p.Type != "" {
 		add("c.type = $%d", p.Type)
+	}
+	for col, value := range map[string]string{"size": p.Size, "risk": p.Risk, "complexity": p.Complexity} {
+		if value != "" {
+			add("c."+col+" = $%d", value)
+		}
 	}
 	if p.Priority != "" {
 		add("c.priority = $%d", p.Priority)
@@ -151,7 +177,9 @@ func searchCards(ctx context.Context, pool *pgxpool.Pool, p SearchParams, limit 
 		rowLimit = limit
 	}
 	args = append(args, rowLimit, p.offset)
-	sql := `SELECT ` + prefixCols("c") + ` FROM cards c WHERE ` +
+	// Search/list replies omit commit metadata; fetch a card for its full summary.
+	cols := listCardCols()
+	sql := `SELECT ` + cols + ` FROM cards c WHERE ` +
 		joinAnd(where) + ` ORDER BY ` + order + fmt.Sprintf(`, c.id DESC LIMIT $%d OFFSET $%d`, len(args)-1, len(args))
 	rows, err := pool.Query(ctx, sql, args...)
 	if err != nil {

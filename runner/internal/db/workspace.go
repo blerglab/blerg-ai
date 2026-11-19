@@ -14,9 +14,10 @@ import (
 // SessionWorkspace keeps the existing scalar session schema compatible. A nil
 // manifest is a legacy repo session, not an invitation to infer extra members.
 type SessionWorkspace struct {
-	Kind     string
-	Manifest *protocol.WorkspaceManifest
-	Results  []protocol.WorkspaceMemberResult
+	RuntimeTargetID *string `json:"runtime_target_id,omitempty"`
+	Kind            string
+	Manifest        *protocol.WorkspaceManifest
+	Results         []protocol.WorkspaceMemberResult
 }
 
 // GetSessionWorkspace returns launch selection and settlement state. A legacy
@@ -35,7 +36,8 @@ func GetSessionWorkspace(ctx context.Context, pool *pgxpool.Pool, id string) (*S
 func GetSessionReaderWorkspace(ctx context.Context, pool *pgxpool.Pool, id string) (*SessionWorkspace, error) {
 	var w SessionWorkspace
 	var manifest, results []byte
-	err := pool.QueryRow(ctx, `SELECT s.workspace_kind,w.manifest,w.results FROM sessions s LEFT JOIN session_workspaces w ON w.session_id=s.id WHERE s.id=$1`, id).Scan(&w.Kind, &manifest, &results)
+	// The launch row is immutable; the pointer selects the authorized revision.
+	err := pool.QueryRow(ctx, `SELECT s.runtime_target_id,s.workspace_kind,COALESCE(r.manifest,w.manifest),w.results FROM sessions s LEFT JOIN session_workspaces w ON w.session_id=s.id LEFT JOIN session_workspace_revisions r ON r.session_id=w.session_id AND r.revision=w.membership_revision WHERE s.id=$1`, id).Scan(&w.RuntimeTargetID, &w.Kind, &manifest, &results)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

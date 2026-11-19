@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { page } from 'vitest/browser'
@@ -15,7 +16,7 @@ const json = (data: unknown, status = 200) => new Response(JSON.stringify(data),
 afterEach(() => { localStorage.clear(); identity.account = 'person-a'; cleanup(); vi.unstubAllGlobals(); document.documentElement.removeAttribute('data-theme') })
 
 describe('workspace picker', () => {
-  for (const width of [390, 3840]) for (const theme of ['light', 'dark']) {
+  for (const width of browserWidths([390, 3840])) for (const theme of ['light', 'dark']) {
     it(`preserves shared named-folder colors at ${width}px in ${theme}`, async () => {
       await page.viewport(width, 900)
       document.documentElement.setAttribute('data-theme', theme)
@@ -54,7 +55,7 @@ describe('workspace picker', () => {
       expect(picker.right).toBeLessThanOrEqual(width)
     })
   }
-  it.each([390, 3840])('shows one checked tree with explicit selection at %ipx', async width => {
+  it.each(browserWidths([390, 3840]))('shows one checked tree with explicit selection at %ipx', async width => {
     await page.viewport(width, 900)
     const chosen: {current: WorkspaceSelection | null} = {current: null}
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
@@ -110,7 +111,7 @@ describe('workspace picker', () => {
     expect(screen.getByText(/relative paths are preserved/)).toBeTruthy()
     expect((screen.getByRole('checkbox', { name: /large.*Folder/ }) as HTMLInputElement).indeterminate).toBe(true)
   })
-  it.each([390, 3840])('offers searchable hosted multi-select at %ipx without local-only folders', async width => {
+  it.each(browserWidths([390, 3840]))('offers searchable hosted multi-select at %ipx without local-only folders', async width => {
     await page.viewport(width, 900)
     render(<WorkspacePicker daemon={null} runtime="cluster" repos={[
       { name: 'api', full_name: 'team/api', provider: 'github', checked_out: [] },
@@ -169,7 +170,7 @@ it('refuses a folder union over twenty without replacing the earlier selection',
 
 // #242: a host folder with no Git repository resolves to zero members. The server sent
 // them as null and the picker threw "The selection could not be checked."
-for (const members of [[], null] as const) for (const width of [390, 3840]) {
+for (const members of [[], null] as const) for (const width of browserWidths([390, 3840])) {
   it(`selects a host folder without repositories (members ${JSON.stringify(members)}) at ${width}px`, async () => {
     await page.viewport(width, 900)
     const change = vi.fn()
@@ -241,7 +242,7 @@ async function selectLayoutRepos() {
   fireEvent.click(screen.getByRole('checkbox', { name: 'api Git repository' }))
   await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Keep folder structure' }).hasAttribute('disabled')).toBe(false))
 }
-it.each([390, 3840])('offers layout only for separate multi-repo picks and sends the choice at %ipx', async width => {
+it.each(browserWidths([390, 3840]))('offers layout only for separate multi-repo picks and sends the choice at %ipx', async width => {
   await page.viewport(width, 900)
   const requests = layoutPreview()
   const change = vi.fn()

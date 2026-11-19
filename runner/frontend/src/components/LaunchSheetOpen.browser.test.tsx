@@ -109,7 +109,7 @@ describe('+ New → LaunchSheet', () => {
     render(<Harness />)
     await userEvent.click(screen.getByRole('button', { name: '+ New' }))
     await waitFor(() => expect(screen.getByText('myrepo')).toBeTruthy())
-    await userEvent.click(screen.getByRole('button', { name: '✕' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }))
     expect(isOpen()).toBe(false)
     cleanup()
     render(<Harness />)

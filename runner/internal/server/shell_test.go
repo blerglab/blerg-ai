@@ -28,16 +28,17 @@ func (shellTestAuthority) Authorize(context.Context, ownershell.Actor) (protocol
 }
 
 type shellTestRuntime struct {
-	mu      sync.Mutex
-	binding ownershell.Binding
-	out     chan []byte
-	input   chan []byte
+	resolveErr error
+	mu         sync.Mutex
+	binding    ownershell.Binding
+	out        chan []byte
+	input      chan []byte
 }
 
 func (s *shellTestRuntime) Resolve(context.Context, string) (ownershell.Binding, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.binding, nil
+	return s.binding, s.resolveErr
 }
 func (s *shellTestRuntime) Open(context.Context, ownershell.Binding, ownershell.SignedGrant, ed25519.PublicKey) (<-chan []byte, error) {
 	return s.out, nil
@@ -53,6 +54,48 @@ func (s *shellTestRuntime) Resize(context.Context, ownershell.SignedGrant, uint6
 func (s *shellTestRuntime) Close(context.Context, ownershell.SignedGrant) error { return nil }
 func shellTestBinding() ownershell.Binding {
 	return ownershell.Binding{RuntimeGeneration: 1, Root: protocol.WorkspaceRoot{Device: 1, Inode: 1}, ManifestDigest: "digest", Session: "session", Owner: "owner", Launch: "launch", Connection: "connection", Audience: ownershell.RuntimeAudience("connection", 1), Runtime: "sandbox", Folder: "project", Live: true, ServerCapabilities: protocol.WorkspaceCapabilities{ManifestVersion: 2, ShellVersion: 1, LinuxHost: true, Sandbox: true, Cluster: true}, RuntimeCapabilities: protocol.WorkspaceCapabilities{ManifestVersion: 2, ShellVersion: 1, LinuxHost: true, Sandbox: true, Cluster: true}}
+}
+
+func TestShellPrivilegedOpenThroughHTTP(t *testing.T) {
+	pub, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := NewAPI(NewHub(), nil, "", nil, "")
+	api.coreAuth = newTestCoreAuthClient(t, pub, "shell-key")
+	binding := shellTestBinding()
+	binding.Runtime = "host"
+	binding.HostConsentValid = true
+	binding.Consent = "consent"
+	rt := &shellTestRuntime{binding: binding, out: make(chan []byte)}
+	manager, err := ownershell.New(shellTestAuthority{}, rt, rt, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.shells = manager
+	manager.SetPolicy(t.Context(), protocol.ShellPolicy{Version: 1, Revision: 1, Enabled: true})
+	t.Cleanup(func() { manager.Unavailable(context.Background()) })
+	mux := http.NewServeMux()
+	api.RegisterShellRoutes(mux)
+	token := mintTestToken(t, key, "shell-key", identity.Claims{Kind: "human", Sub: "owner", Aud: coreAuthAudience, Sid: "login", Caps: []string{coreAuthBrowserCap}, ExpiresAt: time.Now().Add(time.Hour).Unix()})
+	for _, privileged := range []bool{true, false} {
+		body, _ := json.Marshal(map[string]bool{"privileged": privileged})
+		request := httptest.NewRequest("POST", "http://runner.example/api/sessions/session/shells", strings.NewReader(string(body)))
+		request.Header.Set("Origin", "http://runner.example")
+		request.Header.Set("Authorization", "Bearer "+token)
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("open: %d %s", response.Code, response.Body.String())
+		}
+		var info protocol.OwnerShellInfo
+		if err := json.Unmarshal(response.Body.Bytes(), &info); err != nil {
+			t.Fatal(err)
+		}
+		if info.Privileged != privileged {
+			t.Fatalf("wire privilege %v, want %v", info.Privileged, privileged)
+		}
+	}
 }
 func TestShellChannelOriginIsolationAndStaleSocket(t *testing.T) {
 	pub, key, err := ed25519.GenerateKey(rand.Reader)
@@ -94,6 +137,9 @@ func TestShellChannelOriginIsolationAndStaleSocket(t *testing.T) {
 	for _, who := range []struct{ owner, kind string }{{"other", "human"}, {"owner", "agent"}, {"owner", "service"}} {
 		if r := open(token(who.owner, who.kind), server.URL, ""); r.Code != 403 {
 			t.Fatal("identity", who, r.Code)
+		}
+		if r := open(token(who.owner, who.kind), server.URL, `{"privileged":true}`); r.Code != 403 {
+			t.Fatal("privileged identity", who, r.Code)
 		}
 	}
 	if r := open(token("owner", "human"), server.URL, `{"command":"sh"}`); r.Code != 400 {
@@ -147,13 +193,13 @@ func TestShellChannelOriginIsolationAndStaleSocket(t *testing.T) {
 		t.Fatal("revoked socket stayed open")
 	}
 }
-func TestShellResolverBindsPersistedLaunch(t *testing.T) {
+func TestShellResolverClusterTarget(t *testing.T) {
 	fx := newTopicFx(t)
 	ctx := t.Context()
-	if _, err := fx.pool.Exec(ctx, `UPDATE sessions SET runtime='docker' WHERE id=$1`, fx.sess); err != nil {
+	if _, err := fx.pool.Exec(ctx, `UPDATE sessions SET runtime='cluster' WHERE id=$1`, fx.sess); err != nil {
 		t.Fatal(err)
 	}
-	manifest := protocol.WorkspaceManifest{Version: 2, Kind: "repo", OwnerID: topicOwner, Runtime: "sandbox", LaunchGeneration: "launch", Root: protocol.WorkspaceRoot{Device: 1, Inode: 1}, Digest: "digest", Members: []protocol.WorkspaceMember{{ID: "member", Name: "project", Path: ".", SourceIdentity: "source", CommonDirectoryIdentity: "common", Destination: "destination"}}}
+	manifest := protocol.WorkspaceManifest{Version: 2, Kind: "repo", OwnerID: topicOwner, Runtime: "cluster", LaunchGeneration: "launch", Root: protocol.WorkspaceRoot{Device: 1, Inode: 1}, Digest: "digest", Members: []protocol.WorkspaceMember{{ID: "member", Name: "project", Path: ".", SourceIdentity: "source", CommonDirectoryIdentity: "common", Destination: "destination"}}}
 	if err := db.InsertSessionWorkspace(ctx, fx.pool, fx.sess, manifest); err != nil {
 		t.Fatal(err)
 	}
@@ -163,6 +209,7 @@ func TestShellResolverBindsPersistedLaunch(t *testing.T) {
 	}
 	ref := protocol.WorkspaceRuntimeRef{LaunchGeneration: manifest.LaunchGeneration, Generation: generation}
 	b := shellTestBinding()
+	b.Runtime = "cluster"
 	b.RuntimeGeneration = ref.Generation
 	b.Audience = ownershell.RuntimeAudience(b.Connection, ref.Generation)
 	b.Session = fx.sess
@@ -181,16 +228,24 @@ func TestShellResolverBindsPersistedLaunch(t *testing.T) {
 		t.Fatal("forged physical root accepted")
 	}
 	rt.binding = b
-	if _, err := resolver.Resolve(ctx, fx.sess); err != nil {
-		t.Fatal("valid persisted launch", err)
+	if binding, _, err := resolver.resolve(ctx, fx.sess); err != nil || binding.RuntimeTargetID != "cluster" {
+		t.Fatalf("valid persisted launch target: %q %v", binding.RuntimeTargetID, err)
 	}
+	for _, refusal := range []error{ownershell.ErrUnknown, ownershell.Refuse(ownershell.ReasonRuntimeBinding)} {
+		rt.resolveErr = refusal
+		binding, _, err := resolver.resolve(ctx, fx.sess)
+		if err == nil || binding.RuntimeTargetID != "cluster" {
+			t.Fatalf("refused target lost: %q %v", binding.RuntimeTargetID, err)
+		}
+	}
+	rt.resolveErr = nil
 	if _, err := fx.pool.Exec(ctx, `UPDATE sessions SET runtime='daemon' WHERE id=$1`, fx.sess); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := resolver.Resolve(ctx, fx.sess); err == nil {
 		t.Fatal("persisted runtime replacement accepted")
 	}
-	if _, err := fx.pool.Exec(ctx, `UPDATE sessions SET runtime='docker' WHERE id=$1`, fx.sess); err != nil {
+	if _, err := fx.pool.Exec(ctx, `UPDATE sessions SET runtime='cluster' WHERE id=$1`, fx.sess); err != nil {
 		t.Fatal(err)
 	}
 	rt.binding.Launch = "forged"
@@ -436,4 +491,77 @@ func TestShellDescribeRefusalReachesOnlyPersistedOwner(t *testing.T) {
 			t.Fatalf("inconsistent persisted owner reached runtime or disclosed a reason: binding=%+v error=%v", b, err)
 		}
 	})
+}
+
+func TestShellResolverBindsPersistedLaunch(t *testing.T) {
+	fx := newTopicFx(t)
+	ctx := t.Context()
+	if _, err := fx.pool.Exec(ctx, `UPDATE sessions SET runtime='docker' WHERE id=$1`, fx.sess); err != nil {
+		t.Fatal(err)
+	}
+	manifest := protocol.WorkspaceManifest{Version: 2, Kind: "repo", OwnerID: topicOwner, Runtime: "sandbox", LaunchGeneration: "launch", Root: protocol.WorkspaceRoot{Device: 1, Inode: 1}, Digest: "digest", Members: []protocol.WorkspaceMember{{ID: "member", Name: "project", Path: ".", SourceIdentity: "source", CommonDirectoryIdentity: "common", Destination: "destination"}}}
+	if err := db.InsertSessionWorkspace(ctx, fx.pool, fx.sess, manifest); err != nil {
+		t.Fatal(err)
+	}
+	generation, err := db.BeginWorkspaceRuntime(ctx, fx.pool, fx.sess, manifest.LaunchGeneration, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := protocol.WorkspaceRuntimeRef{LaunchGeneration: manifest.LaunchGeneration, Generation: generation}
+	b := shellTestBinding()
+	b.RuntimeGeneration = ref.Generation
+	b.Audience = ownershell.RuntimeAudience(b.Connection, ref.Generation)
+	b.Session = fx.sess
+	b.Owner = topicOwner
+	rt := &shellTestRuntime{binding: b}
+	resolver := shellResolver{fx.api, rt}
+	if _, err := resolver.Resolve(ctx, fx.sess); err == nil {
+		t.Fatal("pending prepared root accepted")
+	}
+	prepared := protocol.WorkspaceRuntimeBinding{WorkspaceRuntimeRef: ref, ManifestDigest: manifest.Digest, Root: b.Root}
+	if err := db.BindWorkspaceRuntime(ctx, fx.pool, fx.sess, ref, prepared); err != nil {
+		t.Fatal(err)
+	}
+	rt.binding.Root.Inode++
+	if _, err := resolver.Resolve(ctx, fx.sess); err == nil {
+		t.Fatal("forged physical root accepted")
+	}
+	rt.binding = b
+	if _, err := resolver.Resolve(ctx, fx.sess); err != nil {
+		t.Fatal("valid persisted launch", err)
+	}
+	if _, err := fx.pool.Exec(ctx, `UPDATE sessions SET runtime='daemon' WHERE id=$1`, fx.sess); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.Resolve(ctx, fx.sess); err == nil {
+		t.Fatal("persisted runtime replacement accepted")
+	}
+	if _, err := fx.pool.Exec(ctx, `UPDATE sessions SET runtime='docker' WHERE id=$1`, fx.sess); err != nil {
+		t.Fatal(err)
+	}
+	rt.binding.Launch = "forged"
+	if _, err := resolver.Resolve(ctx, fx.sess); err == nil {
+		t.Fatal("forged launch accepted")
+	}
+	rt.binding = b
+	cases := []struct {
+		name, status string
+		owner        *string
+		discard      *time.Time
+		parent       *string
+	}{
+		{name: "stopped", status: "stopped", owner: &b.Owner},
+		{name: "unowned", status: "running"},
+		{name: "discard", status: "running", owner: &b.Owner, discard: new(time.Time)},
+		{name: "child", status: "running", owner: &b.Owner, parent: &fx.ended},
+	}
+	for _, c := range cases {
+		if _, err := fx.pool.Exec(ctx, `UPDATE sessions SET status=$2,spawning_account_id=$3,discard_requested_at=$4,parent_session_id=$5 WHERE id=$1`, fx.sess, c.status, c.owner, c.discard, c.parent); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := resolver.Resolve(ctx, fx.sess); err == nil {
+			t.Fatal("invalid persisted lifecycle accepted", c.name)
+		}
+	}
+
 }

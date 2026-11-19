@@ -26,6 +26,7 @@ type deskCore struct {
 	codes    map[string]string // code -> owner, removed when redeemed
 	redeemed []string
 	issued   int
+	disabled map[string]bool
 }
 
 func newDeskCore(t *testing.T, a *API) *deskCore {
@@ -39,6 +40,12 @@ func newDeskCore(t *testing.T, a *API) *deskCore {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		switch r.URL.Path {
+		case "/internal/accounts/standing":
+			var body struct {
+				Account string `json:"account"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			_ = json.NewEncoder(w).Encode(map[string]bool{"exists": true, "active": !c.disabled[body.Account]})
 		case "/internal/desktop-tokens/validate":
 			var body map[string]string
 			_ = json.NewDecoder(r.Body).Decode(&body)
@@ -314,5 +321,59 @@ CREATE TRIGGER refuse_code_audit BEFORE INSERT ON desktop_enrollment_audit FOR E
 	var owned int
 	if err := fx.pool.QueryRow(t.Context(), `SELECT count(*) FROM daemons WHERE name='audit-laptop' AND desktop_owner_id IS NOT NULL`).Scan(&owned); err != nil || owned != 0 {
 		t.Fatalf("desktop owned without its audit: %d %v", owned, err)
+	}
+}
+
+func TestDisablePersonDisconnectsDesktopsAndPreservesAssignment(t *testing.T) {
+	t.Setenv("BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS", "false")
+	enrollCodes = &enrollCodeLimiter{}
+	fx := newPrivFixture(t)
+	core := newDeskCore(t, fx.api)
+	core.codes[deskCode('a')], core.codes[deskCode('b')] = deskPersonA, deskPersonB
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/daemon", fx.hub.ServeDaemon(spawnTokenDaemonTok, fx.pool))
+	fx.api.RegisterDesktopRoutes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	var a, b issuedDesktopCredential
+	_ = json.Unmarshal(enrollWithCode(t, mux, deskCode('a'), "laptop-a", "192.0.2.10").Body.Bytes(), &a)
+	_ = json.Unmarshal(enrollWithCode(t, mux, deskCode('b'), "laptop-b", "192.0.2.11").Body.Bytes(), &b)
+	desktopConnect(t, srv.URL, a.Token, a.Binding.DesktopID, "laptop-a", true)
+	dc := desktopWait(t, fx.hub, a.Binding.DesktopID)
+	path := "/internal/people/" + deskPersonA + "/disable-desktops"
+	if w := internalDesktopRequest(t, mux, "POST", path, deskPersonB, false, ""); w.Code != 403 {
+		t.Fatalf("member disable %d", w.Code)
+	}
+	core.mu.Lock()
+	core.disabled = map[string]bool{deskPersonA: true}
+	core.mu.Unlock()
+	if w := internalDesktopRequest(t, mux, "POST", path, deskPersonB, true, ""); w.Code != 200 {
+		t.Fatalf("disable %d", w.Code)
+	}
+	if fx.hub.GetDaemon(a.Binding.DesktopID) != nil {
+		t.Fatal("disabled person's desktop stayed connected")
+	}
+	if db.ValidateDesktopConnection(t.Context(), fx.pool, a.Binding, dc.DesktopGeneration) == nil {
+		t.Fatal("old desktop authority survived")
+	}
+	row, err := db.GetDesktop(t.Context(), fx.pool, a.Binding.DesktopID)
+	if err != nil || row == nil || row.OwnerID != deskPersonA || row.Revision <= a.Binding.Revision {
+		t.Fatal("desktop assignment was lost or revision did not advance")
+	}
+	revision := row.Revision
+	if w := internalDesktopRequest(t, mux, "POST", path, deskPersonB, true, ""); w.Code != 200 {
+		t.Fatal("disable retry failed")
+	}
+	row, _ = db.GetDesktop(t.Context(), fx.pool, a.Binding.DesktopID)
+	if row.Revision != revision {
+		t.Fatal("retry changed revision")
+	}
+	other, _ := db.GetDesktop(t.Context(), fx.pool, b.Binding.DesktopID)
+	if other.Revision != b.Binding.Revision {
+		t.Fatal("another person's desktop changed")
+	}
+	var audits int
+	if err := fx.pool.QueryRow(t.Context(), `SELECT count(*) FROM desktop_enrollment_audit WHERE desktop_id=$1 AND actor_id=$2 AND action='owner_disabled'`, a.Binding.DesktopID, deskPersonB).Scan(&audits); err != nil || audits != 1 {
+		t.Fatalf("disable audits %d %v", audits, err)
 	}
 }

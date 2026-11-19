@@ -1,0 +1,9 @@
+{
+  "version": "0.5.4",
+  "title": "Smoother starts and upgrades",
+  "items": [
+    "Start a new workspace with a Git repository and an empty initial commit, without adding existing files.",
+    "Update notices take you straight to the release notes.",
+    "Image builds work when the source is a Git checkout."
+  ]
+}

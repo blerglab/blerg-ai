@@ -82,15 +82,15 @@ describe("Board call limits", () => {
   it("shows the limits with their defaults and saves all four", async () => {
     render(<BoardLimitsSection />);
     const perMinute = (await screen.findByLabelText(
-      "Board requests a minute, per session",
+      "Board requests a minute, per workspace",
     )) as HTMLInputElement;
     expect(perMinute.value).toBe("600");
     expect(
-      screen.getByLabelText("Board calls at once, per session"),
+      screen.getByLabelText("Board calls at once, per workspace"),
     ).toHaveValue(8);
     expect(screen.getByText(/Default 100; 10 to 10000/)).toBeInTheDocument();
     expect(
-      screen.getByText("Limit how often sessions can use boards across this install."),
+      screen.getByText("Limit how often workspaces can use boards across this install."),
     ).toBeInTheDocument();
     fireEvent.change(perMinute, { target: { value: "1200" } });
     fireEvent.click(screen.getByRole("button", { name: "Save limits" }));
@@ -102,20 +102,20 @@ describe("Board call limits", () => {
 
   it("says how many busy sessions use up the account's live tokens", async () => {
     expect(headroomLine(64, 100)).toContain(
-      "at 64 calls at once, 2 busy sessions of one account use all 100",
+      "at 64 calls at once, 2 busy workspaces of one account use all 100",
     );
-    expect(headroomLine(8, 100)).toContain("13 busy sessions");
+    expect(headroomLine(8, 100)).toContain("13 busy workspaces");
     expect(headroomLine(0, 100)).toBeNull();
     render(<BoardLimitsSection />);
     const inFlight = await screen.findByLabelText(
-      "Board calls at once, per session",
+      "Board calls at once, per workspace",
     );
     expect(screen.getByTestId("board-limits-headroom")).toHaveTextContent(
-      "at 8 calls at once, 13 busy sessions",
+      "at 8 calls at once, 13 busy workspaces",
     );
     fireEvent.change(inFlight, { target: { value: "64" } });
     expect(screen.getByTestId("board-limits-headroom")).toHaveTextContent(
-      "at 64 calls at once, 2 busy sessions of one account use all 100",
+      "at 64 calls at once, 2 busy workspaces of one account use all 100",
     );
   });
 
@@ -131,6 +131,7 @@ describe("Board call limits", () => {
   });
 
   it("is in Settings for an administrator only", async () => {
+    history.replaceState(null, "", "/settings?section=install");
     vi.mocked(authClient.getAccessToken).mockReturnValue(
       tokenWith(["card.read"]),
     );

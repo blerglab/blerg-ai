@@ -25,7 +25,7 @@ describe('Plan tab', () => {
   it('is absent without a ticket, a list or a diff', () => {
     rail()
     expect(screen.queryByRole('tab', { name: /Plan/ })).toBeNull()
-    expect(tabs()).toEqual(['Live', 'History', 'Files', 'Capabilities'])
+    expect(tabs()).toEqual(['Live', 'History', 'Shared', 'Capabilities'])
     expect(screen.queryByTestId('rail-plan-summary')).toBeNull()
   })
 

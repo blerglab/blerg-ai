@@ -37,7 +37,7 @@ describe('CommitViewer: a commit chip with no published diff', () => {
     expect(files.commitDiff).toHaveBeenCalledWith('s1', SHA, expect.any(AbortSignal))
     const dialog = screen.getByRole('dialog', { name: 'Commit aaaaaaa' })
     expect(dialog).toHaveTextContent('lookup.go')
-    expect(dialog).toHaveTextContent('From the session’s workspace · blerg')
+    expect(dialog.querySelector('.viewer-path')).toHaveAttribute('title', expect.stringContaining('From the workspace · blerg'))
     expect(screen.queryByTestId('commit-none')).toBeNull()
     // Nothing links out of Blerg.
     expect(dialog.querySelector('a[href^="http"]')).toBeNull()
@@ -52,7 +52,7 @@ describe('CommitViewer: a commit chip with no published diff', () => {
     fireEvent.click(screen.getByRole('button', { name: /Open commit aaaaaaa/ }))
     await settle()
     const dialog = screen.getByRole('dialog', { name: 'Commit aaaaaaa' })
-    expect(dialog.querySelector('.artifact-meta')!.textContent).toContain('repo\\u{202E}name')
+    expect(dialog.querySelector('.viewer-path')!.getAttribute('title')).toContain('repo\\u{202E}name')
     const text = dialog.textContent ?? ''
     expect(text).toContain('Read\\u{2028} commits\\u{E0041} on demand')
     expect(text.includes('Read\u2028') || text.includes('Pat\u202E')).toBe(false)
@@ -72,7 +72,7 @@ describe('CommitViewer: a commit chip with no published diff', () => {
       const { unmount } = render(<CommitViewerHost files={files}><CommitChips commits={[{ sha: SHA }]} hover={{ sessionId: 's1' }} /></CommitViewerHost>)
       fireEvent.click(screen.getByRole('button', { name: /Open commit aaaaaaa/ }))
       await settle()
-      expect(screen.getByTestId('commit-none').textContent).toBe('This commit can’t be read from the session’s workspace right now.')
+      expect(screen.getByTestId('commit-none').textContent).toBe('This commit can’t be read from the workspace right now.')
       unmount()
     }
   })

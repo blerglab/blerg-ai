@@ -36,6 +36,8 @@ spec:
       labels:
         app: postgres
     spec:
+      serviceAccountName: blerg-postgres
+      automountServiceAccountToken: false
       containers:
         - name: postgres
           image: postgres:16
@@ -98,3 +100,12 @@ spec:
         resources:
           requests:
             storage: 5Gi
+
+---
+# This service only uses application protocols; it needs no Kubernetes API token.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: blerg-postgres
+  namespace: blerg
+automountServiceAccountToken: false

@@ -12,6 +12,7 @@ import { useSessionStore } from '../hooks/useSessionStore'
 
 const media = window.matchMedia
 beforeEach(() => {
+  useSessionStore.setState({ sessions: [] })
   useSessionListFilters.setState({query:'',focus:null,clusterConfigured:false})
   localStorage.clear(); vi.useFakeTimers(); clearHovercardCache()
   window.matchMedia = vi.fn().mockImplementation((query: string) => ({ matches: query === '(hover: hover)', media: query, addEventListener: () => {}, removeEventListener: () => {} }))
@@ -29,10 +30,10 @@ it('uses title monograms and stable project colors, with starred then working th
   expect(projectTint(recent)).toBe(projectTint({ ...running, title: 'Another title' }))
   expect(projectTint(recent)).not.toBe(projectTint({ ...recent, repo: 'another-project' }))
 })
-it('reuses status glyphs and the shared hovercard, includes children, and navigates by keyboard', () => {
+it('reuses status glyphs and the shared hovercard, counts children, and navigates by keyboard', () => {
   useSessionStore.setState({ sessions: [
     makeSession({ id: 'parent', title: 'Build widgets', repo: 'example-org/widget', runtime: 'docker', model: 'model-next', status: 'idle', starred: true }),
-    makeSession({ id: 'child', parent_session_id: 'parent', title: 'Test widgets', status: 'waiting' }),
+    makeSession({ id: 'child', parent_session_id: 'parent', started_by: { kind: 'session' }, title: 'Test widgets', status: 'waiting' }),
     makeSession({ id: 'other', title: 'Other work', status: 'running' }),
   ] })
   render(<MemoryRouter initialEntries={['/sessions/parent']}><SessionTiles /></MemoryRouter>)
@@ -47,16 +48,10 @@ it('reuses status glyphs and the shared hovercard, includes children, and naviga
   expect(card).toHaveTextContent('example-org/widget')
   expect(card.querySelector('[data-runtime="sandbox"]')).not.toBeNull()
   expect(card).toHaveTextContent('model-next')
-  expect(card).toHaveTextContent('Test widgets')
-  expect(within(card).getAllByTestId('status-dot').map(g => g.title)).toEqual(['idle', 'Waiting for its parent session'])
-  const hideChildren = within(card).getByRole('button', { name: 'Hide 1 started session' })
-  hideChildren.focus()
-  fireEvent.keyDown(hideChildren, { key: 'ArrowDown' })
-  expect(hideChildren).toHaveFocus()
-  fireEvent.click(hideChildren)
-  expect(within(card).queryByText('Test widgets')).toBeNull()
-  fireEvent.click(within(card).getByRole('button', { name: 'Show 1 started session' }))
-  expect(within(card).getByText('Test widgets')).toBeInTheDocument()
+  expect(card).not.toHaveTextContent('Test widgets')
+  expect(within(card).getAllByTestId('status-dot').map(g => g.title)).toEqual(['idle'])
+  expect(within(card).getByTestId('hidden-children')).toHaveTextContent('↳ 1')
+  expect(within(card).queryByTestId('children-toggle')).toBeNull()
   parent.focus()
   fireEvent.keyDown(parent, { key: 'ArrowDown' })
   expect(screen.getByRole('button', { name: /Other work/ })).toHaveFocus()
@@ -129,26 +124,52 @@ it('preserves collapsed children in tile previews, including working and waiting
   localStorage.setItem('blerg-runner.sidebar.childrenClosed', JSON.stringify(['parent']))
   useSessionStore.setState({ sessions: [
     makeSession({ id: 'parent', title: 'Parent', status: 'idle' }),
-    makeSession({ id: 'busy', title: 'Busy child', parent_session_id: 'parent', status: 'running' }),
-    makeSession({ id: 'asking', title: 'Asking child', parent_session_id: 'parent', status: 'waiting' }),
+    makeSession({ id: 'busy', title: 'Busy child', parent_session_id: 'parent', started_by: { kind: 'session' }, status: 'running' }),
+    makeSession({ id: 'asking', title: 'Asking child', parent_session_id: 'parent', started_by: { kind: 'session' }, status: 'waiting' }),
   ], daemons: [] })
   render(<MemoryRouter><SessionTiles /></MemoryRouter>)
   const parent = screen.getByRole('button', { name: /Parent/ })
-  expect(parent).toHaveAccessibleName('Parent, running, 2 started sessions')
+  expect(parent).toHaveAccessibleName('Parent, running, 2 workers')
   expect(parent).toHaveTextContent('↳2')
   fireEvent.pointerEnter(parent, { pointerType: 'mouse' })
   act(() => { vi.advanceTimersByTime(HOVERCARD.openDelayMs + 10) })
   const card = screen.getByTestId('hovercard')
-  expect(within(card).getByRole('button', { name: 'Show 2 started sessions' })).toHaveAttribute('aria-expanded', 'false')
+  expect(within(card).queryByTestId('children-toggle')).toBeNull()
   expect(card).toHaveTextContent('↳ 2')
   expect(card).not.toHaveTextContent('Busy child')
   expect(card).not.toHaveTextContent('Asking child')
   act(() => useSessionStore.getState().updateSessionStatus('busy', 'idle'))
-  expect(parent).toHaveAccessibleName('Parent, idle, 2 started sessions')
+  expect(parent).toHaveAccessibleName('Parent, idle, 2 workers')
   expect(within(parent).getByTestId('status-dot')).toHaveTextContent('Zz')
   expect(card).not.toHaveTextContent('Asking child')
-  fireEvent.click(within(card).getByRole('button', { name: 'Show 2 started sessions' }))
-  expect(card).toHaveTextContent('Asking child')
-  expect(within(card).getByRole('img', { name: 'Waiting for its parent session' })).toHaveAttribute('data-status', 'waiting-parent')
+  expect(within(card).queryByRole('img', { name: 'Waiting for Main' })).toBeNull()
+  expect(within(card).getAllByTestId('status-dot')).toHaveLength(1)
   expect(within(parent).getByTestId('status-dot')).toHaveTextContent('Zz')
+})
+
+it('preserves unread on an orphan worker tile and on channels', () => {
+  useSessionStore.setState({ sessions: [
+    makeSession({ id: 'worker', title: 'Worker tile', unread: true, started_by: { kind: 'session' } }),
+    makeSession({ id: 'channel', title: 'Channel tile', unread: true }),
+  ] })
+  render(<MemoryRouter initialEntries={['/sessions/worker']}><SessionTiles /></MemoryRouter>)
+  const worker = screen.getByRole('button', { name: /Worker tile/ })
+  expect(worker).toHaveAccessibleName(/unread/)
+  expect(worker.querySelector('.session-tile-unread')).not.toBeNull()
+  expect(screen.getByRole('button', { name: /Channel tile/ }).querySelector('.session-tile-unread')).not.toBeNull()
+})
+
+it('keeps the chosen color named on a collapsed sidebar tile', () => {
+ useSessionStore.setState({sessions:[makeSession({id:'colored',title:'Colored workspace',color:'blue'})]})
+ render(<MemoryRouter><SessionTiles/></MemoryRouter>)
+ expect(screen.getByRole('button',{name:/Colored workspace/})).toHaveAccessibleName(/Session color: Blue/)
+})
+
+it('uses the saved theme token for the rounded bar on a collapsed tile', () => {
+ useSessionStore.setState({sessions:[makeSession({title:'Colored work',color:'blue'})]})
+ render(<MemoryRouter><SessionTiles /></MemoryRouter>)
+ const tile=screen.getByRole('button',{name:/Colored work/})
+ expect(tile).toHaveClass('workspace-color-bar')
+ expect(tile.style.getPropertyValue('--workspace-color')).toBe('var(--session-color-blue)')
+ expect(within(tile).queryByRole('img',{name:'Session color: Blue'})).toBeNull()
 })

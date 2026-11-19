@@ -1,5 +1,5 @@
-# golangci-lint v2 configuration: the one lint gate for all four Go modules
-# (contracts, core, board, runner). CI and `make lint` both use this file.
+# golangci-lint v2 configuration: production modules and verification tooling.
+# CI and `make lint` both use this file.
 #
 # The set is chosen to catch bugs, not to police style:
 #   - correctness: errcheck, govet, staticcheck, ineffassign, unused

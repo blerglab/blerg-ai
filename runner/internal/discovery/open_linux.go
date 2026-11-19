@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"syscall"
+	"time"
 )
 
 func openBeneath(root *os.File, name string, flags int) (*os.File, error) {
@@ -36,4 +37,12 @@ func metadataVersion(info os.FileInfo) string {
 		return ""
 	}
 	return "ctime:" + strconv.FormatInt(stat.Ctim.Sec, 10) + ":" + strconv.FormatInt(stat.Ctim.Nsec, 10)
+}
+
+func indexChangeTime(info os.FileInfo) (time.Time, bool) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return time.Time{}, false
+	}
+	return time.Unix(stat.Ctim.Sec, stat.Ctim.Nsec), true
 }

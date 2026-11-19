@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { afterEach, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import { page, userEvent } from 'vitest/browser'
@@ -11,7 +12,7 @@ vi.mock('../apiFetch', () => ({ apiFetch: vi.fn(async () => ({ ok: true, json: a
   request: { engine: 'codex', runtime: 'cluster', title: 'Review selected repositories', prompt: 'Review changes', repos: ['member-one', 'member-two'] },
 }) })) }))
 afterEach(cleanup)
-it.each([390, 3840])('lists the exact cluster child subset on the approval card at %ipx', async width => {
+it.each(browserWidths([390, 3840]))('lists the exact cluster child subset on the approval card at %ipx', async width => {
   await page.viewport(width, 900)
   render(<MemoryRouter><DelegationLiveReview sessionId="parent" requestId="request" /></MemoryRouter>)
   await userEvent.click(screen.getByRole('button', { name: 'Review request' }))

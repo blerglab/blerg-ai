@@ -14,58 +14,6 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
-// A registered engine declares its own model/effort flags on its EngineSpec;
-// one without an EffortArgs hook ignores effort entirely.
-func TestBuildTerminalCommandUsesTheSpecsEffortHook(t *testing.T) {
-	t.Cleanup(models.RegisterEngineRules("fakeeng", models.EngineRules{Efforts: []string{"ultra"}}))
-	spec := EngineSpec{ID: "fakeeng", Binary: "fakeeng", ModelFlag: "-m",
-		EffortArgs: func(e string) []string { return []string{"--reasoning=" + e} }}
-	got := buildTerminalCommand(spec, "vendor/model-1", "ultra", false, true)
-	if want := []string{"fakeeng", "-m", "vendor/model-1", "--reasoning=ultra"}; !slices.Equal(got, want) {
-		t.Errorf("got %v, want %v", got, want)
-	}
-	// Not in the engine's allowlist: dropped.
-	if got := buildTerminalCommand(spec, "", "max", false, true); len(got) != 1 {
-		t.Errorf("an effort outside the engine's list reached argv: %v", got)
-	}
-	// OpenClaw has no hook: effort never appears.
-	spec = engineRegistry["openclaw"]
-	spec.ID = "fakeeng" // rules that would accept "ultra": only the missing hook drops it
-	got = buildTerminalCommand(spec, "", "ultra", false, true)
-	if want := []string{"openclaw", "chat"}; !slices.Equal(got, want) {
-		t.Errorf("openclaw got %v, want %v", got, want)
-	}
-}
-
-// Codex and Hermes render effort through their own flags in a tmux terminal,
-// sandboxed or not.
-func TestTerminalCommandCodexAndHermesEffort(t *testing.T) {
-	for _, sandboxed := range []bool{true, false} {
-		got := buildTerminalCommand(engineRegistry["codex"], "gpt-5.6-terra", "ultra", false, sandboxed)
-		if want := []string{"--model", "gpt-5.6-terra", "-c", "model_reasoning_effort=ultra"}; !slices.Equal(got[1:], want) {
-			t.Errorf("codex (sandboxed=%v) got %v, want …%v", sandboxed, got, want)
-		}
-		got = buildTerminalCommand(engineRegistry["hermes"], "qwen3-30b", "minimal", true, sandboxed)
-		if want := []string{"-m", "qwen3-30b", "--reasoning", "minimal", "--yolo"}; !slices.Equal(got[1:], want) {
-			t.Errorf("hermes (sandboxed=%v) got %v, want …%v", sandboxed, got, want)
-		}
-	}
-	// No effort = no flag (Hermes "Auto", Codex's own default).
-	if got := buildTerminalCommand(engineRegistry["hermes"], "qwen3-30b", "", false, true); slices.Contains(got, "--reasoning") {
-		t.Errorf("hermes without effort got %v", got)
-	}
-	// Hostile or foreign values never reach argv, flag and all.
-	for _, tc := range []struct{ engine, effort string }{
-		{"codex", "auto"}, {"codex", "high model=\"x\""}, {"codex", "high\n-c sandbox=off"},
-		{"hermes", "auto"}, {"hermes", "--yolo"}, {"hermes", "max; id"},
-	} {
-		got := buildTerminalCommand(engineRegistry[tc.engine], "", tc.effort, false, true)
-		if len(got) != 1 {
-			t.Errorf("%s effort %q reached argv: %v", tc.engine, tc.effort, got)
-		}
-	}
-}
-
 // An agent-kind Claude turn gets --model <id> --effort <level>.
 func TestCCTurnArgsModelAndEffort(t *testing.T) {
 	got := ccTurnArgs("do it", "claude-opus-5-5", "max", "")

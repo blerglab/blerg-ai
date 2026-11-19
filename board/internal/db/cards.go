@@ -20,39 +20,49 @@ type Link struct {
 }
 
 type Card struct {
-	Reference   string          `json:"reference,omitempty"`
-	Sensitive   bool            `json:"sensitive"`
-	Origin      json.RawMessage `json:"origin,omitempty"`
-	Effort      string          `json:"effort"`
-	ID          string          `json:"id"`
-	BoardID     string          `json:"board_id"`
-	Number      int             `json:"number"`
-	ColumnID    *string         `json:"column_id"`
-	Type        string          `json:"type"`
-	Title       string          `json:"title"`
-	Body        *string         `json:"body"`
-	Priority    string          `json:"priority"`
-	AutoMerge   bool            `json:"auto_merge"`
-	RunAttempts int             `json:"run_attempts"`
-	MergedSHA   *string         `json:"merged_sha"`
-	MergedAt    *string         `json:"merged_at"`
-	StuckAt     *string         `json:"stuck_at"`
-	StaleAt     *string         `json:"stale_at"`
-	Size        *string         `json:"size"`
-	Model       string          `json:"model"` // overrides the board's model for this card's sessions; "" = board default
-	Fields      json.RawMessage `json:"fields"`
-	DedupKey    *string         `json:"dedup_key"`
-	ExternalID  *string         `json:"external_id"`
-	Rank        string          `json:"rank"`
-	ArchivedAt  *string         `json:"archived_at"`
-	Version     int             `json:"version"`
-	GateFlag    *string         `json:"gate_flag"`
-	CreatedAt   string          `json:"created_at"`
-	UpdatedAt   string          `json:"updated_at"`
-	Repos       []string        `json:"repos"`
-	Tags        []string        `json:"tags"`
-	Links       []Link          `json:"links"`
-	DependsOn   []string        `json:"depends_on"` // blocker card ids
+	ToTestAddedAt        *string         `json:"to_test_added_at,omitempty"`
+	HasHumanDoneReason   *bool           `json:"has_human_done_reason,omitempty"`
+	DoneMovedAt          *string         `json:"done_moved_at,omitempty"`
+	CommitSummary        json.RawMessage `json:"commit_summary,omitempty"`
+	ReleaseID            *string         `json:"release_id"`
+	Reference            string          `json:"reference,omitempty"`
+	Sensitive            bool            `json:"sensitive"`
+	Origin               json.RawMessage `json:"origin,omitempty"`
+	Effort               string          `json:"effort"`
+	ID                   string          `json:"id"`
+	BoardID              string          `json:"board_id"`
+	Number               int             `json:"number"`
+	ColumnID             *string         `json:"column_id"`
+	Type                 string          `json:"type"`
+	Title                string          `json:"title"`
+	Body                 *string         `json:"body"`
+	Priority             string          `json:"priority"`
+	AutoMerge            bool            `json:"auto_merge"`
+	RunAttempts          int             `json:"run_attempts"`
+	MergedSHA            *string         `json:"merged_sha"`
+	MergedAt             *string         `json:"merged_at"`
+	StuckAt              *string         `json:"stuck_at"`
+	StaleAt              *string         `json:"stale_at"`
+	Size                 *string         `json:"size"`
+	Risk                 *string         `json:"risk"`
+	Complexity           *string         `json:"complexity"`
+	SizeFirstSetAt       *string         `json:"size_first_set_at"`
+	RiskFirstSetAt       *string         `json:"risk_first_set_at"`
+	ComplexityFirstSetAt *string         `json:"complexity_first_set_at"`
+	Model                string          `json:"model"` // overrides the board's model for this card's sessions; "" = board default
+	Fields               json.RawMessage `json:"fields"`
+	DedupKey             *string         `json:"dedup_key"`
+	ExternalID           *string         `json:"external_id"`
+	Rank                 string          `json:"rank"`
+	ArchivedAt           *string         `json:"archived_at"`
+	Version              int             `json:"version"`
+	GateFlag             *string         `json:"gate_flag"`
+	CreatedAt            string          `json:"created_at"`
+	UpdatedAt            string          `json:"updated_at"`
+	Repos                []string        `json:"repos"`
+	Tags                 []string        `json:"tags"`
+	Links                []Link          `json:"links"`
+	DependsOn            []string        `json:"depends_on"` // blocker card ids
 	// Blockers is DependsOn resolved: same edges, in card-number order, each
 	// carrying the blocker's number/title and whether it has landed. A card
 	// with an unsatisfied blocker is skipped by the dispatcher, so this is
@@ -66,14 +76,17 @@ const cardCols = `COALESCE((SELECT NULLIF(board_key, '') || '-' || cards.number:
 	to_char(stuck_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 	to_char(stale_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 	to_char(archived_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), version, gate_flag,
-	to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), sensitive, origin`
+	to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), sensitive, origin, risk, complexity,
+ to_char(size_first_set_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+ to_char(risk_first_set_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+ to_char(complexity_first_set_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'), release_id, commit_summary`
 
 func scanCard(row pgx.Row) (Card, error) {
 	var c Card
 	err := row.Scan(&c.Reference, &c.ID, &c.BoardID, &c.Number, &c.ColumnID, &c.Type, &c.Title, &c.Body,
 		&c.Priority, &c.Size, &c.Model, &c.Effort, &c.Fields, &c.DedupKey, &c.ExternalID, &c.Rank,
 		&c.AutoMerge, &c.RunAttempts, &c.MergedSHA, &c.MergedAt, &c.StuckAt, &c.StaleAt,
-		&c.ArchivedAt, &c.Version, &c.GateFlag, &c.CreatedAt, &c.UpdatedAt, &c.Sensitive, &c.Origin)
+		&c.ArchivedAt, &c.Version, &c.GateFlag, &c.CreatedAt, &c.UpdatedAt, &c.Sensitive, &c.Origin, &c.Risk, &c.Complexity, &c.SizeFirstSetAt, &c.RiskFirstSetAt, &c.ComplexityFirstSetAt, &c.ReleaseID, &c.CommitSummary)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return c, ErrNotFound
 	}
@@ -83,6 +96,8 @@ func scanCard(row pgx.Row) (Card, error) {
 // CardParams is a create/update payload. Nil pointers mean "unchanged" on
 // update; on create, sensible defaults apply.
 type CardParams struct {
+	CommitSummary        json.RawMessage `json:"commit_summary,omitempty"`
+	ReleaseID            *string         `json:"release_id"`
 	SensitiveBodyAllowed bool            `json:"-"`
 	Effort               *string         `json:"effort"`
 	Type                 *string         `json:"type"`
@@ -90,6 +105,8 @@ type CardParams struct {
 	Body                 *string         `json:"body"`
 	Priority             *string         `json:"priority"`
 	Size                 *string         `json:"size"`
+	Risk                 *string         `json:"risk"`
+	Complexity           *string         `json:"complexity"`
 	Model                *string         `json:"model"` // "" clears the override
 	Fields               json.RawMessage `json:"fields"`
 	DedupKey             *string         `json:"dedup_key"`
@@ -110,6 +127,9 @@ type CardParams struct {
 }
 
 func normalizeCardParams(p *CardParams) error {
+	if err := ValidateCommitSummary(p.CommitSummary); err != nil {
+		return err
+	}
 	if err := checkEffort("effort", p.Effort); err != nil {
 		return err
 	}
@@ -122,9 +142,19 @@ func normalizeCardParams(p *CardParams) error {
 	if p.Size != nil && *p.Size != "" {
 		*p.Size = strings.ToUpper(strings.TrimSpace(*p.Size))
 		switch *p.Size {
-		case "XS", "S", "M", "L", "XL":
+		case "S", "M", "L", "XL":
 		default:
-			return fmt.Errorf("invalid size %q (XS|S|M|L|XL)", *p.Size)
+			return fmt.Errorf("invalid size %q (S|M|L|XL)", *p.Size)
+		}
+	}
+	for name, value := range map[string]*string{"risk": p.Risk, "complexity": p.Complexity} {
+		if value != nil {
+			*value = strings.ToLower(strings.TrimSpace(*value))
+			switch *value {
+			case "", "low", "medium", "high":
+			default:
+				return fmt.Errorf("invalid %s %q (low|medium|high)", name, *value)
+			}
 		}
 	}
 	if p.Priority != nil {
@@ -238,6 +268,9 @@ func createCardTx(ctx context.Context, tx pgx.Tx, boardID string, p CardParams, 
 	}
 
 	if err := lockBoard(ctx, tx, boardID); err != nil {
+		return CreateResult{}, err
+	}
+	if err := validateRelease(ctx, tx, boardID, p.ReleaseID); err != nil {
 		return CreateResult{}, err
 	}
 	requireRepo, defs, err := loadBoardMeta(ctx, tx, boardID)
@@ -444,14 +477,18 @@ func createCardTx(ctx context.Context, tx pgx.Tx, boardID string, p CardParams, 
 	if len(fields) == 0 {
 		fields = json.RawMessage(`{}`)
 	}
+	summary := p.CommitSummary
+	if len(summary) == 0 {
+		summary = json.RawMessage(`[]`)
+	}
 
 	card, err := scanCard(tx.QueryRow(ctx, `
 		INSERT INTO cards (board_id, number, column_id, type, title, body, priority, size, model, effort,
-			fields, dedup_key, external_id, rank)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+			fields, dedup_key, external_id, rank, risk, complexity, release_id, commit_summary)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 		RETURNING `+cardCols,
 		boardID, number, columnID, typ, *p.Title, p.Body, priority, p.Size, deref(p.Model), deref(p.Effort),
-		fields, emptyToNil(p.DedupKey), emptyToNil(p.ExternalID), rank))
+		fields, emptyToNil(p.DedupKey), emptyToNil(p.ExternalID), rank, emptyToNil(p.Risk), emptyToNil(p.Complexity), emptyToNil(p.ReleaseID), summary))
 	if err != nil {
 		if isUniqueViolation(err, "cards_external_id_uidx") {
 			return CreateResult{}, ErrDuplicateExternal
@@ -624,6 +661,9 @@ func replaceTags(ctx context.Context, tx pgx.Tx, cardID string, tags []string) e
 
 // onlyAddsLinks reports whether a patch carries nothing but add_links (and guards).
 func onlyAddsLinks(p CardParams) bool {
+	if p.ReleaseID != nil {
+		return false
+	}
 	p.AddLinks, p.IfMatch, p.IfMatchOnHit = nil, nil, nil
 	return reflect.DeepEqual(p, CardParams{})
 }
@@ -690,6 +730,9 @@ func changedFields(before Card, p CardParams) []string {
 			changed = append(changed, name)
 		}
 	}
+	if len(p.CommitSummary) > 0 {
+		mark("commit_summary", !sameJSON(p.CommitSummary, before.CommitSummary))
+	}
 	if p.Title != nil {
 		mark("title", *p.Title != before.Title)
 	}
@@ -704,6 +747,12 @@ func changedFields(before Card, p CardParams) []string {
 	}
 	if p.Size != nil {
 		mark("size", *p.Size != deref(before.Size))
+	}
+	if p.Risk != nil {
+		mark("risk", *p.Risk != deref(before.Risk))
+	}
+	if p.Complexity != nil {
+		mark("complexity", *p.Complexity != deref(before.Complexity))
 	}
 	if p.Model != nil {
 		mark("model", *p.Model != before.Model)
@@ -731,6 +780,9 @@ func changedFields(before Card, p CardParams) []string {
 	}
 	if p.Links != nil {
 		mark("links", !sameLinks(*p.Links, before.Links))
+	}
+	if p.ReleaseID != nil {
+		mark("release_id", deref(p.ReleaseID) != deref(before.ReleaseID))
 	}
 	return changed
 }
@@ -781,6 +833,11 @@ func sameJSON(a, b json.RawMessage) bool {
 // UpdateCard patches card content. Every change bumps version; If-Match
 // (when supplied) is checked against the pre-write version.
 func UpdateCard(ctx context.Context, pool *pgxpool.Pool, cardID string, p CardParams, ev EventMeta) (Card, error) {
+	legacyXS := p.Size != nil && strings.EqualFold(strings.TrimSpace(*p.Size), "XS")
+	if legacyXS {
+		p.Size = nil
+	}
+
 	if err := normalizeCardParams(&p); err != nil {
 		return Card{}, err
 	}
@@ -793,9 +850,9 @@ func UpdateCard(ctx context.Context, pool *pgxpool.Pool, cardID string, p CardPa
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after a successful commit is a no-op; the commit error is what is returned
 
-	// A change of repos takes the board lock first (before the card's row, the order
-	// ResolveBoardRepo locks in), so the repos it validates cannot be renamed under it.
-	if p.Repos != nil {
+	// Lock the board before the card for repo validation and release assignment.
+	// Release cuts use the same order, so assignment cannot race a cut.
+	if p.Repos != nil || p.ReleaseID != nil {
 		var boardID string
 		if err := tx.QueryRow(ctx, `SELECT board_id FROM cards WHERE id = $1`, cardID).Scan(&boardID); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -813,6 +870,10 @@ func UpdateCard(ctx context.Context, pool *pgxpool.Pool, cardID string, p CardPa
 	if err != nil {
 		return Card{}, err
 	}
+	if legacyXS && deref(card.Size) != "XS" {
+		return Card{}, fmt.Errorf("invalid size XS (S|M|L|XL)")
+	}
+
 	if card.Sensitive && p.Body != nil {
 		if !p.SensitiveBodyAllowed {
 			return Card{}, ErrSensitiveBodyForbidden
@@ -824,6 +885,21 @@ func UpdateCard(ctx context.Context, pool *pgxpool.Pool, cardID string, p CardPa
 	}
 	if p.IfMatch != nil && *p.IfMatch != card.Version {
 		return Card{}, ErrStaleVersion
+	}
+	if err := validateRelease(ctx, tx, card.BoardID, p.ReleaseID); err != nil {
+		return Card{}, err
+	}
+	if p.ReleaseID != nil && deref(p.ReleaseID) != deref(card.ReleaseID) && card.ArchivedAt != nil {
+		return Card{}, &FieldError{Key: "release_id", Msg: "restore the archived card before changing its release"}
+	}
+	if p.ReleaseID != nil && card.ReleaseID != nil {
+		var closed bool
+		if err := tx.QueryRow(ctx, `SELECT status='released' FROM board_releases WHERE id=$1`, *card.ReleaseID).Scan(&closed); err != nil {
+			return Card{}, err
+		}
+		if closed {
+			return Card{}, &FieldError{Key: "release_id", Msg: "released cards retain their release"}
+		}
 	}
 	requireRepo, defs, err := loadBoardMeta(ctx, tx, card.BoardID)
 	if err != nil {
@@ -855,6 +931,17 @@ func UpdateCard(ctx context.Context, pool *pgxpool.Pool, cardID string, p CardPa
 		args = append(args, v)
 		set = append(set, fmt.Sprintf("%s = $%d", col, len(args)))
 	}
+	if len(p.CommitSummary) > 0 {
+		add("commit_summary", p.CommitSummary)
+	}
+	if p.ReleaseID != nil {
+		if deref(p.ReleaseID) != deref(card.ReleaseID) {
+			if _, err = tx.Exec(ctx, `DELETE FROM release_done_cards WHERE card_id=$1 AND release_id=$2`, card.ID, card.ReleaseID); err != nil {
+				return Card{}, err
+			}
+		}
+		add("release_id", emptyToNil(p.ReleaseID))
+	}
 	if p.Title != nil {
 		add("title", *p.Title)
 	}
@@ -876,6 +963,12 @@ func UpdateCard(ctx context.Context, pool *pgxpool.Pool, cardID string, p CardPa
 		} else {
 			add("size", *p.Size)
 		}
+	}
+	if p.Risk != nil {
+		add("risk", emptyToNil(p.Risk))
+	}
+	if p.Complexity != nil {
+		add("complexity", emptyToNil(p.Complexity))
 	}
 	if len(p.Fields) > 0 {
 		add("fields", p.Fields)
@@ -932,7 +1025,7 @@ func UpdateCard(ctx context.Context, pool *pgxpool.Pool, cardID string, p CardPa
 	}
 
 	if err := appendEvent(ctx, tx, cardID, "updated", ev, nil, nil,
-		map[string]any{"fields": changedFields(before, p)}); err != nil {
+		map[string]any{"fields": changedFields(before, p), "from_release": deref(before.ReleaseID), "to_release": deref(card.ReleaseID), "burn_before": burnStateOf(before)}); err != nil {
 		return Card{}, err
 	}
 	if err := loadCardExtras(ctx, tx, &card); err != nil {
@@ -1044,9 +1137,27 @@ func moveCard(ctx context.Context, pool *pgxpool.Pool, cardID, toColumnID string
 		return Card{}, err
 	}
 
+	if card.ArchivedAt != nil && card.ReleaseID != nil {
+		var released bool
+		if err = tx.QueryRow(ctx, `SELECT status='released' FROM board_releases WHERE id=$1`, *card.ReleaseID).Scan(&released); err != nil {
+			return Card{}, err
+		}
+		if released {
+			if _, err = tx.Exec(ctx, `UPDATE release_done_cards SET restored_at=now() WHERE card_id=$1 AND release_id=$2`, cardID, *card.ReleaseID); err != nil {
+				return Card{}, err
+			}
+			if _, err = tx.Exec(ctx, `UPDATE cards SET release_id=NULL WHERE id=$1`, cardID); err != nil {
+				return Card{}, err
+			}
+		} else {
+			if _, err = tx.Exec(ctx, `DELETE FROM release_done_cards WHERE card_id=$1 AND release_id=$2`, cardID, *card.ReleaseID); err != nil {
+				return Card{}, err
+			}
+		}
+	}
 	fromCol := card.ColumnID
 	card, err = scanCard(tx.QueryRow(ctx, `
-		UPDATE cards SET column_id = $2, rank = $3, archived_at = NULL,
+        UPDATE cards SET column_id = $2, rank = $3, archived_at = NULL,
 			version = version + 1, updated_at = now()
 		WHERE id = $1 RETURNING `+cardCols, cardID, colID, rank))
 	if err != nil {
@@ -1074,6 +1185,14 @@ func ArchiveCard(ctx context.Context, pool *pgxpool.Pool, cardID string, ifMatch
 		return Card{}, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after a successful commit is a no-op; the commit error is what is returned
+	card, err := archiveCardTx(ctx, tx, cardID, ifMatch, ev)
+	if err != nil {
+		return Card{}, err
+	}
+	return card, tx.Commit(ctx)
+}
+
+func archiveCardTx(ctx context.Context, tx pgx.Tx, cardID string, ifMatch *int, ev EventMeta) (Card, error) {
 	card, err := scanCard(tx.QueryRow(ctx,
 		`SELECT `+cardCols+` FROM cards WHERE id = $1 FOR UPDATE`, cardID))
 	if err != nil {
@@ -1081,6 +1200,9 @@ func ArchiveCard(ctx context.Context, pool *pgxpool.Pool, cardID string, ifMatch
 	}
 	if ifMatch != nil && *ifMatch != card.Version {
 		return Card{}, ErrStaleVersion
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO release_done_cards(release_id,card_id,column_name) SELECT c.release_id,c.id,col.name FROM cards c JOIN board_columns col ON col.id=c.column_id WHERE c.id=$1 AND c.release_id IS NOT NULL AND col.is_terminal ON CONFLICT DO NOTHING`, cardID); err != nil {
+		return Card{}, err
 	}
 	fromCol := card.ColumnID
 	card, err = scanCard(tx.QueryRow(ctx, `
@@ -1093,7 +1215,7 @@ func ArchiveCard(ctx context.Context, pool *pgxpool.Pool, cardID string, ifMatch
 	if err := appendEvent(ctx, tx, cardID, "archived", ev, fromCol, nil, nil); err != nil {
 		return Card{}, err
 	}
-	return card, tx.Commit(ctx)
+	return card, nil
 }
 
 // DeleteCard hard-deletes (events cascade).
@@ -1115,7 +1237,7 @@ func ListCards(ctx context.Context, pool *pgxpool.Pool, boardID string, archived
 		where = `c.board_id = $1 AND c.archived_at IS NOT NULL`
 	}
 	rows, err := pool.Query(ctx, `
-		SELECT `+prefixCols("c")+` FROM cards c
+		SELECT `+listCardCols()+` FROM cards c
 		LEFT JOIN board_columns col ON col.id = c.column_id
 		WHERE `+where+`
 		ORDER BY col.rank NULLS LAST, c.rank`, boardID)
@@ -1148,7 +1270,10 @@ const cardColsC = `COALESCE((SELECT NULLIF(board_key, '') || '-' || c.number::te
 	to_char(c.stuck_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 	to_char(c.stale_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 	to_char(c.archived_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), c.version, c.gate_flag,
-	to_char(c.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), to_char(c.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), c.sensitive, c.origin`
+	to_char(c.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), to_char(c.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), c.sensitive, c.origin, c.risk, c.complexity,
+ to_char(c.size_first_set_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+ to_char(c.risk_first_set_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+ to_char(c.complexity_first_set_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'), c.release_id, c.commit_summary`
 
 func prefixCols(string) string { return cardColsC }
 
@@ -1272,4 +1397,9 @@ func CountBlocked(ctx context.Context, pool *pgxpool.Pool, columnID string) (int
 		 WHERE column_id = $1 AND archived_at IS NULL
 		   AND `+hasUnsatisfiedBlockerSQL("cards.id"), columnID).Scan(&n)
 	return n, err
+}
+
+// List/search payloads retain card display fields without loading commit metadata.
+func listCardCols() string {
+	return strings.Replace(prefixCols("c"), "c.commit_summary", "NULL::jsonb", 1)
 }

@@ -364,3 +364,14 @@ func TestLogsKeepTheReasonReadyzLeavesOut(t *testing.T) {
 		t.Fatalf("log lacks the reason:\n%s", logs.String())
 	}
 }
+
+func TestOptionalWarningDoesNotFailReadiness(t *testing.T) {
+	var gate Gate
+	gate.SetHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	gate.SetWarningCheck(func() string { return "live_data_tls_expiring" })
+	rec := httptest.NewRecorder()
+	gate.ServeHTTP(rec, httptest.NewRequest("GET", "/readyz", nil))
+	if rec.Code != http.StatusOK || rec.Header().Get("X-Blerg-Readiness-Warning") != "live_data_tls_expiring" {
+		t.Fatal("optional TLS warning failed service readiness")
+	}
+}

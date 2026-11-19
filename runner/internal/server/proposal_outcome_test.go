@@ -15,6 +15,7 @@ func (fx *topicFx) agentOn() *DaemonConn {
 	fx.t.Helper()
 	dc := &DaemonConn{ID: topicDaemonID, Name: "laptop", ReposRoot: "/repos", send: make(chan []byte, 32)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	dc.SetInputReceipts(true)
 	fx.api.hub.Register(dc)
 	fx.api.hub.SetSessionOwner(fx.sess, dc.ID)

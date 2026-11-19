@@ -50,7 +50,7 @@ func filingText(s string, maxRunes int, allowLines bool) bool {
 	return true
 }
 func validateFilingDraft(d boardfiling.Draft) error {
-	if strings.TrimSpace(d.Title) == "" || !filingText(d.Title, 200, false) || len(d.Body) > 64<<10 || !filingText(d.Body, 64<<10, true) || !filingText(d.Type, 64, false) || len(d.Repos) > 20 {
+	if !d.ValidEstimates() || strings.TrimSpace(d.Title) == "" || !filingText(d.Title, 200, false) || len(d.Body) > 64<<10 || !filingText(d.Body, 64<<10, true) || !filingText(d.Type, 64, false) || len(d.Repos) > 20 {
 		return apiErrorf(400, "Provide a title up to 200 characters, body up to 64 KiB, and valid type and repositories.")
 	}
 	for _, repo := range d.Repos {
@@ -244,12 +244,15 @@ func (a *API) HandleFileTicket(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		protocol.WorkspaceGitRef
-		Board     string   `json:"board"`
-		Title     string   `json:"title"`
-		Body      string   `json:"body"`
-		Type      string   `json:"type"`
-		Sensitive bool     `json:"sensitive"`
-		Repos     []string `json:"repos"`
+		Board      string   `json:"board"`
+		Size       string   `json:"size"`
+		Risk       string   `json:"risk"`
+		Complexity string   `json:"complexity"`
+		Title      string   `json:"title"`
+		Body       string   `json:"body"`
+		Type       string   `json:"type"`
+		Sensitive  bool     `json:"sensitive"`
+		Repos      []string `json:"repos"`
 	}
 	if filingDecode(body, &req) != nil || !filingText(req.Board, 200, false) {
 		writeError(w, 400, "Provide a board and a valid ticket draft.")
@@ -265,7 +268,7 @@ func (a *API) HandleFileTicket(w http.ResponseWriter, r *http.Request) {
 		writeFilingError(w, err)
 		return
 	}
-	draft := boardfiling.Draft{Title: req.Title, Body: req.Body, Type: req.Type, Sensitive: req.Sensitive, Repos: req.Repos}
+	draft := boardfiling.Draft{Size: req.Size, Risk: req.Risk, Complexity: req.Complexity, Title: req.Title, Body: req.Body, Type: req.Type, Sensitive: req.Sensitive, Repos: req.Repos}
 	if err := validateFilingDraft(draft); err != nil {
 		writeFilingError(w, err)
 		return
@@ -350,12 +353,15 @@ func (h *proposalsHandler) editBoardDraft(w http.ResponseWriter, r *http.Request
 	var req struct {
 		Expected string `json:"expected_arguments_raw"`
 		Draft    struct {
-			BoardID   string   `json:"board_id"`
-			Title     string   `json:"title"`
-			Body      string   `json:"body"`
-			Type      string   `json:"type"`
-			Sensitive bool     `json:"sensitive"`
-			Repos     []string `json:"repos"`
+			BoardID    string   `json:"board_id"`
+			Size       *string  `json:"size"`
+			Risk       *string  `json:"risk"`
+			Complexity *string  `json:"complexity"`
+			Title      string   `json:"title"`
+			Body       string   `json:"body"`
+			Type       string   `json:"type"`
+			Sensitive  bool     `json:"sensitive"`
+			Repos      []string `json:"repos"`
 		} `json:"draft"`
 	}
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 2*db.MaxProposalArgumentsBytes))
@@ -379,7 +385,13 @@ func (h *proposalsHandler) editBoardDraft(w http.ResponseWriter, r *http.Request
 		writeFilingError(w, err)
 		return
 	}
-	draft := boardfiling.Draft{Title: req.Draft.Title, Body: req.Draft.Body, Type: req.Draft.Type, Sensitive: req.Draft.Sensitive, Repos: req.Draft.Repos, Origin: old.Origin}
+	draft := boardfiling.Draft{Size: old.Size, Risk: old.Risk, Complexity: old.Complexity, Title: req.Draft.Title, Body: req.Draft.Body, Type: req.Draft.Type, Sensitive: req.Draft.Sensitive, Repos: req.Draft.Repos, Origin: old.Origin}
+	for dst, value := range map[*string]*string{&draft.Size: req.Draft.Size, &draft.Risk: req.Draft.Risk, &draft.Complexity: req.Draft.Complexity} {
+		if value != nil {
+			*dst = *value
+		}
+	}
+
 	if err := validateFilingDraft(draft); err != nil {
 		writeFilingError(w, err)
 		return

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -192,5 +193,16 @@ func TestAgentSessionEnvLetsBlergRunnerPostAMessage(t *testing.T) {
 	}
 	if len(msgs) != 1 || msgs[0].Body != "from inside the session" {
 		t.Fatalf("blerg-runner did not post for this session: %+v", msgs)
+	}
+}
+
+// Each hosting's engine hears its own generation, so the CLI's questions are stamped with it.
+func TestAgentSessionEnvCarriesTheHostGeneration(t *testing.T) {
+	host := &AgentHost{}
+	first := host.nextHostGeneration(0)
+	env := hostedSessionEnv([]string{"PATH=/bin", hostGenerationEnv + "=1"}, first)
+	want := hostGenerationEnv + "=" + strconv.FormatInt(first, 10)
+	if env[len(env)-1] != want {
+		t.Fatalf("env = %v", env)
 	}
 }

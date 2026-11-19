@@ -104,9 +104,6 @@ func TestClaudeSandboxExceptionWithManagedDomainsOnly(t *testing.T) {
 	if !strings.Contains(note, "localhost:8083") || !strings.Contains(note, "administrator") {
 		t.Fatalf("note = %q", note)
 	}
-	if args := claudeTerminalSandboxArgs("s1", []string{"BLERG_RUNNER_SERVER_HTTP=http://localhost:8083"}, home, "", false); args != nil {
-		t.Fatalf("terminal args = %q", args)
-	}
 	assertUntouched(t, settings, sandboxOnSettings)
 }
 
@@ -187,19 +184,6 @@ func TestAgentSessionSettingsCarryTheSandboxException(t *testing.T) {
 		}
 		assertUntouched(t, settings, settingsBody)
 	}
-}
-
-func TestTerminalSandboxArgs(t *testing.T) {
-	home, settings := claudeSandboxFixture(t, sandboxOnSettings)
-	env := []string{"BLERG_RUNNER_SERVER_HTTP=http://localhost:8083"}
-	got := claudeTerminalSandboxArgs("s1", env, home, "", false)
-	if len(got) != 2 || got[0] != "--settings" || got[1] != `{"sandbox":{"network":{"allowedDomains":["localhost:8083"]}}}` {
-		t.Fatalf("terminal args = %q", got)
-	}
-	if got := claudeTerminalSandboxArgs("s1", env, home, "", true); got != nil {
-		t.Fatalf("a Docker-sandboxed terminal got %q", got)
-	}
-	assertUntouched(t, settings, sandboxOnSettings)
 }
 
 // hasErrorContaining reports whether an error event in the session's transcript says text.

@@ -24,8 +24,12 @@ func isolatedClusterPod(pod map[string]any, container map[string]any) {
 chown -R 1000:1000 /runtime-home
 chown 1001:1000 /runtime-home
 chmod 0770 /runtime-home
+mkdir -p /runtime-home/tool-tmp
+chown 1000:1000 /runtime-home/tool-tmp
+chmod 1777 /runtime-home/tool-tmp
 chown 1001:1001 /runtime-private
 chmod 0700 /runtime-private
 chown 1000:1000 /runtime-attachments
-chmod 0700 /runtime-attachments`}, "securityContext": map[string]any{"runAsUser": 0, "runAsNonRoot": false, "allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": map[string]any{"drop": []string{"ALL"}, "add": []string{"CHOWN", "DAC_OVERRIDE", "FOWNER"}}, "seccompProfile": map[string]any{"type": "RuntimeDefault"}}, "resources": map[string]any{"requests": map[string]string{"cpu": "10m", "memory": "32Mi"}, "limits": map[string]string{"cpu": "1", "memory": "128Mi"}}, "volumeMounts": []map[string]any{{"name": "workspace-home", "mountPath": "/runtime-home"}, {"name": "workspace-private", "mountPath": "/runtime-private"}, {"name": "session-attachments", "mountPath": "/runtime-attachments"}}}}
+chmod 0700 /runtime-attachments
+chmod 1777 /runtime-tmp`}, "securityContext": map[string]any{"runAsUser": 0, "runAsNonRoot": false, "allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": map[string]any{"drop": []string{"ALL"}, "add": []string{"CHOWN", "DAC_OVERRIDE", "FOWNER"}}, "seccompProfile": map[string]any{"type": "RuntimeDefault"}}, "resources": map[string]any{"requests": map[string]string{"cpu": "10m", "memory": "32Mi"}, "limits": map[string]string{"cpu": "1", "memory": "128Mi"}}, "volumeMounts": []map[string]any{{"name": "workspace-home", "mountPath": "/runtime-home"}, {"name": "workspace-private", "mountPath": "/runtime-private"}, {"name": "session-attachments", "mountPath": "/runtime-attachments"}, {"name": "workspace-tmp", "mountPath": "/runtime-tmp"}}}}
 }

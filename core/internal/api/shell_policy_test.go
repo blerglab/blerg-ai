@@ -249,3 +249,73 @@ func TestShellPolicyQueuedWriteRechecksAuthority(t *testing.T) {
 		})
 	}
 }
+
+func TestShellAuthorizationDenialBindsTheFreshRequest(t *testing.T) {
+	deps, pool := newTestDeps(t, nil, nil)
+	deps.ShellPolicy = shellpolicy.New(pool)
+	deps.InternalKey = "shell-denial-fixture"
+	owner := insertCredAccount(t, pool, "shell-denial")
+	sid := insertLiveHumanSession(t, pool, owner)
+	if _, err := pool.Exec(t.Context(), `UPDATE human_sessions SET revoked_at=now() WHERE id=$1`, sid); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(api.NewRouter(deps))
+	defer server.Close()
+	request := map[string]any{"owner_id": owner, "login_id": sid, "nonce": "fresh-request"}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequestWithContext(t.Context(), "POST", server.URL+"/internal/shell/authorize", strings.NewReader(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Internal-Key", deps.InternalKey)
+	res, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var reply map[string]any
+	if err = json.NewDecoder(res.Body).Decode(&reply); err != nil {
+		t.Fatal("denial is not typed", err)
+	}
+	if res.StatusCode != 403 || reply["version"] != float64(1) || reply["outcome"] != "deny" || reply["owner_id"] != owner || reply["login_id"] != sid || reply["nonce"] != "fresh-request" || reply["reason"] != "login_unavailable" {
+		t.Fatalf("uncorrelated denial: %#v", reply)
+	}
+}
+
+func TestShellAuthorizationApprovalCarriesLoginDeadline(t *testing.T) {
+	deps, pool := newTestDeps(t, nil, nil)
+	deps.ShellPolicy = shellpolicy.New(pool)
+	deps.InternalKey = "shell-approval-fixture"
+	owner := insertCredAccount(t, pool, "shell-approval")
+	sid := insertLiveHumanSession(t, pool, owner)
+	var deadline time.Time
+	if err := pool.QueryRow(t.Context(), `UPDATE human_sessions SET expires_at=now()+interval '1 hour' WHERE id=$1 RETURNING expires_at`, sid).Scan(&deadline); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(api.NewRouter(deps))
+	defer server.Close()
+	raw, err := json.Marshal(map[string]any{"owner_id": owner, "login_id": sid, "nonce": "fresh-request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequestWithContext(t.Context(), "POST", server.URL+"/internal/shell/authorize", strings.NewReader(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Internal-Key", deps.InternalKey)
+	res, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var reply map[string]any
+	if err = json.NewDecoder(res.Body).Decode(&reply); err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != 200 || reply["authorization_version"] != float64(2) || reply["outcome"] != "allow" || reply["owner_id"] != owner || reply["login_id"] != sid || reply["nonce"] != "fresh-request" || reply["login_expires_at"] != float64(deadline.Unix()) {
+		t.Fatal("approval lacks correlated login deadline")
+	}
+}

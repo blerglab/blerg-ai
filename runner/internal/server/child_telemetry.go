@@ -27,6 +27,7 @@ func childTelemetry(c *liveChild, snapshot db.ChildTelemetry) *protocol.UsageUpd
 		c.LastActivityAt = &at
 		switch e.Kind {
 		case "turn_done":
+			c.LastTurnEndedAt = &at
 			completed = e.Seq
 			usage = nil
 			var report struct {

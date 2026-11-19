@@ -1,3 +1,4 @@
+import { IconButton } from '@blerglab/chat'
 // SessionPermissions: the session panel's compact Permissions summary. A title, how many are
 // active, a Manage button that opens the Permissions modal, then each active permission as a small
 // chip (kind glyph and target) with × to revoke it at once. Permissions that no longer approve
@@ -14,7 +15,7 @@ import { sessionView } from '../lib/sessionView'
 import type { LiveDelegationGrant } from '../lib/liveState'
 import { refreshChildren } from '../hooks/useChildrenSignal'
 import { useChildApproval } from '../hooks/useChildApproval'
-import { boardCaps, boardChip, boardDetail, boardName, boardScope, grantDetail, grantScope, grantTarget, inactiveLabel, ownLevel, readPermissions, type BoardAccess, type ProposalGrant, type PermissionsView } from '../lib/sessionPermissions'
+import { authorityLabel, authorityShort, boardCaps, boardChip, boardDetail, boardName, boardScope, grantDetail, grantScope, grantTarget, inactiveLabel, ownLevel, readPermissions, type BoardAccess, type ProposalGrant, type PermissionsView } from '../lib/sessionPermissions'
 import { CHILD_APPROVAL_NOTE, changeSummary, delegationKey, sessionChildOption, toolKey, type PermissionChanges } from '../lib/permissionsModal'
 import PermissionsModal, { type ActiveEntry, type Loadable, type SaveOutcome } from './PermissionsModal'
 import './SessionPermissions.css'
@@ -22,7 +23,6 @@ import './SessionPermissions.css'
 // Board and tool permissions could not be read: the modal still manages children, and says why
 // the rest is missing.
 const UNREADABLE: PermissionsView = { can_grant: false, reason: 'Board and tool permissions could not be loaded. Close this and use Refresh in the panel.', grants: [], mcp_tools: [], boards: [] }
-const SIGNED_OUT = 'Needs you signed in: Renew it, or choose another level'
 
 interface ChildGroup { key: string; label: string; chip: string; ids: string[] }
 
@@ -69,7 +69,7 @@ export default function SessionPermissions(props: {
 
 function Summary({ sessionId, active, delegationGrants, refreshKey, openRequest, onOpenRequestTaken }: { sessionId: string; active: boolean; delegationGrants: LiveDelegationGrant[]; refreshKey: string; openRequest?: number; onOpenRequestTaken?: () => void }) {
   const headId = useId()
-  // The last read of this session (the explorer and panel cache): shown at once, then read again.
+  // Restore presentation immediately, then refresh; execution always authorizes on the server.
   const [cached] = useState(() => sessionView<{ view: PermissionsView | null; state: 'ready' | 'hidden' }>(sessionId, 'permissions').cached)
   const [view, setView] = useState<PermissionsView | null>(() => cached?.view ?? null)
   const [state, setState] = useState<'loading' | 'ready' | 'hidden' | 'failed'>(() => cached?.state ?? 'loading')
@@ -97,7 +97,7 @@ function Summary({ sessionId, active, delegationGrants, refreshKey, openRequest,
       const next = readPermissions(await r.json())
       if (version === generation.current) { setView(next); setState('ready'); publishSessionPermissions(sessionId, next, ticket); cache.keep({ view: next, state: 'ready' }) }
     } catch {
-      if (version === generation.current) setState('failed')
+      if (version === generation.current) { setView(null); setState('failed') }
     }
   }, [sessionId])
   useEffect(() => { if (active) void Promise.resolve().then(load) }, [active, load, refreshKey])
@@ -162,27 +162,27 @@ function Summary({ sessionId, active, delegationGrants, refreshKey, openRequest,
         {state !== 'loading' && <span className="perm-active-count" data-testid="perm-count">{count} active</span>}
         <button type="button" className="perm-manage" data-perm-manage disabled={state === 'loading'} onClick={() => setModal('search')} aria-haspopup="dialog">Manage</button>
       </div>
-      <div role="group" aria-label="Session permissions" className="perm-group">
+      <div role="group" aria-label="Workspace permissions" className="perm-group">
         {state === 'loading' && !view && <p className="child-approval-note">Loading permissions…</p>}
         {view && !view.can_grant && view.reason && <p className="child-approval-note" data-testid="perm-reason">{view.reason}</p>}
-        {state === 'ready' && count === 0 && dormant.length + dormantBoards.length === 0 && <p className="child-approval-note">None yet: this session asks you each time.</p>}
+        {state === 'ready' && count === 0 && dormant.length + dormantBoards.length === 0 && <p className="child-approval-note">None yet: this workspace asks you each time.</p>}
         {count > 0 && <ul className="perm-chips" data-testid="perm-active" aria-label="Active permissions">
           {groups.map(c => <Chip key={c.key} glyph={GRANT_GLYPH.child} text={c.chip} scope={c.label} title={`${c.label} without asking`} disabled={busy !== null} onRevoke={() => { void revokeChildren(c.ids) }} />)}
-          {boards.map(b => <Chip key={`b:${b.board_id}`} testId="perm-board" glyph={GRANT_GLYPH.board} text={boardChip(b)} scope={boardScope(b)} title={`${boardScope(b)} · ${boardDetail(b)}`} disabled={busy !== null} onRevoke={() => { void revokeBoard(b) }} />)}
+          {boards.map(b => <Chip key={`b:${b.board_id}`} testId="perm-board" glyph={GRANT_GLYPH.board} text={`Ticket board: ${boardChip(b)}`} scope={boardScope(b)} title={`${boardScope(b)} · ${boardDetail(b)}`} disabled={busy !== null} onRevoke={() => { void revokeBoard(b) }} />)}
           {grants.map(g => <Chip key={g.id} testId="perm-grant" glyph={GRANT_GLYPH.tool} text={grantTarget(g)} scope={grantScope(g)} title={`${grantScope(g)} · ${grantDetail(g)}`} disabled={busy !== null} onRevoke={() => { void revoke(g.id) }} />)}
         </ul>}
         {dormant.length + dormantBoards.length > 0 && <div className="perm-dormant-list" data-testid="perm-inactive">
           <p className="perm-dormant-head">Not approving now</p>
           <ul className="perm-chips">
-            {dormantBoards.map(b => <Chip key={`b:${b.board_id}`} dormant glyph={GRANT_GLYPH.board} text={boardChip(b)} scope={boardScope(b)} why="Needs you signed in"
-              title={`${boardScope(b)}. ${SIGNED_OUT}`} disabled={busy !== null} onRevoke={() => { void revokeBoard(b) }} />)}
+            {dormantBoards.map(b => <Chip key={`b:${b.board_id}`} dormant glyph={GRANT_GLYPH.board} text={`Ticket board: ${boardChip(b)}`} scope={boardScope(b)} why={authorityShort(b.inactive)}
+              title={`${boardScope(b)}. ${authorityLabel(b.inactive)}`} disabled={busy !== null} onRevoke={() => { void revokeBoard(b) }} />)}
             {dormant.map(g => <Chip key={g.id} dormant glyph={GRANT_GLYPH.tool} text={grantTarget(g)} scope={grantScope(g)}
-              why={g.inactive === 'tool_changed' ? 'tool changed' : 'Needs you signed in'} title={`${grantScope(g)}. ${inactiveLabel(g)}`} disabled={busy !== null} onRevoke={() => { void revoke(g.id) }} />)}
+              why={authorityShort(g.inactive)} title={`${grantScope(g)}. ${inactiveLabel(g)}`} disabled={busy !== null} onRevoke={() => { void revoke(g.id) }} />)}
           </ul>
         </div>}
         {busy && <p role="status" className="child-approval-note">Saving…</p>}
         {status && !busy && <p role="status" className="child-approval-note perm-saved">{status}</p>}
-        {(error || state === 'failed') && <p role="alert" className="child-approval-note perm-error">{error || 'Could not load the session permissions.'} <button type="button" className="perm-revoke" onClick={() => { setError(''); void load() }}>Refresh</button></p>}
+        {(error || state === 'failed') && <p role="alert" className="child-approval-note perm-error">{error || 'Could not load the workspace permissions.'} <IconButton label="Refresh" onClick={() => { setError(''); return load() }} /></p>}
       </div>
       {modal && <SessionPermissionsModal sessionId={sessionId} view={view ?? UNREADABLE} groups={groups} refreshKey={refreshKey} initialFocus={modal}
         onClose={() => setModal(null)} reload={load} onSaved={summary => setStatus(`Saved: ${summary.toLowerCase()}.`)} />}
@@ -193,7 +193,7 @@ function Summary({ sessionId, active, delegationGrants, refreshKey, openRequest,
 function Chip({ glyph, text, scope, title, why, dormant, disabled, onRevoke, testId }: { glyph: string; text: string; scope: string; title: string; why?: string; dormant?: boolean; disabled: boolean; onRevoke: () => void; testId?: string }) {
   return <li className={`perm-chip${dormant ? ' perm-chip-dormant' : ''}`} title={title} data-testid={testId}>
     <span className="perm-chip-glyph" aria-hidden="true">{glyph}</span>
-    <span className="perm-chip-text">{text}{why && <span className="perm-why"> · {why}</span>}</span>
+    <span className="perm-chip-text">{text}</span>{why && <span className="perm-why"> · {why}</span>}
     <button type="button" className="perm-chip-x" disabled={disabled} onClick={onRevoke} aria-label={`Revoke: ${scope}`}>×</button>
   </li>
 }
@@ -224,7 +224,7 @@ function SessionPermissionsModal({ sessionId, view, groups, refreshKey, initialF
     return [...listed, ...extra]
   }, [boardsRead, levels])
   const nameOf = (b: BoardAccess) => b.board_name || boardRows.find(x => x.id === b.board_id)?.name || b.board_id
-  const boardInfo = Object.fromEntries(levels.map(b => [b.board_id, { launch: b.launch, dormant: b.active === false ? SIGNED_OUT : undefined }]))
+  const boardInfo = Object.fromEntries(levels.map(b => [b.board_id, { launch: b.launch, dormant: b.active === false ? authorityLabel(b.inactive) : undefined, renewable: b.inactive === 'revoked' || b.inactive === 'signed_out' }]))
   const boards: Loadable<{ id: string; name: string }[]> = boardsRead.state === 'loading' ? { state: 'loading' }
     : boardsRead.state === 'failed' ? { state: 'failed', message: 'Boards are unavailable.', retry: boardsRead.retry } : { state: 'ready', value: boardRows }
   const tools = view.mcp_tools.map(t => ({ ...t, changed: dormant.some(g => g.kind === 'mcp_tool' && g.inactive === 'tool_changed' && g.connection_id === t.connection_id && g.tool === t.tool) }))
@@ -236,18 +236,18 @@ function SessionPermissionsModal({ sessionId, view, groups, refreshKey, initialF
     revokeDelegations: [], revokeDormant: [],
   }
   const active: ActiveEntry[] = [
-    ...groups.map(c => ({ key: c.key, kind: 'child' as const, label: c.label, detail: 'Allowed for this session', target: { delegation: c.key } })),
+    ...groups.map(c => ({ key: c.key, kind: 'child' as const, label: c.label, detail: 'Allowed for this workspace', target: { delegation: c.key } })),
     ...levels.map(b => ({ key: `b:${b.board_id}`, kind: 'board' as const, label: boardChip({ ...b, board_name: nameOf(b) }), detail: boardDetail(b),
-      dormant: b.active === false ? SIGNED_OUT : undefined, target: { board: b.board_id } })),
+      dormant: b.active === false ? authorityLabel(b.inactive) : undefined, renewable: b.inactive === 'revoked' || b.inactive === 'signed_out', target: { board: b.board_id } })),
     ...grants.map(g => ({ key: g.id, kind: 'tool' as const, label: grantScope(g), detail: grantDetail(g),
       target: { tool: toolKey(g.connection_id ?? '', g.tool ?? '') } })),
     ...dormant.map(g => ({ key: g.id, kind: 'tool' as const, label: grantScope(g), detail: grantDetail(g),
-      dormant: g.inactive === 'tool_changed' ? 'Tool changed: allow it again to approve the new version' : 'Needs you signed in: allow it again', target: { dormant: g.id } })),
+      dormant: inactiveLabel(g), target: { dormant: g.id } })),
   ]
   const dormantScopes = Object.fromEntries(dormant.map(g => [g.id, { tool: toolKey(g.connection_id ?? '', g.tool ?? '') }]))
 
   const caps = boardCaps(view.started_by)
-  const boardCap = caps && view.started_by ? { by: view.started_by.title || 'the session that started it', levels: caps } : undefined
+  const boardCap = caps && view.started_by ? { by: view.started_by.title || 'Main', levels: caps } : undefined
 
   async function save(_: unknown, c: PermissionChanges): Promise<SaveOutcome> {
     const errors: string[] = []

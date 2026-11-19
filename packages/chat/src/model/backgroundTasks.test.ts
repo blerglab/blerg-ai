@@ -126,3 +126,11 @@ describe('labels', () => {
     expect(truncateLabel('a'.repeat(47) + '\u{1F600}\u{1F600}', 48)).toBe('a'.repeat(47) + '…')
   })
 })
+
+it('retires acknowledged failures and failures seen in a later turn, retaining results', () => {
+  for (const later of [ev('background_task_cleared', { task_id: 'a' }, T0 + 2000), ev('status_changed', { status: 'running' }, T0 + 2000)]) {
+    const tasks = backgroundTasks([started('a', T0), done('a', T0 + 1000, 'failed', 'failed'), later])
+    expect(tasks[0].done?.summary).toBe('failed')
+    expect(shownTasks(tasks, T0 + 3000, true, T0, new Set())).toEqual([])
+  }
+})

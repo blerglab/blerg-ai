@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/ownershell"
+	"github.com/blerglab/blerg-ai/runner/internal/processcontainment"
 )
 
 func TestHelperBootstrapStages(t *testing.T) {
@@ -335,4 +336,126 @@ func TestHelperBootstrapExpiredGrantIsNotClockSkew(t *testing.T) {
 	if json.Unmarshal(out.Bytes(), &reply) != nil || reply.Op != "start_failed" || reply.StartStage != "lease_create" {
 		t.Fatalf("expired grant mislabeled: %+v", reply)
 	}
+}
+
+// Job control through the real tracer: ^Z stops the foreground job and gives the prompt back, a turn
+// end leaves it stopped, fg resumes it.
+// Past the limit a command fails and says why; the shell goes on.
+func TestTracedShellRefusesProcessesAndSaysSo(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash:", err)
+	}
+	c, b, _, _ := fixture(t)
+	identity, root := c.command.Identity, c.command.Identity.Cwd
+	identity.Shell = bash
+	p, err := startTraced(identity, b.Root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		_ = p.stop(ctx)
+	}()
+	if err := p.input([]byte("for i in $(seq 1200); do sleep 60 & done\n")); err != nil {
+		t.Fatal(err)
+	}
+	var seen strings.Builder
+	expect := func(want string, again func()) {
+		t.Helper()
+		deadline, tick := time.After(60*time.Second), time.NewTicker(time.Second)
+		defer tick.Stop()
+		for !strings.Contains(seen.String(), want) {
+			select {
+			case chunk, ok := <-p.output:
+				if !ok {
+					t.Fatalf("shell ended waiting for %q: %s", want, seen.String())
+				}
+				seen.Write(chunk)
+			case <-tick.C:
+				if again != nil {
+					again()
+				}
+			case <-deadline:
+				t.Fatalf("no %q in %s", want, seen.String())
+			}
+		}
+	}
+	expect(processcontainment.TaskLimitMessage(TasksPerShell), nil)
+	expect("Resource temporarily unavailable", nil)
+	// Still there: interrupt the loop and run a builtin.
+	seen.Reset()
+	expect("still-here", func() {
+		if err := p.input([]byte("\x03echo still-$((1+1))-here; echo still-here\n")); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestTracedShellJobControl(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash:", err)
+	}
+	c, b, _, _ := fixture(t)
+	identity, root := c.command.Identity, c.command.Identity.Cwd
+	identity.Shell = bash
+	p, err := startTraced(identity, b.Root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = p.stop(ctx)
+	}()
+	var seen strings.Builder
+	expect := func(want string) {
+		t.Helper()
+		deadline := time.After(10 * time.Second)
+		for !strings.Contains(seen.String(), want) {
+			select {
+			case chunk, ok := <-p.output:
+				if !ok {
+					t.Fatalf("shell ended waiting for %q: %s", want, seen.String())
+				}
+				seen.Write(chunk)
+			case <-deadline:
+				t.Fatalf("no %q in %s", want, seen.String())
+			}
+		}
+		_, rest, _ := strings.Cut(seen.String(), want)
+		seen.Reset()
+		seen.WriteString(rest)
+	}
+	send := func(text string) {
+		t.Helper()
+		if err := p.input([]byte(text)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	send("PS1=ready-\\ ; sleep 30; echo slept-out\n")
+	time.Sleep(300 * time.Millisecond)
+	send("\x1a")
+	expect("Stopped")
+	expect("ready-")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := p.freeze(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.thaw(ctx); err != nil {
+		t.Fatal(err)
+	}
+	send("jobs; echo checked$((1+1))\n")
+	expect("Stopped")
+	expect("checked2")
+	send("fg\n")
+	expect("sleep 30")
+	time.Sleep(100 * time.Millisecond)
+	send("\x03")
+	expect("ready-")
+	send("echo back$((2+2))\n")
+	expect("back4")
 }

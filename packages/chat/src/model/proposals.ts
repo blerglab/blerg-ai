@@ -31,7 +31,7 @@ export function readCard(v: unknown): FiledCard | null {
 
 const ACCESS: readonly CreatedBoard['access'][] = ['propose', 'read', 'file', 'full']
 /** The kind of an untrusted payload: an unknown kind reads as an MCP call. */
-const kindOf = (v: unknown): ProposalKind => (v === 'board_file' || v === 'board_create' ? v : 'mcp')
+const kindOf = (v: unknown): ProposalKind => (v === 'board_file' || v === 'board_create' || v === 'board_metadata' ? v : 'mcp')
 
 /** A created board from untrusted JSON, or null. */
 export function readCreatedBoard(v: unknown): CreatedBoard | null {
@@ -80,7 +80,7 @@ export function readProposalView(v: unknown): ProposalDetail {
   const body = text(args.body, 4000)
   return {
     id: p.id,
-    kind: board ? 'board_file' : p.kind === 'plugin_request' ? 'plugin_request' : 'mcp',
+    kind: board ? 'board_file' : p.kind === 'plugin_request' ? 'plugin_request' : p.kind === 'board_metadata' ? 'board_metadata' : 'mcp',
     state: p.state as ProposalState,
     target: board ? text(args.board_name, 200) || text(args.board_id, 200) : text(p.connection_name, 200),
     tool: board ? '' : text(p.tool, 200),
@@ -97,10 +97,10 @@ const ACCESS_WORDS: Record<CreatedBoard['access'], string> = { propose: 'no acce
 
 /** One line for a decided proposal, or '' while it waits. */
 export function outcomeLine(kind: ProposalKind, state: ProposalState, auto: boolean, board?: CreatedBoard | null): string {
-  const by = auto ? ' by a session permission' : ''
+  const by = auto ? ' by a workspace permission' : ''
   if (kind === 'board_create') {
     switch (state) {
-      case 'done': return board ? `Board created · this session has ${ACCESS_WORDS[board.access]}` : 'Board created'
+      case 'done': return board ? `Board created · this workspace has ${ACCESS_WORDS[board.access]}` : 'Board created'
       case 'rejected': return 'Rejected · no board was created'
       case 'expired': return 'Expired · no board was created'
       case 'failed': return 'Failed · no board was created'

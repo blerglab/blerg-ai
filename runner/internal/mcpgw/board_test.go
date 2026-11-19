@@ -32,13 +32,13 @@ const (
 // wantBoardTools is the exact set spec 10.2 names. It is written out here on purpose: the
 // constant in board.go must equal it, not merely agree with itself.
 var wantBoardTools = []string{
-	"blerg_board_get", "blerg_board_list", "blerg_board_schema", "blerg_column_list",
+	"blerg_board_get", "blerg_board_list", "blerg_board_schema", "blerg_column_list", "blerg_release_list", "blerg_release_get",
 	"blerg_card_search", "blerg_card_get", "blerg_card_create", "blerg_card_update",
 	"blerg_card_move", "blerg_card_comment", "blerg_card_link",
 }
 
-// wantColumnTools manage columns (0.5.0): offered at level full where a person launched the session.
-var wantColumnTools = []string{"blerg_column_create", "blerg_column_update", "blerg_column_move", "blerg_column_delete"}
+// wantPersonTools manage columns (0.5.0): offered at level full where a person launched the session.
+var wantPersonTools = []string{"blerg_card_archive", "blerg_column_create", "blerg_column_update", "blerg_column_move", "blerg_column_delete"}
 
 // boardUpstreamTools is what the board's MCP serves: the eleven allowed tools and five it must
 // not hand a cron.
@@ -47,7 +47,7 @@ func boardUpstreamTools() []fakeTool {
 	for _, n := range wantBoardTools {
 		out = append(out, fakeTool{Name: n, Description: "the board's own " + n, Schema: `{"type":"object"}`})
 	}
-	for _, n := range []string{"blerg_card_archive", "blerg_column_create", "blerg_column_update", "blerg_column_move", "blerg_column_delete", "blerg_board_create", "blerg_board_update"} {
+	for _, n := range []string{"blerg_release_save", "blerg_release_close", "blerg_release_delete", "blerg_card_archive", "blerg_column_create", "blerg_column_update", "blerg_column_move", "blerg_column_delete", "blerg_board_create", "blerg_board_update"} {
 		out = append(out, fakeTool{Name: n, Description: "dangerous " + n, Schema: `{"type":"object"}`})
 	}
 	return out
@@ -69,7 +69,7 @@ type fakeExchanger struct {
 	goneToken string   // a token proof that is no longer live (expired or revoked launch token)
 }
 
-func (f *fakeExchanger) Exchange(_ context.Context, p Proof, boardID, sessionRef string) (BoardToken, error) {
+func (f *fakeExchanger) Exchange(_ context.Context, p Proof, boardID, sessionRef string, standing bool) (BoardToken, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
@@ -90,8 +90,8 @@ func (f *fakeExchanger) Exchange(_ context.Context, p Proof, boardID, sessionRef
 	return BoardToken{Token: fmt.Sprintf("tok-%d", f.n), Sub: fmt.Sprintf("sub-%d", f.n), ExpiresAt: f.clock.Now().Add(ttl)}, nil
 }
 
-func (f *fakeExchanger) ExchangeReadOnly(ctx context.Context, p Proof, boardID, sessionRef string) (BoardToken, error) {
-	tok, err := f.Exchange(ctx, p, boardID, sessionRef)
+func (f *fakeExchanger) ExchangeReadOnly(ctx context.Context, p Proof, boardID, sessionRef string, standing bool) (BoardToken, error) {
+	tok, err := f.Exchange(ctx, p, boardID, sessionRef, standing)
 	f.mu.Lock()
 	if err == nil {
 		f.readOnly[len(f.readOnly)-1] = true
@@ -166,7 +166,7 @@ func (b *boardHarness) authHeader() string {
 
 func TestBoardToolNamesAreExact(t *testing.T) {
 	got := BoardToolNames()
-	want := append(append([]string(nil), wantBoardTools...), wantColumnTools...)
+	want := append(append([]string(nil), wantBoardTools...), wantPersonTools...)
 	sort.Strings(got)
 	sort.Strings(want)
 	if !slices.Equal(got, want) {
@@ -285,7 +285,7 @@ func TestBoardExposesExactlyTheFixedTools(t *testing.T) {
 		t.Fatalf("listed = %v\nwant    %v", got, want)
 	}
 	_, _, callsBefore := b.up.snapshot()
-	for _, n := range []string{"blerg_card_archive", "blerg_column_create", "blerg_column_move", "blerg_board_create", "blerg_board_update", "no_such"} {
+	for _, n := range []string{"blerg_release_save", "blerg_release_close", "blerg_release_delete", "blerg_card_archive", "blerg_column_create", "blerg_column_move", "blerg_board_create", "blerg_board_update", "no_such"} {
 		r := b.callTool(gh, n, map[string]any{})
 		if r.errMessage() != "unknown tool" {
 			t.Errorf("%s: %s, want refused as unknown", n, r.raw)
@@ -474,7 +474,7 @@ func TestHTTPBoardExchanger(t *testing.T) {
 	defer core.Close()
 	ex := &HTTPBoardExchanger{BaseURL: core.URL + "/", InternalKey: "ik"}
 
-	tok, err := ex.Exchange(context.Background(), Proof{AccountID: "acct-1", TokenID: boardTestCron}, boardTestID, "sess-1")
+	tok, err := ex.Exchange(context.Background(), Proof{AccountID: "acct-1", TokenID: boardTestCron}, boardTestID, "sess-1", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +489,7 @@ func TestHTTPBoardExchanger(t *testing.T) {
 		t.Errorf("body = %v, want %v", bodies[0], want)
 	}
 	// A human proof names the session id instead.
-	if _, err := ex.Exchange(context.Background(), Proof{AccountID: "acct-1", SessionID: "login"}, boardTestID, ""); err != nil {
+	if _, err := ex.Exchange(context.Background(), Proof{AccountID: "acct-1", SessionID: "login"}, boardTestID, "", true); err != nil {
 		t.Fatal(err)
 	}
 	if _, has := bodies[1]["token_id"]; has || bodies[1]["session_id"] != "login" {
@@ -504,7 +504,7 @@ func TestHTTPBoardExchanger(t *testing.T) {
 	mu.Lock()
 	status = http.StatusNotFound
 	mu.Unlock()
-	if _, err := ex.Exchange(context.Background(), Proof{AccountID: "acct-1", TokenID: boardTestCron}, boardTestID, ""); !errors.Is(err, ErrConnectionGone) {
+	if _, err := ex.Exchange(context.Background(), Proof{AccountID: "acct-1", TokenID: boardTestCron}, boardTestID, "", true); !errors.Is(err, ErrConnectionGone) {
 		t.Errorf("404 = %v, want ErrConnectionGone", err)
 	}
 	if err := ex.Revoke(context.Background(), "acct-1", sub); err != nil {
@@ -513,10 +513,10 @@ func TestHTTPBoardExchanger(t *testing.T) {
 	mu.Lock()
 	status = http.StatusInternalServerError
 	mu.Unlock()
-	if _, err := ex.Exchange(context.Background(), Proof{AccountID: "acct-1", TokenID: boardTestCron}, boardTestID, ""); err == nil || errors.Is(err, ErrConnectionGone) {
+	if _, err := ex.Exchange(context.Background(), Proof{AccountID: "acct-1", TokenID: boardTestCron}, boardTestID, "", true); err == nil || errors.Is(err, ErrConnectionGone) {
 		t.Errorf("500 = %v", err)
 	}
-	if _, err := ex.Exchange(context.Background(), Proof{AccountID: "acct-1"}, boardTestID, ""); err == nil {
+	if _, err := ex.Exchange(context.Background(), Proof{AccountID: "acct-1"}, boardTestID, "", true); err == nil {
 		t.Error("no proof was accepted")
 	}
 }
@@ -559,5 +559,17 @@ func TestBoardObserverHearsSuccessfulCalls(t *testing.T) {
 	defer o.mu.Unlock()
 	if len(o.calls) != 1 || !strings.HasPrefix(o.calls[0], gh.sessionID+"|"+boardTestID+"|blerg_card_move|") || !strings.Contains(o.calls[0], "ok:blerg_card_move") {
 		t.Fatalf("observed = %v", o.calls)
+	}
+}
+
+func TestReleaseReadsRemainAndWritesAreNotSessionTools(t *testing.T) {
+	for _, name := range []string{"blerg_release_list", "blerg_release_get", "blerg_release_save", "blerg_release_close", "blerg_release_delete"} {
+		read := name == "blerg_release_list" || name == "blerg_release_get"
+		if builtinToolOffered(name) != read {
+			t.Errorf("session release surface: %s", name)
+		}
+		if BoardToolNeedsPerson(name) {
+			t.Errorf("release write should not be offered: %s", name)
+		}
 	}
 }

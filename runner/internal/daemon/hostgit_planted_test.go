@@ -47,6 +47,9 @@ func TestCommitLookupIgnoresPlantedConfiguration(t *testing.T) {
 // person's repository, the turn-end fetch and the release, with that repository and the clone
 // both planted.
 func TestSandboxCloneGitIgnoresPlantedConfiguration(t *testing.T) {
+	dockerDir, dockerLog := fakeDocker(t)
+	t.Setenv("PATH", dockerDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_DOCKER_LOG", dockerLog)
 	t.Setenv(DaemonStateDirEnv, t.TempDir())
 	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
@@ -94,4 +97,24 @@ func TestRemoteCloneIgnoresTheRemotesConfiguration(t *testing.T) {
 	if entries, _ := os.ReadDir(filepath.Join(dest, "sub")); len(entries) != 0 {
 		t.Fatal("a submodule was cloned")
 	}
+}
+
+func TestWorkspaceWorkerFetchIgnoresPlantedConfiguration(t *testing.T) {
+	const id = "planted-worker"
+	repo, clone := cloneFixture(t, id)
+	childCommit(t, clone, "worker.txt")
+	c, err := loadSandboxClone(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceProbe := hostgittest.Plant(t, filepath.Join(clone, ".git"))
+	receiverProbe := hostgittest.Plant(t, filepath.Join(repo, ".git"))
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	changed, err := fetchCloneContext(ctx, clone, id, c, fetchWorkspaceWorkerPack)
+	if err != nil || !changed {
+		t.Fatalf("worker fetch: changed=%v err=%v", changed, err)
+	}
+	sourceProbe.Check(t)
+	receiverProbe.Check(t)
 }

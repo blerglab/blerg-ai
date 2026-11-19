@@ -1,0 +1,16 @@
+/* BLG-464: colors only from theme tokens, same tone vocabulary CapabilitiesPanel.css already
+   uses (tone-ok/tone-warn/var(--lichen|--amber|--danger|--fog)). Cards stay natural width (not
+   stretched edge to edge) so a wide pane shows several per row with their figures kept together. */
+.skill-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 440px)); gap: 10px; margin-top: 18px; }
+.skill-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.skill-card-head h2 { margin: 0; padding: 0; border: 0; font-size: 0.95rem; letter-spacing: normal; }
+.skill-verdict { flex: none; display: inline-flex; align-items: center; gap: 4px; font-size: 0.8rem; font-weight: 600; color: var(--fog-dim); }
+.skill-verdict.tone-ok { color: var(--lichen); }
+.skill-verdict.tone-warn { color: var(--amber); }
+.skill-verdict.tone-same { color: var(--fog); }
+.skill-verdict.tone-unknown { color: var(--fog-dim); font-weight: 400; }
+.skill-stats { margin-top: 10px; }
+.skill-card details { margin-top: 14px; }
+.skill-card details .stack-figs { margin-top: 10px; }
+.skill-evidence { margin-top: 8px; font-size: 0.85rem; color: var(--fog); }
+.skill-evidence .muted { color: var(--fog-dim); }

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mermaidTheme, observeVisualTheme, readVisualTheme, vegaTheme, type VisualTheme } from './theme'
+import { sanitizeSvg } from './policy'
 
 const theme: VisualTheme = {fg: '#edf1f7', muted: '#c1cad6', surface: '#131923', surface2: '#1c2430', border: '#405066',
   accent: '#e5865c', fontFamily: '"Example Sans", sans-serif', fontSize: 14,
@@ -16,6 +17,16 @@ describe('native visual theme', () => {
       mainBkg: theme.surface2, nodeBorder: theme.border, relationColor: theme.muted,
       taskBkgColor: theme.surface2, taskTextColor: theme.fg, taskTextOutsideColor: theme.fg,
     }})
+  })
+  it('gives Mermaid a paint-only themeCSS that is never a font or layout property', () => {
+    const {themeCSS} = mermaidTheme(theme)
+    expect(themeCSS).toBeTruthy()
+    expect(themeCSS).not.toMatch(/font-size|font-family|(?<![-\w])width\s*:|(?<![-\w])height\s*:/)
+    // Policy-safe wherever it ends up: a generated <style> block passes the same sanitizer a
+    // diagram's own SVG output does (no url(), @import, or anything but paint properties).
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg"><style>${themeCSS}</style><g class="node"><rect/></g></svg>`
+    expect(() => sanitizeSvg(svg)).not.toThrow()
+    expect(sanitizeSvg(svg)).toContain('stroke-width')
   })
   it('maps Vega labels, grid, mark, categorical palette and font without a white plot', () => {
     expect(vegaTheme(theme)).toMatchObject({background: 'transparent', font: theme.fontFamily,
@@ -47,7 +58,7 @@ describe('native visual theme', () => {
       'border': '#405066', 'accent': 'rgb(229, 134, 92)', 'font': '"Example Sans", sans-serif', 'text-sm': '14px',
       'code-keyword': '#bc9cf0', 'code-string': '#8fc9a0', 'code-number': '#e0b36a', 'code-title': '#7fb2ee', 'code-type': '#6fc7c7'}
     for (const [key, value] of Object.entries(values)) host.style.setProperty('--chat-' + key, value)
-    expect(readVisualTheme(host)).toEqual(theme)
+    expect(readVisualTheme(host)).toEqual({...theme,sequential:['#587190','#ccdef4']})
   })
   it('observes inherited ancestor styles and system color-scheme changes', async () => {
     const ancestor = document.createElement('div')
@@ -101,4 +112,45 @@ describe('native visual theme', () => {
     await new Promise(resolve => setTimeout(resolve, 40))
     expect(callback).toHaveBeenCalledTimes(1)
   })
+})
+
+// BLG-472: the chart series choice is driven by which tokens are present, never by a theme's name
+// or id — no accessibility-theme allowlist lives in this file. A theme that defines the chart
+// tokens gets distinct per-series hues regardless of what (or whether) data-theme says.
+it('uses distinct chart hues whenever a theme defines them, with no data-theme attribute at all', () => {
+ expect(document.documentElement.hasAttribute('data-theme')).toBe(false)
+ const host=document.createElement('div');document.body.append(host)
+ const hues=['#005a88','#8c4300','#17613d','#60318c','#99254b','#526000','#00656a','#853c77']
+ for (const [i,name] of ['tests','build','git','read','edit','other','model','waiting'].entries()) host.style.setProperty('--chart-'+name,hues[i])
+ expect(readVisualTheme(host).palette).toEqual(expect.arrayContaining(hues))
+ expect(readVisualTheme(host).palette.slice(0, 2)).toEqual(hues.slice(0, 2))
+ expect(vegaTheme(readVisualTheme(host)).range.category.length).toBeGreaterThanOrEqual(8)
+})
+
+// The old code only looked at chart-* tokens for three hard-coded theme ids; any other data-theme
+// value (a future theme, a typo, a theme this file has never heard of) fell through to the
+// code-highlighting palette even when the chart tokens were right there. Proves no such allowlist
+// survives: an arbitrary, unrecognized theme id with the tokens present still gets them.
+it('reads chart tokens under an arbitrary, unrecognized theme id (no hard-coded allowlist)', () => {
+ document.documentElement.dataset.theme = 'some-future-theme-this-file-has-never-heard-of'
+ try {
+  const host=document.createElement('div');document.body.append(host)
+  const hues=['#005a88','#8c4300','#17613d','#60318c','#99254b','#526000','#00656a','#853c77']
+  for (const [i,name] of ['tests','build','git','read','edit','other','model','waiting'].entries()) host.style.setProperty('--chart-'+name,hues[i])
+  expect(readVisualTheme(host).palette).toEqual(expect.arrayContaining(hues))
+ } finally {
+  document.documentElement.removeAttribute('data-theme')
+ }
+})
+
+// The missing-token check: a theme (or an older stylesheet) that never set the chart series falls
+// back to the code-highlighting palette — every theme has always defined that one — rather than an
+// empty or partial series.
+it('falls back to the code-highlighting palette when a theme has no chart series tokens', () => {
+ const host=document.createElement('div');document.body.append(host)
+ const code=['#111111','#222222','#333333','#444444','#555555']
+ for (const [i,name] of ['keyword','string','number','title','type'].entries()) host.style.setProperty('--chat-code-'+name,code[i])
+ // No --chart-* set at all: readVisualTheme must not surface an undefined/empty series.
+ expect(readVisualTheme(host).palette).toEqual(expect.arrayContaining(code))
+ expect(readVisualTheme(host).palette.every(color => /^#[0-9a-f]{6}$/i.test(color))).toBe(true)
 })

@@ -74,6 +74,7 @@ func (fx *artFx) agentDaemon() *DaemonConn {
 	}
 	dc := &DaemonConn{ID: "0d0d0d0d-0d0d-4d0d-8d0d-0d0d0d0d0d0d", Name: "laptop", ReposRoot: "/repos", send: make(chan []byte, 16)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	dc.SetInputReceipts(true)
 	fx.hub.Register(dc)
 	fx.hub.SetSessionOwner(fx.sess, dc.ID)
@@ -518,5 +519,51 @@ func TestReviewRequestDecisionCarriesAnAgentReopen(t *testing.T) {
 	}
 	if strings.Contains(texts[0], "[flip]") || strings.Contains(texts[0], "[skip]") {
 		t.Fatalf("message %q lists a thread the agent's copy settled or moved by more than one revision", texts[0])
+	}
+}
+
+func TestReviewRequestWorkerRouting(t *testing.T) {
+	for _, tc := range []struct {
+		name, via string
+		parent    bool
+		status    int
+	}{
+		{"Main", "", false, http.StatusCreated},
+		{"worker", "session", true, http.StatusForbidden},
+		{"legacy worker", "", true, http.StatusForbidden},
+		{"person channel", "person", true, http.StatusCreated},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newArtFx(t)
+			var parent *string
+			if tc.parent {
+				parent = &fx.otherSess
+			}
+			if _, err := fx.api.dbPool.Exec(t.Context(), `UPDATE sessions SET parent_session_id=$2, delegation_via=$3 WHERE id=$1`, fx.sess, parent, tc.via); err != nil {
+				t.Fatal(err)
+			}
+			fx.publish(fx.sessTok, fx.sess, "review.md", []byte("Review me"))
+			logs := captureLog(t)
+			rec := fx.send("POST", "/api/sessions/"+fx.sess+"/review-requests", fx.sessTok, `{"artifact":"review.md","ask":"Approve?"}`)
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, tc.status, rec.Body.String())
+			}
+			if tc.status == http.StatusForbidden {
+				if !strings.Contains(logs.String(), "worker must send work for review to Main") {
+					t.Fatal("missing refusal cause in log")
+				}
+				want := "Workers send work for review to Main with blerg-runner ask; Main runs the review and asks the person only when their approval is needed."
+				if !strings.Contains(rec.Body.String(), want) {
+					t.Errorf("missing routing guidance: %s", rec.Body.String())
+				}
+				pending, err := db.ListPendingReviewRequests(t.Context(), fx.api.dbPool, fx.sess)
+				if err != nil || len(pending) != 0 {
+					t.Fatalf("worker created pending requests: %v, %v", pending, err)
+				}
+				if kinds := eventKinds(t, fx, fx.sess); kinds[reviewRequestedKind] != 0 {
+					t.Fatal("worker emitted review request event")
+				}
+			}
+		})
 	}
 }

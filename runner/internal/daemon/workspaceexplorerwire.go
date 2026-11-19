@@ -184,16 +184,20 @@ func (r *WorkspaceExplorerRouter) Handle(parent context.Context, sender Sender, 
 		}
 		delivery, stopDelivery := context.WithTimeout(ctx, 2*time.Second)
 		defer stopDelivery()
+		var sendErr error
 		if contextual, ok := sender.(interface {
 			SendWorkspaceExplorerResultContext(context.Context, protocol.WorkspaceExplorerResult) error
 		}); ok {
-			_ = contextual.SendWorkspaceExplorerResultContext(delivery, res)
+			sendErr = contextual.SendWorkspaceExplorerResultContext(delivery, res)
 		} else if bounded, ok := sender.(interface {
 			SendWorkspaceExplorerResult(protocol.WorkspaceExplorerResult) error
 		}); ok {
-			_ = bounded.SendWorkspaceExplorerResult(res)
+			sendErr = bounded.SendWorkspaceExplorerResult(res)
 		} else {
-			_ = sender.Send(res)
+			sendErr = sender.Send(res)
+		}
+		if sendErr != nil {
+			logDaemonFailure("explorer reply delivery", sendErr)
 		}
 	}()
 }
@@ -302,17 +306,21 @@ func (r *WorkspaceExplorerRouter) HandleFile(parent context.Context, sender Send
 		if ctx.Err() != nil || !same {
 			return
 		}
+		var sendErr error
 		if contextual, ok := sender.(interface {
 			SendWorkspaceFileResultContext(context.Context, protocol.WorkspaceFileResult, time.Time) error
 		}); ok {
 			deadline, _ := ctx.Deadline()
-			_ = contextual.SendWorkspaceFileResultContext(ctx, res, deadline)
+			sendErr = contextual.SendWorkspaceFileResultContext(ctx, res, deadline)
 		} else if bounded, ok := sender.(interface {
 			SendWorkspaceFileResultBy(protocol.WorkspaceFileResult, time.Time) error
 		}); ok {
-			_ = bounded.SendWorkspaceFileResultBy(res, time.Now().Add(time.Second))
+			sendErr = bounded.SendWorkspaceFileResultBy(res, time.Now().Add(time.Second))
 		} else {
-			_ = sender.Send(res)
+			sendErr = sender.Send(res)
+		}
+		if sendErr != nil {
+			logDaemonFailure("explorer reply delivery", sendErr)
 		}
 	}()
 }
@@ -381,6 +389,6 @@ func (c *WSClient) queuedWorkspaceReply(ctx context.Context, value any, viewer b
 		if viewer {
 			timeout = 10 * time.Second
 		}
-		return c.sendBoundedReplyContext(ctx, conn, value, min(remaining, timeout), remaining, until)
+		return c.sendBoundedReplyContext(ctx, conn, value, timeout, remaining, until)
 	})
 }

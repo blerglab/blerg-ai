@@ -5,6 +5,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -51,7 +52,7 @@ func CountRecentChecklist(ctx context.Context, q Querier, sessionID string) (int
 }
 
 // LatestChecklist is the session's newest checklist event with seq <= through (nil when none).
-func LatestChecklist(ctx context.Context, q Querier, sessionID string, through int64) (*AgentEventRow, error) {
+func latestChecklistEvent(ctx context.Context, q Querier, sessionID string, through int64) (*AgentEventRow, error) {
 	var r AgentEventRow
 	err := q.QueryRow(ctx, `SELECT session_id, seq, client_event_id, kind, payload::text, ts FROM agent_events
 		WHERE session_id = $1 AND kind = 'checklist' AND seq <= $2 ORDER BY seq DESC LIMIT 1`, sessionID, through).
@@ -67,7 +68,7 @@ func LatestChecklist(ctx context.Context, q Querier, sessionID string, through i
 
 // ListTicketRows reads what ticket.Pinned folds of the session's ticket events with seq <= through:
 // the summary fields only, never the description or the comments.
-func ListTicketRows(ctx context.Context, q Querier, sessionID string, through int64) ([]ticket.Row, error) {
+func listTicketHistory(ctx context.Context, q Querier, sessionID string, through int64) ([]ticket.Row, error) {
 	rows, err := q.Query(ctx, `SELECT seq, client_event_id, ts,
 			coalesce(payload->>'action', ''), coalesce(payload->'ticket'->>'source', ''), coalesce(payload->'ticket'->>'key', ''),
 			coalesce(payload->'ticket'->>'title', ''), coalesce(payload->'ticket'->>'status', ''), coalesce(payload->'ticket'->>'url', ''),
@@ -155,4 +156,19 @@ func ListPlanEvents(ctx context.Context, q Querier, sessionID string, through in
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// ListTicketRows uses the current pins row when it covers this read; old sessions remain readable.
+func ListTicketRows(ctx context.Context, q Querier, sid string, through int64) ([]ticket.Row, error) {
+	var raw []byte
+	err := q.QueryRow(ctx, `SELECT payload FROM session_work_state s WHERE session_id=$1 AND kind='ticket' AND seq<=$2 AND NOT EXISTS(SELECT 1 FROM agent_events e WHERE e.session_id=$1 AND e.kind='ticket' AND e.seq>s.seq AND e.seq<=$2)`, sid, through).Scan(&raw)
+	if err == nil {
+		var rows []ticket.Row
+		err = json.Unmarshal(raw, &rows)
+		return rows, err
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	return listTicketHistory(ctx, q, sid, through)
 }

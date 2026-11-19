@@ -55,7 +55,8 @@ func sendOpenAsks(ctx context.Context, dbPool *pgxpool.Pool, dc *DaemonConn, ses
 
 // handleSessionPaused records a daemon's report that a session it hosts again after a restart
 // waits for a message, closes the session's asks (nobody waits for their answers any more) and
-// tells the browsers. Only for the daemon's own session, and only while it is idle or waiting.
+// tells the browsers. Only for the daemon's own nonterminal session; stale running
+// state from before the restart is replaced by waiting.
 func handleSessionPaused(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, dc *DaemonConn, msg protocol.SessionPaused) {
 	if dbPool == nil || msg.Reason != protocol.PausedByRestart {
 		return
@@ -77,6 +78,7 @@ func handleSessionPaused(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, dc *
 	if !set {
 		return // running again already, ended, or reported before
 	}
+	recordServerAgentEvent(ctx, h, dbPool, msg.SessionID, newUUID(), "status_changed", map[string]string{"status": "waiting"})
 	h.SessionPausedForDelegation(msg.SessionID)
 	h.ChildActivity(msg.SessionID)
 	detail := msg.Detail
@@ -95,12 +97,15 @@ func handleSessionPaused(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, dc *
 	if err := recordSessionFailure(ctx, h, dbPool, msg.SessionID); err != nil {
 		log.Printf("session pause alert: %v", err)
 	}
-	h.BroadcastJSON(protocol.SessionPausedChanged{Type: "session_paused_changed", SessionID: msg.SessionID, PausedReason: msg.Reason}) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
+	h.BroadcastJSON(protocol.SessionPausedChanged{Type: "session_paused_changed", SessionID: msg.SessionID, PausedReason: msg.Reason, PausedDetail: msg.Detail}) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 }
 
-// clearPausedOnMessage drops a session's paused reason once a message for it has been accepted
-// (delivered, or held for its daemon) and tells every browser, so a second tab or a reload does
-// not offer to resume it again and send a second continue.
+// clearPausedOnMessage drops a hosted session's paused reason once a message has been accepted.
+// Recovery refusals remain paused until the daemon confirms running: queuing input
+// only retries adoption, and must not resolve the failure alert. ClearSessionPaused
+// enforces that distinction atomically.
+// For hosted sessions it tells every browser, so another tab does not offer
+// to resume the session again and send a second continue.
 func clearPausedOnMessage(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, sessionID string) {
 	if dbPool == nil {
 		return
@@ -113,4 +118,17 @@ func clearPausedOnMessage(ctx context.Context, h *Hub, dbPool *pgxpool.Pool, ses
 	if cleared {
 		h.BroadcastJSON(protocol.SessionPausedChanged{Type: "session_paused_changed", SessionID: sessionID}) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 	}
+}
+
+// A recovery refusal has no turn to interrupt. Keep the daemon's durable reason
+// visible on both interrupt transports rather than dispatching to an absent worker.
+func pausedStopReason(ctx context.Context, pool *pgxpool.Pool, id string) string {
+	if pool == nil {
+		return ""
+	}
+	row, err := db.GetSession(ctx, pool, id)
+	if err != nil || row == nil || row.PausedReason != protocol.PausedByRestart || row.PausedDetail == "" {
+		return ""
+	}
+	return row.PausedDetail + " There is no active recovered turn to interrupt; all work is retained."
 }

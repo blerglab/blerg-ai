@@ -7,7 +7,6 @@ import {
   runtimeDisabledReason,
   RUNTIME_CARDS,
   AGENT_NO_PROMPTS,
-  TERMINAL_NEEDS_DAEMON,
   OPENCLAW_HOST_ONLY,
   NO_CLUSTER_REASON,
   NO_DAEMON_REASON,
@@ -92,9 +91,7 @@ describe('runtimeDisabledReason', () => {
     expect(runtimeDisabledReason('cluster', { ...base, clusterConfigured: false })).toBe(NO_CLUSTER_REASON)
   })
 
-  it('refuses the cluster pod for a terminal session', () => {
-    expect(runtimeDisabledReason('cluster', { ...base, kind: 'tmux' })).toBe(TERMINAL_NEEDS_DAEMON)
-  })
+
 
   it('refuses both daemon-backed runtimes with no daemon connected', () => {
     expect(runtimeDisabledReason('docker', { ...base, daemons: [] })).toBe(NO_DAEMON_REASON)
@@ -130,7 +127,7 @@ describe('RunColumn', () => {
     renderColumn({ clusterConfigured: true })
     const card = screen.getByTestId('runtime-docker').parentElement!
     expect(card).toHaveTextContent('working in a clone of your repo: never your checkout or its .git')
-    expect(card).toHaveTextContent('Its commits land on the branch wip/<session-id> in your repo')
+    expect(card).toHaveTextContent('Its commits land on the branch returned by blerg-runner session result <id> in your repo')
   })
 
   it('marks the chosen runtime and reports picks', () => {
@@ -154,21 +151,9 @@ describe('RunColumn', () => {
     expect(screen.queryByTestId('skip-permissions-toggle')).not.toBeInTheDocument()
   })
 
-  it('shows the permissions toggle for a terminal session in the sandbox', () => {
-    const props = renderColumn({ kind: 'tmux', runtime: 'docker' })
-    fireEvent.click(screen.getByTestId('skip-permissions-toggle'))
-    expect(props.onSkipPermissionsChange).toHaveBeenCalledWith(true)
-  })
 
-  it('makes the permissions toggle keyboard-operable', () => {
-    const props = renderColumn({ kind: 'tmux', runtime: 'docker' })
-    const toggle = screen.getByTestId('skip-permissions-toggle')
-    expect(toggle).toHaveAttribute('tabindex', '0')
-    fireEvent.keyDown(toggle, { key: ' ' })
-    fireEvent.keyDown(toggle, { key: 'Enter' })
-    expect(props.onSkipPermissionsChange).toHaveBeenCalledTimes(2)
-    expect(props.onSkipPermissionsChange).toHaveBeenLastCalledWith(true)
-  })
+
+
 
   it('explains the dead end when OpenClaw is picked with no daemon connected', () => {
     renderColumn({ engine: 'openclaw', daemons: [], selectedDaemon: null, runtime: 'daemon' })
@@ -192,10 +177,7 @@ describe('RunColumn', () => {
     expect(screen.getByTestId('daemon-picker')).toBeInTheDocument()
   })
 
-  it('hides the permissions toggle for a terminal session on the host', () => {
-    renderColumn({ kind: 'tmux', runtime: 'daemon' })
-    expect(screen.queryByTestId('skip-permissions-toggle')).not.toBeInTheDocument()
-  })
+
 
   it('shows the model picker for Claude only', () => {
     renderColumn({ engine: 'claude' })
@@ -310,5 +292,20 @@ describe('discovered engine choices', () => {
 
 it('links directly to managed login when a cluster credential needs renewal', () => {
   renderColumn({ engine: 'codex', runtime: 'cluster', clusterConfigured: true, modelsError: 'Dedicated login required', modelsReconnect: true })
-  expect(screen.getByRole('link', { name: 'Reconnect in Settings' })).toHaveAttribute('href', expect.stringMatching(/\/settings#managed-connections$/))
+  expect(screen.getByRole('link', { name: 'Connect Codex' })).toHaveAttribute('href', expect.stringMatching(/\/settings#managed-connections$/))
+})
+
+it('offers a prominent cluster Codex connection action when credentials are missing', () => {
+  renderColumn({ engine: 'codex', runtime: 'cluster', clusterEngineBlocked: true })
+  expect(screen.getByRole('alert')).toHaveTextContent('Connect Codex for cluster workspaces')
+  expect(screen.getByRole('link', { name: 'Connect Codex' })).toHaveAttribute('href', expect.stringMatching(/\/settings#managed-connections$/))
+})
+it('offers the same action when cluster Codex needs a managed reconnect', () => {
+  renderColumn({ engine: 'codex', runtime: 'cluster', modelsReconnect: true })
+  expect(screen.getByRole('alert')).toHaveTextContent('Connect Codex for cluster workspaces')
+})
+
+it.each(['daemon', 'docker'] as const)('keeps the cluster connection callout out of %s sessions', runtime => {
+  renderColumn({ engine: 'codex', runtime, modelsReconnect: true })
+  expect(screen.queryByTestId('cluster-codex-connection')).toBeNull()
 })

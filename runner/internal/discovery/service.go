@@ -35,6 +35,7 @@ var (
 	errOverlap     = errors.New("overlapping_repositories")
 	errSubmodule   = errors.New("submodule")
 	errBudget      = errors.New("discovery_limit")
+	errOutside     = errors.New("outside_folder")
 )
 
 const (
@@ -71,6 +72,7 @@ type Service struct {
 	selectionOrder []string
 	bound          map[string]boundRecord
 	boundOrder     []string
+	indexCache     map[string]indexCacheEntry
 }
 
 func New(root func() string) *Service {
@@ -93,6 +95,8 @@ type operation struct {
 	ctx     context.Context
 	visited int
 	seen    map[string]bool
+	indexes map[string][]string
+	service *Service
 }
 
 func (o *operation) visit() error {
@@ -221,12 +225,16 @@ func safeDirectory(root *rootHandle, rel string, op *operation) (*os.File, *repo
 			_ = f.Close()
 			return nil, nil, errUnavailable
 		}
-		repo, err := inspectRepository(root.file, root.name, root.tag, prefix, info)
+		repo, err := inspectRepository(op, root.file, root.name, root.tag, prefix, info)
 		if err != nil {
 			_ = f.Close()
 			return nil, nil, err
 		}
 		if repo != nil && prefix != rel {
+			if repo.links == nil {
+				_ = f.Close()
+				return nil, nil, errUnavailable
+			}
 			rest := rel
 			if prefix != "." {
 				rest = strings.TrimPrefix(rel, prefix+"/")
@@ -681,9 +689,11 @@ func (s *Service) Handle(ctx context.Context, req protocol.DiscoverWorkspace) pr
 		result.OK = true
 		return result
 	}
+	// resolve_base (BLG-501 design §10) reads one ref — O(1) regardless of repository
+	// size, so it needs no larger budget than every other operation here gets.
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	op := &operation{ctx: ctx}
+	op := &operation{ctx: ctx, service: s}
 	root, err := s.openRoot()
 	if err != nil {
 		result.ErrorCode = errUnavailable.Error()
@@ -715,10 +725,14 @@ func (s *Service) Handle(ctx context.Context, req protocol.DiscoverWorkspace) pr
 			s.remember(record)
 			result.Resolved = &record.resolved
 		}
+	case "addition":
+		result.Addition, err = s.addition(root, req, op)
 	case "bind":
 		err = s.bind(root, req, op)
 	case "bind_child":
 		err = s.bindChild(root, req, op)
+	case "resolve_base":
+		result.BaseSHA, result.Cause, err = s.resolveBase(root, req, op)
 	default:
 		err = errInvalid
 	}
@@ -726,9 +740,9 @@ func (s *Service) Handle(ctx context.Context, req protocol.DiscoverWorkspace) pr
 		err = errStale
 	}
 	if err != nil {
-		result.Page, result.Resolved = nil, nil
+		result.Page, result.Resolved, result.Addition = nil, nil, nil
 		switch {
-		case errors.Is(err, errStale), errors.Is(err, errInvalid), errors.Is(err, errTooMany), errors.Is(err, errOverlap), errors.Is(err, errSubmodule), errors.Is(err, errBudget):
+		case errors.Is(err, errStale), errors.Is(err, errInvalid), errors.Is(err, errTooMany), errors.Is(err, errOverlap), errors.Is(err, errSubmodule), errors.Is(err, errBudget), errors.Is(err, errOutside):
 			result.ErrorCode = err.Error()
 		default:
 			result.ErrorCode = errUnavailable.Error()
@@ -776,7 +790,7 @@ func (s *Service) Inventory(ctx context.Context) (names []string, origins map[st
 		return names, origins, true
 	}
 	defer func() { _ = root.file.Close() }()
-	op := &operation{ctx: ctx}
+	op := &operation{ctx: ctx, service: s}
 	cursor := ""
 	for {
 		page, err := s.list(root, protocol.DiscoverWorkspace{Path: ".", Cursor: cursor}, op)

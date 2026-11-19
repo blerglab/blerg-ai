@@ -1,0 +1,10 @@
+**/.git
+**/.env*
+**/node_modules
+**/dist
+**/coverage
+**/*.log
+**/logs
+**/.cache
+**/.venv
+**/__pycache__

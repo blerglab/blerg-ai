@@ -93,11 +93,15 @@ func fetchBoard(ctx context.Context, base *url.URL, path, token string, out any)
 }
 
 func (d Deps) handleInternalBoardsList(w http.ResponseWriter, r *http.Request) {
-	var body internalMCPProof
+	var body struct {
+		internalMCPProof
+		BoardID string `json:"board_id,omitempty"`
+	}
 	svc, ok := d.internalTokenGate(w, r, &body)
 	if !ok {
 		return
 	}
+	standingResponse(w, body.Standing)
 	if msg := validateProofShape(body.AccountID, body.TokenID, body.SessionID); msg != "" {
 		http.Error(w, msg, http.StatusBadRequest)
 		return
@@ -114,12 +118,13 @@ func (d Deps) handleInternalBoardsList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	_, _, live, err := d.principalLiveness(r.Context(), body.AccountID, body.TokenID, body.SessionID)
+	_, _, live, err := d.principalLiveness(r.Context(), body.AccountID, body.TokenID, body.SessionID, body.Standing)
 	if err != nil {
 		deny(http.StatusServiceUnavailable)
 		return
 	}
 	if !live {
+		d.standingRefusalState(w, r, body.AccountID, body.TokenID, body.SessionID, body.Standing)
 		deny(http.StatusNotFound)
 		return
 	}
@@ -129,6 +134,13 @@ func (d Deps) handleInternalBoardsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if state.Disabled || state.MustChangePassword || !slices.Contains(identity.PlatformRoleCaps[state.Role], "card.read") {
+		if body.Standing && body.SessionID != "" && body.TokenID == "" {
+			if state.MustChangePassword && !state.Disabled {
+				w.Header().Set("X-Blerg-Standing-State", "suspended")
+			} else {
+				w.Header().Set("X-Blerg-Standing-State", "revoked")
+			}
+		}
 		deny(http.StatusNotFound)
 		return
 	}
@@ -143,6 +155,11 @@ func (d Deps) handleInternalBoardsList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if body.BoardID != "" && !validBoardID(body.BoardID) {
+		deny(http.StatusBadRequest)
+		return
+	}
+
 	base, err := d.operatorBoardURL(r.Context())
 	if err != nil {
 		deny(http.StatusServiceUnavailable)
@@ -177,12 +194,13 @@ func (d Deps) handleInternalBoardsList(w http.ResponseWriter, r *http.Request) {
 		}
 		seen[b.ID] = true
 	}
-	_, _, live, err = d.principalLiveness(r.Context(), body.AccountID, body.TokenID, body.SessionID)
+	_, _, live, err = d.principalLiveness(r.Context(), body.AccountID, body.TokenID, body.SessionID, body.Standing)
 	if err != nil {
 		deny(http.StatusServiceUnavailable)
 		return
 	}
 	if !live {
+		d.standingRefusalState(w, r, body.AccountID, body.TokenID, body.SessionID, body.Standing)
 		deny(http.StatusNotFound)
 		return
 	}
@@ -190,6 +208,14 @@ func (d Deps) handleInternalBoardsList(w http.ResponseWriter, r *http.Request) {
 		boards = []accessibleBoard{}
 	}
 	w.Header().Set("Cache-Control", "no-store")
+	if body.Standing {
+		// rc.4 cannot prove owner provenance for an absent board. A positive
+		// discovery result remains usable; absence must stay unavailable.
+		w.Header().Set("X-Blerg-Standing-State", "unavailable")
+		if body.BoardID != "" && seen[body.BoardID] {
+			w.Header().Set("X-Blerg-Standing-State", "active")
+		}
+	}
 	writeJSON(w, struct {
 		Boards []accessibleBoard `json:"boards"`
 	}{boards})

@@ -7,17 +7,17 @@
     <!-- Brand assets are served by blerg-core itself under /brand/ (core/internal/landing):
          the same tokens.css board and runner adopt, so every surface shares one palette. -->
     <link rel="icon" href="/brand/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/brand/tokens.css" />
     <script>
       // Apply a pinned theme before first paint to avoid a flash. Dark is the default;
       // without a pin the tokens fall back to the OS preference. Same key as board/runner.
       (function () {
         try {
           var t = localStorage.getItem("blerg-theme");
-          if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+          if (["dark", "light", "colorblind-dark", "colorblind-light", "high-contrast", "catppuccin-mocha", "catppuccin-latte", "dracula", "nord", "tokyo-night"].includes(t || "")) document.documentElement.setAttribute("data-theme", t); // themecheck:allow BLG-473: the theme vocabulary (packages/settings/theme.ts), necessarily duplicated here so this bootstrap script can run before any module loads
         } catch (e) {}
       })();
     </script>
+    <link rel="stylesheet" href="/brand/tokens.css" />
   </head>
   <body>
     <div id="root"></div>

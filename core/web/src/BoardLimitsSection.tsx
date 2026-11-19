@@ -28,12 +28,12 @@ export const LIMIT_FIELDS: {
 }[] = [
   {
     key: "calls_per_minute",
-    label: "Board requests a minute, per session",
+    label: "Board requests a minute, per workspace",
     help: "A rolling minute; a refused request says when to retry.",
   },
   {
     key: "calls_in_flight",
-    label: "Board calls at once, per session",
+    label: "Board calls at once, per workspace",
     help: "Each call holds one of the account's live exchange tokens while it runs.",
   },
   {
@@ -68,7 +68,7 @@ export function headroomLine(
   if (!(inFlight >= 1) || !(liveTokens >= 1)) return null;
   const sessions = Math.max(1, Math.ceil(liveTokens / inFlight));
   return `Calls at once count against the account's live exchange tokens: at ${inFlight} calls at once, ${sessions} busy ${
-    sessions === 1 ? "session" : "sessions"
+    sessions === 1 ? "workspace" : "workspaces"
   } of one account use all ${liveTokens}, and its other board calls and launch-board connections wait until calls finish.`;
 }
 
@@ -152,7 +152,7 @@ export default function BoardLimitsSection() {
     <section className="settings-section section" data-testid="board-limits">
       <p className="eyebrow">Administration</p>
       <h2 className="settings-heading section-title">Board call limits</h2>
-      <p className="settings-description">Limit how often sessions can use boards across this install.</p>
+      <p className="settings-description">Limit how often workspaces can use boards across this install.</p>
       {error && (
         <p className="field-error" role="alert">
           {error}

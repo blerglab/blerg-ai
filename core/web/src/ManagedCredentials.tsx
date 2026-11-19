@@ -7,6 +7,9 @@ export type ManagedCredentialSummary = {
   kind?: string;
   state?: string;
   expires_at?: string;
+  // last_used_at: the most recent time any component actually fetched this credential's
+  // plaintext, not when it was stored (BLG-460's read-only tokens for workers).
+  last_used_at?: string;
 };
 type Capability = { engine: string; kind: string; login: true; verification_origin: string };
 type Attempt = {
@@ -171,8 +174,17 @@ function Connection({ capability, summary, label, onConnected }: {
     : attempt?.state === "reconnect_required" ? "Reconnect required"
     : summary?.kind === capability.kind ? (STATES[summary.state ?? ""] ?? "Configured") : "Not connected";
   return <div className="card" aria-label={`${label} managed connection`}>
-    <p className="card-help">{label}: {state}</p>
-    <p className="card-help">Use a separate connection for Blerg’s Cluster sessions. Blerg renews it centrally; your machine’s login stays separate.</p>
+    <div className="card-head">
+      <h3 className="settings-heading card-title">{label}</h3>
+      <span className={state === "Connected" ? "chip up" : "chip idle"}>
+        <span className="dot" aria-hidden="true" />
+        <span className="label">{state}</span>
+      </span>
+    </div>
+    <p className="card-help">{capability.engine === "codex"
+      ? "Cluster workspaces use this managed connection when connected; desktop workspaces use the Codex login on your workstation, while the pasted credential below is a separate snapshot for cluster workspaces."
+      : "Use a separate connection for Blerg’s Cluster workspaces. Blerg renews it centrally; your machine’s login stays separate."}</p>
+    {capability.engine === "codex" && !pending && <p className="card-help">First turn on device code sign-in for Codex in ChatGPT → Settings → Security.</p>}
     {error && <p className="field-error" role="alert">{error}</p>}
     {pending ? <>
       <p>Open <a href={trustedLink(attempt.verification_url, capability.verification_origin)!} target="_blank" rel="noopener noreferrer">the sign-in page</a> and enter <strong className="mono">{attempt.user_code}</strong>.</p>

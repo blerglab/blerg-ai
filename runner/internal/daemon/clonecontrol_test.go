@@ -113,7 +113,16 @@ func TestSandboxTokenCloneRunsInContainer(t *testing.T) {
 // The in-container script keeps the credential out of every argv and env:
 // the builtin printf writes it into a private HOME's .gitconfig.
 func TestSandboxCloneScriptKeepsCredentialOutOfEnvAndArgv(t *testing.T) {
-	if strings.Contains(sandboxCloneScript, "export cred") || strings.Contains(sandboxCloneScript, "GIT_CONFIG_VALUE") {
+	testSandboxCloneScript(t, sandboxCloneScript, false)
+}
+
+func TestConnectedSandboxCloneScriptKeepsCredentialOutOfEnvAndArgv(t *testing.T) {
+	testSandboxCloneScript(t, sandboxConnectedCloneScript, true)
+}
+
+func testSandboxCloneScript(t *testing.T, cloneScript string, connected bool) {
+	t.Helper()
+	if strings.Contains(cloneScript, "export cred") || strings.Contains(cloneScript, "GIT_CONFIG_VALUE") {
 		t.Error("the script exports the credential")
 	}
 	sh, err := exec.LookPath("sh")
@@ -123,9 +132,9 @@ func TestSandboxCloneScriptKeepsCredentialOutOfEnvAndArgv(t *testing.T) {
 	// Run the script for real with a fake git that dumps what it can see.
 	gitDir := writeScript(t, "git", `env > "$OUT/env"; echo "$@" > "$OUT/argv"; cat "$HOME/.gitconfig" > "$OUT/cfg"; mkdir -p "$4"`)
 	out := t.TempDir()
-	script := strings.ReplaceAll(sandboxCloneScript, "/clone/repo", filepath.Join(out, "repo"))
+	script := strings.ReplaceAll(cloneScript, "/clone/repo", filepath.Join(out, "repo"))
 	cmd := exec.Command(sh, "-c", script, "clone", "github.com", "https://github.com/a/b.git")
-	cmd.Env = []string{"PATH=" + gitDir + ":/usr/bin:/bin", "OUT=" + out}
+	cmd.Env = []string{"PATH=" + gitDir + ":/usr/bin:/bin", "OUT=" + out, "TMPDIR=" + out}
 	cmd.Stdin = strings.NewReader("Q1JFRA==\n")
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("script: %v: %s", err, b)
@@ -133,6 +142,9 @@ func TestSandboxCloneScriptKeepsCredentialOutOfEnvAndArgv(t *testing.T) {
 	env, _ := os.ReadFile(filepath.Join(out, "env"))
 	argv, _ := os.ReadFile(filepath.Join(out, "argv"))
 	cfg, _ := os.ReadFile(filepath.Join(out, "cfg"))
+	if connected && !strings.Contains(string(cfg), "followRedirects = false") {
+		t.Fatal("sandbox clone permits a redirect to an unconnected host")
+	}
 	if strings.Contains(string(env), "Q1JFRA==") || strings.Contains(string(argv), "Q1JFRA==") {
 		t.Errorf("credential in git's env or argv:\n%s\n%s", env, argv)
 	}

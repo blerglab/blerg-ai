@@ -118,7 +118,7 @@ describe('virtualized history width', () => {
   expect(error.textContent).toContain('x'.repeat(5000))
   expect(error.scrollWidth).toBeLessThanOrEqual(error.clientWidth)
   // Wide tables retain their own horizontal scroller instead of widening the transcript.
-  const table = timeline.querySelector<HTMLElement>('.md-table-wrap')!
+  const table = timeline.querySelector<HTMLElement>('.md-table-scroll')!
   expect(getComputedStyle(table).overflowX).toBe('auto')
   if (width < 2048) {
     expect(table.scrollWidth).toBeGreaterThan(table.clientWidth)

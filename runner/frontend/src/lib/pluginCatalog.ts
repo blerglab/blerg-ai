@@ -118,7 +118,7 @@ export function validMarketplaceInput(raw: string): boolean {
 
 /** Why a plugin cannot be installed from here, or null when it can. */
 export function installBlocker(market: CatalogMarketplace | undefined, settings: SessionPluginSettings | null, removing = false): string | null {
-  if (!settings || !settings.supported) return 'Plugins cannot be added to this session.'
+  if (!settings || !settings.supported) return 'Plugins cannot be added to this workspace.'
   if (!market?.source) return 'This local marketplace cannot be installed here.'
   if (market.source.startsWith('codex:') && settings.engine !== 'codex') return 'This marketplace requires Codex.'
   const src = market.source.toLowerCase()

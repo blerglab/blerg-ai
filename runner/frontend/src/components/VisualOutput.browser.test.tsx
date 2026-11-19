@@ -1,16 +1,23 @@
 import type { CSSProperties } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, waitFor } from '@testing-library/react'
+import { act, render, waitFor } from '@testing-library/react'
 import { userEvent } from 'vitest/browser'
 import { Markdown, Transcript, VisualBlock, type AgentEvent } from '@blerglab/chat'
 import '@blerglab/chat/blerg.css'
+import { readVisualTheme } from '../../../../packages/chat/src/visual/theme'
 
 const diagrams = {
-  flowchart: 'flowchart LR\n  Start --> Finish',
-  sequence: 'sequenceDiagram\n  Alice->>Bob: Hello\n  Bob-->>Alice: Welcome',
+  // BLG-468: these tests are about Mermaid's own <img>-based rendering (font scaling, theme
+  // contrast on its own SVG, VisualBlock's generic chrome) — a cylinder shape (flowchart) or a
+  // `par` block (sequence, slice 2's own declared subset has no `par`) keeps each one outside
+  // Blerg's own renderers, so it still exercises the Mermaid fallback path a plain `Start -->
+  // Finish` or a plain `Alice->>Bob` would no longer take.
+  flowchart: 'flowchart LR\n  Start --> Finish[(Finish)]',
+  sequence: 'sequenceDiagram\n  par Alice to Bob\n  Alice->>Bob: Hello\n  and Bob to Alice\n  Bob-->>Alice: Welcome\n  end',
   state: 'stateDiagram-v2\n  [*] --> Ready\n  Ready --> Finished',
   ER: 'erDiagram\n  OWNER ||--o{ SESSION : owns\n  OWNER {\n    string name\n  }',
-  gantt: 'gantt\n  title Release\n  dateFormat YYYY-MM-DD\n  section Work\n  Build :2026-01-01, 2d',
+  // `excludes` is outside BLG-471's gantt subset, so this stays on the Mermaid fallback path.
+  gantt: 'gantt\n  title Release\n  dateFormat YYYY-MM-DD\n  excludes weekends\n  section Work\n  Build :2026-01-01, 2d',
 }
 
 const values = [
@@ -25,7 +32,11 @@ function chart(mark: string) {
     width: 300,
     height: 180,
     data: { values },
-    mark,
+    // strokeDash isn't in any of BLG-452's mark property allow-lists yet, so this deliberately
+    // keeps these canvas/tooltip-hover tests on the existing Vega path they were written to
+    // exercise — bar/line/point/rect's own rendering via BLG-452 is covered by its own
+    // differential tests (BlergBar/Line/Point/Rect.differential.browser.test.tsx), not here.
+    mark: { type: mark, strokeDash: [1, 0] },
     encoding: {
       x: { field: mark === 'bar' || mark === 'rect' ? 'category' : 'x', type: mark === 'bar' || mark === 'rect' ? 'nominal' : 'quantitative' },
       y: { field: 'y', type: mark === 'rect' ? 'ordinal' : 'quantitative' },
@@ -37,9 +48,9 @@ function chart(mark: string) {
 
 async function renderedGraphic(container: HTMLElement) {
   await waitFor(() => {
-    expect(container.querySelector('img.visual-diagram, canvas, .md-card-note')).not.toBeNull()
+    expect(container.querySelector('img.visual-diagram, .visual-surface[data-scene-state="exact"] canvas, .md-card-note')).not.toBeNull()
   }, { timeout: 30_000 })
-  const graphic = container.querySelector<HTMLImageElement | HTMLCanvasElement>('img.visual-diagram, canvas')
+  const graphic = container.querySelector<HTMLImageElement | HTMLCanvasElement>('img.visual-diagram, .visual-surface[data-scene-state="exact"] canvas')
   expect(graphic, container.textContent ?? 'No rendered graphic').not.toBeNull()
   await waitFor(() => {
     expect(graphic!.getBoundingClientRect().width).toBeGreaterThan(20)
@@ -157,7 +168,7 @@ describe('rich output in Chromium', () => {
         }
       }
       assertNative(await renderedGraphic(container) as HTMLImageElement)
-      await userEvent.click(getByRole('button', {name: 'Open'}))
+      await userEvent.click(getByRole('button', {name: 'Full screen'}))
       const dialog = getByRole('dialog')
       expect(rgb(getComputedStyle(dialog).backgroundColor)).toEqual(rgb(theme.surface))
       assertNative(await renderedGraphic(dialog) as HTMLImageElement)
@@ -178,7 +189,7 @@ describe('rich output in Chromium', () => {
       const {container, getByRole} = render(<div className="agent-chat" style={style}><VisualBlock kind="mermaid" source={diagrams.sequence} /></div>)
       const inline = await renderedGraphic(container) as HTMLImageElement
       for (const color of diagramTextColors(inline)) expect(contrast(color, scoped.surface)).toBeGreaterThanOrEqual(4.5)
-      await userEvent.click(getByRole('button', {name: 'Open'}))
+      await userEvent.click(getByRole('button', {name: 'Full screen'}))
       const dialog = getByRole('dialog')
       expect(rgb(getComputedStyle(dialog).backgroundColor)).toEqual(rgb(scoped.surface))
       const image = await renderedGraphic(dialog) as HTMLImageElement
@@ -192,7 +203,9 @@ describe('rich output in Chromium', () => {
   }, 40_000)
 
   it('keeps ordinary Mermaid labels near chat text size instead of the SVG 300px fallback', async () => {
-    const source = 'flowchart LR\n Request --> Review\n Review --> Approved\n Approved --> Delivered'
+    // BLG-468: a cylinder shape keeps this outside Blerg's own declared flowchart subset
+    // (parse.ts) — this test is specifically about Mermaid's own SVG font-size scaling.
+    const source = 'flowchart LR\n Request --> Review\n Review --> Approved\n Approved[(Delivered)]'
     const event: AgentEvent = {type: 'agent_event', session_id: 'native-font-size', client_event_id: 'diagram-answer', kind: 'assistant_text', ts: '2026-10-18T12:00:00Z', payload: {text: '```mermaid\n' + source + '\n```'}}
     const {container} = render(<div className="agent-chat" style={{width: 800, height: 500}}><Transcript sessionId="native-font-size" events={[event]} streaming="" compact={false} liveIds={new Set()} showSkeleton={false} loadingOlder={false} starting={false} attempt={null} clockOffset={0} readyCard={null} working={false} waiting={false} since={null} waitingOn={null} queued={[]} queueState="queued" steers pin={0} /></div>)
     const image = await renderedGraphic(container) as HTMLImageElement
@@ -208,7 +221,7 @@ describe('rich output in Chromium', () => {
   it('keeps visual controls quiet until the message is hovered or keyboard focused', async () => {
     const {container, getByRole} = render(<><button type="button">Outside the message</button><VisualBlock kind="mermaid" source={diagrams.flowchart} /></>)
     await renderedGraphic(container)
-    const open = getByRole('button', {name: 'Open'})
+    const open = getByRole('button', {name: 'Full screen'})
     const outside = getByRole('button', {name: 'Outside the message'})
     await userEvent.hover(outside)
     await waitFor(() => expect(getComputedStyle(open).opacity).toBe('0'))
@@ -222,16 +235,23 @@ describe('rich output in Chromium', () => {
     await userEvent.click(getByRole('button', {name: 'Close'}))
   }, 40_000)
 
-  it.each(THEMES.flatMap(theme => ['bar', 'line'].map(mark => ({...theme, mark}))))('paints native Vega $mark labels with AA contrast and no white canvas in $name', async theme => {
+  it.each(THEMES.flatMap(theme => ['bar', 'line'].map(mark => ({...theme, mark}))))('paints worker-rendered Vega $mark labels with AA contrast and no white canvas in $name', async theme => {
     const root = document.documentElement
     const previousStyle = root.getAttribute('style')
     applyTheme(theme)
     const painted: Array<{text: string; color: string}> = []
-    const original = CanvasRenderingContext2D.prototype.fillText
-    vi.spyOn(CanvasRenderingContext2D.prototype, 'fillText').mockImplementation(function (this: CanvasRenderingContext2D, text, x, y, maxWidth) {
-      if (text.trim()) painted.push({text, color: String(this.fillStyle)})
-      if (maxWidth === undefined) original.call(this, text, x, y)
-      else original.call(this, text, x, y, maxWidth)
+    const original = CanvasRenderingContext2D.prototype.drawImage
+    vi.spyOn(CanvasRenderingContext2D.prototype, 'drawImage').mockImplementation(function (this: CanvasRenderingContext2D, image, ...args: number[]) {
+      // Labels now arrive in the exact inert SVG copied to the visible canvas, rather than
+      // through main-thread fillText calls. Keep the same contrast checks on those drawn labels.
+      if (image instanceof HTMLImageElement && image.src.startsWith('data:image/svg+xml')) {
+        const source = decodeURIComponent(image.src.split(',')[1]!)
+        const svg = new DOMParser().parseFromString(source, 'image/svg+xml')
+        for (const label of svg.querySelectorAll('text')) {
+          if (label.textContent?.trim()) painted.push({text: label.textContent, color: label.getAttribute('fill') ?? '#000000'})
+        }
+      }
+      Reflect.apply(original, this, [image, ...args])
     })
     try {
       const {container, getByRole} = render(<div style={{background: theme.surface}}><VisualBlock kind="vega-lite" source={chart(theme.mark)} /></div>)
@@ -240,7 +260,7 @@ describe('rich output in Chromium', () => {
       expect(painted.length).toBeGreaterThan(0)
       for (const label of painted) expect(contrast(label.color, theme.surface), `${label.text}: ${label.color}`).toBeGreaterThanOrEqual(4.5)
       painted.length = 0
-      await userEvent.click(getByRole('button', {name: 'Open'}))
+      await userEvent.click(getByRole('button', {name: 'Full screen'}))
       const fullscreen = await renderedGraphic(getByRole('dialog')) as HTMLCanvasElement
       expect(transparentCorner(fullscreen)).toBe(true)
       expect(painted.length).toBeGreaterThan(0)
@@ -252,6 +272,64 @@ describe('rich output in Chromium', () => {
     }
   }, 40_000)
 
+  // BLG-472: readVisualTheme must pick the chart series from whatever theme is actually applied —
+  // switched here through the real data-theme attribute and the real cascade (brand.css, loaded via
+  // blerg.css above), not a hand-set custom property — and those colors must reach the canvas with
+  // enough contrast to read as distinct marks (WCAG's 3:1 non-text minimum, not the 4.5:1 text one
+  // the label test above checks).
+  it('draws a Color-blind light chart in that theme\'s own series colors, each readable against its surface', async () => {
+    const root = document.documentElement
+    const previousTheme = root.getAttribute('data-theme')
+    root.dataset.theme = 'colorblind-light'
+    const resolved = (name: string) => getComputedStyle(root).getPropertyValue(name).trim().toLowerCase()
+    const surface = resolved('--chat-surface')
+    // The full palette readVisualTheme can hand Vega as range.category: the accent plus every
+    // chart series token. Vega assigns a nominal field's colors from this range in field order,
+    // so which entries a 3-category chart actually uses isn't predicted here — only that every
+    // drawn color must come from this theme's own set, not a default/code fallback.
+    const expectedSeries = ['--chat-accent', '--chart-tests', '--chart-build', '--chart-git', '--chart-read', '--chart-edit', '--chart-other', '--chart-model', '--chart-waiting'].map(resolved)
+    expect(expectedSeries.filter(Boolean).length).toBeGreaterThanOrEqual(4)
+    const painted: string[] = []
+    const original = CanvasRenderingContext2D.prototype.drawImage
+    vi.spyOn(CanvasRenderingContext2D.prototype, 'drawImage').mockImplementation(function (this: CanvasRenderingContext2D, image, ...args: number[]) {
+      if (image instanceof HTMLImageElement && image.src.startsWith('data:image/svg+xml')) {
+        const source = decodeURIComponent(image.src.split(',')[1]!)
+        const svg = new DOMParser().parseFromString(source, 'image/svg+xml')
+        for (const mark of svg.querySelectorAll(':not(text)[fill]')) {
+          const fill = mark.getAttribute('fill')
+          if (fill && /^#[0-9a-f]{6}$/i.test(fill)) painted.push(fill.toLowerCase())
+        }
+      }
+      Reflect.apply(original, this, [image, ...args])
+    })
+    try {
+      const nominal = JSON.stringify({
+        $schema: 'https://vega.github.io/schema/vega-lite/v6.json', width: 300, height: 180,
+        // strokeDash isn't in BLG-452's bar mark-property allow-list — deliberately keeps this
+        // canvas/drawImage-spying test on the existing Vega path it was written to exercise, same
+        // reasoning as chart()'s own comment above.
+        data: { values }, mark: { type: 'bar', strokeDash: [1, 0] },
+        encoding: {
+          x: { field: 'category', type: 'nominal' }, y: { field: 'y', type: 'quantitative' },
+          color: { field: 'category', type: 'nominal' },
+        },
+      })
+      const { container } = render(<div style={{ background: surface }}><VisualBlock kind="vega-lite" source={nominal} /></div>)
+      await renderedGraphic(container)
+      expect(painted.length).toBeGreaterThan(0)
+      // Every drawn series color came from the theme's own chart tokens (not the default/code
+      // palette this fixture would fall back to without BLG-472's token-driven fix), and reads
+      // against the theme's surface.
+      for (const fill of painted) {
+        expect(expectedSeries, `drawn ${fill} should be one of this theme's chart series`).toContain(fill)
+        expect(contrast(fill, surface), `${fill} on ${surface}`).toBeGreaterThanOrEqual(3)
+      }
+    } finally {
+      if (previousTheme === null) root.removeAttribute('data-theme')
+      else root.dataset.theme = previousTheme
+    }
+  }, 40_000)
+
   it('redraws mounted diagrams and charts when theme tokens change', async () => {
     const root = document.documentElement
     const previousStyle = root.getAttribute('style')
@@ -260,23 +338,56 @@ describe('rich output in Chromium', () => {
       const categorical = JSON.parse(chart('bar'))
       categorical.encoding.color = {field: 'category', type: 'nominal'}
       const {container} = render(<div><VisualBlock kind="mermaid" source={diagrams.flowchart} /><VisualBlock kind="vega-lite" source={JSON.stringify(categorical)} /></div>)
-      const image = await waitFor(() => {const node = container.querySelector<HTMLImageElement>('img.visual-diagram'); expect(node?.naturalWidth).toBeGreaterThan(20); return node!})
-      const canvas = await waitFor(() => {const node = container.querySelector('canvas'); expect(node).not.toBeNull(); return node!})
+      const image = await waitFor(() => {const node = container.querySelector<HTMLImageElement>('img.visual-diagram'); expect(node?.naturalWidth).toBeGreaterThan(20); return node!}, {timeout: 30_000})
+      const canvas = await waitFor(() => {const node = container.querySelector('canvas'); expect(node).not.toBeNull(); return node!}, {timeout: 30_000})
       const beforeImage = image.src
       const beforeChart = canvas.toDataURL()
       applyTheme(THEMES[1])
       await waitFor(() => {const next = container.querySelector<HTMLImageElement>('img.visual-diagram'); expect(next).not.toBeNull(); expect(next!.naturalWidth).toBeGreaterThan(20); expect(next!.src).not.toBe(beforeImage)}, {timeout: 15_000})
-      await waitFor(() => {const next = container.querySelector('canvas'); expect(next).not.toBeNull(); expect(next!.toDataURL()).not.toBe(beforeChart); expect(canvasHasColor(next!, THEMES[1].accent)).toBe(true)}, {timeout: 15_000})
+      await waitFor(() => {const next = container.querySelector('canvas'); expect(next).not.toBeNull(); expect(next!.toDataURL()).not.toBe(beforeChart); expect(canvasHasColor(next!, readVisualTheme(next!).palette[0])).toBe(true)}, {timeout: 15_000})
       const afterImage = container.querySelector<HTMLImageElement>('img.visual-diagram')!
       for (const color of diagramTextColors(afterImage)) expect(contrast(color, THEMES[1].surface)).toBeGreaterThanOrEqual(4.5)
       const lightChart = container.querySelector('canvas')!.toDataURL()
-      // Code-color token changes also trigger a redraw without remounting the visual.
-      root.style.setProperty('--chat-code-keyword', '#087830')
+      // A chart-series token change also triggers a redraw without remounting the visual
+      // (series colors come from the theme's --chart-* tokens, BLG-472).
+      root.style.setProperty('--chart-tests', '#087830')
       await waitFor(() => {const next = container.querySelector('canvas'); expect(next).not.toBeNull(); expect(next!.toDataURL()).not.toBe(lightChart); expect(canvasHasColor(next!, '#087830')).toBe(true)}, {timeout: 15_000})
     } finally {
       if (previousStyle === null) root.removeAttribute('style')
       else root.setAttribute('style', previousStyle)
     }
+  }, 40_000)
+
+  // BLG-467: a resized pane reflows what's inside it, rather than leaving a chart or diagram at
+  // whatever size it first drew at.
+  it('reflows a Mermaid diagram, our own chart renderer and Vega to a resized pane', async () => {
+    // A plain bar (no strokeDash) classifies 'blerg' (classify.ts); chart('line') keeps its
+    // strokeDash, which deliberately keeps it on the Vega path (the fixture's own comment above).
+    const bar = JSON.stringify({$schema: 'https://vega.github.io/schema/vega-lite/v6.json', width: 300, height: 180, data: {values}, mark: 'bar', encoding: {x: {field: 'category', type: 'nominal'}, y: {field: 'y', type: 'quantitative'}}})
+    const line = chart('line')
+    const {container} = render(<div style={{width: 1600}}>
+      <VisualBlock kind="mermaid" source={diagrams.flowchart} />
+      <VisualBlock kind="vega-lite" source={bar} />
+      <VisualBlock kind="vega-lite" source={line} />
+    </div>)
+    const [diagramSurface, blergSurface, vegaSurface] = [...container.querySelectorAll<HTMLElement>('.visual-surface')]
+    await waitFor(() => expect(diagramSurface.querySelector('img.visual-diagram')).not.toBeNull(), {timeout: 30_000})
+    const blergGraphic = await waitFor(() => { const c = blergSurface.querySelector<HTMLElement>('[data-chart-renderer="blerg"]'); expect(c).not.toBeNull(); return c! }, {timeout: 30_000})
+    const vegaGraphic = await waitFor(() => { const c = vegaSurface.querySelector('canvas'); expect(c).not.toBeNull(); return c! }, {timeout: 30_000})
+    // A wide pane never grows an explicit chart width past what the spec asked for (300px here).
+    expect(blergGraphic.getBoundingClientRect().width).toBeCloseTo(300, 0)
+    expect(vegaGraphic.getBoundingClientRect().width).toBeCloseTo(300, 0)
+    // A Mermaid diagram does flow to fill a wide pane, through its own viewBox — up to the
+    // readable maximum (visual.css), not the tiny flowchart's own natural width.
+    const wideDiagramWidth = diagramSurface.querySelector('img')!.getBoundingClientRect().width
+    expect(wideDiagramWidth).toBeGreaterThan(400)
+
+    const outer = container.firstElementChild as HTMLElement
+    outer.style.width = '220px'
+    await act(async () => { await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))) })
+    await waitFor(() => expect(diagramSurface.querySelector('img')!.getBoundingClientRect().width).toBeLessThan(wideDiagramWidth))
+    await waitFor(() => expect(blergSurface.querySelector<HTMLElement>('[data-chart-renderer="blerg"]')!.getBoundingClientRect().width).toBeLessThanOrEqual(220))
+    await waitFor(() => expect(vegaSurface.querySelector('canvas')!.getBoundingClientRect().width).toBeLessThanOrEqual(220))
   }, 40_000)
 
   it('fits ordinary diagrams and default charts within a phone message', async () => {
@@ -323,7 +434,10 @@ describe('rich output in Chromium', () => {
   }, 40_000)
 
   it('renders hconcat, facet and repeat compositions and refuses one too large to draw', async () => {
-    const panel = (y: string) => ({ width: 160, height: 120, mark: 'bar', encoding: { x: { field: 'category', type: 'nominal' }, y: { field: y, type: 'quantitative' } } })
+    // strokeDash keeps these on the existing Vega composition path on purpose — see chart()'s
+    // comment above; BLG-452's own composition of its shipped marks has its own differential
+    // test (BlergComposition.differential.browser.test.tsx).
+    const panel = (y: string) => ({ width: 160, height: 120, mark: { type: 'bar', strokeDash: [1, 0] }, encoding: { x: { field: 'category', type: 'nominal' }, y: { field: y, type: 'quantitative' } } })
     const { container } = render(<VisualBlock kind="vega-lite" source={JSON.stringify({ data: { values }, hconcat: [panel('x'), panel('y')] })} />)
     const canvas = await renderedGraphic(container) as HTMLCanvasElement
     expect(canvas.getBoundingClientRect().width).toBeGreaterThan(200)
@@ -334,7 +448,7 @@ describe('rich output in Chromium', () => {
     const six = Array.from({ length: 6 }, (_, i) => ({ category: `c${i}`, x: i, y: i + 1 }))
     const facetSix = render(<VisualBlock kind="vega-lite" source={JSON.stringify({ data: { values: six }, facet: { field: 'category', type: 'nominal' }, columns: 3, spec: { ...panel('y'), width: 120, height: 90 } })} />)
     expect((await renderedGraphic(facetSix.container) as HTMLCanvasElement).getBoundingClientRect().width).toBeGreaterThan(200)
-    const scatter = { width: 120, height: 90, mark: 'point', encoding: { x: { field: { repeat: 'column' }, type: 'quantitative' }, y: { field: { repeat: 'row' }, type: 'quantitative' } } }
+    const scatter = { width: 120, height: 90, mark: { type: 'point', strokeDash: [1, 0] }, encoding: { x: { field: { repeat: 'column' }, type: 'quantitative' }, y: { field: { repeat: 'row' }, type: 'quantitative' } } }
     const eight = render(<VisualBlock kind="vega-lite" source={JSON.stringify({ data: { values }, hconcat: [{ repeat: { row: ['x', 'y'], column: ['x', 'y'] }, spec: scatter }, panel('y')] })} />)
     expect((await renderedGraphic(eight.container) as HTMLCanvasElement).getBoundingClientRect().width).toBeGreaterThan(200)
     const huge = render(<VisualBlock kind="vega-lite" source={JSON.stringify({ data: { values }, hconcat: Array.from({ length: 8 }, () => ({ ...panel('y'), width: 1024 })) })} />)
@@ -346,9 +460,9 @@ describe('rich output in Chromium', () => {
     const source = diagrams.flowchart
     const { container, getByRole } = render(<VisualBlock kind="mermaid" source={source} />)
     await renderedGraphic(container)
-    await userEvent.click(getByRole('button', { name: /^source$/i }))
+    await userEvent.click(getByRole('button', { name: 'Show source' }))
     expect(container.textContent).toContain(source)
-    const openButton = getByRole('button', { name: /^open$/i })
+    const openButton = getByRole('button', { name: 'Full screen' })
     await userEvent.click(openButton)
     const dialog = getByRole('dialog')
     expect(dialog.getBoundingClientRect().width).toBeGreaterThan(300)
@@ -375,10 +489,15 @@ describe('rich output in Chromium', () => {
   it.each([
     ['mermaid', 'this is definitely not a diagram'],
     ['vega-lite', '{not valid JSON'],
-  ] as const)('preserves invalid %s source in its fallback', async (kind, source) => {
+  ] as const)('keeps invalid %s source behind its source toggle', async (kind, source) => {
     const { container } = render(<VisualBlock kind={kind} source={source} />)
-    await waitFor(() => expect(container.textContent).toContain(source), { timeout: 30_000 })
-    expect(container.querySelector('svg')).toBeNull()
+    await waitFor(() => expect(container.querySelector('.visual-failed-reason')).toBeTruthy(), { timeout: 30_000 })
+    expect(container.querySelector('pre')).toBeNull()
+    const toggle = container.querySelector('button[aria-label="Show source"]')!
+    expect(getComputedStyle(toggle).opacity).toBe('1')
+    await userEvent.click(toggle)
+    expect(container.textContent).toContain(source)
+    expect(container.querySelector('.visual-surface')).toBeNull()
   }, 40_000)
 
   it('leaves ordinary fences unchanged while rendering visual fences', async () => {
@@ -423,9 +542,10 @@ describe('rich output in Chromium', () => {
       { kind: 'vega-lite' as const, source: JSON.stringify({ data: { values }, mark: { type: 'point', href: 'https://attacker.invalid/link' } }) },
     ]
     const { container } = render(<>{attacks.map((attack, i) => <VisualBlock key={i} {...attack} />)}</>)
-    await waitFor(() => {
-      for (const attack of attacks) expect(container.textContent).toContain(attack.source)
-    }, { timeout: 30_000 })
+    await waitFor(() => expect(container.querySelectorAll('.visual-failed')).toHaveLength(attacks.length), { timeout: 30_000 })
+    expect(container.querySelector('pre')).toBeNull()
+    for (const toggle of container.querySelectorAll<HTMLButtonElement>('button[aria-label="Show source"]')) await userEvent.click(toggle)
+    for (const attack of attacks) expect(container.textContent).toContain(attack.source)
     expect(requests).toEqual([])
     expect(container.querySelector('script, iframe, object, embed, svg a, svg image, svg foreignObject')).toBeNull()
     const resources = performance.getEntriesByType('resource').map(e => e.name)

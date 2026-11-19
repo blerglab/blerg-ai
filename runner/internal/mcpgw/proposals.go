@@ -6,6 +6,7 @@ package mcpgw
 import (
 	"context"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,7 +84,8 @@ func (s *DBProposalSink) ProposeRow(ctx context.Context, req ProposalRequest) (*
 		return nil, "", &ProposalRefusal{Msg: "this call was not queued: its arguments are not a JSON object"}
 	}
 	p, err := db.InsertProposalLimited(ctx, s.pool, db.Proposal{
-		AccountID: req.AccountID, SessionID: req.SessionID, ConnectionID: req.ConnectionID,
+		SessionScope: req.SessionScope,
+		AccountID:    req.AccountID, SessionID: req.SessionID, ConnectionID: req.ConnectionID,
 		ConnectionName: req.ConnectionName, URLSnapshot: req.URLSnapshot, Tool: req.Tool, ToolHash: req.ToolHash,
 		Arguments: json.RawMessage(args), AgentSummary: summarizeProposal(req.Tool, json.RawMessage(args)),
 	}, db.ProposalLimits{Account: s.maxPending, Session: s.perSession, Cron: s.perCron})
@@ -162,7 +164,7 @@ func renderArg(raw json.RawMessage) string {
 // oneLine collapses whitespace and control characters to single spaces and cuts to n runes.
 func oneLine(s string, n int) string {
 	s = strings.Map(func(r rune) rune {
-		if r < ' ' || r == 0x7f || r == ' ' || r == ' ' {
+		if r < ' ' || r == 0x7f || r == '\u2028' || r == '\u2029' {
 			return ' '
 		}
 		return r
@@ -212,6 +214,8 @@ func (e *ApprovedError) Is(target error) bool { return target == ErrOutcomeUnkno
 
 // ApprovedCall is one approved proposal to run.
 type ApprovedCall struct {
+	SessionScope *db.MCPSessionScope `json:"-"`
+
 	Proof        Proof // the approver's login session: the proof core needs for the credential
 	ConnectionID string
 	URLSnapshot  string // the connection URL recorded at proposal time; the credential must carry exactly this
@@ -254,6 +258,19 @@ func (g *Gateway) ExecuteApproved(ctx context.Context, c ApprovedCall) (Approved
 		ProofKind: c.Proof.Kind(), ProofValue: c.Proof.Value(),
 	}
 	st := &grantState{g: g, sem: make(chan struct{}, 1)}
+	if c.SessionScope != nil {
+		scope := *c.SessionScope
+		if !scope.Valid() || scope.AccountID != c.Proof.AccountID {
+			_ = sessionCoreFailure("proposal_scope")
+			return unsent("The original sign-in is no longer available.", ErrConnectionGone)
+		}
+		gr.SessionScope = &scope
+		gr.SessionID = scope.RunnerSessionID
+		gr.ProofKind = "session_id"
+		gr.ProofValue = scope.HumanSessionID
+		gr.TokenHash, _ = hex.DecodeString(scope.GrantTokenHash)
+		st.actorSessionID = c.Proof.SessionID
+	}
 
 	cred, err := st.credential(ctx, gr)
 	switch {
@@ -314,6 +331,8 @@ func classifyCallError(ctx context.Context, err error) *ApprovedError {
 	var oe *net.OpError
 	var cv *tls.CertificateVerificationError
 	switch {
+	case errors.Is(err, errSessionCore):
+		return &ApprovedError{Msg: upstreamMessage(err), NotSent: true, Err: err}
 	case errors.Is(err, ErrConnectionGone):
 		return &ApprovedError{Msg: upstreamMessage(err), Err: err}
 	case errors.Is(err, errConnectionURLRefused), errors.Is(err, netguard.ErrBlockedAddress), errors.Is(err, netguard.ErrURLNotPermitted),

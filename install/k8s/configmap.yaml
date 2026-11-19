@@ -109,6 +109,8 @@ metadata:
 data:
   POSTGRES_USER: "blerg"
   POSTGRES_DB: "blerg_core"
+  # Scoped MCP internal HTTP service names are trusted only in this deployment.
+  BLERG_MCP_CLUSTER_DEPLOYMENT: "true"
   BLERG_CORE_URL: "http://blerg-core:8080"
   # What core advertises to browsers must be browser-reachable — the
   # in-cluster Service name/port isn't, so these are the public Ingress

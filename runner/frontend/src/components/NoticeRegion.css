@@ -1,6 +1,10 @@
-.notice-region { position: fixed; z-index: 1100; top: 64px; right: 12px; width: min(340px, calc(100vw - 24px)); max-height: 0; overflow: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 8px; scrollbar-width: thin; }
+.notice-region { position: fixed; z-index: 1100; top: 64px; right: 12px; width: min(340px, calc(100vw - 24px)); max-height: 0; overflow: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 8px; scrollbar-width: thin; padding: 8px; box-sizing: border-box; }
 .notice-slot { display: contents; }
 .notice-region > *, .notice-slot > * { flex-shrink: 0; box-sizing: border-box; overflow-wrap: anywhere; }
 .notice-region button { min-height: 28px; }
-.message-toast { background: var(--chat-surface-2, var(--scree)); color: var(--chat-fg, var(--chalk)); border: 1px solid var(--chat-border, var(--stone)); border-radius: 10px; padding: 12px 14px; box-shadow: 0 10px 24px rgb(0 0 0 / .35); font-family: inherit; pointer-events: auto; }
+.message-toast { background: var(--scree-2); color: var(--chat-fg, var(--chalk)); border: 1px solid var(--fog); border-radius: 10px; padding: 12px 14px; box-shadow: 0 12px 32px var(--shadow-5), 0 2px 6px var(--shadow-3); font-family: inherit; pointer-events: auto; }
 .message-toast .confirm-popover-text { margin-bottom: 0; }
+/* A toast is a short signal, never the whole message (owner: a 93-change question grew the toast
+   down the screen). The body keeps its first lines; the full text is in Needs you / the dialog. */
+.message-toast .confirm-popover-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; overflow-wrap: anywhere; white-space: normal; }
+.message-toast { max-height: min(40vh, 220px); overflow: hidden; }

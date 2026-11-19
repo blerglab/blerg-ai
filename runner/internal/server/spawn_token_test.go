@@ -37,6 +37,7 @@ func spawnTokenFixture(t *testing.T) (*API, *Hub, *DaemonConn, *pgxpool.Pool) {
 	hub := NewHub()
 	dc := &DaemonConn{ID: daemonID, Name: "laptop", ReposRoot: "/repos", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true)
+	dc.SetWorkBranches(true)     // current daemon: immutable recorded branch names
 	dc.SetSessionTokenFile(true) // a current daemon: it can take a re-issued token
 	hub.Register(dc)
 	api := NewAPI(hub, pool, spawnTokenDaemonTok, nil, "")
@@ -124,46 +125,6 @@ func TestPostSessionsMintsSessionToken(t *testing.T) {
 	}
 }
 
-func TestForwardBrowserSpawnMintsSessionToken(t *testing.T) {
-	_, hub, dc, pool := spawnTokenFixture(t)
-	ctx := context.Background()
-
-	sessionID, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1", AccountID: "user-1"}, protocol.BrowserSpawnSession{
-		Kind: "agent", Type: "spawn_session", DaemonID: dc.ID, Repo: "app", Title: "t",
-	}, pool)
-	if err != nil {
-		t.Fatalf("forwardBrowserSpawn: %v", err)
-	}
-	msg := recvSpawn(t, dc)
-	if msg.SessionID != sessionID || msg.SessionToken == "" {
-		t.Fatalf("spawn_session = %+v", msg)
-	}
-	row, err := db.ValidateBoardToken(ctx, pool, msg.SessionToken)
-	if err != nil {
-		t.Fatalf("ValidateBoardToken: %v", err)
-	}
-	if row.SessionID != sessionID || row.BoardID != "" || len(row.Capabilities) != 1 || row.Capabilities[0] != "message" {
-		t.Fatalf("token row = %+v", row)
-	}
-	if sess, err := db.GetSession(ctx, pool, sessionID); err != nil || sess == nil || sess.Status != "starting" {
-		t.Fatalf("pre-created session = %+v, %v", sess, err)
-	}
-}
-
-// A DB-less server still spawns (nothing to mint against); the daemon simply
-// gets no token. Guards the nil-pool branch.
-func TestForwardBrowserSpawnWithoutDBSendsNoToken(t *testing.T) {
-	hub := NewHub()
-	dc := &DaemonConn{ID: "d1", send: make(chan []byte, 8)}
-	hub.Register(dc)
-	if _, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1", AccountID: "user-1"}, protocol.BrowserSpawnSession{Kind: "agent", DaemonID: dc.ID, Repo: "app"}, nil); err == nil {
-		t.Fatal("missing desktop authority was accepted")
-	}
-	if len(dc.send) != 0 {
-		t.Fatal("unowned spawn was dispatched")
-	}
-}
-
 func postAs(api *API, tok string) int {
 	b, _ := json.Marshal(map[string]any{"kind": "update", "body": "still here"})
 	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(string(b)))
@@ -240,6 +201,7 @@ func TestSessionTokenSurvivesDaemonReconnect(t *testing.T) {
 	// Daemon comes back, re-registers, and reports the session alive.
 	dc2 := &DaemonConn{ID: dc.ID, Name: dc.Name, ReposRoot: dc.ReposRoot, send: make(chan []byte, 8)}
 	dc2.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc2.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	hub.Register(dc2)
 	reconcileSessions(ctx, hub, pool, dc.ID, []string{sessionID}, map[string]string{sessionID: "running"})
 	if row, _ := db.GetSession(ctx, pool, sessionID); row == nil || row.Status != "running" {
@@ -266,6 +228,7 @@ func TestPostSessionsAbortsTokenWhenDaemonBufferFull(t *testing.T) {
 	ctx := context.Background()
 	full := &DaemonConn{ID: dc.ID, Name: dc.Name, ReposRoot: dc.ReposRoot, send: make(chan []byte)} // unbuffered, nobody reading
 	full.SetSandboxClones(true)
+	full.SetWorkBranches(true) // current daemon: immutable recorded branch names
 	fixtureOwnDesktop(t, pool, full, "user-1")
 	hub.Register(full)
 
@@ -291,14 +254,6 @@ func TestPostSessionsAbortsTokenWhenDaemonBufferFull(t *testing.T) {
 	}
 	if live != 0 {
 		t.Fatalf("%d live token(s) after 503", live)
-	}
-
-	// Same guarantee on the browser-WS path.
-	if _, err := hub.forwardBrowserSpawn(&BrowserConn{ID: "b1", AccountID: "user-1"}, protocol.BrowserSpawnSession{Kind: "agent", Type: "spawn_session", DaemonID: dc.ID, Repo: "app"}, pool); err == nil {
-		t.Fatal("expected send-channel-full error")
-	}
-	if rows, _ := db.ListSessionsByDaemon(ctx, pool, dc.ID); len(rows) != 0 {
-		t.Fatalf("phantom session rows after WS failure: %+v", rows)
 	}
 }
 

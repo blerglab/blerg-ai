@@ -39,6 +39,14 @@ func (a *API) StartStaleSweep(ctx context.Context) {
 func (a *API) SweepStaleCards(ctx context.Context) {
 	a.clearStaleCards(ctx)
 	a.flagStaleCards(ctx)
+	boards, err := db.AutoArchiveDone(ctx, a.Pool)
+	if err != nil {
+		log.Printf("auto-archive sweep: %v", err)
+		return
+	}
+	for _, id := range boards {
+		a.Hub.Broadcast(id, "card_changed")
+	}
 }
 
 // clearStaleCards drops the flag on cards that got real activity or picked

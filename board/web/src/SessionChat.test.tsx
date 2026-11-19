@@ -79,7 +79,7 @@ describe("SessionChat delegation request", () => {
     };
     render(<ChatView session="s" transport={transport} readOnly />);
     const card = await screen.findByTestId("delegation-card");
-    expect(card).toHaveTextContent("This session wants to start a Codex session");
+    expect(card).toHaveTextContent("This agent wants to start a Codex worker");
     expect(card).toHaveTextContent("on your desktop, unsandboxed");
     expect(card).toHaveTextContent("Decide in Blerg Runner");
     expect(card.querySelector("button")).toBeNull();

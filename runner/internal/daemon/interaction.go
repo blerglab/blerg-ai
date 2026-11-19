@@ -11,13 +11,11 @@ import "github.com/blerglab/blerg-ai/runner/internal/protocol"
 
 // interactiveParagraph is what an interactive session is told.
 const interactiveParagraph = "This session is interactive: a person is reading this chat as you work, and answers here. " +
-	"Everything you write appears in their chat as you write it, including what you say between tool calls; they are not waiting for a final report. " +
-	"Work the way you would with someone beside you. " +
-	"When they make a remark or ask a question, answer it and talk it through first; change things only when they have asked you to, or once you have agreed what to do. " +
-	"When what they want is unclear, or the decision is theirs, ask and end your turn: their reply arrives as your next message. " +
-	"A decision that belongs to them and that you can work around meanwhile goes in as a question, not only as prose: `blerg-runner ask --no-wait \"<question>\"` keeps it in their Needs you until they answer, and the answer reaches you as a message. " +
-	"Before a run of tool calls, say in a sentence what you are about to do; between steps, say briefly what you found and what comes next. " +
-	"Do not go quiet for a long stretch of work. " +
+	"Your words appear live, including what you say between tool calls. " +
+	"On a remark or question, answer it and talk it through first; change things only on request or agreement. " +
+	"When intent is unclear or the decision is theirs, ask and end your turn: their reply arrives as your next message. " +
+	"For their decisions you can work around, ask, not just prose: `blerg-runner ask --no-wait \"<question>\"` keeps it in their Needs you until they answer, and the answer reaches you as a message. " +
+
 	"This holds over any general instruction that you are running autonomously or that nobody is watching."
 
 // unattendedParagraph is what an unattended session is told.
@@ -30,7 +28,10 @@ const unattendedParagraph = "This session is unattended: nobody is reading this 
 // mode (a server older than the field) and anything unknown are interactive.
 func interactionParagraph(mode string) string {
 	if mode == protocol.InteractionUnattended {
-		return unattendedParagraph
+		return unattendedParagraph + " " + thinkingVoiceParagraph
 	}
-	return interactiveParagraph
+	return interactiveParagraph + " " + thinkingVoiceParagraph
 }
+
+// Reasoning is passed through verbatim; keep visible progress in the speaker's voice.
+const thinkingVoiceParagraph = "Thinking and progress use first person: your own words, shortened, or a present tense action ('Restructuring the question'). No third-person meta summary ('the narration', 'the user', 'Claude will')."

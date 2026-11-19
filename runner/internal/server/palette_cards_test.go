@@ -32,15 +32,15 @@ func (b *paletteSearchBoard) CallBoard(ctx context.Context, call mcpgw.BoardCall
 }
 func TestPaletteCardSearchUsesPersonsReadOnlyBoardSearchAndOnlyReturnsSummaries(t *testing.T) {
 	api, _, token := newLiveCardAPI(t)
-	board := &paletteSearchBoard{searchJSON: `[{"id":"c218","board_id":"board-a","number":218,"title":"Split view","column_id":"doing","body":"private description","sensitive_body":"private details"}]`}
+	board := &paletteSearchBoard{searchJSON: `[{"id":"c218","board_id":"board-a","number":218,"reference":"AP-218","title":"Split view","column_id":"doing","body":"private description","sensitive_body":"private details"}]`}
 	api.hub.mcpStart.set(&mcpStartConfig{Core: &filingBoardList{}, Board: board})
 	mux := http.NewServeMux()
 	api.RegisterSessionBoardRoutes(mux)
-	req := httptest.NewRequest("GET", "/api/board-cards/board-a/search?q=split+view", nil)
+	req := httptest.NewRequest("GET", "/api/board-cards/board-a/search?q=AP-218", nil)
 	req.Header.Set("Authorization", "Bearer "+token("session.start"))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"column_name":"In progress"`) || !strings.Contains(rec.Body.String(), `"number":218`) {
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"column_name":"In progress"`) || !strings.Contains(rec.Body.String(), `"number":218`) || !strings.Contains(rec.Body.String(), `"reference":"AP-218"`) {
 		t.Fatalf("search = %d %s", rec.Code, rec.Body.String())
 	}
 	if strings.Contains(rec.Body.String(), "private") || strings.Contains(rec.Body.String(), "body") {
@@ -58,7 +58,7 @@ func TestPaletteCardSearchUsesPersonsReadOnlyBoardSearchAndOnlyReturnsSummaries(
 		Query string `json:"query"`
 		Limit int    `json:"limit"`
 	}
-	if err := json.Unmarshal(board.calls[0].Arguments, &args); err != nil || args.Query != "split view" || args.Limit != 100 || board.calls[0].Tool != "blerg_card_search" {
+	if err := json.Unmarshal(board.calls[0].Arguments, &args); err != nil || args.Query != "AP-218" || args.Limit != 100 || board.calls[0].Tool != "blerg_card_search" {
 		t.Fatalf("wrong search arguments: %s", board.calls[0].Arguments)
 	}
 	board.searchJSON = `[{"board_id":"another-board","number":218,"title":"wrong target"}]`
@@ -70,7 +70,7 @@ func TestPaletteCardSearchUsesPersonsReadOnlyBoardSearchAndOnlyReturnsSummaries(
 func TestPaletteCardSearchNumberAndAccessRefusals(t *testing.T) {
 	api, board, token := newLiveCardAPI(t)
 	rec := liveCardDo(api, api.HandlePaletteCards, "GET", "/x?q=7", "board-a", "", token("session.start"), "")
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"number":7`) || board.last().Tool != "blerg_card_get" {
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"number":7`) || !strings.Contains(rec.Body.String(), `"reference":"BLG-7"`) || board.last().Tool != "blerg_card_get" {
 		t.Fatalf("number lookup = %d %s", rec.Code, rec.Body.String())
 	}
 	board.refuse = true

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -54,11 +55,21 @@ func TestClusterWorkspaceJobKeepsHomeAndCredentialsOutsidePublicRoot(t *testing.
 	if strings.Contains(job, `"name":"BLERG_RUNNER_GIT_TOKEN"`) {
 		t.Fatal("operator or singular Git fallback injected")
 	}
-	if !strings.Contains(job, `"memory":"536870912"`) {
-		t.Fatal("aggregate Git descendants lack an enforced memory cgroup ceiling")
+	// BLG-558 stopgap: the configured pod limit is the enforced memory ceiling
+	// for Git and everything else in the pod (a dedicated Git group is 0.7.0).
+	if !regexp.MustCompile(`"limits":\{[^}]*"memory":"[1-9][0-9]*"`).MatchString(job) {
+		t.Fatal("the workspace pod lacks an enforced memory limit")
 	}
 	if !strings.Contains(job, `"automountServiceAccountToken":false`) {
 		t.Fatal("pod received Kubernetes authority")
+	}
+	for _, required := range []string{"PLAYWRIGHT_BROWSERS_PATH", "GOCACHE", "GOMODCACHE", "npm_config_cache", "GOTMPDIR"} {
+		if !strings.Contains(job, `"name":"`+required+`","value":"/workspace/projects/.blerg-build-cache/`) {
+			t.Fatalf("build cache not on retained volume: %s", required)
+		}
+	}
+	if !strings.Contains(job, `"name":"TMPDIR","value":"/tmp"`) {
+		t.Fatal("daemon temporary files can reach retained storage")
 	}
 	data := f.createdSecrets[0]["stringData"].(map[string]any)
 	encoded, ok := data[clusterworkspace.Env].(string)
@@ -69,6 +80,11 @@ func TestClusterWorkspaceJobKeepsHomeAndCredentialsOutsidePublicRoot(t *testing.
 	var got clusterworkspace.Plan
 	if json.Unmarshal(decoded, &got) != nil || got.Validate() != nil || got.Members[0].Token == got.Members[1].Token {
 		t.Fatal("lost per-member credential scopes")
+	}
+	for _, required := range []string{`"emptyDir":{"sizeLimit":"4Gi"},"name":"workspace-home"`, "mkdir -p /runtime-home/tool-tmp", "chmod 1777 /runtime-home/tool-tmp"} {
+		if !strings.Contains(job, required) {
+			t.Fatalf("missing bounded tool scratch configuration: %s", required)
+		}
 	}
 	rbac, e := os.ReadFile("../../../install/k8s/cluster-runtime.yaml")
 	if e != nil {
@@ -87,11 +103,83 @@ func TestClusterWorkspaceChildSubset(t *testing.T) {
 	if e != nil || len(selected) != 1 || selected[0].ID != "two" || selected[0].Token != "" {
 		t.Fatal("child inherited credentials or changed selection", e)
 	}
+	// BLG-460: a cluster worker never inherits its parent Main's push authority, even
+	// transiently in the projected member context — the parent fixture has
+	// PushAuthorized: true for every member (clusterPlanFixture), and the child's own
+	// read-only credential stage (withClusterWorkspace) decides push authority fresh.
+	if selected[0].PushAuthorized {
+		t.Fatal("cluster worker inherited PushAuthorized from its parent Main")
+	}
 	child.Members[0].Destination = "other/repo"
 	if _, e = ClusterWorkspaceChild(p.Manifest, child, p.Members); e == nil {
 		t.Fatal("child escalated destination")
 	}
 }
+
+// TestClusterWorkspaceReadOnlyWorkerNeverFetchesWriteCredential: BLG-460's
+// option B — a cluster worker (spec.ReadOnlyGitWorker) must never reach
+// fetchPersonalCredential for its members, and must never store
+// PushAuthorized: true, even though a real write-capable credential is
+// available and would ordinarily be used (as in
+// TestClusterWorkspacePrechecksEachCredentialBeforeStorage).
+func TestClusterWorkspaceReadOnlyWorkerNeverFetchesWriteCredential(t *testing.T) {
+	fixture, spec := nativeFixture(t)
+	ctx := context.Background()
+	// BLG-460: worker-ness is now decided from the session's own row, never from a
+	// caller-set spec field — mark this row as a cluster-runtime child the same way a real
+	// worker's launch does, before CreateSessionJob is ever called for it.
+	if err := db.SetSessionPosture(ctx, fixture.pool, spec.SessionID, "cluster", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetSessionStartedBy(ctx, fixture.pool, spec.SessionID, "session", "fixture-parent"); err != nil {
+		t.Fatal(err)
+	}
+	p := clusterPlanFixture()
+	p.SessionID = spec.SessionID
+	p.Manifest.OwnerID = spec.SpawningAccountID
+	p.Manifest.Members = p.Manifest.Members[:1]
+	p.Members = p.Members[:1]
+	for i := range p.Members {
+		// A worker's own members never carry PushAuthorized by the time they reach
+		// withClusterWorkspace (ClusterWorkspaceChild already stripped it) — the raw
+		// fixture does carry it, so clear it here the same way that real projection does.
+		p.Members[i].Token = ""
+		p.Members[i].PushAuthorized = false
+	}
+	if e := db.InsertSessionWorkspace(context.Background(), fixture.pool, spec.SessionID, p.Manifest); e != nil {
+		t.Fatal(e)
+	}
+	fixture.fake.credentialKinds = []string{"github", "codex"}
+	fixture.fake.credentialFetchResponses = map[string][]byte{spec.SpawningAccountID + ":github": []byte("ghp_personal_write")}
+	j := newTestJobManager(t, fixture.fake)
+	j.historyPool = fixture.pool
+	j.WorkspaceStorageClass = "fixture-enforced"
+	var checkedTokens []string
+	j.repositoryRead = func(_ context.Context, url, token string) error {
+		checkedTokens = append(checkedTokens, token)
+		return nil
+	}
+	spec.Repo = ""
+	spec.GitURL = ""
+	spec.AuthSessionID = "fixture-login"
+	spec.Workspace = &p.Manifest
+	spec.WorkspaceMembers = p.Members
+	// spec.ReadOnlyGitWorker is deliberately left unset here: CreateSessionJob must derive
+	// it itself, from the row marked above, not from anything this test sets directly.
+	// The launch may still fail later (PVC/storage-class plumbing this fixture does not
+	// mock) — that is not what this test is about. What matters happened already, in the
+	// credentials stage: did the precheck ever see the write-capable personal token.
+	_ = j.CreateSessionJob(spec)
+	if len(checkedTokens) == 0 {
+		t.Fatal("repository precheck never ran — test fixture problem, not a credential-suppression result")
+	}
+	for _, tok := range checkedTokens {
+		if tok == "ghp_personal_write" {
+			t.Fatalf("a read-only worker's repository precheck used the write-capable personal credential: %v", checkedTokens)
+		}
+	}
+}
+
 func TestClusterWorkspaceStorageMissingFailsClosed(t *testing.T) {
 	p := clusterPlanFixture()
 	j := &JobManager{}
@@ -354,6 +442,15 @@ func TestClusterWorkspaceWaitForFirstConsumerLaunchPersistsOnlyTokenFreeStorageB
 	if e := j.CreateSessionJob(spec); e != nil {
 		t.Fatal(e)
 	}
+	var launch clusterworkspace.Plan
+	data := fixture.fake.createdSecrets[0]["stringData"].(map[string]any)
+	if err := json.Unmarshal([]byte(data[clusterworkspace.Env].(string)), &launch); err != nil {
+		t.Fatal(err)
+	}
+	remaining := time.Until(time.UnixMilli(launch.PrepareDeadlineMillis))
+	if remaining < 20*time.Minute || remaining > clusterworkspace.PrepareTimeout {
+		t.Fatalf("launch prepare budget = %s", remaining)
+	}
 	var stored []byte
 	var owner, uid string
 	if e := fixture.pool.QueryRow(context.Background(), `SELECT contexts,owner_id,claim_uid FROM cluster_workspace_storage WHERE session_id=$1`, spec.SessionID).Scan(&stored, &owner, &uid); e != nil {
@@ -378,8 +475,12 @@ func TestClusterWorkspaceWaitForFirstConsumerLaunchPersistsOnlyTokenFreeStorageB
 	}
 }
 
-func TestClusterWorkspaceMemoryBudgetPreservesTighterLimits(t *testing.T) {
-	for _, limit := range []string{"256Mi", "512Mi", "4Gi"} {
+// BLG-558 stopgap (owner decision 2026-11-05): the pod keeps the configured
+// memory limit; the pod limit bounds Git together with the agent and its builds
+// until Git gets its own memory group (0.7.0). Clamping the whole pod to Git's
+// budget OOM-killed every cluster worker at 512 MiB.
+func TestClusterWorkspacePodKeepsTheConfiguredMemoryLimit(t *testing.T) {
+	for _, limit := range []string{"256Mi", "512Mi", "4Gi", "12Gi"} {
 		j := newTestJobManager(t, &fakeK8s{})
 		j.MemLimit = limit
 		p := clusterPlanFixture()
@@ -393,9 +494,16 @@ func TestClusterWorkspaceMemoryBudgetPreservesTighterLimits(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
+		request, e := clusterMemoryBytes(resources["requests"].(map[string]any)["memory"])
+		if e != nil {
+			t.Fatal(e)
+		}
 		original, _ := clusterMemoryBytes(limit)
-		if actual > original || actual > protocol.DefaultWorkspaceBudget().GitMemoryBytes {
-			t.Fatal("memory ceiling was relaxed")
+		if actual != original {
+			t.Fatalf("limit %s became %d bytes, want %d", limit, actual, original)
+		}
+		if request > actual {
+			t.Fatalf("request %d exceeds limit %d", request, actual)
 		}
 	}
 	if _, e := clusterMemoryBytes("unknown"); e == nil {

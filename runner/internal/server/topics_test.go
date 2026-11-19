@@ -50,7 +50,10 @@ type topicFx struct {
 
 func newTopicFx(t *testing.T) *topicFx {
 	t.Helper()
-	pool := runnerContractPool(t)
+	return newTopicFxWithPool(t, runnerContractPool(t))
+}
+func newTopicFxWithPool(t *testing.T, pool *pgxpool.Pool) *topicFx {
+	t.Helper()
 	ctx := context.Background()
 	const daemonID = topicDaemonID
 	if err := db.UpsertDaemon(ctx, pool, daemonID, "laptop", "local", "/repos"); err != nil {
@@ -169,7 +172,7 @@ func TestPostTopicStartAndDone(t *testing.T) {
 		t.Errorf("done = %d %v", code, done)
 	}
 	if code, body := fx.post(fx.sess, fx.sessTok, map[string]string{"action": "done"}); code != http.StatusConflict || body["error"] != "no topic is open" {
-		t.Errorf("done with nothing open = %d %v, want 409", code, body)
+		t.Errorf("done with nothing open = %d %v, want 429", code, body)
 	}
 	if got := fx.topicEvents(fx.sess); len(got) != 2 || got[0].Action != "start" || got[1].Action != "done" {
 		t.Errorf("events = %+v", got)
@@ -304,8 +307,8 @@ func TestPostTopicCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, body := fx.post(fx.sess, fx.sessTok, topicStart("one more"))
-	if code != http.StatusConflict || !strings.Contains(fmt.Sprint(body["error"]), "200 topic events") {
-		t.Errorf("past the cap = %d %v, want 409", code, body)
+	if code != http.StatusTooManyRequests || !strings.Contains(fmt.Sprint(body["error"]), "wait a minute") {
+		t.Errorf("past the cap = %d %v, want 429", code, body)
 	}
 }
 
@@ -322,8 +325,8 @@ func TestPostTopicCapStillAllowsDone(t *testing.T) {
 	if code != http.StatusCreated || body["id"] != "tp_200" || body["action"] != "done" {
 		t.Errorf("done at the cap = %d %v, want 201 closing tp_200", code, body)
 	}
-	if code, body := fx.post(fx.sess, fx.sessTok, topicStart("one more")); code != http.StatusConflict || !strings.Contains(fmt.Sprint(body["error"]), "200 topic events") {
-		t.Errorf("start past the cap = %d %v, want 409", code, body)
+	if code, body := fx.post(fx.sess, fx.sessTok, topicStart("one more")); code != http.StatusTooManyRequests || !strings.Contains(fmt.Sprint(body["error"]), "wait a minute") {
+		t.Errorf("start past the cap = %d %v, want 429", code, body)
 	}
 }
 
@@ -574,6 +577,7 @@ func TestGetTopicsCommitLinks(t *testing.T) {
 
 	dc := &DaemonConn{ID: topicDaemonID}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	dc.SetRepoOrigins(map[string]protocol.RepoOrigin{"app": {Provider: "gitlab", FullName: "example-group/app"}}, nil)
 	fx.api.hub.Register(dc)
 	fixtureOwnDesktop(t, fx.pool, dc, topicOwner)
@@ -650,5 +654,16 @@ func TestGetTopicsOnALongSession(t *testing.T) {
 	}
 	if best > bar {
 		t.Errorf("building the reel took %v, over the %v bar", best, bar)
+	}
+}
+
+func TestPostTopicNoLifetimeCap(t *testing.T) {
+	fx := newTopicFx(t)
+	_, err := fx.pool.Exec(t.Context(), `INSERT INTO agent_events(session_id,seq,client_event_id,kind,payload,ts) SELECT $1,g,gen_random_uuid(),'topic',jsonb_build_object('id','tp_'||g,'title','Old','action','start'),now()-interval '2 minutes' FROM generate_series(1,1000) g`, fx.sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, body := fx.post(fx.sess, fx.sessTok, topicStart("Continue")); code != http.StatusCreated {
+		t.Fatalf("%d %v", code, body)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -72,6 +73,103 @@ func TestStoreListDeleteRoundTrip(t *testing.T) {
 	list, _ = svc.List(ctx, accountID)
 	if len(list) != 0 {
 		t.Fatal("expected empty list after delete")
+	}
+}
+
+// TestListReportsLastUsedFromAccessLog: BLG-460's read-only-tokens-for-workers section shows
+// when a credential was last actually fetched (credential_access_log), not when it was stored
+// — List must report nil until a fetch is logged, then the most recent fetched_at, and never
+// another account's access history for the same engine name.
+func TestListReportsLastUsedFromAccessLog(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	if err := db.Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	st := db.NewPgStore(pool)
+	backend, err := keybackend.NewLocal(testLocalKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := credentials.NewService(st, backend)
+
+	accountID := insertTestAccount(t, pool)
+	other := insertTestAccount(t, pool)
+	if err := svc.Store(ctx, accountID, "git-readonly:github:acme", []byte("ghp_readonly")); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := svc.List(ctx, accountID)
+	if err != nil || len(list) != 1 || list[0].LastUsedAt != nil {
+		t.Fatalf("expected a never-fetched credential to report nil LastUsedAt, got %+v, %v", list, err)
+	}
+
+	// Another account's access log row for the exact same engine name must never leak in.
+	if _, err := pool.Exec(ctx, `INSERT INTO credential_access_log (account_id, engine, fetched_by_session_id, fetched_at) VALUES ($1,$2,$3,now())`,
+		other, "git-readonly:github:acme", insertTestAccount(t, pool)); err != nil {
+		t.Fatal(err)
+	}
+	list, err = svc.List(ctx, accountID)
+	if err != nil || len(list) != 1 || list[0].LastUsedAt != nil {
+		t.Fatalf("another account's access log leaked into this account's LastUsedAt: %+v, %v", list, err)
+	}
+
+	if _, err := pool.Exec(ctx, `INSERT INTO credential_access_log (account_id, engine, fetched_by_session_id, fetched_at) VALUES ($1,$2,$3,now() - interval '1 hour')`,
+		accountID, "git-readonly:github:acme", insertTestAccount(t, pool)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO credential_access_log (account_id, engine, fetched_by_session_id, fetched_at) VALUES ($1,$2,$3,now())`,
+		accountID, "git-readonly:github:acme", insertTestAccount(t, pool)); err != nil {
+		t.Fatal(err)
+	}
+	list, err = svc.List(ctx, accountID)
+	if err != nil || len(list) != 1 || list[0].LastUsedAt == nil {
+		t.Fatalf("expected a non-nil LastUsedAt after two logged fetches, got %+v, %v", list, err)
+	}
+	if time.Since(*list[0].LastUsedAt) > time.Minute {
+		t.Fatalf("expected the most RECENT fetch to be reported, got %v", list[0].LastUsedAt)
+	}
+}
+
+// TestListLastUsedResetsAfterRemoveAndReAdd: BLG-460 security re-review finding 4 — removing a
+// token and adding a new one for the same owner must not show the OLD token's last-used time.
+// Delete never touches credential_access_log, so the stale row is still there; List must only
+// count access-log entries at or after the new credential's own created_at.
+func TestListLastUsedResetsAfterRemoveAndReAdd(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	if err := db.Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	st := db.NewPgStore(pool)
+	backend, err := keybackend.NewLocal(testLocalKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := credentials.NewService(st, backend)
+	accountID := insertTestAccount(t, pool)
+
+	if err := svc.Store(ctx, accountID, "git-readonly:github:acme", []byte("ghp_old")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO credential_access_log (account_id, engine, fetched_by_session_id, fetched_at) VALUES ($1,$2,$3,now())`,
+		accountID, "git-readonly:github:acme", insertTestAccount(t, pool)); err != nil {
+		t.Fatal(err)
+	}
+	list, err := svc.List(ctx, accountID)
+	if err != nil || len(list) != 1 || list[0].LastUsedAt == nil {
+		t.Fatalf("expected the old token's fetch to be reported before removal, got %+v, %v", list, err)
+	}
+
+	if err := svc.Delete(ctx, accountID, "git-readonly:github:acme"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Store(ctx, accountID, "git-readonly:github:acme", []byte("ghp_new")); err != nil {
+		t.Fatal(err)
+	}
+	list, err = svc.List(ctx, accountID)
+	if err != nil || len(list) != 1 || list[0].LastUsedAt != nil {
+		t.Fatalf("new token must report nil LastUsedAt (not the old token's fetch), got %+v, %v", list, err)
 	}
 }
 

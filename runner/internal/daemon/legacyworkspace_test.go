@@ -137,7 +137,7 @@ func TestLegacySandboxAttachmentUsesRuntimeHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := newManagerWithSender(newRecordingSender(8), ManagerConfig{})
-	manager.sessions["legacy-sandbox"] = &Session{workspace: clone, workspaceInfo: info, sandboxed: true, done: make(chan struct{})}
+	bindLegacyAgentFixture(t, manager, "legacy-sandbox", clone, info, true, make(chan struct{}))
 	start := legacyExplorerStart("legacy-sandbox")
 	start.GitTargets = map[string]string{"repo": filepath.Join(sourceRepo, ".git", "objects")}
 	remote := processExplorer(t, runtimeRoot, start)
@@ -199,7 +199,7 @@ func TestLegacyAttachmentPreservesGitAndFileConsumers(t *testing.T) {
 			sender := newRecordingSender(32)
 			manager := newManagerWithSender(sender, ManagerConfig{})
 			const id = "legacy-consumers"
-			router := &manager.explorer
+			var router *WorkspaceExplorerRouter
 			if agent {
 				host.sender = sender
 				host.spawn(protocol.SpawnSession{SessionID: id, Kind: "agent", ProjectPath: project, Repo: "proj"}, nil, "", &adoptRequest{})
@@ -211,7 +211,8 @@ func TestLegacyAttachmentPreservesGitAndFileConsumers(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				manager.sessions[id] = &Session{workspace: project, workspaceInfo: info, done: make(chan struct{})}
+				bindLegacyAgentFixture(t, manager, id, project, info, false, make(chan struct{}))
+				router = &manager.agents.explorer
 			}
 			source := manager.workspaceFileBinding(id)
 			caps := protocol.WorkspaceCapabilitiesFor("host", "linux")

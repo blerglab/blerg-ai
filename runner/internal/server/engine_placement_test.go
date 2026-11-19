@@ -19,10 +19,12 @@ func TestHeadlessPlacementUsesRequestedEngine(t *testing.T) {
 			hub := NewHub()
 			first := &DaemonConn{ID: "00000000-0000-4000-8000-000000000065", send: make(chan []byte, 8)}
 			first.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+			first.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 			first.SetCheckedOutRepos([]string{"project"})
 			first.SetAvailableEngines([]string{"claude"})
 			second := &DaemonConn{ID: "00000000-0000-4000-8000-000000000068", send: make(chan []byte, 8)}
 			second.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+			second.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 			second.SetCheckedOutRepos([]string{"project"})
 			second.SetAvailableEngines([]string{"codex"})
 			hub.Register(first)
@@ -76,9 +78,11 @@ func TestHeadlessPinnedTargetNeverFallsBack(t *testing.T) {
 	hub := NewHub()
 	first := &DaemonConn{ID: "00000000-0000-4000-8000-000000000072", send: make(chan []byte, 8)}
 	first.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	first.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	first.SetAvailableEngines([]string{"claude"})
 	second := &DaemonConn{ID: "00000000-0000-4000-8000-000000000076", send: make(chan []byte, 8)}
 	second.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	second.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	second.SetAvailableEngines([]string{"codex"})
 	hub.Register(first)
 	hub.Register(second)

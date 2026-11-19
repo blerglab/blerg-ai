@@ -13,6 +13,7 @@ func TestPlanUpdatedTransientCannotBypassValidation(t *testing.T) {
 	h := NewHub()
 	dc := &DaemonConn{ID: "fixture", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	h.Register(dc)
 	sub := make(chan []byte, 8)
 	h.Subscribe("fixture-session", "fixture-browser", sub)
@@ -33,6 +34,7 @@ func TestPlanUpdatedMalformedAndChildSnapshotsAreAcknowledgedAndDropped(t *testi
 		h := NewHub()
 		dc := &DaemonConn{ID: "fixture", send: make(chan []byte, 2)}
 		dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+		dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 		h.Register(dc)
 		sub := make(chan []byte, 2)
 		h.Subscribe("fixture-session", "fixture-browser", sub)
@@ -46,6 +48,7 @@ func TestLiveCodexPlanReplaysAndClearsAndRemainsPrivate(t *testing.T) {
 	fx := newLiveFx(t)
 	dc := &DaemonConn{ID: "fixture", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	fx.api.hub.Register(dc)
 	appendPlan := func(payload string) {
 		t.Helper()

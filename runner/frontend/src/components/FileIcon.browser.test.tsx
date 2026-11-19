@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { useEffect } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -14,12 +15,13 @@ import { PaletteDialog } from './CommandPalette'
 import '../index.css'
 import '@blerglab/chat/blerg.css'
 
+vi.mock('../ws', () => import('../test/wsMock'))
 const entries = vi.hoisted(() => [
   ...['src', 'docs', '.github', 'test'].map(name => ({ name, path: name, directory: true })),
   ...['main.go', 'README.md', 'Dockerfile.dev', 'Makefile', 'package-lock.json', 'app.tsx'].map(name => ({ name, path: name, directory: false })),
 ])
 vi.mock('../apiFetch', () => ({ apiFetch: async () => new Response(JSON.stringify({ result: { ok: true, launch_generation: 'launch', generation: 1, entries, truncated: false }, members: [], runtime: 'host' })) }))
-vi.mock('../lib/chatTransport', () => ({ blergTransport: () => ({ files: null }) }))
+vi.mock('../lib/chatTransport', async original => ({ ...await original<typeof import('../lib/chatTransport')>(), blergTransport: () => ({ files: null }) }))
 
 const names = ['main.go', 'README.md', 'data.json', 'config.yaml', 'app.ts', 'app.js', 'app.tsx', 'main.py', 'run.sh', 'run.ps1', 'Dockerfile', 'Makefile', 'yarn.lock', 'photo.png', 'drawing.svg', 'index.html', 'style.css', 'style.scss', 'style.less', 'main.rs', 'main.c', 'main.cpp', 'main.cs', 'Main.java', 'main.kt', 'main.swift', 'main.rb', 'index.php', 'App.vue', 'App.svelte', '.env', 'package.json', 'data.sql', 'data.csv', 'book.pdf', 'archive.zip', 'music.mp3', 'movie.mp4', 'font.woff', '.gitignore', 'LICENSE', 'main.tf', 'script.lua', 'file.xml', 'notes.ipynb', 'unknown.file']
 const files = createFakeFiles()
@@ -55,7 +57,7 @@ function luminance(color: string) {
   return rgb[0] * .2126 + rgb[1] * .7152 + rgb[2] * .0722
 }
 afterEach(() => { document.documentElement.removeAttribute('data-theme'); localStorage.clear() })
-for (const width of [390, 1440, 3840]) for (const theme of ['light', 'dark']) {
+for (const width of browserWidths([390, 1440, 3840])) for (const theme of ['light', 'dark']) {
   it(`keeps the shared icons visible and contrasting at ${width}px in ${theme}`, async () => {
     const shots = import.meta.env.VITE_FILE_ICON_SHOTS_DIR
     await page.viewport(width, shots ? 2160 : 1000)

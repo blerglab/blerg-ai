@@ -1,13 +1,21 @@
 package daemon
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/blerglab/blerg-ai/runner/internal/persontime"
+
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
 )
 
@@ -120,5 +128,112 @@ func TestInputJournalAcceptsPreNudgeReceiptAfterUpgrade(t *testing.T) {
 	send, _, err := reopened.accept(agent.Input{Text: "Resume", Source: "chat", ClientID: "legacy"})
 	if err != nil || !send {
 		t.Fatalf("old durable input refused after upgrade: send=%v err=%v", send, err)
+	}
+}
+
+func TestInputJournalNudgeRedelivery(t *testing.T) {
+	j, err := newInputJournal(t.TempDir(), "nudge-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := agent.Input{ClientID: "same-id", Text: "hello", Source: "chat", PlanNudge: "initial facts"}
+	if _, _, err := j.accept(in); err != nil {
+		t.Fatal(err)
+	}
+	in.PlanNudge = "updated facts"
+	in.PersonTime = &persontime.Account{Timezone: "UTC"}
+	if send, _, err := j.accept(in); err != nil || send {
+		t.Fatalf("redelivery: send=%v err=%v", send, err)
+	}
+}
+
+func TestInputJournalRetention(t *testing.T) {
+	j, err := newInputJournal("", "retention-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 1024 {
+		id := fmt.Sprint(i)
+		if send, _, err := j.accept(agent.Input{ClientID: id, Text: "hello"}); err != nil || !send {
+			t.Fatalf("accept %d: %v", i, err)
+		}
+		ev := agent.Event{ClientEventID: "event-" + id, Ts: time.Now().Add(-8 * 24 * time.Hour), Kind: "user_message", Payload: agent.UserMessagePayload{ClientID: id, Text: "hello"}}
+		if err := j.settle(ev); err != nil {
+			t.Fatal(err)
+		}
+		if err := j.ack(ev.ClientEventID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := j.accept(agent.Input{ClientID: "fresh"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(j.state.Receipts) != 1 {
+		t.Fatalf("expired receipts retained: %d", len(j.state.Receipts))
+	}
+}
+
+func TestInputJournalSaveFailureRetry(t *testing.T) {
+	dir := t.TempDir()
+	j, err := newInputJournal(dir, "save-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "save-session.json")
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	in := agent.Input{ClientID: "save-id", Text: "private canary"}
+	if _, _, err := j.accept(in); err == nil || !strings.HasPrefix(err.Error(), "receipt_save_failed_") {
+		t.Fatalf("cause=%v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if send, _, err := j.accept(in); err != nil || !send {
+		t.Fatalf("retry send=%v err=%v", send, err)
+	}
+}
+
+func TestInputJournalFailureLogsAreTypedAndPrivate(t *testing.T) {
+	var logs bytes.Buffer
+	old := failurelog.Default
+	failurelog.Default = failurelog.New(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { failurelog.Default = old })
+	j, err := newInputJournal("", "privacy-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := agent.Input{ClientID: "private-id", Text: "private-text-canary"}
+	if _, _, err := j.accept(in); err != nil {
+		t.Fatal(err)
+	}
+	in.Text = "private-conflict-canary"
+	if _, _, err := j.accept(in); !errors.Is(err, inputAcceptError("client_id_conflict")) {
+		t.Fatalf("conflict: %v", err)
+	}
+	in.Text = "private-text-canary"
+	j.state.Receipts[0].EventID = "invalid-event"
+	j.state.Receipts[0].Kind = "invalid"
+	if _, _, err := j.accept(in); !errors.Is(err, inputAcceptError("invalid_receipt")) {
+		t.Fatalf("invalid receipt: %v", err)
+	}
+	j.state.Receipts = make([]inputReceipt, inputReceiptLimit)
+	if _, _, err := j.accept(in); !errors.Is(err, inputAcceptError("pending_limit")) {
+		t.Fatalf("capacity: %v", err)
+	}
+	j.closed = true
+	if _, _, err := j.accept(in); !errors.Is(err, inputAcceptError("session_stopping")) {
+		t.Fatalf("closed: %v", err)
+	}
+	for _, want := range []string{"privacy-session", "client_id_conflict", "session_stopping", "invalid_receipt", "pending_limit"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("missing %s", want)
+		}
+	}
+	for _, private := range []string{in.ClientID, "private-text-canary", in.Text} {
+		if strings.Contains(logs.String(), private) {
+			t.Fatal("input leaked into diagnostics")
+		}
 	}
 }

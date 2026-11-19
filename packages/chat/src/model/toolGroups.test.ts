@@ -250,3 +250,8 @@ it('ignores additive nonbilling usage snapshots without breaking legacy tool gro
  expect(groups(timeline)).toHaveLength(1)
  expect(groups(timeline)[0].entries).toHaveLength(3)
 })
+
+it('keeps reveal and fixed command cards in the real timeline', () => {
+ const rows = buildTimeline([ev('ui_reveal', {action:'open',target:'readme.md'}), ev('cron_command_result', {index:1, output:'health'})])
+ expect(rows).toHaveLength(2)
+})

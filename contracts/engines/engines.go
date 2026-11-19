@@ -13,7 +13,6 @@ type Descriptor struct {
 	ID               string   `json:"id"`
 	Name             string   `json:"name"`
 	Runtimes         []string `json:"runtimes"`
-	Terminal         bool     `json:"terminal"`
 	Restricted       bool     `json:"restricted"`
 	Plugins          bool     `json:"plugins"`
 	CredentialImport bool     `json:"credential_import"`
@@ -29,10 +28,10 @@ func (d Descriptor) SupportsRuntime(runtime string) bool { return slices.Contain
 var (
 	mu       sync.RWMutex
 	registry = map[string]Descriptor{
-		"claude":   {ID: "claude", Steering: true, Name: "Claude Code", Runtimes: []string{"daemon", "docker", "cluster"}, Terminal: true, Restricted: true, Plugins: true, CredentialImport: true, LimitResume: true, UsageWindows: []string{"5h", "7d", "7d_opus", "7d_sonnet", "7d_fable", "month", "day", "spend-week", "capped"}, CredentialEnvKeys: []string{"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"}},
-		"codex":    {ID: "codex", Steering: true, Name: "Codex", Runtimes: []string{"daemon", "docker", "cluster"}, Terminal: true, Restricted: true, Plugins: true, CredentialImport: true, LimitResume: true, UsageWindows: []string{"5h", "7d", "spend", "capped"}, CredentialEnvKeys: []string{"CODEX_AUTH_JSON"}},
-		"hermes":   {ID: "hermes", Steering: true, Name: "Hermes", Runtimes: []string{"daemon", "docker", "cluster"}, Terminal: true, CredentialImport: true, CredentialEnvKeys: []string{"HERMES_ENV_CONTENTS"}},
-		"openclaw": {ID: "openclaw", Name: "OpenClaw", Runtimes: []string{"daemon"}, Terminal: true},
+		"claude":   {ID: "claude", Steering: true, Name: "Claude Code", Runtimes: []string{"daemon", "docker", "cluster"}, Restricted: true, Plugins: true, CredentialImport: true, LimitResume: true, UsageWindows: []string{"5h", "7d", "7d_opus", "7d_sonnet", "7d_fable", "month", "day", "spend-week", "capped"}, CredentialEnvKeys: []string{"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"}},
+		"codex":    {ID: "codex", Steering: true, Name: "Codex", Runtimes: []string{"daemon", "docker", "cluster"}, Restricted: true, Plugins: true, CredentialImport: true, LimitResume: true, UsageWindows: []string{"5h", "7d", "spend", "capped"}, CredentialEnvKeys: []string{"CODEX_AUTH_JSON"}},
+		"hermes":   {ID: "hermes", Steering: true, Name: "Hermes", Runtimes: []string{"daemon", "docker", "cluster"}, CredentialImport: true, CredentialEnvKeys: []string{"HERMES_ENV_CONTENTS"}},
+		"openclaw": {ID: "openclaw", Name: "OpenClaw", Runtimes: []string{"daemon"}},
 	}
 )
 

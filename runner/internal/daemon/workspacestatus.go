@@ -19,10 +19,13 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
+var errWorkspaceMetadataChanged = errors.Join(os.ErrPermission, errors.New("workspace metadata changed"))
+
 type workspaceStatusDiagnostic func(stage string, err error, stderr string)
 type workspaceStatusDiagnosticKey struct{}
 
 func (e *LocalExplorer) diagnoseStatus(ctx context.Context, stage string, err error, stderr string) {
+	logDaemonFailure("workspace status: "+stage, err)
 	diagnostic := e.statusDiagnostic
 	if sink, ok := ctx.Value(workspaceStatusDiagnosticKey{}).(workspaceStatusDiagnostic); ok {
 		diagnostic = sink
@@ -35,6 +38,31 @@ func (e *LocalExplorer) diagnoseStatus(ctx context.Context, stage string, err er
 // status is invoked in the same runtime as traversal. The daemon never calls
 // this on a sandbox clone: that adapter must invoke its in-container helper.
 func (e *LocalExplorer) status(ctx context.Context, req protocol.WorkspaceExplorerRequest, name string) protocol.WorkspaceExplorerResult {
+	e.mu.Lock()
+	if e.statusBusy {
+		e.mu.Unlock()
+		return explorerFailure(req, "busy")
+	}
+	e.statusBusy = true
+	e.mu.Unlock()
+	defer func() { e.mu.Lock(); e.statusBusy = false; e.mu.Unlock() }()
+	result := e.statusAttempt(ctx, req, name)
+	if result.OK || result.StatusReason != "metadata_changed" || ctx.Err() != nil {
+		return result
+	}
+	// A writer may change refs while Git reads our private snapshot. Rebuild it
+	// once under the original request deadline; never accept the stale result.
+	timer := time.NewTimer(25 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return result
+	case <-timer.C:
+		return e.statusAttempt(ctx, req, name)
+	}
+}
+
+func (e *LocalExplorer) statusAttempt(ctx context.Context, req protocol.WorkspaceExplorerRequest, name string) protocol.WorkspaceExplorerResult {
 	observe := statusObserver(ctx)
 	started, phase := time.Now(), time.Now()
 	mark := func(stage string, err error) {
@@ -88,15 +116,6 @@ func (e *LocalExplorer) status(ctx context.Context, req protocol.WorkspaceExplor
 		res.ErrorCode = "forbidden"
 		return res
 	}
-	e.mu.Lock()
-	if e.statusBusy {
-		e.mu.Unlock()
-		res.ErrorCode = "busy"
-		return res
-	}
-	e.statusBusy = true
-	e.mu.Unlock()
-	defer func() { e.mu.Lock(); e.statusBusy = false; e.mu.Unlock() }()
 	file, err := e.openDirectory(name)
 	if err != nil {
 		return fail("open member", err)
@@ -205,8 +224,12 @@ func (e *LocalExplorer) status(ctx context.Context, req protocol.WorkspaceExplor
 	finalInfo, err := final.Stat()
 	_ = final.Close()
 	finalFingerprint, safe := guard()
-	if err != nil || !os.SameFile(gitInfo, finalInfo) || (pinned && !validWorkspaceObjectPin(pin)) || !safe || finalFingerprint != fingerprint {
+	if err != nil || !os.SameFile(gitInfo, finalInfo) || (pinned && !validWorkspaceObjectPin(pin)) || !safe {
 		return fail("final metadata guard", err)
+	}
+	if finalFingerprint != fingerprint {
+		metadataReason = "metadata_changed"
+		return fail("final metadata guard", errWorkspaceMetadataChanged)
 	}
 	status.Path = req.Path
 	status.MemberID = memberID
@@ -246,6 +269,26 @@ func (e *LocalExplorer) statusMetadataReason(ctx context.Context, dir, alternate
 	return fingerprint, safe, budget.reason
 }
 func metadataTree(ctx context.Context, root *os.Root, dir string, allowed map[string]string, worktreeRecords bool, budget *metadataBudget) (string, bool) {
+	return metadataTreeWithOpen(ctx, root, dir, allowed, worktreeRecords, budget, workspaceOpenDirectory)
+}
+
+func metadataTreeWithOpen(ctx context.Context, root *os.Root, dir string, allowed map[string]string, worktreeRecords bool, budget *metadataBudget, openDirectory func(*os.Root, string) (*os.File, error)) (string, bool) {
+	fingerprint, safe := metadataTreeAttempt(ctx, root, dir, allowed, worktreeRecords, budget, openDirectory)
+	if safe || budget.reason != "metadata_changed" {
+		return fingerprint, safe
+	}
+	// Retry once with fresh descriptors, retaining the total work budget.
+	timer := time.NewTimer(25 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return "", false
+	case <-timer.C:
+		return metadataTreeAttempt(ctx, root, dir, allowed, worktreeRecords, budget, openDirectory)
+	}
+}
+
+func metadataTreeAttempt(ctx context.Context, root *os.Root, dir string, allowed map[string]string, worktreeRecords bool, budget *metadataBudget, openDirectory func(*os.Root, string) (*os.File, error)) (string, bool) {
 	budget.reason = "metadata_read_refused"
 	hash := sha256.New()
 	seen := map[string]bool{}
@@ -258,8 +301,11 @@ func metadataTree(ctx context.Context, root *os.Root, dir string, allowed map[st
 			budget.reason = "metadata_limit"
 			return false
 		}
-		file, err := workspaceOpenDirectory(root, name)
+		file, err := openDirectory(root, name)
 		if err != nil {
+			if errors.Is(err, errWorkspaceMetadataChanged) {
+				budget.reason = "metadata_changed"
+			}
 			return false
 		}
 		defer func() { _ = file.Close() }()
@@ -306,6 +352,9 @@ func metadataTree(ctx context.Context, root *os.Root, dir string, allowed map[st
 			}
 			f, err := workspaceOpenFile(root, child)
 			if err != nil {
+				if errors.Is(err, errWorkspaceMetadataChanged) {
+					budget.reason = "metadata_changed"
+				}
 				return false
 			}
 			st, err := f.Stat()

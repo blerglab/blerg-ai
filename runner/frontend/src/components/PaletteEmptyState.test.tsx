@@ -49,7 +49,7 @@ function show(path = '/sessions/sess-a') {
   })
   render(<MemoryRouter initialEntries={[path]}><CommandPaletteProvider>
     <RunnerCommands onNewSession={vi.fn()} />
-    <Routes><Route path="/sessions/:id" element={<SessionDetail />} /><Route path="/sessions" element={<div>Session list</div>} /></Routes>
+    <Routes><Route path="/sessions/:id" element={<SessionDetail />} /><Route path="/sessions" element={<div>Workspace list</div>} /></Routes>
   </CommandPaletteProvider></MemoryRouter>)
 }
 const dialog = () => within(screen.getByRole('dialog', { name: 'Command palette' }))
@@ -77,14 +77,14 @@ describe('the empty command palette', () => {
     for (const id of ['alpha', 'cron-run', 'ended', 'stopped', 'beta', 'gamma', 'delta']) rememberSessionVisit(ACCOUNT, id)
     show()
     openPalette()
-    expect(groupNames()).toEqual(['This session', 'Recent sessions', 'Commands'])
-    expect(titles('This session')).toEqual(['Quick open session files', 'Switch model…', 'Set effort…', 'Open board', 'Session insights'])
+    expect(groupNames()).toEqual(['This workspace', 'Recent workspaces', 'Commands'])
+    expect(titles('This workspace')).toEqual(['Quick open workspace files', 'Switch model…', 'Set color…', 'Set effort…', 'Open board', 'Workspace insights'])
     // The first safe action is the default highlight.
-    expect(dialog().getByRole('option', { selected: true })).toHaveTextContent('Quick open session files')
+    expect(dialog().getByRole('option', { selected: true })).toHaveTextContent('Quick open workspace files')
     // Crons, ended and stopped sessions, never-opened ones and the current session are not offered.
-    expect(titles('Recent sessions')).toEqual(['Delta work', 'Gamma work', 'Beta work'])
+    expect(titles('Recent workspaces')).toEqual(['Delta work', 'Gamma work', 'Beta work'])
     expect(titles('Commands')).not.toContain('Open board')
-    expect(titles('Commands')).toContain('New session')
+    expect(titles('Commands')).toContain('New workspace')
   })
   it('still finds crons, stopped and ended sessions by search', () => {
     rememberSessionVisit(ACCOUNT, 'alpha')
@@ -92,15 +92,15 @@ describe('the empty command palette', () => {
     const input = openPalette()
     for (const [query, title] of [['s literary', 'Literary agent'], ['s education', 'Education stopped'], ['s old finished', 'Old finished'], ['s never', 'Never opened']]) {
       fireEvent.change(input, { target: { value: query } })
-      expect(within(dialog().getByRole('group', { name: 'Sessions' })).getByRole('option')).toHaveTextContent(title)
-      fireEvent.click(dialog().getByRole('button', { name: 'Remove sessions scope' }))
+      expect(within(dialog().getByRole('group', { name: 'Workspaces' })).getByRole('option')).toHaveTextContent(title)
+      fireEvent.click(dialog().getByRole('button', { name: 'Remove workspaces scope' }))
       fireEvent.change(input, { target: { value: '' } })
     }
   })
   it('falls back to open sessions by latest activity when nothing was opened', () => {
     show()
     openPalette()
-    expect(titles('Recent sessions')).toEqual(['Never opened', 'Delta work', 'Gamma work'])
+    expect(titles('Recent workspaces')).toEqual(['Never opened', 'Delta work', 'Gamma work'])
   })
   it('records visits so the session just left leads the list next time', async () => {
     rememberSessionVisit(ACCOUNT, 'alpha')
@@ -111,7 +111,7 @@ describe('the empty command palette', () => {
     fireEvent.keyDown(input, { key: 'Enter' })
     await waitFor(() => expect(recentSessionIds(ACCOUNT)[0]).toBe('beta'))
     openPalette()
-    expect(titles('Recent sessions')).toEqual(['Current', 'Alpha work'])
+    expect(titles('Recent workspaces')).toEqual(['Current', 'Alpha work'])
   })
   it('turns Switch model… into a search for the choices', () => {
     show()
@@ -126,8 +126,8 @@ describe('the empty command palette', () => {
     rememberSessionVisit(ACCOUNT, 'alpha')
     show('/sessions')
     openPalette()
-    expect(groupNames()).toEqual(['Recent sessions', 'Commands'])
-    expect(titles('Recent sessions')).toEqual(['Alpha work'])
+    expect(groupNames()).toEqual(['Recent workspaces', 'Commands'])
+    expect(titles('Recent workspaces')).toEqual(['Alpha work'])
     expect(titles('Commands')).toContain('Open board')
     expect(dialog().getByRole('option', { selected: true })).toHaveTextContent('Alpha work')
   })

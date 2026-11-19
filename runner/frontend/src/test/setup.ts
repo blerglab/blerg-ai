@@ -1,3 +1,5 @@
+import { invalidateBlackboardViews } from '../lib/blackboardViewCache'
+import { clearInsightsCache } from '../lib/insightsCache'
 // Global test setup, wired via vitest.config.ts `setupFiles`.
 //
 // jsdom omits several browser APIs the components touch. We provide minimal
@@ -13,10 +15,19 @@ import { clearViewCache } from '../../../../packages/chat/src/model/viewCache'
 // Unmount any rendered components and clear the DOM between tests.
 afterEach(() => {
   cleanup()
+  clearInsightsCache()
+  invalidateBlackboardViews()
   // A session's cached explorer and panel never carry into another test's fixtures.
   clearViews()
   // Nor the chat's kept Files lists and file contents (#281).
   clearViewCache()
+  // Per-workspace panel choices and layouts (BLG-587) never leak into another test's fixtures.
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i) ?? ''
+      if (key.startsWith('blerg-runner.workspace-panel.') || key.startsWith('blerg-runner.layouts.') || key.startsWith('blerg-runner.tabs.')) localStorage.removeItem(key)
+    }
+  } catch { /* no storage in this environment */ }
 })
 
 // waitFor's default second is not enough when the whole suite runs on a loaded CI runner; a

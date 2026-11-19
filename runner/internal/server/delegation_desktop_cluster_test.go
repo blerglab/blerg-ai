@@ -442,8 +442,8 @@ func TestDesktopParentAndClusterChildMessagesBothWays(t *testing.T) {
 	if asks, _ := status["open_asks"].([]any); code != http.StatusOK || len(asks) != 1 || !strings.Contains(string(mustJSON(t, asks)), "Which branch?") {
 		t.Fatalf("child status = %d %v", code, status)
 	}
-	code, out, _ = cx.do("POST", childRoute(cx.parent, child, "/message"), cx.parentTok, map[string]any{"text": "main"}, nil)
-	if code != http.StatusAccepted || out["answered_ask"] != true {
+	code, out, _ = cx.do("POST", childRoute(cx.parent, child, "/questions/"+mid+"/answer"), cx.parentTok, map[string]any{"answer": "main"}, nil)
+	if code != http.StatusOK {
 		t.Fatalf("answer = %d %v", code, out)
 	}
 }

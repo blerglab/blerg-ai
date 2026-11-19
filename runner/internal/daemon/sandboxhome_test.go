@@ -470,22 +470,6 @@ func TestReleaseSandboxHome(t *testing.T) {
 	}
 }
 
-// A sandboxed terminal brought back after a restart resumes from the transcript in its own home.
-func TestSandboxTranscriptExists(t *testing.T) {
-	home := sandboxHomeFixture(t)
-	sb, err := prepareSandboxHome("s-term", home, "", sandboxEnginesFor("", ""))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sandboxTranscriptExists("s-term") {
-		t.Fatal("no transcript yet")
-	}
-	writeFile(t, filepath.Join(sb, "claude", "projects", "-workspace", "s-term.jsonl"), "{}\n")
-	if !sandboxTranscriptExists("s-term") {
-		t.Fatal("the transcript in the session's home was not found")
-	}
-}
-
 func writeFile(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

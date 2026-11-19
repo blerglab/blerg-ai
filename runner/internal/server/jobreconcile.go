@@ -20,10 +20,12 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
@@ -127,6 +129,9 @@ func (a *API) reconcileClusterJobsOnce(ctx context.Context) {
 	if a.dbPool == nil {
 		return
 	}
+	if err := pruneWorkerWakeReceipts(ctx, a.dbPool); err != nil {
+		failurelog.Default.Event("runner:worker-wake:prune", slog.LevelError, "component", "runner", "operation", "worker_wake_receipt_prune", "cause", failurelog.Cause(err))
+	}
 	if jm := a.hub.JobManager(); jm != nil {
 		jm.reconcileLaunchSecrets(ctx)
 		if err := jm.reclaimNativeHistory(ctx); err != nil {
@@ -141,8 +146,17 @@ func (a *API) reconcileClusterJobsOnce(ctx context.Context) {
 			}
 		}
 	}
+	if err := a.reconcileChildTurns(ctx); err != nil {
+		log.Printf("child turn delivery: %v", err)
+	}
 	a.reconcileLocalWorkspaceFinals(ctx)
 	a.finaliseLostDaemonSessions(ctx)
+	if err := a.reconcileChildNotes(ctx); err != nil {
+		failurelog.Default.Event("runner:child-notes:reconcile", slog.LevelError, "component", "runner", "operation", "child_note_reconcile", "cause", failurelog.Cause(err))
+	}
+	if err := a.reconcileChildQuestions(ctx, time.Now()); err != nil {
+		log.Printf("child questions: %v", err)
+	}
 	if err := a.reconcileSessionFailures(ctx, time.Now()); err != nil {
 		log.Printf("session failure alerts: %v", err)
 	}
@@ -186,6 +200,14 @@ func (a *API) reconcileClusterSession(ctx context.Context, jm *JobManager, row d
 	var status, reason, endReason string
 	switch state {
 	case jobStateSucceeded:
+		if row.Status == "starting" {
+			status, reason, endReason = "error", "cluster job exited before startup was confirmed", db.EndReasonStartFailed
+			break
+		}
+		// Older pods returned zero after eviction SIGTERM. The pod reason wins.
+		if row.Status == "running" && a.explainStoppedPod(ctx, jm, row) {
+			return
+		}
 		// The Job exited cleanly; the session simply ended. No error text —
 		// there is no error to explain.
 		status, endReason = "ended", db.EndReasonJobFinished
@@ -240,6 +262,13 @@ func (a *API) finishSession(ctx context.Context, row db.ReconcileSessionRow, sta
 		// knows better than this pass does.
 		return
 	}
+	if endReason == db.EndReasonStartFailed {
+		if jm := a.hub.JobManager(); jm != nil {
+			if err := jm.cleanupFailedSessionJob(ctx, row.ID); err != nil {
+				logLaunchFailure("failed_start_cleanup", err)
+			}
+		}
+	}
 	log.Printf("cluster reconcile: session %s %s → %s", row.ID, why, status)
 	if reason != "" {
 		failStart(ctx, a.hub, a.dbPool, row.ID, reason,
@@ -266,6 +295,9 @@ func (a *API) finaliseLostDaemonSessions(ctx context.Context) {
 		return
 	}
 	for _, row := range rows {
+		if a.retainedDaemonAbsence(ctx, row.ID) {
+			continue
+		}
 		// One guarded statement decides it: the session is finalised only if
 		// it is STILL lost when the write runs. A daemon that reconnected
 		// between the SELECT above and this line has already cleared
@@ -380,4 +412,18 @@ func sanitiseConditionReason(reason string) string {
 		}
 	}
 	return b.String()
+}
+
+// A database row cannot authorize a retention exemption. This runner must have
+// positively allocated custody in its current process-local manager ledger.
+func (a *API) retainedDaemonAbsence(ctx context.Context, session string) bool {
+	if a.shells == nil || a.dbPool == nil {
+		return false
+	}
+	var absent *time.Time
+	if err := a.dbPool.QueryRow(ctx, `SELECT daemon_lost_at FROM sessions WHERE id=$1 AND end_reason IS NULL AND status='error'`, session).Scan(&absent); err != nil || absent == nil {
+		return false
+	}
+	_, hold := a.shells.AbsenceHold(session, *absent, time.Now())
+	return hold
 }

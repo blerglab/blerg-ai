@@ -144,7 +144,7 @@ func TestChildFilingIsRefusedWhenTheParentCannotLendItsSignIn(t *testing.T) {
 
 	l.end("fixture-login")
 	code, out := childFile(fx, c, "Parent signed out")
-	if code != 409 || !strings.Contains(out["error"].(string), "sign-in of the session that started it") || !strings.Contains(out["error"].(string), "ended") {
+	if code != 409 || !strings.Contains(out["error"].(string), "Ticket board permission") || !strings.Contains(out["error"].(string), "restore suspended access") || strings.Contains(strings.ToLower(out["error"].(string)), "renew") {
 		t.Fatalf("parent signed out: %d %v", code, out)
 	}
 	if n := countProposals(t, fx, c.id); n != before || up.creates != 0 {

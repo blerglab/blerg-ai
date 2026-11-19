@@ -26,6 +26,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/blerglab/blerg-ai/runner/internal/topics"
 	"github.com/jackc/pgx/v5"
 )
@@ -132,6 +133,50 @@ func (a *API) HandlePatchSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
+	if req.Emoji != nil {
+		if req.Color != nil || req.Title != "" {
+			writeError(w, 422, "Set an emoji separately.")
+			return
+		}
+		if problem := a.setSessionEmoji(r.Context(), sessionID, *req.Emoji); problem != nil {
+			writeAPIError(w, problem)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if req.Color != nil {
+		if principal.Kind != "human" {
+			writeError(w, 403, "Only a signed-in person can set a color.")
+			return
+		}
+		if req.Title != "" {
+			writeError(w, 422, "Set a title or a color separately.")
+			return
+		}
+		switch *req.Color {
+		case "", "blue", "orange", "purple", "teal", "silver", "indigo", "gold", "coral", "cyan", "violet", "lime", "rose":
+		default:
+			writeError(w, 422, "Choose a session color from the palette.")
+			return
+		}
+		if a.dbPool == nil {
+			writeError(w, 503, "database not available")
+			return
+		}
+		tag, err := a.dbPool.Exec(r.Context(), `UPDATE sessions SET color=$2 WHERE id=$1`, sessionID, *req.Color)
+		if err != nil {
+			writeDatabaseFailure(w, "set the color", "patch session color", err)
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			writeError(w, 404, "session not found")
+			return
+		}
+		a.hub.BroadcastJSON(protocol.SessionColorChanged{Type: "session_color_changed", SessionID: sessionID, Color: *req.Color}) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	title := topics.CleanText(req.Title, maxDelegationTitleRunes)
 	if title == "" {
 		writeError(w, http.StatusUnprocessableEntity, "title is required")
@@ -149,6 +194,26 @@ func (a *API) HandlePatchSession(w http.ResponseWriter, r *http.Request) {
 func (a *API) HandleRenameOwnSession(w http.ResponseWriter, r *http.Request) {
 	sid, body, ok := a.agentSessionWrite(w, r, "title", renameBodyLimit)
 	if !ok {
+		return
+	}
+	var req struct {
+		Emoji *string `json:"emoji"`
+		Title string  `json:"title"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, 400, "invalid JSON")
+		return
+	}
+	if req.Emoji != nil {
+		if req.Title != "" {
+			writeError(w, 422, "Set an emoji separately.")
+			return
+		}
+		if problem := a.setSessionEmoji(r.Context(), sid, *req.Emoji); problem != nil {
+			writeAPIError(w, problem)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"session_id": sid, "emoji": *req.Emoji})
 		return
 	}
 	title, problem := decodeRename(body)

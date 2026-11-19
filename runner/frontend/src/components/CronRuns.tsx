@@ -66,7 +66,7 @@ export default function CronRuns({ cronId, refreshKey = 0 }: { cronId: string; r
           {r.manual && <span style={chip}>manual</span>}
           {r.reason && <span style={{ color: 'var(--fog)' }}>{r.reason}</span>}
           {r.session_id && (
-            <Link to={`/sessions/${r.session_id}`} style={{ color: 'var(--amber)', marginLeft: 'auto' }}>Open session</Link>
+            <Link to={`/sessions/${r.session_id}`} style={{ color: 'var(--amber)', marginLeft: 'auto' }}>Open run</Link>
           )}
         </li>
       ))}

@@ -52,7 +52,7 @@ export function StatsPanel({ cardId }: { cardId: string }) {
             <dt>agent time</dt>
             <dd>
               {dur(agentTotal)}
-              {stats.sessions ? ` across ${stats.sessions} session${stats.sessions === 1 ? "" : "s"}` : ""}
+              {stats.sessions ? ` across ${stats.sessions} workspace${stats.sessions === 1 ? "" : "s"}` : ""}
               {agent.length > 1 &&
                 ` (${agent.map(([r, s]) => `${r} ${dur(s)}`).join(" · ")})`}
             </dd>

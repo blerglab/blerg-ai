@@ -415,7 +415,7 @@ const (
 	// startWatchLimit bounds a watcher that never sees the session settle.
 	// The browser offers "stop" long before this; the watcher only stops
 	// polling the API.
-	startWatchLimit = 20 * time.Minute
+	startWatchLimit = 30 * time.Minute
 )
 
 // clusterWatchLifetime lets an explicit owner cancel and join start watchers.
@@ -589,6 +589,9 @@ func clusterJobCreateFailed(ctx context.Context, h *Hub, pool *pgxpool.Pool, ses
 // created: terminal status and reason on the row, the start attempt closed as
 // failed, browsers told. reason must already be caller-safe.
 func (a *API) markClusterStartFailed(ctx context.Context, sessionID, reason string) {
+	// Finalization belongs to the coordinator after the launch request ends.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
 	if a.dbPool != nil {
 		now := time.Now()
 		if err := db.EndSessionStatus(ctx, a.dbPool, sessionID, "error", &now, systemEnd(db.EndReasonStartFailed)); err != nil {
@@ -600,7 +603,17 @@ func (a *API) markClusterStartFailed(ctx context.Context, sessionID, reason stri
 		// A start that failed after its grants were made: no Job will ever use the tokens.
 		revokeSessionGrants(ctx, a.dbPool, sessionID, "cluster start failed")
 	}
+	if jm := a.hub.JobManager(); jm != nil {
+		if err := jm.cleanupFailedSessionJob(ctx, sessionID); err != nil {
+			logLaunchFailure("failed_start_cleanup", err)
+		}
+	}
 	clusterJobCreateFailed(ctx, a.hub, a.dbPool, sessionID, reason)
+	// Notify Main immediately; the durable failure outbox retries when Main is unavailable.
+	if err := recordSessionFailure(ctx, a.hub, a.dbPool, sessionID); err != nil {
+		logLaunchFailure("queued", &jobSubmissionError{reason: "InternalError"})
+	}
+	a.onChildTurnEnded(sessionID, childSessionFailed, reason)                                                                         //nolint:contextcheck // delivery runs outside launch locks with its own bounded context
 	broadcastWithEnd(a.hub, sessionEndFor(ctx, a.dbPool, sessionID, "error"), func(endReason string, endedBy *protocol.EndedBy) any { //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
 		return protocol.SessionStateChanged{
 			Type: "session_state_changed", SessionID: sessionID, Status: "error", Message: &reason,
@@ -656,6 +669,7 @@ type k8sPod struct {
 	Status struct {
 		Phase      string `json:"phase"`
 		Reason     string `json:"reason"`
+		Message    string `json:"message"`
 		Conditions []struct {
 			Type    string `json:"type"`
 			Status  string `json:"status"`

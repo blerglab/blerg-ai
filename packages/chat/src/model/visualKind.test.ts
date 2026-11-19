@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { visualFence, visualFile } from './visualKind'
+import { visualFence, visualFile, visualSnapshotId } from './visualKind'
 
 describe('visual output identification', () => {
   it('matches visual fences without importing renderers', () => {
@@ -17,5 +17,14 @@ describe('visual output identification', () => {
     expect(visualFile('chart.json', 'json', '{"$schema":"http://vega.github.io/schema/vega-lite/v6.json"}')).toBeNull()
     expect(visualFile('chart.json', 'json', '{"$schema":"https://example.com/vega-lite/v6.json"}')).toBeNull()
     expect(visualFile('chart.json', 'json', '{"$schema":"https://vega.github.io/schema/vega/v6.json"}')).toBeNull()
+  })
+})
+
+describe('visualSnapshotId', () => {
+  it('is stable for the same kind and source, and distinct otherwise', () => {
+    const id = visualSnapshotId('mermaid', 'flowchart LR; A-->B')
+    expect(visualSnapshotId('mermaid', 'flowchart LR; A-->B')).toBe(id)
+    expect(visualSnapshotId('mermaid', 'flowchart LR; A-->C')).not.toBe(id)
+    expect(visualSnapshotId('vega-lite', 'flowchart LR; A-->B')).not.toBe(id)
   })
 })

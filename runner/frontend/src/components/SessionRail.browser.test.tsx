@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 // The session page's side panel in real Chromium: whether the toggle fits a phone's header, the
 // drawer opens over the whole height and closes, and nothing is wider than the screen; and on a
 // desktop, that the panel is a column beside the chat that the chat and its composer give way to.
@@ -87,7 +88,7 @@ describe('the session panel on a phone (390 px)', () => {
     // background, its task counted once) + 5 background tasks (3 the page holds, 2 that started
     // before them) run inside the session, from the server's live state. Main is not a count.
     await waitFor(() => expect(shownCounts(toggle)).toBe('🤖7'))
-    expect(screen.getByTestId('rail-announce').textContent).toBe('Session panel: 7 subagents and background tasks')
+    expect(screen.getByTestId('rail-announce').textContent).toBe('Workspace panel: 7 subagents and background tasks')
     for (const count of toggle.querySelectorAll('.icon-btn-count')) expect(count.getBoundingClientRect().right).toBeLessThanOrEqual(PHONE.width)
     const r = toggle.getBoundingClientRect()
     expect(r.left).toBeGreaterThanOrEqual(0)
@@ -104,7 +105,7 @@ describe('the session panel on a phone (390 px)', () => {
     renderPage()
     const toggle = screen.getByTestId('rail-toggle')
     await userEvent.click(toggle)
-    const drawer = await screen.findByRole('dialog', { name: 'Session panel' })
+    const drawer = await screen.findByRole('dialog', { name: 'Workspace panel' })
     // It slides in from the right edge; measured once it is in place.
     await waitFor(() => expect(drawer.getBoundingClientRect().right).toBe(PHONE.width))
     const d = drawer.getBoundingClientRect()
@@ -129,7 +130,7 @@ describe('the session panel on a phone (390 px)', () => {
     expect(document.body.style.overflow).toBe('')
 
     await userEvent.click(toggle)
-    await screen.findByRole('dialog', { name: 'Session panel' })
+    await screen.findByRole('dialog', { name: 'Workspace panel' })
     // The strip of page left of the drawer is the backdrop.
     await userEvent.click(screen.getByTestId('session-rail-backdrop'), { position: { x: 10, y: 300 } })
     await waitFor(() => expect(screen.queryByTestId('session-rail')).toBeNull())
@@ -139,7 +140,7 @@ describe('the session panel on a phone (390 px)', () => {
     localStorage.setItem(RAIL_TAB_KEY, 'history')
     renderPage()
     await userEvent.click(screen.getByTestId('rail-toggle'))
-    const drawer = await screen.findByRole('dialog', { name: 'Session panel' })
+    const drawer = await screen.findByRole('dialog', { name: 'Workspace panel' })
     await waitFor(() => expect(drawer.getBoundingClientRect().right).toBe(PHONE.width))
     const list = await screen.findByTestId('reel-list')
     for (const head of screen.getAllByTestId('reel-head')) await userEvent.click(head)
@@ -162,7 +163,7 @@ describe('the session panel on a phone (390 px)', () => {
     expect(screen.queryByTestId('files-toggle')).toBeNull()
     expect(screen.queryByTestId('capabilities-toggle')).toBeNull()
     await userEvent.click(screen.getByTestId('rail-toggle'))
-    const drawer = await screen.findByRole('dialog', { name: 'Session panel' })
+    const drawer = await screen.findByRole('dialog', { name: 'Workspace panel' })
     await waitFor(() => expect(drawer.getBoundingClientRect().right).toBe(PHONE.width))
     const rows = await screen.findAllByTestId('artifact-row')
     expect(rows).toHaveLength(2)
@@ -198,7 +199,7 @@ describe('the session panel on a desktop (1280 px)', () => {
     expect(r.bottom).toBe(DESKTOP.height)
     const chat = screen.getByTestId('agent-chat').getBoundingClientRect()
     expect(chat.right).toBeLessThanOrEqual(r.left)
-    const composer = screen.getByPlaceholderText('Answer the agent’s question…').getBoundingClientRect()
+    const composer = screen.getByPlaceholderText('Message the agent… (/model, /effort, /<skill>)').getBoundingClientRect()
     expect(composer.right).toBeLessThanOrEqual(r.left)
     expect(composer.left).toBeGreaterThanOrEqual(chat.left)
     noOverflow(DESKTOP.width)
@@ -208,11 +209,11 @@ describe('the session panel on a desktop (1280 px)', () => {
     const tools = screen.getByRole('navigation', { name: 'Workspace' }).getBoundingClientRect()
     const expandedChat = screen.getByTestId('agent-chat').getBoundingClientRect()
     expect(expandedChat.left).toBe(tools.left)
-    expect(screen.queryByRole('toolbar', { name: 'Session panel tools' })).toBeNull()
+    expect(screen.queryByRole('toolbar', { name: 'Workspace panel tools' })).toBeNull()
     const panelRail = { width: 0 }
     expect(panelRail.width).toBe(0)
     expect(expandedChat.width).toBeGreaterThan(DESKTOP.width - panelRail.width - 2)
-    expect(localStorage.getItem(RAIL_PREF_KEY)).toBe('0')
+    expect(localStorage.getItem('blerg-runner.workspace-panel..sess-a')).toBe('0')
   })
 
   it('Capabilities fills the panel’s column, its filter and groups inside it; Session closes Live', async () => {
@@ -276,7 +277,7 @@ it.each([[390,false],[1280,false],[390,true],[1280,true]] as const)('opens child
     await waitFor(()=>expect(document.activeElement).toBe(dialog))
     finishLoad()
   }
-  const checkbox=await within(dialog).findByRole('checkbox',{name:'Start sandboxed children without asking'})
+  const checkbox=await within(dialog).findByRole('checkbox',{name:'Start sandboxed workers without asking'})
   await waitFor(()=>expect(document.activeElement).toBe(checkbox))
   expect(screen.getByRole('tab',{name:/Live/})).toHaveAttribute('aria-selected','true')
   const box=checkbox.getBoundingClientRect()
@@ -325,7 +326,7 @@ it('does not reopen the Permissions modal by itself after it was closed, across 
 
 // The plan nudge setting (card #158) sits in the panel's Session section and stays inside it, on a
 // phone's drawer and on a 4K screen alike.
-it.each([390, 3840])('shows the plan nudge setting inside the panel at %ipx', async width => {
+it.each(browserWidths([390, 3840]))('shows the plan nudge setting inside the panel at %ipx', async width => {
   await page.viewport(width, 900)
   const fallback = apiFetch.getMockImplementation()!
   apiFetch.mockImplementation((url: string) => url.endsWith('/plan-nudges') ? json({ enabled: true }) : fallback(url))
@@ -341,16 +342,16 @@ it.each([390, 3840])('shows the plan nudge setting inside the panel at %ipx', as
   expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
 })
 
-// Card #233 part 5: the toggle shows the work inside the session (🤖) and the child sessions at work
+// Card #233 part 5: the toggle shows the work inside the session (🤖) and the workers at work
 // (↳) as two counts, each hidden at zero, from the selector Running now lists with.
-describe('the panel toggle counts work inside and child sessions apart', () => {
+describe('the panel toggle counts work inside and workers apart', () => {
   const child = (id: string, engine: string) => ({ id, title: `Worker ${id}`, engine, model: 'fixture', status: 'running', started_at: new Date().toISOString(), ended_at: null, asking: false, tokens: null })
   const cases = [
-    ['zero', { subagents: false, tasks: false, children: 0 }, '', 'Session panel'],
-    ['children only', { subagents: false, tasks: false, children: 1 }, '↳1', 'Session panel: 1 child session'],
-    ['both', { subagents: true, tasks: true, children: 4 }, '🤖7↳4', 'Session panel: 7 subagents and background tasks · 4 child sessions'],
+    ['zero', { subagents: false, tasks: false, children: 0 }, '', 'Workspace panel'],
+    ['children only', { subagents: false, tasks: false, children: 1 }, '↳1', 'Workspace panel: 1 worker'],
+    ['both', { subagents: true, tasks: true, children: 4 }, '🤖7↳4', 'Workspace panel: 7 subagents and background tasks · 4 workers'],
   ] as const
-  for (const width of [390, 3840]) {
+  for (const width of browserWidths([390, 3840])) {
     it.each(cases)(`at ${width} px: %s`, async (_name, o, shown, label) => {
       await page.viewport(width, width === 390 ? 844 : 2160)
       localStorage.setItem(RAIL_PREF_KEY, '0')

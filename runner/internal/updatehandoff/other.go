@@ -8,6 +8,7 @@ import (
 )
 
 func ProcessStart(int) string      { return "" }
+func processUnit(int) string       { return "" }
 func ancestors(int) map[int]string { return nil }
 func processSession(int) string    { return "" }
 func peerPID(*net.UnixConn) (int, error) {

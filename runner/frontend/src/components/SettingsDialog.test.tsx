@@ -9,6 +9,7 @@ vi.mock('./DelegationRulesSection', () => ({ default: () => null }))
 vi.mock('./EngineStatusSection', () => ({ default: () => null }))
 vi.mock('./ShellLimitsSection', () => ({ default: () => null }))
 vi.mock('./UsageNoticeSettings', () => ({ default: () => null }))
+vi.mock('./CardTimeBudgetSettings', () => ({ default: () => null }))
 vi.mock('../apiFetch', () => ({ apiFetch }))
 
 const preview = () => screen.getByTestId('cc-preview')
@@ -19,6 +20,9 @@ beforeEach(() => {
   localStorage.clear()
   setCodeColours(DEFAULT_CODE_COLOURS)
   apiFetch.mockReset()
+  // Default: not an administrator (/api/skills/settings' admin flag), and any other call just
+  // succeeds with an empty body; tests that care override with mockImplementation(Once).
+  apiFetch.mockImplementation(() => respond(200, {}))
   document.documentElement.setAttribute('data-theme', 'dark')
 })
 afterEach(() => document.documentElement.removeAttribute('data-theme'))
@@ -69,7 +73,7 @@ describe('SettingsDialog', () => {
     expect(document.documentElement.style.getPropertyValue('--chat-code-keyword')).not.toBe(codeThemes.monokai.tokens.keyword)
     fireEvent.click(screen.getByRole('button', { name: 'Save colors' }))
     await waitFor(() => expect(onClose).toHaveBeenCalled())
-    const [url, init] = apiFetch.mock.calls[0]
+    const [url, init] = apiFetch.mock.calls.find(([u]) => u === '/api/me/preferences')!
     expect(url).toBe('/api/me/preferences')
     expect(init.method).toBe('PUT')
     expect(JSON.parse(init.body).code_colours.dark).toBe('monokai')
@@ -92,7 +96,7 @@ describe('SettingsDialog', () => {
     expect(screen.getByRole('button', { name: 'Save colors' })).toBeDisabled()
     fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
     expect(onClose).toHaveBeenCalled()
-    expect(apiFetch).not.toHaveBeenCalled()
+    expect(apiFetch.mock.calls.some(([url]) => url === '/api/me/preferences')).toBe(false)
   })
 })
 
@@ -139,8 +143,40 @@ describe('SettingsDialog as a dialog', () => {
     expect(screen.getByRole('heading', { name: 'Code colors' })).toBeInTheDocument()
     expect(screen.getByTestId('cc-theme-dark')).toBeInTheDocument()
     expect(screen.getByText('Customize')).toBeInTheDocument()
-    const link = screen.getByRole('link', { name: /main Settings/ })
-    expect(link.getAttribute('href')).toMatch(/\/settings$/)
+  })
+
+  it('offers a deep link to Account and Integrations for everyone, opening at that section in a new tab', async () => {
+    render(<SettingsDialog onClose={() => {}} />)
+    expect(screen.getByRole('heading', { name: 'Blerg’s main Settings' })).toBeInTheDocument()
+    for (const [label, section] of [
+      ['Account', 'account'],
+      ['Integrations', 'integrations'],
+    ] as const) {
+      const link = screen.getByRole('link', { name: label })
+      expect(link.getAttribute('href')).toMatch(new RegExp(`/settings\\?section=${section}$`))
+      expect(link).toHaveAttribute('target', '_blank')
+      expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+    }
+    // Non-administrator (the default /api/skills/settings response has no admin flag): People
+    // and Install would only bounce a non-admin back to core's Account, so neither is offered.
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/api/skills/settings', expect.anything()))
+    expect(screen.queryByRole('link', { name: 'People' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Install' })).not.toBeInTheDocument()
+  })
+
+  it('also offers People and Install once /api/skills/settings reports an administrator', async () => {
+    apiFetch.mockImplementation((url: string) =>
+      url === '/api/skills/settings' ? respond(200, { admin: true }) : respond(200, {}))
+    render(<SettingsDialog onClose={() => {}} />)
+    for (const [label, section] of [
+      ['People', 'people'],
+      ['Install', 'install'],
+    ] as const) {
+      const link = await screen.findByRole('link', { name: label })
+      expect(link.getAttribute('href')).toMatch(new RegExp(`/settings\\?section=${section}$`))
+      expect(link).toHaveAttribute('target', '_blank')
+      expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+    }
   })
 
   it('closes on the ×, the backdrop and Escape, and puts focus back where it was', () => {

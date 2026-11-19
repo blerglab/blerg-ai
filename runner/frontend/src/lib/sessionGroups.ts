@@ -34,12 +34,12 @@ export function normalizeLayout(value: unknown, ids: string[], active: string): 
   }
   let tree = read(value, 0)
   const missing = ids.filter(id => !seenTabs.has(id))
-  if (!tree) return { type: 'group', id: 'main', tabs: ids, active: ids.includes(active) ? active : ids[0] }
+  if (!tree) return { type: 'group', id: 'main', tabs: ids, active: ids.includes(active) ? active : ids[0] ?? '' }
   if (missing.length) {
     const first = groups(tree)[0].id
     tree = mapGroups(tree, group => group.id === first ? { ...group, tabs: [...group.tabs, ...missing] } : group)
   }
-  return mapGroups(tree, group => group.tabs.includes('chat') ? { ...group, tabs: ['chat', ...group.tabs.filter(id => id !== 'chat')] } : group)
+  return tree
 }
 export function activateTab(tree: TabLayout, id: string): TabLayout {
   return mapGroups(tree, group => group.tabs.includes(id) ? { ...group, active: id } : group)
@@ -49,7 +49,7 @@ export function removeTab(tree: TabLayout, id: string): TabLayout {
     const index = group.tabs.indexOf(id)
     const tabs = group.tabs.filter(tab => tab !== id)
     return { ...group, tabs, active: group.active === id ? tabs[Math.max(0, index - 1)] ?? '' : group.active }
-  })) ?? { type: 'group', id: 'main', tabs: ['chat'], active: 'chat' }
+  })) ?? { type: 'group', id: 'main', tabs: [], active: '' }
 }
 export function moveToGroup(tree: TabLayout, id: string, target: string, edge: DropEdge, newId: string, before?: string): TabLayout {
   const source = groups(tree).find(group => group.tabs.includes(id))
@@ -64,7 +64,7 @@ export function moveToGroup(tree: TabLayout, id: string, target: string, edge: D
     if (node.id !== target) return node
     if (edge === 'center') {
       const tabs = [...node.tabs], index = tabs.indexOf(before ?? '')
-      tabs.splice(id === 'chat' ? 0 : index < 0 ? tabs.length : Math.max(tabs[0] === 'chat' ? 1 : 0, index), 0, id)
+      tabs.splice(index < 0 ? tabs.length : index, 0, id)
       return { ...node, tabs, active: id }
     }
     const next: TabGroup = { type: 'group', id: newId, tabs: [id], active: id }
@@ -79,12 +79,12 @@ export function resizeSplit(tree: TabLayout, id: string, ratio: number): TabLayo
 }
 
 /** Where a tab dropped at clientX lands in a strip: before the first file tab whose middle is right
- *  of the pointer (Chat stays pinned first), else at the end; `left` is the insertion marker's offset. */
+ *  of the pointer, else at the end; `left` is the insertion marker's offset. */
 export function stripInsertion(clientX: number, strip: Element): { before: string; left: number } {
   const tabs = [...strip.children].filter((node): node is HTMLElement => node instanceof HTMLElement && node.classList.contains('session-tab'))
   for (const tab of tabs) {
     const id = tab.querySelector<HTMLElement>('[data-tab-id]')?.dataset.tabId
-    if (!id || id === 'chat') continue
+    if (!id) continue
     const rect = tab.getBoundingClientRect()
     if (clientX < rect.left + rect.width / 2) return { before: id, left: tab.offsetLeft }
   }

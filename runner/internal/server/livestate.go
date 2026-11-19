@@ -41,12 +41,15 @@ type liveReply struct {
 	// The checklist, the engine's plan and the pinned tickets (worklist.go).
 	workState
 	liveDelegation
-	ToolChanges int `json:"tool_changes"`
+	ToolChanges        int `json:"tool_changes"`
+	RepositoryRequests int `json:"repository_requests"`
 	// Proposals is how many of the viewer's proposals from this session wait for a decision
 	// (proposals.go): Needs you. The list itself is the owner's queue, GET /api/proposals.
 	Proposals int `json:"proposals"`
 	// ReviewRequests are the session's pending review requests (reviewrequests.go): Needs you.
+	ChildAsks      []liveChildAsk      `json:"child_asks"`
 	ReviewRequests []liveReviewRequest `json:"review_requests"`
+	AnswerRequests []map[string]string `json:"answer_requests"`
 	Counts         liveCounts          `json:"counts"`
 	// Usage is the session's own token usage for its Main row in Running now (live_usage.go): for
 	// the owner or an administrator only, as Insights. Omitted otherwise or before any usage.
@@ -124,19 +127,15 @@ func (a *API) snapshotHandleGetLive(w http.ResponseWriter, r *http.Request) {
 		log.Printf("live %s %s: %v", what, sid, err)
 		writeError(w, http.StatusInternalServerError, "query failed")
 	}
-	through, err := db.MaxAgentEventSeq(ctx, a.dbPool, sid)
+	// BLG-431: three independent scalar reads of the newest seq, the viewer's pending tool
+	// changes and pending proposals, each its own round trip. Combined into one: cuts three
+	// round trips to one regardless of the pool's connection count (including the MaxConns=1
+	// installs runtime_fence.go supports, where goroutine-level concurrency would not help at
+	// all - a batching fix, not a parallelism one, for exactly that reason). sid is already
+	// validSessionID-checked above, which proposalUUID (CountPending*'s own guard) accepts too.
+	through, toolChanges, proposals, err := db.LiveCounts(ctx, a.dbPool, p.Sub, sid)
 	if err != nil {
-		fail("MaxAgentEventSeq", err)
-		return
-	}
-	toolChanges, err := db.CountPendingToolChangesForSession(ctx, a.dbPool, p.Sub, sid)
-	if err != nil {
-		fail("CountPendingToolChangesForSession", err)
-		return
-	}
-	proposals, err := db.CountPendingProposalsForSession(ctx, a.dbPool, p.Sub, sid)
-	if err != nil {
-		fail("CountPendingProposalsForSession", err)
+		fail("LiveCounts", err)
 		return
 	}
 	asks, err := db.ReadAskRows(ctx, a.dbPool, sid)
@@ -154,6 +153,25 @@ func (a *API) snapshotHandleGetLive(w http.ResponseWriter, r *http.Request) {
 		fail("readChildrenSnapshot", err)
 		return
 	}
+	childAsks, err := a.liveChildAsks(ctx, sid, p.Sub)
+	if err != nil {
+		fail("liveChildAsks", err)
+		return
+	}
+	if isChildSession(row) {
+		pending, err := db.ListOpenAsks(ctx, a.dbPool, sid)
+		if err != nil {
+			fail("child questions", err)
+			return
+		}
+		for _, m := range pending {
+			if childQuestionPending(ctx, a.dbPool, m) {
+				asks.Closed[m.ID] = true
+				asks.Open--
+			}
+		}
+	}
+	childAskJSON, _ := json.Marshal(childAsks)
 	var prices []db.ModelPrice
 	if showTokens {
 		prices, err = db.ListModelPrices(ctx, a.dbPool)
@@ -169,7 +187,27 @@ func (a *API) snapshotHandleGetLive(w http.ResponseWriter, r *http.Request) {
 	if ref, ok := a.sessionRepo(ctx, p.Sub, row); ok {
 		repoScope += ":" + ref.Key()
 	}
-	etag := liveETag(through, row.Status, toolChanges, proposals, asks, showTokens, repoScope+"."+snapshot.digest()+"."+childrenDigestBytes(reasoningJSON)+"."+childrenDigestBytes(priceJSON)+"."+reviewsDigest(reviews))
+	answers, err := a.pendingAnswerViews(ctx, sid, ownsSession(p.Sub, row) && !terminalSessionStatus(row.Status))
+	if err != nil {
+		fail("PendingAnswers", err)
+		return
+	}
+	answerJSON, _ := json.Marshal(answers)
+	repositoryRequests := 0
+	var pendingRepository *db.MembershipOperation
+	if ownsSession(p.Sub, row) {
+		op, err := db.OpenMembershipOperation(ctx, a.dbPool, sid)
+		if err != nil {
+			fail("OpenMembershipOperation", err)
+			return
+		}
+		if repositoryRequest(op) != nil {
+			repositoryRequests = 1
+			pendingRepository = op
+		}
+	}
+	repositoryJSON, _ := json.Marshal(repositoryRequest(pendingRepository))
+	etag := liveETag(through, row.Status, toolChanges, proposals, asks, showTokens, repoScope+"."+childrenDigestBytes(childAskJSON)+"."+snapshot.digest()+"."+childrenDigestBytes(reasoningJSON)+"."+childrenDigestBytes(priceJSON)+"."+reviewsDigest(reviews)+"."+childrenDigestBytes(answerJSON)+"."+childrenDigestBytes(repositoryJSON))
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "private, no-store")
 	if etagMatches(r.Header.Get("If-None-Match"), etag) {
@@ -216,10 +254,13 @@ func (a *API) snapshotHandleGetLive(w http.ResponseWriter, r *http.Request) {
 	checklistChildTitles(ws.Checklist, snapshot.Rows)
 	writeJSON(w, http.StatusOK, liveReply{
 		SessionID: sid, ThroughSeq: through, GeneratedAt: now.UTC(), State: st, workState: ws, ToolChanges: toolChanges, Proposals: proposals, liveDelegation: liveDelegation{Children: children, DelegationRequests: snapshot.Requests, DelegationGrants: snapshot.Grants},
-		ReviewRequests:   reviews,
-		Usage:            usage,
-		Counts:           liveCounts{NeedsYou: len(st.Asks) + toolChanges + proposals + len(snapshot.Requests) + len(reviews), Running: len(st.Subagents) + len(st.Tasks) + runningChildren(children)},
-		CanReleasePrompt: ownsSession(p.Sub, row),
+		ReviewRequests:     reviews,
+		AnswerRequests:     answers,
+		RepositoryRequests: repositoryRequests,
+		ChildAsks:          childAsks,
+		Usage:              usage,
+		Counts:             liveCounts{NeedsYou: len(st.Asks) + len(childAsks) + toolChanges + proposals + len(snapshot.Requests) + len(reviews) + len(answers) + repositoryRequests, Running: len(st.Subagents) + len(st.Tasks) + runningChildren(children)},
+		CanReleasePrompt:   ownsSession(p.Sub, row),
 	})
 }
 
@@ -272,4 +313,41 @@ func liveEvents(rows []db.AgentEventRow) []livestate.Event {
 		out = append(out, livestate.Event{Seq: e.Seq, ID: e.ClientEventID, Kind: e.Kind, Payload: json.RawMessage(e.Payload), Ts: e.Ts})
 	}
 	return out
+}
+
+type liveChildAsk struct {
+	MessageID  string    `json:"message_id"`
+	SessionID  string    `json:"session_id"`
+	ChildTitle string    `json:"child_title"`
+	Question   string    `json:"question"`
+	AskedAt    time.Time `json:"asked_at"`
+	NoWait     bool      `json:"no_wait,omitempty"`
+	OwnerOnly  bool      `json:"owner_only,omitempty"`
+	// The child stopped waiting; the question stays with the person.
+	WaiterEnded bool `json:"waiter_ended,omitempty"`
+}
+
+// Read original rows, never copies in the parent: answers still address the child's message.
+// Ownership is checked on each child, independently of whether the parent is public.
+func (a *API) liveChildAsks(ctx context.Context, parent, account string) ([]liveChildAsk, error) {
+	out := []liveChildAsk{}
+	if account == "" {
+		return out, nil
+	}
+	rows, err := a.dbPool.Query(ctx, `SELECT m.id,m.session_id,COALESCE(s.title,''),m.body,m.created_at,m.no_wait,m.owner_only,m.waiter_ended
+ FROM messages m JOIN sessions s ON s.id=m.session_id
+ WHERE s.parent_session_id=$1 AND s.spawning_account_id=$2 AND m.kind='ask' AND m.status='open' AND (m.child_escalated OR EXISTS(SELECT 1 FROM session_failure_alerts f WHERE f.message_id=m.id))
+ ORDER BY m.created_at,m.id`, parent, account)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var q liveChildAsk
+		if err := rows.Scan(&q.MessageID, &q.SessionID, &q.ChildTitle, &q.Question, &q.AskedAt, &q.NoWait, &q.OwnerOnly, &q.WaiterEnded); err != nil {
+			return nil, err
+		}
+		out = append(out, q)
+	}
+	return out, rows.Err()
 }

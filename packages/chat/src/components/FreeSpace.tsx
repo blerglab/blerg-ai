@@ -47,14 +47,14 @@ export function WaitingSpaceActions({sessionId, files, waitingBytes, waitingForS
   const atMax = space ? atStorageMaximum(space) : false
   return <>
     <p className="attach-space-text">
-      This session’s attachments are full. You can delete older attachments to make room; waiting files upload by themselves.
+      This workspace’s attachments are full. You can delete older attachments to make room; waiting files upload by themselves.
       {' '}Send still sends your message without them.
     </p>
     <div className="attach-space-buttons">
       <FreeSpaceButton sessionId={sessionId} files={files} waitingBytes={waitingBytes} onChanged={onChanged} />
       {canIncrease && <button type="button" className="artifact-btn" disabled={busy} aria-busy={busy || undefined} onClick={() => void increase()}>{busy ? 'Increasing…' : 'Increase storage'}</button>}
     </div>
-    {space && !canIncrease && <p className="attach-space-text">{atMax ? 'This session already has the most storage this install allows.' : 'Ask an admin to increase this session’s storage.'}</p>}
+    {space && !canIncrease && <p className="attach-space-text">{atMax ? 'This workspace already has the most storage this install allows.' : 'Ask an admin to increase this workspace’s storage.'}</p>}
     {message && <p className={`attach-space-text${message.error ? ' is-error' : ''}`} role={message.error ? 'alert' : 'status'}>{message.text}</p>}
   </>
 }
@@ -114,6 +114,7 @@ function FreeSpaceDialog({sessionId, files, waitingBytes, onClose, onChanged}: {
   const shortfall = space ? uploadShortfall(space, queuedBytes) : 0
   const anyDeletable = !!space?.artifacts.some(a => a.can_delete !== false)
   const someRefused = !!space?.artifacts.some(a => a.can_delete === false)
+  // button-guard-ignore: useBackdropClose supplies pointer handlers only; this overlay is not a button
   return createPortal(<div className="artifact-overlay free-space-overlay" {...backdrop}>
     <div className="artifact-dialog free-space-dialog" role="dialog" aria-modal="true" aria-labelledby={title} tabIndex={-1} ref={dialog} onKeyDown={keyDown}>
       <header className="artifact-header"><h2 id={title}>Free up space</h2><button type="button" className="artifact-close" aria-label="Close cleanup" disabled={busy} onClick={onClose}>✕</button></header>
@@ -121,8 +122,8 @@ function FreeSpaceDialog({sessionId, files, waitingBytes, onClose, onChanged}: {
         <p>Files are listed oldest first. Deleting a file is permanent; published files keep a removed marker in History.</p>
         {shortfall > 0 && <p role="status">Free {formatSize(shortfall)} of attachments for the waiting files. Published files use separate space.</p>}
         {space && someRefused && <p role="status">{anyDeletable
-          ? 'You can delete the files you attached. The session’s owner or an administrator can delete the others.'
-          : 'Only the session’s owner or an administrator can delete these files.'}</p>}
+          ? 'You can delete the files you attached. The workspace’s owner or an administrator can delete the others.'
+          : 'Only the workspace’s owner or an administrator can delete these files.'}</p>}
         {!space && !error && <p role="status">Loading files…</p>}
         {error && <p role="alert">{error}</p>}
         {space && <ul className="free-space-list">{oldestFiles(space.artifacts).map(a => <li key={a.id}><label>

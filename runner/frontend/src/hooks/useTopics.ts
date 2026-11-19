@@ -34,6 +34,8 @@ export function countTriggers(events: readonly AgentEvent[]): number {
 
 /** The read state of one session; replaced (and the old one killed) when the sessionId changes. */
 interface Flight {
+  viewId: string
+  cursor: string
   sessionId: string
   alive: boolean
   active: boolean
@@ -54,19 +56,22 @@ const isNoRoute = (status: number) => status === 200 || status === 404 || status
 /** The last History read for a session, kept in the explorer and panel cache. */
 interface CachedTopics { etag: string; reply: TopicsReply }
 
-export function useTopics(sessionId: string, active: boolean, filesKey: string): TopicsView {
+export function useTopics(sessionId: string, active: boolean, filesKey: string, cursor = ''): TopicsView {
+  const viewId = sessionId + '/' + cursor
   // The last list read for this session (the explorer and panel cache) shows at once, and is asked
   // for again with its ETag when the tab is on screen.
   const [shown, setShown] = useState<{ sessionId: string; view: TopicsView }>(() => {
-    const cached = sessionView<CachedTopics>(sessionId, 'topics').cached
-    return { sessionId, view: cached ? { status: 'ready', reply: cached.reply } : LOADING }
+    // Older pages live only in this flight; cursor-specific global slots could grow forever.
+    const cached = cursor ? undefined : sessionView<CachedTopics>(sessionId, 'topics').cached
+    return { sessionId: viewId, view: cached ? { status: 'ready', reply: cached.reply } : LOADING }
   })
   const flight = useRef<Flight | null>(null)
 
   // Declared first: the effects below find this session's flight in place.
   useEffect(() => {
-    const cached = sessionView<CachedTopics>(sessionId, 'topics').cached
-    const f: Flight = { sessionId, alive: true, active: false, inFlight: false, trailing: false, lastStart: -Infinity, timer: null, etag: cached?.etag ?? '', reply: cached?.reply ?? null, aborter: new AbortController() }
+    // Older pages live only in this flight; cursor-specific global slots could grow forever.
+    const cached = cursor ? undefined : sessionView<CachedTopics>(sessionId, 'topics').cached
+    const f: Flight = { viewId, cursor, sessionId, alive: true, active: false, inFlight: false, trailing: false, lastStart: -Infinity, timer: null, etag: cached?.etag ?? '', reply: cached?.reply ?? null, aborter: new AbortController() }
     flight.current = f
     return () => {
       f.alive = false
@@ -74,8 +79,8 @@ export function useTopics(sessionId: string, active: boolean, filesKey: string):
       if (f.timer) clearTimeout(f.timer)
       f.timer = null
     }
-  }, [sessionId])
-  useEffect(() => { if (flight.current) flight.current.active = active }, [active, sessionId])
+  }, [sessionId, cursor, viewId])
+  useEffect(() => { if (flight.current) flight.current.active = active }, [active, sessionId, cursor])
 
   const read = useCallback(function run(): void {
     const f = flight.current
@@ -89,11 +94,11 @@ export function useTopics(sessionId: string, active: boolean, filesKey: string):
       f.timer ??= setTimeout(() => { f.timer = null; run() }, wait)
       return
     }
-    const show = (view: TopicsView) => { if (f.alive) setShown({ sessionId: f.sessionId, view }) }
+    const show = (view: TopicsView) => { if (f.alive) setShown({ sessionId: f.viewId, view }) }
     f.inFlight = true
     f.lastStart = Date.now()
-    const cache = sessionView<CachedTopics>(f.sessionId, 'topics')
-    apiFetch(`/api/sessions/${encodeURIComponent(f.sessionId)}/topics`, { headers: f.etag ? { 'If-None-Match': f.etag } : {}, signal: f.aborter.signal })
+    const cache = f.cursor ? null : sessionView<CachedTopics>(f.sessionId, 'topics')
+    apiFetch(`/api/sessions/${encodeURIComponent(f.sessionId)}/topics${f.cursor ? '?cursor=' + encodeURIComponent(f.cursor) : ''}`, { headers: f.etag ? { 'If-None-Match': f.etag } : {}, signal: f.aborter.signal })
       .then(async res => {
         if (!f.alive) return
         if (res.status === 304) {
@@ -113,7 +118,7 @@ export function useTopics(sessionId: string, active: boolean, filesKey: string):
         if (!f.alive) return
         f.etag = res.headers.get('ETag') ?? ''
         f.reply = reply
-        cache.keep({ etag: f.etag, reply })
+        cache?.keep({ etag: f.etag, reply })
         show({ status: 'ready', reply })
       })
       .catch(() => show({ status: 'error', reply: f.reply }))
@@ -138,7 +143,7 @@ export function useTopics(sessionId: string, active: boolean, filesKey: string):
   // A number, so an event that is not a trigger does not render this hook's component again.
   const triggers = useTranscriptStore(s => (active ? countTriggers(s.sessions[sessionId]?.events ?? NO_EVENTS) : 0))
   // On screen, and whenever the session, the Files list or the reel's events change while it is.
-  useEffect(() => { if (active) read() }, [active, sessionId, filesKey, triggers, read])
+  useEffect(() => { if (active) read() }, [active, sessionId, filesKey, triggers, read, cursor])
   useEffect(() => {
     if (!active) return
     const onVisible = () => { if (document.visibilityState === 'visible') read() }
@@ -150,5 +155,5 @@ export function useTopics(sessionId: string, active: boolean, filesKey: string):
       document.removeEventListener('visibilitychange', onVisible)
     }
   }, [active, read])
-  return shown.sessionId === sessionId ? shown.view : LOADING
+  return shown.sessionId === viewId ? shown.view : LOADING
 }

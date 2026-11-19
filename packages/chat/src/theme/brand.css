@@ -1,0 +1,1199 @@
+/* Blerg brand tokens — the single source of truth for color, type, and status
+   colors across every Blerg surface (core, board, runner, ops, gpu, ...).
+   The Blerg "Deep Slate" palette — a cool slate-tinted near-black with a wide
+   surface ramp (dark, the committed default) and a first-class cool-paper light
+   variant, orange kept as the signature accent. Do not invent parallel hex
+   values or a second status vocabulary in a derived surface — extend this file
+   instead, and keep the derived copies (landing, board, runner) in sync. */
+
+:root {
+  --permissions-backdrop: rgba(5, 4, 3, 0.72);
+  --button-fg: #0d1117;
+  --shadow-3: #0000004d;
+  --shadow-5: #00000080;
+  --shadow-8: #00000088;
+  --shadow-9: #00000099;
+  --shadow-a: #000000aa;
+  --shadow-b: #000000bb;
+  --shadow-c: #000000cc;
+  /* Derived from --terminal-*, the tokens the live terminal itself uses (BLG-473 review): base
+     alone used to carry fixed hex here, with no light-theme override, so saved terminal history
+     stayed dark-themed even in light mode. --terminal-* is already defined per theme (including
+     the three below, which no longer need their own --history-* overrides — inherited). */
+  --history-bg: var(--basalt);
+  --history-fg: var(--chalk);
+  --history-cursor: var(--blaze);
+  --history-ansi-0: var(--terminal-black);
+  --history-ansi-1: var(--terminal-red);
+  --history-ansi-2: var(--terminal-green);
+  --history-ansi-3: var(--terminal-yellow);
+  --history-ansi-4: var(--terminal-blue);
+  --history-ansi-5: var(--terminal-magenta);
+  --history-ansi-6: var(--terminal-cyan);
+  --history-ansi-7: var(--terminal-white);
+  --history-ansi-8: var(--terminal-bright-black);
+  --history-ansi-9: var(--terminal-bright-red);
+  --history-ansi-10: var(--terminal-bright-green);
+  --history-ansi-11: var(--terminal-bright-yellow);
+  --history-ansi-12: var(--terminal-bright-blue);
+  --history-ansi-13: var(--terminal-bright-magenta);
+  --history-ansi-14: var(--terminal-bright-cyan);
+  --history-ansi-15: var(--terminal-bright-white);
+
+  /* Seti's quiet single-color file-type icon palette (chat/packages/components/FileIcon.tsx).
+     Mixed with --chat-fg at the render site, so the final icon color still adapts per theme; the
+     base hues themselves are a fixed file-type identity, like any IDE's language icon colors. */
+  --icon-blue: #519aba;
+  --icon-yellow: #cbcb41;
+  --icon-purple: #a074c4;
+  --icon-green: #8dc149;
+  --icon-orange: #e37933;
+  --icon-pink: #f55385;
+  --icon-red: #cc3e44;
+  --icon-tan: #b8a36a;
+
+  /* Usage meter accessibility presets (runner UsageMeters.css): off by default, a theme turns
+     them on by overriding these, rather than the component special-casing a theme ID. */
+  --meter-pattern-warning: none;
+  --meter-pattern-danger: none;
+  --meter-critical-display: none;
+
+  /* Session Insights' series legend texture (runner SessionInsights.css): off by default, on in
+     the three accessibility themes, same reasoning as the usage meter patterns above. */
+  --si-pattern-1: none;
+  --si-pattern-2: none;
+  --si-pattern-3: none;
+
+  /* Activity Insights' per-category stack texture (runner ActivityInsights.css): off by default,
+     on in the three accessibility themes, same reasoning as the patterns above. */
+  --activity-pattern-tests: none;
+  --activity-pattern-build: none;
+  --activity-pattern-git: none;
+  --activity-pattern-read: none;
+  --activity-pattern-edit: none;
+  --activity-pattern-other: none;
+  --activity-pattern-model: none;
+  --activity-pattern-waiting: none;
+  --activity-pattern-idle: none;
+
+  /* The board's 404 illustration (board/web/src/NotFound.tsx): a fixed shading ramp for the
+     scattered stones, like a logo's colors, kept the same across themes. */
+  --notfound-outline: #16181a;
+  --notfound-stone-1: #3a4148;
+  --notfound-stone-2: #4a525a;
+  --notfound-stone-3: #5a636c;
+  --notfound-stone-4: #6c757f;
+  --notfound-stone-5: #7f8892;
+
+  /* Label text for a tile whose background is a hash-derived hue at a fixed hsl(h 32% 30%) or
+     hsl(h 45% 28%) lightness (runner SessionTiles.css, board App.tsx's BoardIcon): since the tile
+     is always this dark regardless of app theme, white text clears 4.5:1 at every hue (worst case
+     ~6:1 at yellow hues; --runner-primary-fg/--chalk instead go near-black in colorblind-dark and
+     high-contrast, which only contrasts with a theme-variable background, not this fixed one). */
+  --tile-label-fg: #ffffff;
+
+  --fill-muted: var(--stone);
+  --success: #4caf50;
+  --terminal-black: #161c26;
+  --terminal-red: var(--danger);
+  --terminal-green: #63d68b;
+  --terminal-yellow: var(--amber);
+  --terminal-blue: var(--batch);
+  --terminal-magenta: #d8a0ef;
+  --terminal-cyan: #65cfdb;
+  --terminal-white: #c2ccd8;
+  --terminal-bright-black: #48525f;
+  --terminal-bright-red: var(--diff-del);
+  --terminal-bright-green: #8ed6a6;
+  --terminal-bright-yellow: #f4ca6c;
+  --terminal-bright-blue: #6aadff;
+  --terminal-bright-magenta: #e4bdf4;
+  --terminal-bright-cyan: #9ae2e9;
+  --terminal-bright-white: #f2f6fa;
+  --code-keyword: #b69cf0;
+  --code-string: #8fc9a0;
+  --code-number: #e0b36a;
+  --code-comment: #7d8798;
+  --code-title: #7fb2ee;
+  --code-type: #6fc7c7;
+  --code-variable: #e0b36a;
+  --code-builtin: #6fc7c7;
+
+  /* ── Deep Slate palette (DARK — the committed default; operators live in it).
+     Cool slate-tinted near-black with a wide surface ramp so panels step off
+     the ground, bright foreground for contrast, orange kept as the signature.
+     Light is a first-class alternate defined below. Theming structure:
+       bare :root                        = dark (default)
+       @media (prefers-color-scheme:light) = light, unless data-theme is set
+       :root[data-theme="…"]  = explicit choice, wins over the OS
+     Style components through these tokens only — never a raw hex that works in
+     just one theme. Source of truth: keep the derived copies (landing, board,
+     runner) byte-identical to this block. ─────────────────────────────────── */
+  --basalt: #0d1117;     /* app background */
+  --scree: #161c26;      /* raised surface (panels, sheets) */
+  --scree-2: #1e2633;    /* card surface + row dividers */
+  --stone: #313d4f;      /* borders, inputs, dividers */
+  --fog: #c2ccd8;        /* secondary text */
+  --fog-dim: #8b97a7;    /* muted text */
+  --chalk: #f2f6fa;      /* primary text */
+
+  --blaze: #ff6a3d;      /* primary accent — brand, primary actions, attention, focus ring; not "selected" */
+  --blaze-soft: #ff6a3d33;
+  --lichen: #63d68b;     /* healthy / success / passing */
+  --amber: #e8b13d;      /* pending / waiting */
+  --danger: #ff6b63;     /* failing / error / down */
+  --batch: #4c9bff;      /* GPU batch work */
+  --selected-border: #4c9bff;  /* on / open / pressed / selected: borders, outline icons */
+  --selected-bg: #4c9bff29;  /* its soft fill */
+  --selected-text: #6aadff;  /* its text and glyphs (4.5:1 on its fill) */
+
+  /* diff inks */
+  --diff-add: #8ed6a6;
+  --diff-del: #ff9d94;
+
+  color-scheme: dark;
+
+  /* ── type: three voices, never blurred ──────────────────────────────────
+     display  = condensed uppercase sans, the chrome voice (nav, labels, headers)
+     body     = system sans, prose
+     mono     = monospace, data (ids, counts, timestamps, code) */
+  --display: "Avenir Next Condensed", "Bahnschrift", "Arial Narrow", "Helvetica Neue", sans-serif;
+  --body: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", monospace;
+
+  /* small, deliberate type scale */
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 15px;
+  --text-lg: 18px;
+  --text-xl: 24px;
+  --text-2xl: 36px;
+
+  /* Historical default component inks (frozen against main). */
+  --primary-white-fg: #ffffff;
+  --runner-primary-fg: #ffffff;
+  --chat-primary-fg: var(--chalk);
+  --knob-fg: #ffffff;
+  --board-diff-add: #b9d49a;
+  --board-diff-del: #e2a3a3;
+  --si-series-1: var(--chart-tests);
+  --si-series-2: var(--chart-build);
+  --si-series-3: var(--chart-git);
+  --series-fg: #000000;
+  --chart-tests: var(--blaze);
+  --chart-build: var(--amber);
+  --chart-git: var(--lichen);
+  --chart-read: #6ca8c9;
+  --chart-edit: #a393cc;
+  --chart-other: #aa8292;
+  --chart-model: #7cabb0;
+  --chart-waiting: #c4a768;
+  --chart-idle: var(--stone);
+}
+
+/* A usage meter's critical marker stays visible without relying on the pulse animation, whether
+   because the person turned off motion or because the theme already keeps severity visible
+   without hue or motion (every colorblind/high-contrast block above sets this token too). */
+@media (prefers-reduced-motion: reduce) {
+  :root { --meter-critical-display: inline; }
+}
+
+/* ── Deep Slate — LIGHT. Cool paper ground, slate ink, orange deepened so it
+   holds contrast on light surfaces. Only the palette tokens change; every
+   component keeps reading the same names. ───────────────────────────────── */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+  --terminal-black: #313d4f;
+  --terminal-red: #b83636;
+  --terminal-green: #257342;
+  --terminal-yellow: #82570c;
+  --terminal-blue: #2559b0;
+  --terminal-magenta: #8741a5;
+  --terminal-cyan: #177582;
+  --terminal-white: #c2ccd8;
+  --terminal-bright-black: #606b79;
+  --terminal-bright-red: #bc3a3a;
+  --terminal-bright-green: #2b7c49;
+  --terminal-bright-yellow: #8c6015;
+  --terminal-bright-blue: #2861bf;
+  --terminal-bright-magenta: #9047ad;
+  --terminal-bright-cyan: #197581;
+  --terminal-bright-white: #f2f6fa;
+  --code-keyword: #7a52c7;
+  --code-string: #2f7a4a;
+  --code-number: #a15f0d;
+  --code-comment: #6b7684;
+  --code-title: #2f62b8;
+  --code-type: #1f7f7f;
+  --code-variable: #a15f0d;
+  --code-builtin: #1f7f7f;
+
+    color-scheme: light;
+    --basalt: #eef1f6;
+    --scree: #f7f9fc;
+    --scree-2: #ffffff;
+    --stone: #d4dbe5;
+    --fog: #48525f;
+    --fog-dim: #6b7684;
+    --chalk: #131820;
+    --blaze: #d9531e;
+    --blaze-soft: #d9531e1a;
+    --lichen: #2f8a52;
+    --amber: #b7791f;
+    --danger: #d24747;
+    --batch: #2f6fd6;
+    --selected-border: #2f6fd6;
+    --selected-bg: #2f6fd61f;
+    --selected-text: #2559b0;
+    --diff-add: #2f8a52;
+    --diff-del: #cf4b4b;
+
+  /* Historical default component inks (frozen against main). */
+  --primary-white-fg: #ffffff;
+  --runner-primary-fg: #ffffff;
+  --chat-primary-fg: var(--chalk);
+  --knob-fg: #ffffff;
+  --board-diff-add: var(--diff-add);
+  --board-diff-del: var(--diff-del);
+  --si-series-1: var(--chart-tests);
+  --si-series-2: var(--chart-build);
+  --si-series-3: var(--chart-git);
+  --series-fg: #000000;
+  --chart-tests: var(--blaze);
+  --chart-build: var(--amber);
+  --chart-git: var(--lichen);
+  /* read/edit/other/model/waiting: darkened and saturated from the dark-theme hues (BLG-472 round
+     2) — those literal hex values were tuned against #161c26 and read as pale, under-3:1 washes on
+     this near-white surface. Keep hue families so a series still reads as "the same category" in
+     either theme; each is >=3.3:1 against --scree here. */
+  --chart-read: #4689b9;
+  --chart-edit: #724db2;
+  --chart-other: #b04f9d;
+  --chart-model: #3d948d;
+  --chart-waiting: #828d3a;
+  --chart-idle: var(--stone);
+}
+}
+/* Explicit choices win over the OS preference, in both directions. */
+:root[data-theme="light"] {
+  --terminal-black: #313d4f;
+  --terminal-red: #b83636;
+  --terminal-green: #257342;
+  --terminal-yellow: #82570c;
+  --terminal-blue: #2559b0;
+  --terminal-magenta: #8741a5;
+  --terminal-cyan: #177582;
+  --terminal-white: #c2ccd8;
+  --terminal-bright-black: #606b79;
+  --terminal-bright-red: #bc3a3a;
+  --terminal-bright-green: #2b7c49;
+  --terminal-bright-yellow: #8c6015;
+  --terminal-bright-blue: #2861bf;
+  --terminal-bright-magenta: #9047ad;
+  --terminal-bright-cyan: #197581;
+  --terminal-bright-white: #f2f6fa;
+  --code-keyword: #7a52c7;
+  --code-string: #2f7a4a;
+  --code-number: #a15f0d;
+  --code-comment: #6b7684;
+  --code-title: #2f62b8;
+  --code-type: #1f7f7f;
+  --code-variable: #a15f0d;
+  --code-builtin: #1f7f7f;
+
+  color-scheme: light;
+  --basalt: #eef1f6;
+  --scree: #f7f9fc;
+  --scree-2: #ffffff;
+  --stone: #d4dbe5;
+  --fog: #48525f;
+  --fog-dim: #6b7684;
+  --chalk: #131820;
+  --blaze: #d9531e;
+  --blaze-soft: #d9531e1a;
+  --lichen: #2f8a52;
+  --amber: #b7791f;
+  --danger: #d24747;
+  --batch: #2f6fd6;
+  --selected-border: #2f6fd6;
+  --selected-bg: #2f6fd61f;
+  --selected-text: #2559b0;
+  --diff-add: #2f8a52;
+  --diff-del: #cf4b4b;
+
+  /* Historical default component inks (frozen against main). */
+  --primary-white-fg: #ffffff;
+  --runner-primary-fg: #ffffff;
+  --chat-primary-fg: var(--chalk);
+  --knob-fg: #ffffff;
+  --board-diff-add: var(--diff-add);
+  --board-diff-del: var(--diff-del);
+  --si-series-1: var(--chart-tests);
+  --si-series-2: var(--chart-build);
+  --si-series-3: var(--chart-git);
+  --series-fg: #000000;
+  --chart-tests: var(--blaze);
+  --chart-build: var(--amber);
+  --chart-git: var(--lichen);
+  /* See the matching comment in the light media-query block above: darkened/saturated for >=3:1
+     against this theme's near-white surface (BLG-472 round 2). */
+  --chart-read: #4689b9;
+  --chart-edit: #724db2;
+  --chart-other: #b04f9d;
+  --chart-model: #3d948d;
+  --chart-waiting: #828d3a;
+  --chart-idle: var(--stone);
+}
+:root[data-theme="dark"] {
+  --terminal-black: #161c26;
+  --terminal-red: var(--danger);
+  --terminal-green: #63d68b;
+  --terminal-yellow: var(--amber);
+  --terminal-blue: var(--batch);
+  --terminal-magenta: #d8a0ef;
+  --terminal-cyan: #65cfdb;
+  --terminal-white: #c2ccd8;
+  --terminal-bright-black: #48525f;
+  --terminal-bright-red: var(--diff-del);
+  --terminal-bright-green: #8ed6a6;
+  --terminal-bright-yellow: #f4ca6c;
+  --terminal-bright-blue: #6aadff;
+  --terminal-bright-magenta: #e4bdf4;
+  --terminal-bright-cyan: #9ae2e9;
+  --terminal-bright-white: #f2f6fa;
+  --code-keyword: #b69cf0;
+  --code-string: #8fc9a0;
+  --code-number: #e0b36a;
+  --code-comment: #7d8798;
+  --code-title: #7fb2ee;
+  --code-type: #6fc7c7;
+  --code-variable: #e0b36a;
+  --code-builtin: #6fc7c7;
+
+  color-scheme: dark;
+  --basalt: #0d1117;
+  --scree: #161c26;
+  --scree-2: #1e2633;
+  --stone: #313d4f;
+  --fog: #c2ccd8;
+  --fog-dim: #8b97a7;
+  --chalk: #f2f6fa;
+  --blaze: #ff6a3d;
+  --blaze-soft: #ff6a3d33;
+  --lichen: #63d68b;
+  --amber: #e8b13d;
+  --danger: #ff6b63;
+  --batch: #4c9bff;
+  --selected-border: #4c9bff;
+  --selected-bg: #4c9bff29;
+  --selected-text: #6aadff;
+  --diff-add: #8ed6a6;
+  --diff-del: #ff9d94;
+
+  /* Historical default component inks (frozen against main). */
+  --primary-white-fg: #ffffff;
+  --runner-primary-fg: #ffffff;
+  --chat-primary-fg: var(--chalk);
+  --knob-fg: #ffffff;
+  --board-diff-add: #b9d49a;
+  --board-diff-del: #e2a3a3;
+  --si-series-1: var(--chart-tests);
+  --si-series-2: var(--chart-build);
+  --si-series-3: var(--chart-git);
+  --series-fg: #000000;
+  --chart-tests: var(--blaze);
+  --chart-build: var(--amber);
+  --chart-git: var(--lichen);
+  --chart-read: #6ca8c9;
+  --chart-edit: #a393cc;
+  --chart-other: #aa8292;
+  --chart-model: #7cabb0;
+  --chart-waiting: #c4a768;
+  --chart-idle: var(--stone);
+}
+
+/* Preset colors use blue/orange plus text and shape cues for color vision differences. */
+:root[data-theme="colorblind-dark"] {
+
+  --fill-muted: var(--scree-2);
+  --success: var(--lichen);
+  --button-fg: #0d1117;
+  color-scheme: dark;
+  --terminal-black: #161c26;
+  --terminal-red: #ffc078;
+  --terminal-green: #80caff;
+  --terminal-yellow: #ffc078;
+  --terminal-blue: #80caff;
+  --terminal-magenta: #ff9eb7;
+  --terminal-cyan: #80caff;
+  --terminal-white: #f2f6fa;
+  --terminal-bright-black: #b5c4d8;
+  --terminal-bright-red: #ffc078;
+  --terminal-bright-green: #80caff;
+  --terminal-bright-yellow: #ffc078;
+  --terminal-bright-blue: #80caff;
+  --terminal-bright-magenta: #d6b8ff;
+  --terminal-bright-cyan: #80caff;
+  --terminal-bright-white: #f2f6fa;
+  --code-keyword: #ff9eb7;
+  --code-string: #80caff;
+  --code-number: #ffc078;
+  --code-comment: #b5c4d8;
+  --code-title: #80caff;
+  --code-type: #f7df8a;
+  --code-variable: #ffc078;
+  --code-builtin: #f7df8a;
+  --basalt: #0d1117;
+  --scree: #161c26;
+  --scree-2: #1e2633;
+  --stone: #718097;
+  --fog: #c2ccd8;
+  --fog-dim: #b5c4d8;
+  --chalk: #f2f6fa;
+  --blaze: #80caff;
+  --blaze-soft: #80caff26;
+  --lichen: #80caff;
+  --amber: #ffffff;
+  --danger: #ffc078;
+  --batch: #80caff;
+  --selected-border: #80caff;
+  --selected-bg: #80caff1a;
+  --selected-text: #80caff;
+  --diff-add: #80caff;
+  --diff-del: #ffc078;
+
+  --chart-tests: #81c8fd;
+  --chart-build: #ff8a00;
+  --chart-git: #fce3ba;
+  --chart-read: #84918b;
+  --chart-edit: #b48d56;
+  --chart-other: #d64aff;
+  --chart-model: #c1f877;
+  --chart-waiting: #6294b3;
+  --chart-idle: #feb5cd;
+  --series-fg: #000000;
+}
+
+/* Preset colors use blue/orange plus text and shape cues for color vision differences. */
+:root[data-theme="colorblind-light"] {
+
+  --fill-muted: var(--scree-2);
+  --success: var(--lichen);
+  --button-fg: #ffffff;
+  color-scheme: light;
+  --terminal-black: #131820;
+  --terminal-red: #8c4300;
+  --terminal-green: #005a88;
+  --terminal-yellow: #8c4300;
+  --terminal-blue: #005a88;
+  --terminal-magenta: #99254b;
+  --terminal-cyan: #005a88;
+  --terminal-white: #f7f9fc;
+  --terminal-bright-black: #48525f;
+  --terminal-bright-red: #8c4300;
+  --terminal-bright-green: #005a88;
+  --terminal-bright-yellow: #8c4300;
+  --terminal-bright-blue: #005a88;
+  --terminal-bright-magenta: #69409b;
+  --terminal-bright-cyan: #005a88;
+  --terminal-bright-white: #131820;
+  --code-keyword: #99254b;
+  --code-string: #005a88;
+  --code-number: #8c4300;
+  --code-comment: #48525f;
+  --code-title: #005a88;
+  --code-type: #705500;
+  --code-variable: #8c4300;
+  --code-builtin: #705500;
+  --basalt: #eef1f6;
+  --scree: #f7f9fc;
+  --scree-2: #ffffff;
+  --stone: #778391;
+  --fog: #48525f;
+  --fog-dim: #48525f;
+  --chalk: #131820;
+  --blaze: #005a88;
+  --blaze-soft: #005a8826;
+  --lichen: #005a88;
+  --amber: #131820;
+  --danger: #8c4300;
+  --batch: #005a88;
+  --selected-border: #005a88;
+  --selected-bg: #005a881a;
+  --selected-text: #005a88;
+  --diff-add: #005a88;
+  --diff-del: #8c4300;
+
+  --chart-tests: #03598a;
+  --chart-build: #ae5501;
+  --chart-git: #220d00;
+  --chart-read: #a009ff;
+  --chart-edit: #6d624a;
+  --chart-other: #0d016a;
+  --chart-model: #530043;
+  --chart-waiting: #6139ba;
+  --chart-idle: #840404;
+  --series-fg: #ffffff;
+}
+
+/* Preset colors use blue/orange plus text and shape cues for color vision differences. */
+:root[data-theme="high-contrast"] {
+
+  --fill-muted: var(--scree-2);
+  --success: var(--lichen);
+  --button-fg: #000000;
+  color-scheme: dark;
+  --terminal-black: #000000;
+  --terminal-red: #ffe080;
+  --terminal-green: #8eeaff;
+  --terminal-yellow: #ffe080;
+  --terminal-blue: #8eeaff;
+  --terminal-magenta: #e6b3ff;
+  --terminal-cyan: #8eeaff;
+  --terminal-white: #ffffff;
+  --terminal-bright-black: #ffffff;
+  --terminal-bright-red: #ffe080;
+  --terminal-bright-green: #8eeaff;
+  --terminal-bright-yellow: #ffe080;
+  --terminal-bright-blue: #8eeaff;
+  --terminal-bright-magenta: #e6b3ff;
+  --terminal-bright-cyan: #8eeaff;
+  --terminal-bright-white: #ffffff;
+  --code-keyword: #e6b3ff;
+  --code-string: #8eeaff;
+  --code-number: #ffe080;
+  --code-comment: #ffffff;
+  --code-title: #8eeaff;
+  --code-type: #ffffff;
+  --code-variable: #ffe080;
+  --code-builtin: #ffffff;
+  --basalt: #000000;
+  --scree: #000000;
+  --scree-2: #000000;
+  --stone: #ffffff;
+  --fog: #ffffff;
+  --fog-dim: #ffffff;
+  --chalk: #ffffff;
+  --blaze: #8eeaff;
+  --blaze-soft: #8eeaff26;
+  --lichen: #8eeaff;
+  --amber: #ffffff;
+  --danger: #ffe080;
+  --batch: #8eeaff;
+  --selected-border: #8eeaff;
+  --selected-bg: #8eeaff1a;
+  --selected-text: #8eeaff;
+  --diff-add: #8eeaff;
+  --diff-del: #ffe080;
+
+  --chart-tests: #81c8fd;
+  --chart-build: #ff8a00;
+  --chart-git: #fce3ba;
+  --chart-read: #84918b;
+  --chart-edit: #b48d56;
+  --chart-other: #d64aff;
+  --chart-model: #c1f877;
+  --chart-waiting: #6294b3;
+  --chart-idle: #feb5cd;
+  --series-fg: #000000;
+}
+
+/* BLG-474:THEMES:START — generated by scripts/themeimport; do not hand-edit. */
+/* Catppuccin Mocha — catppuccin-mocha, bundled under MIT (Copyright (c) 2021 Catppuccin). Palette: Catppuccin Org. Port: Catppuccin Org (self-ported). Source: https://github.com/catppuccin/catppuccin, via https://github.com/tinted-theming/schemes/blob/spec-0.11/base16/catppuccin-mocha.yaml */
+:root[data-theme="catppuccin-mocha"] {
+  --fill-muted: #383948;
+  --button-fg: #000000;
+
+  color-scheme: dark;
+  --terminal-black: #181825;
+  --terminal-red: #f2cdcd;
+  --terminal-green: #a6e3a1;
+  --terminal-yellow: #f9e2af;
+  --terminal-blue: #89b4fa;
+  --terminal-magenta: #cba6f7;
+  --terminal-cyan: #94e2d5;
+  --terminal-white: #cdd6f4;
+  --terminal-bright-black: #9a9db2;
+  --terminal-bright-red: #fffefe;
+  --terminal-bright-green: #d3f1d0;
+  --terminal-bright-yellow: #fdf7e8;
+  --terminal-bright-blue: #c4d9fc;
+  --terminal-bright-magenta: #ecdefc;
+  --terminal-bright-cyan: #c4efe8;
+  --terminal-bright-white: #eef1fb;
+  --code-keyword: #cba6f7;
+  --code-string: #a6e3a1;
+  --code-number: #fab387;
+  --code-comment: #9a9db2;
+  --code-title: #89b4fa;
+  --code-type: #94e2d5;
+  --code-variable: #fab387;
+  --code-builtin: #94e2d5;
+
+  --basalt: #1e1e2e;
+  --scree: #181825;
+  --scree-2: #313244;
+  --stone: #787b97;
+  --fog: #a0a7c0;
+  --fog-dim: #9c9eb1;
+  --chalk: #cdd6f4;
+  --blaze: #fab387;
+  --blaze-soft: #fab38733;
+  --lichen: #a6e3a1;
+  --amber: #f9e2af;
+  --danger: #f2cdcd;
+  --batch: #89b4fa;
+  --selected-border: #89b4fa;
+  --selected-bg: #89b4fa29;
+  --selected-text: #a6c7fb;
+  --diff-add: #a6e3a1;
+  --diff-del: #f2cdcd;
+
+  --primary-white-fg: #000000;
+  --runner-primary-fg: #000000;
+  --chat-primary-fg: #000000;
+  --knob-fg: #000000;
+  --board-diff-add: #a6e3a1;
+  --board-diff-del: #f2cdcd;
+  --si-series-1: #fab387;
+  --si-series-2: #f9e2af;
+  --si-series-3: #a6e3a1;
+  --series-fg: #000000;
+  --chart-tests: #fab387;
+  --chart-build: #f9e2af;
+  --chart-git: #a6e3a1;
+  --chart-read: #94e2d5;
+  --chart-edit: #cba6f7;
+  --chart-other: #f2cdcd;
+  --chart-model: #6cd7c5;
+  --chart-waiting: #f5d180;
+  --chart-idle: #9a9db2;
+}
+
+/* Catppuccin Latte — catppuccin-latte, bundled under MIT (Copyright (c) 2021 Catppuccin). Palette: Catppuccin Org. Port: Catppuccin Org (self-ported). Source: https://github.com/catppuccin/catppuccin, via https://github.com/tinted-theming/schemes/blob/spec-0.11/base16/catppuccin-latte.yaml */
+:root[data-theme="catppuccin-latte"] {
+  --fill-muted: #cdd0d9;
+  --button-fg: #ffffff;
+
+  color-scheme: light;
+  --terminal-black: #e6e9ef;
+  --terminal-red: #a62a2a;
+  --terminal-green: #26601a;
+  --terminal-yellow: #7c4f10;
+  --terminal-blue: #094bcd;
+  --terminal-magenta: #7113ec;
+  --terminal-cyan: #0f5f64;
+  --terminal-white: #43465d;
+  --terminal-bright-black: #51586b;
+  --terminal-bright-red: #a62a2a;
+  --terminal-bright-green: #26601a;
+  --terminal-bright-yellow: #7b4f10;
+  --terminal-bright-blue: #094ace;
+  --terminal-bright-magenta: #7113ed;
+  --terminal-bright-cyan: #0f5f64;
+  --terminal-bright-white: #545875;
+  --code-keyword: #7113ec;
+  --code-string: #26601a;
+  --code-number: #7c4f10;
+  --code-comment: #51586b;
+  --code-title: #094bcd;
+  --code-type: #0f5f64;
+  --code-variable: #7c4f10;
+  --code-builtin: #0f5f64;
+
+  --basalt: #eff1f5;
+  --scree: #e6e9ef;
+  --scree-2: #ccd0da;
+  --stone: #6c748d;
+  --fog: #555766;
+  --fog-dim: #53586a;
+  --chalk: #43465d;
+  --blaze: #7c4f10;
+  --blaze-soft: #7c4f1033;
+  --lichen: #26601a;
+  --amber: #7c4f10;
+  --danger: #a62a2a;
+  --batch: #094bcd;
+  --selected-border: #094bcd;
+  --selected-bg: #094bcd29;
+  --selected-text: #073ca6;
+  --diff-add: #26601a;
+  --diff-del: #a62a2a;
+
+  --primary-white-fg: #ffffff;
+  --runner-primary-fg: #ffffff;
+  --chat-primary-fg: #ffffff;
+  --knob-fg: #ffffff;
+  --board-diff-add: #26601a;
+  --board-diff-del: #a62a2a;
+  --si-series-1: #7c4f10;
+  --si-series-2: #7c4f10;
+  --si-series-3: #26601a;
+  --series-fg: #ffffff;
+  --chart-tests: #7c4f10;
+  --chart-build: #7c4f10;
+  --chart-git: #26601a;
+  --chart-read: #0f5f64;
+  --chart-edit: #7113ec;
+  --chart-other: #a62a2a;
+  --chart-model: #0f6064;
+  --chart-waiting: #7c4f10;
+  --chart-idle: #51586b;
+}
+
+/* Dracula — dracula, bundled under MIT (Copyright (c) 2023 Dracula Theme). Palette: Dracula Theme. Port: clach04 (https://github.com/clach04), base16 port contributed to tinted-theming/schemes. Source: https://github.com/dracula/dracula-theme, via https://github.com/tinted-theming/schemes/blob/spec-0.11/base16/dracula.yaml */
+:root[data-theme="dracula"] {
+  --fill-muted: #424e72;
+  --button-fg: #000000;
+
+  color-scheme: dark;
+  --terminal-black: #21222c;
+  --terminal-red: #ff9c9c;
+  --terminal-green: #50fa7b;
+  --terminal-yellow: #f1fa8c;
+  --terminal-blue: #cfb0fb;
+  --terminal-magenta: #ff98d3;
+  --terminal-cyan: #8be9fd;
+  --terminal-white: #f8f8f2;
+  --terminal-bright-black: #afb8d1;
+  --terminal-bright-red: #ff9c9c;
+  --terminal-bright-green: #8bfca8;
+  --terminal-bright-yellow: #f8fdc7;
+  --terminal-bright-blue: #e0cdfc;
+  --terminal-bright-magenta: #ffb6e0;
+  --terminal-bright-cyan: #c7f4fe;
+  --terminal-bright-white: #ffffff;
+  --code-keyword: #ff98d3;
+  --code-string: #50fa7b;
+  --code-number: #ffb86c;
+  --code-comment: #afb8d1;
+  --code-title: #cfb0fb;
+  --code-type: #8be9fd;
+  --code-variable: #ffb86c;
+  --code-builtin: #8be9fd;
+
+  --basalt: #282a36;
+  --scree: #21222c;
+  --scree-2: #44475a;
+  --stone: #8995ba;
+  --fog: #c2c3c1;
+  --fog-dim: #b1b9d2;
+  --chalk: #f8f8f2;
+  --blaze: #ffb86c;
+  --blaze-soft: #ffb86c33;
+  --lichen: #50fa7b;
+  --amber: #f1fa8c;
+  --danger: #ff9c9c;
+  --batch: #cfb0fb;
+  --selected-border: #cfb0fb;
+  --selected-bg: #cfb0fb29;
+  --selected-text: #e6d7fd;
+  --diff-add: #50fa7b;
+  --diff-del: #ff9c9c;
+
+  --primary-white-fg: #000000;
+  --runner-primary-fg: #000000;
+  --chat-primary-fg: #000000;
+  --knob-fg: #000000;
+  --board-diff-add: #50fa7b;
+  --board-diff-del: #ff9c9c;
+  --si-series-1: #ffb86c;
+  --si-series-2: #f1fa8c;
+  --si-series-3: #50fa7b;
+  --series-fg: #000000;
+  --chart-tests: #ffb86c;
+  --chart-build: #f1fa8c;
+  --chart-git: #50fa7b;
+  --chart-read: #8be9fd;
+  --chart-edit: #ff98d3;
+  --chart-other: #e3abab;
+  --chart-model: #59dffc;
+  --chart-waiting: #ebf85b;
+  --chart-idle: #afb8d1;
+}
+
+/* Nord — nord, bundled under MIT (Copyright (c) 2016-present Sven Greb). Palette: Sven Greb (formerly published as Arctic Ice Studio). Port: Sven Greb (self-ported). Source: https://github.com/nordtheme/nord, via https://github.com/tinted-theming/schemes/blob/spec-0.11/base16/nord.yaml */
+:root[data-theme="nord"] {
+  --fill-muted: #434c5e;
+  --button-fg: #000000;
+
+  color-scheme: dark;
+  --terminal-black: #3b4252;
+  --terminal-red: #dfb1b5;
+  --terminal-green: #adc599;
+  --terminal-yellow: #ebcb8b;
+  --terminal-blue: #aac0d5;
+  --terminal-magenta: #d0b9cc;
+  --terminal-cyan: #8fc4d3;
+  --terminal-white: #e5e9f0;
+  --terminal-bright-black: #b7becb;
+  --terminal-bright-red: #e0b1b5;
+  --terminal-bright-green: #c2d4b3;
+  --terminal-bright-yellow: #f4e2bf;
+  --terminal-bright-blue: #aac0d5;
+  --terminal-bright-magenta: #d0b9cc;
+  --terminal-bright-cyan: #b4d7e1;
+  --terminal-bright-white: #ffffff;
+  --code-keyword: #d0b9cc;
+  --code-string: #adc599;
+  --code-number: #ebcb8b;
+  --code-comment: #b7becb;
+  --code-title: #aac0d5;
+  --code-type: #8fc4d3;
+  --code-variable: #ebcb8b;
+  --code-builtin: #8fc4d3;
+
+  --basalt: #2e3440;
+  --scree: #3b4252;
+  --scree-2: #434c5e;
+  --stone: #939db2;
+  --fog: #bbbfc9;
+  --fog-dim: #d8dee9;
+  --chalk: #e5e9f0;
+  --blaze: #ebcb8b;
+  --blaze-soft: #ebcb8b33;
+  --lichen: #adc599;
+  --amber: #ebcb8b;
+  --danger: #dfb1b5;
+  --batch: #aac0d5;
+  --selected-border: #aac0d5;
+  --selected-bg: #aac0d529;
+  --selected-text: #e1e8f0;
+  --diff-add: #adc599;
+  --diff-del: #dfb1b5;
+
+  --primary-white-fg: #000000;
+  --runner-primary-fg: #000000;
+  --chat-primary-fg: #000000;
+  --knob-fg: #000000;
+  --board-diff-add: #adc599;
+  --board-diff-del: #dfb1b5;
+  --si-series-1: #ebcb8b;
+  --si-series-2: #ebcb8b;
+  --si-series-3: #adc599;
+  --series-fg: #000000;
+  --chart-tests: #ebcb8b;
+  --chart-build: #ebcb8b;
+  --chart-git: #adc599;
+  --chart-read: #8fc4d3;
+  --chart-edit: #d0b9cc;
+  --chart-other: #afc0d6;
+  --chart-model: #8fc4d3;
+  --chart-waiting: #e3b760;
+  --chart-idle: #b7becb;
+}
+
+/* Tokyo Night — tokyo-night, bundled under MIT (Copyright (c) 2018-present Enkia); base16 port under tinted-theming/schemes' MIT license (Copyright (c) 2022 Tinted Theming). Palette: Enkia (original Tokyo Night VS Code theme). Port: Michaël Ball, base16 port contributed to tinted-theming/schemes. Source: https://github.com/enkia/tokyo-night-vscode-theme (original palette), base16 port via https://github.com/tinted-theming/schemes/blob/spec-0.11/base16/tokyo-night-dark.yaml */
+:root[data-theme="tokyo-night"] {
+  --fill-muted: #30354c;
+  --button-fg: #000000;
+
+  color-scheme: dark;
+  --terminal-black: #16161e;
+  --terminal-red: #f7768e;
+  --terminal-green: #9ece6a;
+  --terminal-yellow: #9ece6a;
+  --terminal-blue: #2ac3de;
+  --terminal-magenta: #bb9af7;
+  --terminal-cyan: #b4f9f8;
+  --terminal-white: #b0b7d9;
+  --terminal-bright-black: #969dbb;
+  --terminal-bright-red: #fab0be;
+  --terminal-bright-green: #bcdd98;
+  --terminal-bright-yellow: #bcdd98;
+  --terminal-bright-blue: #5fd2e6;
+  --terminal-bright-magenta: #e1d3fb;
+  --terminal-bright-cyan: #edfefd;
+  --terminal-bright-white: #ccd0e6;
+  --code-keyword: #bb9af7;
+  --code-string: #9ece6a;
+  --code-number: #f7768e;
+  --code-comment: #969dbb;
+  --code-title: #2ac3de;
+  --code-type: #b4f9f8;
+  --code-variable: #f7768e;
+  --code-builtin: #b4f9f8;
+
+  --basalt: #1a1b26;
+  --scree: #16161e;
+  --scree-2: #2f3549;
+  --stone: #7780a8;
+  --fog: #9ca0b7;
+  --fog-dim: #9b9eb3;
+  --chalk: #b0b7d9;
+  --blaze: #f7768e;
+  --blaze-soft: #f7768e33;
+  --lichen: #9ece6a;
+  --amber: #9ece6a;
+  --danger: #f7768e;
+  --batch: #2ac3de;
+  --selected-border: #2ac3de;
+  --selected-bg: #2ac3de29;
+  --selected-text: #3cc8e1;
+  --diff-add: #9ece6a;
+  --diff-del: #f7768e;
+
+  --primary-white-fg: #000000;
+  --runner-primary-fg: #000000;
+  --chat-primary-fg: #000000;
+  --knob-fg: #000000;
+  --board-diff-add: #9ece6a;
+  --board-diff-del: #f7768e;
+  --si-series-1: #f7768e;
+  --si-series-2: #9ece6a;
+  --si-series-3: #9ece6a;
+  --series-fg: #000000;
+  --chart-tests: #f7768e;
+  --chart-build: #9ece6a;
+  --chart-git: #9ece6a;
+  --chart-read: #b4f9f8;
+  --chart-edit: #bb9af7;
+  --chart-other: #f7768e;
+  --chart-model: #85f5f4;
+  --chart-waiting: #85c144;
+  --chart-idle: #969dbb;
+}
+/* BLG-474:THEMES:END */
+
+/* Session identity palette: stable keys, named swatches and a rounded card bar.
+   Override these tokens in additional theme palettes. */
+:root {
+ --session-color-blue: #56b4e9;
+ --session-color-orange: #e69f00;
+ --session-color-purple: #cc79a7;
+ --session-color-teal: #009e73;
+  --session-color-silver: #e0e6ed;
+  --session-color-indigo: #9296ed;
+  --session-color-gold: #ffe08a;
+  --session-color-coral: #dc8065;
+  --session-color-cyan: #65e6ef;
+  --session-color-violet: #b698eb;
+  --session-color-lime: #d5eb82;
+  --session-color-rose: #ec9cba;
+}
+:root[data-theme="light"] {
+ --session-color-blue: #0072b2;
+ --session-color-orange: #985900;
+ --session-color-purple: #9b4a7d;
+ --session-color-teal: #007b59;
+  --session-color-silver: #495567;
+  --session-color-indigo: #514c9c;
+  --session-color-gold: #865600;
+  --session-color-coral: #a34429;
+  --session-color-cyan: #006b78;
+  --session-color-violet: #765099;
+  --session-color-lime: #50680d;
+  --session-color-rose: #96395e;
+}
+
+/* BLG-474:SESSIONS:START — generated by scripts/themeimport; do not hand-edit. */
+:root[data-theme="catppuccin-mocha"] {
+  --session-color-blue: #e7f0fe;
+  --session-color-orange: #fab991;
+  --session-color-purple: #e7e0ff;
+  --session-color-teal: #94e2d5;
+  --session-color-silver: #cac4fc;
+  --session-color-indigo: #e3bafc;
+  --session-color-gold: #e4b8ff;
+  --session-color-coral: #fdc9dd;
+  --session-color-cyan: #fcb5ab;
+  --session-color-violet: #facf89;
+  --session-color-lime: #edfa89;
+  --session-color-rose: #b4fa89;
+}
+
+:root[data-theme="catppuccin-latte"] {
+  --session-color-blue: #073ca6;
+  --session-color-orange: #140800;
+  --session-color-purple: #5b0fbd;
+  --session-color-teal: #0c4e52;
+  --session-color-silver: #2e0ae0;
+  --session-color-indigo: #6a079c;
+  --session-color-gold: #7f066b;
+  --session-color-coral: #140107;
+  --session-color-cyan: #440e03;
+  --session-color-violet: #140007;
+  --session-color-lime: #394403;
+  --session-color-rose: #1c4e03;
+}
+
+:root[data-theme="dracula"] {
+  --session-color-blue: #e2f2fd;
+  --session-color-orange: #b4f500;
+  --session-color-purple: #ffe9e0;
+  --session-color-teal: #a3ffb7;
+  --session-color-silver: #ffd6da;
+  --session-color-indigo: #f2d6ff;
+  --session-color-gold: #ffde00;
+  --session-color-coral: #94ff00;
+  --session-color-cyan: #fcf8ca;
+  --session-color-violet: #c1f773;
+  --session-color-lime: #9cf993;
+  --session-color-rose: #93f9bd;
+}
+
+:root[data-theme="nord"] {
+  --session-color-blue: #d6e9ff;
+  --session-color-orange: #bcff00;
+  --session-color-purple: #ffe0e1;
+  --session-color-teal: #8fffa6;
+  --session-color-silver: #c7fff2;
+  --session-color-indigo: #d6e9ff;
+  --session-color-gold: #ece6f9;
+  --session-color-coral: #ffe3cc;
+  --session-color-cyan: #ffff00;
+  --session-color-violet: #cfff66;
+  --session-color-lime: #99ff99;
+  --session-color-rose: #85ffb9;
+}
+
+:root[data-theme="tokyo-night"] {
+  --session-color-blue: #b0e8f3;
+  --session-color-orange: #00d6af;
+  --session-color-purple: #dfd0fb;
+  --session-color-teal: #b4f9f8;
+  --session-color-silver: #8fffde;
+  --session-color-indigo: #dfa3ff;
+  --session-color-gold: #dbaef3;
+  --session-color-coral: #cec1f5;
+  --session-color-cyan: #fbe5ec;
+  --session-color-violet: #f5c5bd;
+  --session-color-lime: #e5b356;
+  --session-color-rose: #c3de2a;
+}
+/* BLG-474:SESSIONS:END */
+
+@media (prefers-color-scheme: light) {
+ :root:not([data-theme]) {
+  --session-color-blue: #0072b2;
+  --session-color-orange: #985900;
+  --session-color-purple: #9b4a7d;
+  --session-color-teal: #007b59;
+  --session-color-silver: #495567;
+  --session-color-indigo: #514c9c;
+  --session-color-gold: #865600;
+  --session-color-coral: #a34429;
+  --session-color-cyan: #006b78;
+  --session-color-violet: #765099;
+  --session-color-lime: #50680d;
+  --session-color-rose: #96395e;
+ }
+}
+
+:root[data-theme="colorblind-dark"] {
+  --session-color-blue: #88ccff;
+  --session-color-orange: #ffbb77;
+  --session-color-purple: #c180c1;
+  --session-color-teal: #44aa99;
+  --session-color-silver: #edf2f7;
+  --session-color-indigo: #9b8ec4;
+  --session-color-gold: #ffe7a0;
+  --session-color-coral: #c58365;
+  --session-color-cyan: #91ebf5;
+  --session-color-violet: #ab92db;
+  --session-color-lime: #e1f0a1;
+  --session-color-rose: #c488a9;
+}
+
+:root[data-theme="colorblind-light"] {
+  --session-color-blue: #004676;
+  --session-color-orange: #884400;
+  --session-color-purple: #941838;
+  --session-color-teal: #0f7259;
+  --session-color-silver: #303e50;
+  --session-color-indigo: #635687;
+  --session-color-gold: #805b00;
+  --session-color-coral: #9e4729;
+  --session-color-cyan: #006a79;
+  --session-color-violet: #725c99;
+  --session-color-lime: #556521;
+  --session-color-rose: #9c3b60;
+}
+
+:root[data-theme="high-contrast"] {
+  --session-color-blue: #99eeff;
+  --session-color-orange: #ffdd77;
+  --session-color-purple: #ba7ade;
+  --session-color-teal: #ffffee;
+  --session-color-silver: #eeeeee;
+  --session-color-indigo: #a288dd;
+  --session-color-gold: #ffeebb;
+  --session-color-coral: #c18470;
+  --session-color-cyan: #aaffff;
+  --session-color-violet: #b9a1ee;
+  --session-color-lime: #e0ee99;
+  --session-color-rose: #cd92b3;
+}
+
+:root[data-theme="colorblind-dark"] {
+  --meter-pattern-warning: repeating-linear-gradient(45deg, transparent 0 2px, var(--basalt) 2px 3px);
+  --meter-pattern-danger: repeating-linear-gradient(90deg, transparent 0 3px, var(--basalt) 3px 4px);
+  --meter-critical-display: inline;
+  --si-pattern-1: repeating-linear-gradient(45deg, transparent 0 7px, var(--series-fg) 7px calc(7px + 2px));
+  --si-pattern-2: repeating-linear-gradient(90deg, transparent 0 5px, var(--series-fg) 5px calc(5px + 1px));
+  --si-pattern-3: repeating-linear-gradient(0deg, transparent 0 8px, var(--series-fg) 8px calc(8px + 2px));
+  --activity-pattern-tests: repeating-linear-gradient(45deg, transparent 0 7px, var(--series-fg) 7px calc(7px + 2px));
+  --activity-pattern-build: repeating-linear-gradient(90deg, transparent 0 5px, var(--series-fg) 5px calc(5px + 1px));
+  --activity-pattern-git: repeating-linear-gradient(0deg, transparent 0 8px, var(--series-fg) 8px calc(8px + 2px));
+  --activity-pattern-read: repeating-linear-gradient(135deg, transparent 0 4px, var(--series-fg) 4px calc(4px + 1px));
+  --activity-pattern-edit: repeating-linear-gradient(45deg, transparent 0 10px, var(--series-fg) 10px calc(10px + 3px));
+  --activity-pattern-other: repeating-linear-gradient(90deg, transparent 0 9px, var(--series-fg) 9px calc(9px + 3px));
+  --activity-pattern-model: repeating-linear-gradient(0deg, transparent 0 4px, var(--series-fg) 4px calc(4px + 1px));
+  --activity-pattern-waiting: repeating-linear-gradient(135deg, transparent 0 11px, var(--series-fg) 11px calc(11px + 3px));
+  --activity-pattern-idle: repeating-linear-gradient(45deg, transparent 0 3px, var(--series-fg) 3px calc(3px + 1px));
+  --primary-white-fg: var(--button-fg);
+  --runner-primary-fg: var(--button-fg);
+  --chat-primary-fg: var(--button-fg);
+  --knob-fg: var(--button-fg);
+  --board-diff-add: var(--diff-add);
+  --board-diff-del: var(--diff-del);
+}
+
+:root[data-theme="colorblind-light"] {
+  --meter-pattern-warning: repeating-linear-gradient(45deg, transparent 0 2px, var(--basalt) 2px 3px);
+  --meter-pattern-danger: repeating-linear-gradient(90deg, transparent 0 3px, var(--basalt) 3px 4px);
+  --meter-critical-display: inline;
+  --si-pattern-1: repeating-linear-gradient(45deg, transparent 0 7px, var(--series-fg) 7px calc(7px + 2px));
+  --si-pattern-2: repeating-linear-gradient(90deg, transparent 0 5px, var(--series-fg) 5px calc(5px + 1px));
+  --si-pattern-3: repeating-linear-gradient(0deg, transparent 0 8px, var(--series-fg) 8px calc(8px + 2px));
+  --activity-pattern-tests: repeating-linear-gradient(45deg, transparent 0 7px, var(--series-fg) 7px calc(7px + 2px));
+  --activity-pattern-build: repeating-linear-gradient(90deg, transparent 0 5px, var(--series-fg) 5px calc(5px + 1px));
+  --activity-pattern-git: repeating-linear-gradient(0deg, transparent 0 8px, var(--series-fg) 8px calc(8px + 2px));
+  --activity-pattern-read: repeating-linear-gradient(135deg, transparent 0 4px, var(--series-fg) 4px calc(4px + 1px));
+  --activity-pattern-edit: repeating-linear-gradient(45deg, transparent 0 10px, var(--series-fg) 10px calc(10px + 3px));
+  --activity-pattern-other: repeating-linear-gradient(90deg, transparent 0 9px, var(--series-fg) 9px calc(9px + 3px));
+  --activity-pattern-model: repeating-linear-gradient(0deg, transparent 0 4px, var(--series-fg) 4px calc(4px + 1px));
+  --activity-pattern-waiting: repeating-linear-gradient(135deg, transparent 0 11px, var(--series-fg) 11px calc(11px + 3px));
+  --activity-pattern-idle: repeating-linear-gradient(45deg, transparent 0 3px, var(--series-fg) 3px calc(3px + 1px));
+  --primary-white-fg: var(--button-fg);
+  --runner-primary-fg: var(--button-fg);
+  --chat-primary-fg: var(--button-fg);
+  --knob-fg: var(--button-fg);
+  --board-diff-add: var(--diff-add);
+  --board-diff-del: var(--diff-del);
+}
+
+:root[data-theme="high-contrast"] {
+  --meter-pattern-warning: repeating-linear-gradient(45deg, transparent 0 2px, var(--basalt) 2px 3px);
+  --meter-pattern-danger: repeating-linear-gradient(90deg, transparent 0 3px, var(--basalt) 3px 4px);
+  --meter-critical-display: inline;
+  --si-pattern-1: repeating-linear-gradient(45deg, transparent 0 7px, var(--series-fg) 7px calc(7px + 2px));
+  --si-pattern-2: repeating-linear-gradient(90deg, transparent 0 5px, var(--series-fg) 5px calc(5px + 1px));
+  --si-pattern-3: repeating-linear-gradient(0deg, transparent 0 8px, var(--series-fg) 8px calc(8px + 2px));
+  --activity-pattern-tests: repeating-linear-gradient(45deg, transparent 0 7px, var(--series-fg) 7px calc(7px + 2px));
+  --activity-pattern-build: repeating-linear-gradient(90deg, transparent 0 5px, var(--series-fg) 5px calc(5px + 1px));
+  --activity-pattern-git: repeating-linear-gradient(0deg, transparent 0 8px, var(--series-fg) 8px calc(8px + 2px));
+  --activity-pattern-read: repeating-linear-gradient(135deg, transparent 0 4px, var(--series-fg) 4px calc(4px + 1px));
+  --activity-pattern-edit: repeating-linear-gradient(45deg, transparent 0 10px, var(--series-fg) 10px calc(10px + 3px));
+  --activity-pattern-other: repeating-linear-gradient(90deg, transparent 0 9px, var(--series-fg) 9px calc(9px + 3px));
+  --activity-pattern-model: repeating-linear-gradient(0deg, transparent 0 4px, var(--series-fg) 4px calc(4px + 1px));
+  --activity-pattern-waiting: repeating-linear-gradient(135deg, transparent 0 11px, var(--series-fg) 11px calc(11px + 3px));
+  --activity-pattern-idle: repeating-linear-gradient(45deg, transparent 0 3px, var(--series-fg) 3px calc(3px + 1px));
+  --primary-white-fg: var(--button-fg);
+  --runner-primary-fg: var(--button-fg);
+  --chat-primary-fg: var(--button-fg);
+  --knob-fg: var(--button-fg);
+  --board-diff-add: var(--diff-add);
+  --board-diff-del: var(--diff-del);
+}

@@ -1,3 +1,4 @@
+import { VerbositySettings } from './VerbositySelect'
 import "../../../../packages/settings/settings.css";
 // Settings: what applies across sessions, in a dialog over the current page. Chat: Show thinking, Compact
 // tool calls and Hover previews, which act at once (kept per browser). Code colors: the syntax-color theme for dark mode and
@@ -11,17 +12,32 @@ import {
   isHexColour, resolveCodeTokens, setHovercardsEnabled, useBackdropClose, useHovercardsEnabled, type CodeColours, type CodeMode, type CodeTokenKey,
 } from '@blerglab/chat'
 import { saveCompactFolders, useCompactFolders } from '../lib/compactFolders'
+import { POP_OUT_CHOICES, usePopOutChoice, writePopOutChoice, type PopOutChoice } from '@blerglab/chat'
 import { saveCodeColours, useCodeColours } from '../lib/codeColours'
 import { useCompact, useThinking } from '../lib/sessionRail'
 import { coreOrigin } from '../authClient'
+import { apiFetch } from '../apiFetch'
 import './CapabilitiesPanel.css'
 import './SettingsDialog.css'
 import DelegationRulesSection from './DelegationRulesSection'
 import EngineStatusSection from './EngineStatusSection'
 import ShellLimitsSection from './ShellLimitsSection'
 import UsageNoticeSettings from './UsageNoticeSettings'
+import CardTimeBudgetSettings from './CardTimeBudgetSettings'
+import BranchSettingsSection from './BranchSettingsSection'
+import SkillSettingsSection from "./SkillSettingsSection"
 
 const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), summary, [href], [tabindex]:not([tabindex="-1"])'
+
+// core's own Settings page, keyed by its ?section= query (core/web/src/Settings.tsx). One deep
+// link per section, so account/integration/people/install forms stay in core and are never
+// duplicated here.
+const CORE_SECTIONS: { id: string; label: string; description: string; adminOnly?: boolean }[] = [
+  { id: 'account', label: 'Account', description: 'Sign-in, desktops and agent tokens.' },
+  { id: 'integrations', label: 'Integrations', description: 'Credentials, read-only tokens for workers, plugins and MCP connections.' },
+  { id: 'people', label: 'People', description: 'Invite people and manage their desktops.', adminOnly: true },
+  { id: 'install', label: 'Install', description: 'Release notices, worker limits and workspace policies.', adminOnly: true },
+]
 
 const SAMPLE = [
   '```ts',
@@ -63,13 +79,14 @@ function toHex(v: string): string {
   const s = v.trim()
   if (isHexColour(s)) return s.toLowerCase()
   const m = /^rgba?\(\s*(\d+)[ ,]+(\d+)[ ,]+(\d+)/.exec(s)
-  if (!m) return '#808080'
+  if (!m) return '#808080' // themecheck:allow BLG-473: input[type=color]'s value attribute requires literal #rrggbb; it can't take a CSS var()
   return '#' + [m[1], m[2], m[3]].map(n => Number(n).toString(16).padStart(2, '0')).join('')
 }
 
 export default function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [thinking, setThinking] = useThinking()
   const [compact, setCompact] = useCompact()
+  const popOutChoice = usePopOutChoice()
   const compactFolders = useCompactFolders()
   const [folderError, setFolderError] = useState('')
   const [savingFolders, setSavingFolders] = useState(false)
@@ -85,11 +102,25 @@ export default function SettingsDialog({ onClose }: { onClose: () => void }) {
   const dialogRef = useRef<HTMLDivElement>(null)
   const previewRef = useRef<HTMLDivElement>(null)
   const backdrop = useBackdropClose(onClose)
+  // Same source as the Skills section's "This install" scope (/api/skills/settings' admin
+  // flag): People and Install are administrator-only in core, so a non-admin never sees a link
+  // that would only land them back on core's Account section.
+  const [admin, setAdmin] = useState(false)
 
   useEffect(() => {
     const opener = document.activeElement as HTMLElement | null
     dialogRef.current?.querySelector<HTMLElement>(FOCUSABLE)?.focus()
     return () => opener?.focus?.()
+  }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void apiFetch('/api/skills/settings', { signal: controller.signal }).then(async response => {
+      if (!response.ok) return
+      const body = await response.json() as { admin?: boolean }
+      if (!controller.signal.aborted) setAdmin(!!body.admin)
+    }).catch(() => { /* stays non-admin: People and Install stay hidden */ })
+    return () => controller.abort()
   }, [])
 
   // The preview wears the draft for the mode being looked at, scoped to its own box.
@@ -146,6 +177,7 @@ export default function SettingsDialog({ onClose }: { onClose: () => void }) {
   const base = resolveCodeTokens(draft[mode], mode)
 
   return createPortal(
+    // button-guard-ignore: useBackdropClose supplies pointer handlers only; this overlay is not a button
     <div className="caps-overlay" data-testid="settings-overlay" {...backdrop}>
       <div ref={dialogRef} className="caps-dialog cc-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId}
         data-testid="settings" onKeyDown={onKeyDown}>
@@ -157,7 +189,7 @@ export default function SettingsDialog({ onClose }: { onClose: () => void }) {
           <div className="cc-body">
             <section className="settings-section st-section" aria-labelledby={`${titleId}-chat`}>
               <h3 id={`${titleId}-chat`} className="settings-heading st-heading">Chat</h3>
-              <p className="settings-description">Choose how your session conversations are shown.</p>
+              <p className="settings-description">Choose how your workspace conversations are shown.</p>
               <label className="settings-field st-check">
                 <input className="settings-toggle-control" type="checkbox" checked={thinking} onChange={e => setThinking(e.target.checked)} />
                 <span>Show thinking</span>
@@ -168,6 +200,13 @@ export default function SettingsDialog({ onClose }: { onClose: () => void }) {
                 <span>Compact tool calls</span>
               </label>
               <p className="st-hint">Fold runs of tool calls into one summary row.</p>
+              <label className="settings-field cc-field">
+                <span>Offer to open a message in a tab when it's longer than</span>
+                <select className="settings-field select" data-testid="settings-pop-out" value={popOutChoice} onChange={e => writePopOutChoice(e.target.value as PopOutChoice)}>
+                  {POP_OUT_CHOICES.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
+                </select>
+              </label>
+              <p className="st-hint">A long reply reads more easily in its own tab.</p>
               <label className="settings-field st-check">
                 <input className="settings-toggle-control" type="checkbox" data-testid="settings-hovercards" checked={hovercards} onChange={e => setHovercardsEnabled(e.target.checked)} />
                 <span>Hover previews</span>
@@ -188,11 +227,22 @@ export default function SettingsDialog({ onClose }: { onClose: () => void }) {
               {folderError && <p role="alert">{folderError}</p>}
             </section>
             <DelegationRulesSection />
-            <UsageNoticeSettings />
-            <section className="settings-section st-section" aria-labelledby={`${titleId}-desktops`}>
-              <h3 id={`${titleId}-desktops`} className="settings-heading st-heading">Desktops</h3>
-              <p className="settings-description">Your desktops belong to your account: list, rename, enroll, add or remove them in Blerg’s main Settings.</p>
-              <a className="settings-action btn st-desktops-link" href={`${coreOrigin()}/settings#desktops`} target="_blank" rel="noopener noreferrer">Manage your desktops</a>
+            <BranchSettingsSection />
+            <SkillSettingsSection />
+            <VerbositySettings />
+              <UsageNoticeSettings />
+            <CardTimeBudgetSettings />
+            <section className="settings-section st-section" aria-labelledby={`${titleId}-core`}>
+              <h3 id={`${titleId}-core`} className="settings-heading st-heading">Blerg’s main Settings</h3>
+              <p className="settings-description">Account, integrations, people and install settings live in Blerg’s main Settings. Each link opens it in a new tab, at that section.</p>
+              <ul className="st-core-list">
+                {CORE_SECTIONS.filter(s => admin || !s.adminOnly).map(s => (
+                  <li key={s.id} className="st-core-item">
+                    <a className="settings-action btn st-desktops-link" href={`${coreOrigin()}/settings?section=${s.id}`} target="_blank" rel="noopener noreferrer">{s.label}</a>
+                    <span className="st-hint">{s.description}</span>
+                  </li>
+                ))}
+              </ul>
             </section>
             <EngineStatusSection />
             <ShellLimitsSection />
@@ -201,7 +251,7 @@ export default function SettingsDialog({ onClose }: { onClose: () => void }) {
             <div className="cc-pickers" role="group" aria-labelledby={`${titleId}-colors`}>
               {(['dark', 'light'] as const).map(m => (
                 <label key={m} className="settings-field cc-field">
-                  <span>{m === 'dark' ? 'Dark mode' : 'Light mode'}</span>
+                  <span>{m === 'dark' ? 'Dark mode' : 'Light mode'}</span> {/* themecheck:allow BLG-473: CodeMode's own light/dark preview toggle, a second axis from codeThemes.ts (syntax color schemes), not the app theme */}
                   <select className="settings-field select" value={draft[m]} onChange={e => setTheme(m, e.target.value)} data-testid={`cc-theme-${m}`}>
                     {CODE_THEMES.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                   </select>
@@ -213,7 +263,7 @@ export default function SettingsDialog({ onClose }: { onClose: () => void }) {
               <span className="cc-previewbar-label">Preview</span>
               {(['dark', 'light'] as const).map(m => (
                 <button key={m} type="button" className={'settings-action ' + ('cc-seg' + (mode === m ? ' on' : ''))} aria-pressed={mode === m}
-                  onClick={() => setMode(m)}>{m === 'dark' ? 'Dark' : 'Light'}</button>
+                  onClick={() => setMode(m)}>{m === 'dark' ? 'Dark' : 'Light'}{/* themecheck:allow BLG-473: same CodeMode toggle as above */}</button>
               ))}
             </div>
             <div ref={previewRef} className="cc-preview" data-testid="cc-preview">
@@ -238,10 +288,6 @@ export default function SettingsDialog({ onClose }: { onClose: () => void }) {
               </ul>
             </details>
             {error && <div role="alert" className="cc-error">{error}</div>}
-            <p className="st-hint st-account">
-              Account, tokens and connections are in{' '}
-              <a href={`${coreOrigin()}/settings`} target="_blank" rel="noopener noreferrer">Blerg’s main Settings</a>.
-            </p>
           </div>
         </div>
         <footer className="cc-footer">

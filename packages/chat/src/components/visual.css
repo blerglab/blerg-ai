@@ -1,26 +1,98 @@
 .visual-block { position: relative; min-width: 0; max-width: 100%; border: 1px solid var(--chat-border); border-radius: 8px; margin: .75rem 0; background: var(--chat-surface); color: var(--chat-fg); overflow: hidden; font-family: var(--chat-font); }
-.visual-actions { display: flex; align-items: center; gap: .35rem; padding: 4px 6px; font-size: var(--chat-text-xs); }
-.visual-actions > span { margin-right: auto; color: var(--chat-muted); }
+.visual-actions { display: flex; align-items: center; justify-content: flex-end; gap: .35rem; padding: 4px 6px; font-size: var(--chat-text-xs); }
 .visual-actions button { opacity: 0; transition: opacity .12s; background: var(--chat-surface-2); color: var(--chat-muted); border: 1px solid var(--chat-border); border-radius: 5px; font: inherit; padding: 1px 7px; cursor: pointer; }
 .visual-block:hover .visual-actions button, .visual-block:focus-within .visual-actions button { opacity: 1; }
 @media (hover: none) { .visual-actions button { opacity: 1; } }
 .visual-dialog button { color: inherit; background: transparent; border: 1px solid var(--chat-border); border-radius: 4px; padding: .25rem .5rem; cursor: pointer; }
-.visual-surface { position: relative; padding: 8px 10px; overflow: auto; min-height: 3rem; }
-.visual-block > .visual-surface { max-height: 32rem; }
+/* scrollbar-gutter: stable (BLG-468 review round 2): this element's own overflow:auto scrollbar
+   must not come and go based on exactly the content a fill-sizing calculation is driving — a
+   diagram tall enough to need one eats into the width that calculation already used, which draws
+   it shorter, which no longer needs the scrollbar, which widens it back: a real, continuous
+   resize loop (measured: a tab's own .visual-surface toggling 682px/667px — one scrollbar's
+   width — every frame). Reserved unconditionally instead, so the box's own width never depends
+   on whether it happens to be scrolling right now. */
+.visual-surface { position: relative; padding: 8px 10px; overflow: auto; scrollbar-gutter: stable; min-height: 3rem; flex: 1 1 auto; min-width: 0; }
+.visual-block > .visual-surface-wrap > .visual-surface { max-height: 32rem; }
+/* BLG-485: ChipOverlay.tsx's own sibling of `.visual-surface` (never a child placed inside it —
+   that one is redrawn by replacing *all* of its children wholesale, which raced a React-portaled
+   child before this). `position: relative` so the overlay's absolutely positioned proxies
+   (ChipOverlay.tsx computes their coordinates against `.visual-surface`'s own box) and
+   `.visual-surface` itself still line up exactly: this wrapper carries no padding/border/margin
+   of its own, so its box and `.visual-surface`'s box coincide. `display: flex` (not block) so a
+   context that stretches `.visual-surface` to fill available height (the dialog/tab rules below)
+   can still do that — one real flex item, the overlay itself is `position: absolute` and plays
+   no part in that layout either way. */
+.visual-surface-wrap { position: relative; display: flex; min-width: 0; min-height: 0; }
+.visual-chip-overlay { position: absolute; inset: 0; pointer-events: none; }
+.visual-chip-hotspot { position: absolute; pointer-events: auto; background: transparent; border: 0; margin: 0; padding: 0; cursor: pointer; }
+/* BLG-485: a card/commit reference drawn in the data table or a tooltip (accessibility.ts,
+   tooltip.ts) — the same quiet, underlined look chat text's own .md-ref (markdown.css) draws,
+   turned interactive by ChipOverlay.tsx once the store resolves it. */
+.visual-blerg-table-ref, .visual-tooltip-ref { color: var(--chat-accent); text-decoration: underline dotted; text-underline-offset: 2px; }
+/* BLG-468 review round 2: no inner scrollbox for our own renderers (flowchart, and now sequence)
+   — the owner has rejected those before. Mermaid's own <img> and Vega's canvas both benefit from
+   the shared 32rem cap (a very tall diagram/chart stays reachable without ballooning the whole
+   message); our own renderers instead reflow width (render.ts's own layoutForWidth/displaySize)
+   and draw at their natural height, so the card just grows to fit it in the page's own scroll,
+   never its own. One selector for both kinds' own `data-diagram-renderer` values, not two
+   separate rules repeating the same declaration. */
+.visual-block:has(.visual-surface svg[data-diagram-renderer^="blerg-"]) > .visual-surface-wrap > .visual-surface { max-height: none; }
 .visual-diagram { display: block; max-width: 100%; height: auto; margin: auto; background: transparent; }
 .visual-chart { width: fit-content; max-width: 100%; margin: auto; }
 .visual-chart canvas { display: block; max-width: 100%; height: auto; }
-.visual-tooltip { position: absolute; z-index: 1; white-space: pre-wrap; max-width: min(25rem, 90%); overflow-wrap: anywhere; background: var(--chat-surface); color: var(--chat-fg); border: 1px solid var(--chat-border); border-radius: 4px; padding: .5rem; box-shadow: 0 2px 10px #0003; pointer-events: none; font-size: var(--chat-text-sm); }
-.visual-full-scroll { overflow: auto; flex: 1; min-height: 0; }
+/* BLG-467: an inline message's diagram flows to fill the message's own width as a pane is
+   resized, through its own viewBox (an SVG scales cleanly at any size) — not just shrinking to
+   fit, as the bare max-width above only did. Capped at the same readable width charts already
+   draw to at most (vega.ts's own container-fit ceiling), so a small diagram does not balloon
+   across a very wide pane. One `width` declaration, not a separate `max-width` — a tab's or full
+   screen's own fill-sizing (mermaid.ts) sets this element's width inline, which a same-named
+   property here would lose to regardless of selector specificity, but a *different* property
+   (max-width) would not: it would go on silently clamping that inline width back down. */
+.visual-block > .visual-surface-wrap > .visual-surface .visual-diagram { width: min(100%, 64rem); }
+.visual-tooltip { position: absolute; z-index: 1; white-space: pre-wrap; max-width: min(25rem, 90%); overflow-wrap: anywhere; background: var(--chat-surface); color: var(--chat-fg); border: 1px solid var(--chat-border); border-radius: 4px; padding: .5rem; box-shadow: 0 2px 10px var(--chat-shadow-overlay); pointer-events: none; font-size: var(--chat-text-sm); }
+/* BLG-467: a flex row so its single child (.visual-surface) stretches to the dialog's own
+   available height on the cross axis before anything draws — the fill-sizing calculation
+   (Surface's own draw(), VisualBlock.tsx) needs that height up front, not just after the fact. */
+/* BLG-468 review round 2: scrollbar-gutter: stable for the same reason chat.css's own
+   .agent-timeline needs it — a tall fill-sized diagram/chart can make this scroll vertically,
+   whose scrollbar then eats into the width the fill calculation itself used, a real continuous
+   resize loop (measured) once this becomes the content's own size driver. */
+.visual-full-scroll { overflow: auto; flex: 1; min-height: 0; display: flex; scrollbar-gutter: stable; }
 .visual-dialog { width: min(96vw, 100rem); height: 92vh; background: var(--chat-surface); color: var(--chat-fg); font-family: var(--chat-font); }
-.visual-dialog .visual-surface { min-width: fit-content; }
+/* BLG-467: flex-grow fills the dialog's own width before anything draws (fill-sizing needs that
+   up front, same reason as .visual-full-scroll's own display:flex above) — min-width:fit-content
+   still wins over that when zoomed in past 100%, so the existing overflow-and-scroll behavior for
+   zoom is unchanged. */
+.visual-dialog .visual-surface-wrap { flex: 1 1 auto; min-width: fit-content; }
 .visual-dialog .visual-diagram, .visual-dialog .visual-chart canvas { max-width: none; }
 .visual-failed { margin: .75rem 0; min-width: 0; }
 .visual-failed-reason { margin: 0 0 .35rem; color: var(--chat-muted); font-size: var(--chat-text-sm); overflow-wrap: anywhere; }
 .visual-failed .md-codeblock { margin-top: 0; }
+.visual-failed .visual-actions button { opacity: 1; }
+.visual-failed button { margin-top: .35rem; background: var(--chat-surface-2); color: var(--chat-muted); border: 1px solid var(--chat-border); border-radius: 5px; font: inherit; font-size: var(--chat-text-xs); padding: 1px 7px; cursor: pointer; }
 /* In the file viewer (a published .mmd or chart), the visual takes the dialog's whole body and the
    diagram is scaled to fit it, so a tall diagram is seen whole; Open still zooms. */
 .artifact-viewer .artifact-body > .visual-block { flex: 1 1 auto; min-height: 12rem; display: flex; flex-direction: column; margin: 0 0 4px; overflow: auto; }
-.artifact-viewer .artifact-body > .visual-block > .visual-surface { flex: 1 1 auto; min-height: 0; max-height: none; display: flex; overflow: hidden; }
-.artifact-viewer .artifact-body > .visual-block > .visual-surface > div { flex: 1; min-width: 0; min-height: 0; display: flex; }
-.artifact-viewer .artifact-body > .visual-block .visual-diagram { width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; margin: auto; }
+/* BLG-467: stretches to the tab's own available height before anything draws, same reason as
+   .visual-full-scroll above — the fill-sizing calculation needs it up front. Its child stays in
+   normal block flow (no row/flex here): the chart or diagram now draws at an explicit pixel size
+   that already fills this space (Surface's own draw()), so nothing here needs to stretch or
+   object-fit it — and a chart's data-table disclosure (buildAccessibleExtras, blerg/render.ts)
+   stays a block sibling below it, not squeezed into a flex row beside it. */
+.artifact-viewer .artifact-body > .visual-block > .visual-surface-wrap { flex: 1 1 auto; min-height: 0; }
+.artifact-viewer .artifact-body > .visual-block > .visual-surface-wrap > .visual-surface { max-height: none; }
+
+/* Icon actions, like the file viewer's; always visible on touch screens, where there is no hover. */
+.visual-actions .viewer-action { width: 26px; height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+@media (hover: none) { .visual-actions button { opacity: 1; } }
+
+/* Keep the final pane width while the detached drawing is prepared. */
+.visual-loading { width: 100%; height: 360px; max-height: 100%; border-radius: 4px; background: var(--chat-surface-2); }
+
+/* A retained drawing always fits uniformly while the exact generation is prepared. */
+.visual-scene { max-width: 100%; margin-inline: auto; }
+.visual-scene > svg, .visual-scene > canvas { display: block; max-width: 100%; height: auto; }
+.visual-retained-snapshot { pointer-events: none; }
+
+.visual-dialog > .artifact-header { flex-wrap: wrap; }
+.visual-actions { flex-wrap: wrap; }

@@ -455,3 +455,21 @@ func TestUsageNoticeLeavesWorkAndAsksOpen(t *testing.T) {
 		t.Fatalf("usage notice changed live work: %+v", st)
 	}
 }
+
+func TestPageResultDoesNotAnswerUnrelatedAsk(t *testing.T) {
+	s := newScript()
+	s.nativeAsk("", "Proceed?")
+	s.msg("page_result", "Untrusted page data: true")
+	if got := Build(s.events, s.opts("running")); len(got.Asks) != 1 {
+		t.Fatalf("asks=%+v", got.Asks)
+	}
+}
+
+func TestQuestionThreadRevisionUpdatesTheOriginalAsk(t *testing.T) {
+	s := newScript()
+	s.serverAsk("q1", "Deploy?")
+	s.add("question_thread", map[string]string{"message_id": "q1", "kind": "reply", "body": "Which environment?", "author": "person"})
+	s.add("question_thread", map[string]string{"message_id": "q1", "kind": "revision", "body": "Deploy to staging?", "author": "main"})
+	s.turnDone()
+	eq(t, "revised question", asks(Build(s.events, s.opts("idle"))), []string{"q1:Deploy to staging?"})
+}

@@ -103,14 +103,18 @@ prune those roots or their ancestors, and each repository applies its own rules.
 Discovery remains a host-only badge and never grants launch membership. Opening
 an ignored folder explicitly searches its contents.
 
-Without usable Git metadata or Git itself, search skips the common dependency,
-build, virtual environment and cache directories listed in
-`workspaceHeavyDirectories` in `runner/internal/daemon/workspaceignore.go`, while
-preserving routes to independent roots. Preparation shares a one-second allowance
-across all members within the two-second request deadline. Each Git output is
-capped at 8 MiB, with at most 200,000 tracked paths and indexed ancestors. Refusal
-falls back to the fixed directory list. The existing per-request traversal,
-depth, hit and reply limits still apply across members. A deadline during the
+For non-Git folders, search skips the common dependency, build, virtual
+environment and cache directories listed in `workspaceHeavyDirectories` in
+`runner/internal/daemon/workspaceignore.go`, preserving independent roots.
+Git repositories require successfully prepared ignore data: a timeout, missing
+Git executable, unsafe metadata or output limit returns unavailable with no
+matches rather than broadening the search. Preparation shares up to 1.75 seconds
+across all members, shortened to leave 250 ms before the request deadline for the
+filesystem walk. The overall deadline remains two seconds. Git filters the
+tracked index itself, exporting only ignored tracked paths for traversal routes
+instead of every source path. Each Git output is capped at 8 MiB, with at most
+200,000 ignored tracked paths and indexed ancestors. The existing per-request
+traversal, depth, hit and reply limits still apply across members. A deadline during the
 walk returns accumulated matches with `truncated`, even when the last directory
 operation reports another error.
 
@@ -158,6 +162,25 @@ server supplies the trusted runtime reference, not the browser. The response has
 `error_code` states; error never means clean. Counts describe the visible paths
 in a returned status and are partial when truncated.
 
+Status admission waits for a shared explorer/viewer lease within the request's
+existing three-second deadline, without raising the read limits. At most 32
+status callers may wait; cancellation removes a waiter. A full queue or expired
+admission returns `409 busy`. List/search still refuse contention immediately.
+The graph header's reusable `useRepositoryStatus` reader treats both HTTP busy
+and daemon `error_code=busy` as temporary: retain the last good snapshot and
+retry quietly while visible. A partial snapshot is usable; its count is a lower
+bound, and zero partial results never mean clean. Real failures retain a safe
+reason for the tooltip and offer the shared quiet refresh control through
+`RepositoryStatus`. These exports are separate from dock layout so the graph
+header can adopt them independently.
+
+Explorer RPCs allow two pending requests per daemon connection. Pending-cap refusals
+return `busy`; runtime-reference changes return `unavailable`, disconnected daemons
+return `not_running`, and failed sends return `unavailable`. Only reply deadlines
+return `daemon_timeout`. File reads use the same failure codes. Runner diagnostics
+record session ID, daemon ID, operation and a fixed cause label, with repeated
+failures rate limited; request paths and raw errors are never logged.
+
 The main Git directory may contain sibling checkout records at
 `worktrees/<name>/gitdir` and `worktrees/<name>/commondir`. Only regular, bounded
 files at that exact depth are accepted as inert metadata (including when a
@@ -171,13 +194,17 @@ Status copies bounded HEAD/index/refs into a private temporary metadata view;
 repository configuration, info attributes and sibling worktree records are not copied.
 Explicit `GIT_DIR`, `GIT_COMMON_DIR` and `GIT_WORK_TREE` prevent repository discovery.
 Git reads the pinned worktree and object directory by inherited descriptors,
-with fixed safe config,
+with fixed safe config (single-threaded index loading and index preloading disabled),
 no optional locks, no rename/submodule work, a two-second deadline and 256 MiB
 worker memory budget. Linux retains its inherited address-space limit. macOS does
 not use `RLIMIT_AS`/`ulimit -v`: a supervisor samples the entire Git process group's
-resident memory with the system `/bin/ps -o rss= -g <pgid>` every 20 ms, summing
-Git and its helpers in KiB. Each sample has a 100 ms deadline and 64 KiB output
-cap. Exceeding 256 MiB kills the whole group and returns `hostgit.ErrMemoryLimit`
+resident memory through Darwin's native `proc_info` syscall every 20 ms, summing
+Git and its helpers in KiB without launching a sampling process. This does not
+require cgo, including for the desktop installer's cross-build. Each sample has
+a 100 ms time budget checked between synchronous kernel calls and a 64 KiB PID
+buffer; a full buffer, denied observation or malformed response fails closed.
+Only an explicit departed-process error may be omitted. Exceeding 256 MiB kills
+the whole group and returns `hostgit.ErrMemoryLimit`
 (refusal code 126); an observation failure also kills the group and returns
 `hostgit.ErrMemoryMonitor` (code 125). The supervisor is canceled and joined on
 completion, timeout or cancellation. This is an observed RSS budget: memory can
@@ -400,6 +427,19 @@ pass and the run URL/artifacts are recorded. The native memory gate must prove
 that macOS observes and refuses an over-budget process group; cross-compilation
 cannot validate the system RSS sampler.
 
+`TestDarwinNativeGroupRSS` checks the real Darwin ABI against a live process group
+with helpers. `TestWorkspaceSearchLargeIndexUnderContention` must also pass under
+the macOS non-race build. BLG-319 waives only its wall-clock budget on shared macOS race runners; `TestWorkspaceSearchIndexIgnoresBuild` retains functional index/ignore coverage under race, and the native evidence names the waiver. To compare
+the replaced subprocess sampler with native sampling on the same macOS host:
+
+```sh
+cd runner
+GOWORK=off go test -race ./internal/hostgit -run '^$' -bench '^BenchmarkDarwinGroupRSS$' -benchmem -count=3
+```
+
+The workspace platform workflow preserves this comparison with the native gate
+artifacts. Linux timings cannot establish the Darwin syscall's overhead.
+
 ## Production desktop registration
 
 Host launches consume P1's held selection descriptors and obtain an acknowledged
@@ -437,7 +477,7 @@ Collapsing the list keeps its expand control, New, Notifications and session til
 glyphs alongside a separate unread dot, with an accent outline on the current session. Starred sessions come first,
 then working sessions, then recent sessions. Children appear as a count on their
 parent. The shared hovercard reuses the full sidebar session card, including failure
-reasons, Terminal kind, automation facts and the cards of its started sessions. Tab and arrow keys navigate tiles; Enter opens a session. New and the bell
+reasons, automation facts and the cards of its started sessions. Tab and arrow keys navigate tiles; Enter opens a session. New and the bell
 stay pinned while tiles scroll. Phones keep the session list and pane sheets.
 Desktop panes never collapse automatically when space narrows. The session panel
 uses the same phone breakpoint as the list and explorer. Widths clamp to
@@ -534,10 +574,21 @@ former More actions destinations.
 
 ### Git status refusals
 
-Repository badges retain the specific status failure instead of discarding it.
+Files and Repositories show “Git status unavailable” with Retry. The badge tooltip
+retains the specific status failure; technical details do not fill the file tree.
 Current daemons send an allowlisted `status_reason` for identity changes,
 metadata safety checks, private snapshot preparation, Git command failure,
 unsupported status output, or a deadline. The server rejects arbitrary reason
-strings. Paths, Git stderr and underlying errors remain private. Refresh retries
+strings. Paths, Git stderr and underlying errors remain private. Retry repeats the read
 with the existing binding and safety checks; no refusal is treated as clean.
+A metadata change during the final validation rebuilds the private snapshot and
+retries once within the original request deadline. Continued changes still refuse
+status; identity and pointer refusals are never bypassed.
 Older daemons without a reason show the existing safe fallback with update advice.
+
+For acceptance on an existing full-size checkout, run
+`BLERG_STATUS_TEST_REPOSITORY=/path/to/repository GOWORK=off go test ./internal/daemon -run '^TestOptInStatusRealRepository$' -v`
+from `runner`. This opt-in test uses the host reader and the real explorer helper over
+private pipes, including the normal two-second status budget, without changing repository files
+or configuration. It does not authenticate to a running server or exercise the
+installed daemon's browser request.

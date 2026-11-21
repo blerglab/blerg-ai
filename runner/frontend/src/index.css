@@ -1,57 +1,6 @@
+@import "../../../brand/tokens.css";
+
 :root {
-  /* Blerg brand palette (brand/tokens.css is the source of truth; kept in sync
-     here the same way blerg-board defines it inline in styles.css). Every
-     surface in this app is painted from these — without them the whole UI
-     collapses to undefined-variable defaults. */
-  --terminal-black: #161c26;
-  --terminal-red: var(--danger);
-  --terminal-green: #63d68b;
-  --terminal-yellow: var(--amber);
-  --terminal-blue: var(--batch);
-  --terminal-magenta: #d8a0ef;
-  --terminal-cyan: #65cfdb;
-  --terminal-white: #c2ccd8;
-  --terminal-bright-black: #48525f;
-  --terminal-bright-red: var(--diff-del);
-  --terminal-bright-green: #8ed6a6;
-  --terminal-bright-yellow: #f4ca6c;
-  --terminal-bright-blue: #6aadff;
-  --terminal-bright-magenta: #e4bdf4;
-  --terminal-bright-cyan: #9ae2e9;
-  --terminal-bright-white: #f2f6fa;
-  --basalt: #0d1117;     /* app background */
-  --scree: #161c26;      /* raised surface (panels, sheets) */
-  --scree-2: #1e2633;    /* card surface + row dividers */
-  --stone: #313d4f;      /* borders, inputs, dividers */
-  --fog: #c2ccd8;        /* secondary text */
-  --fog-dim: #8b97a7;    /* muted text */
-  --chalk: #f2f6fa;      /* primary text */
-
-  --blaze: #ff6a3d;      /* primary accent — brand, primary actions, attention, focus; not "selected" */
-  --blaze-soft: #ff6a3d33;
-  --lichen: #63d68b;     /* healthy / success / passing */
-  --amber: #e8b13d;      /* pending / waiting */
-  --danger: #ff6b63;     /* failing / error / down */
-  --batch: #4c9bff;      /* GPU batch work */
-  --selected-border: #4c9bff;  /* on / open / pressed / selected: borders, outline icons */
-  --selected-bg: #4c9bff29;  /* its soft fill */
-  --selected-text: #6aadff;  /* its text and glyphs (4.5:1 on its fill) */
-
-  --diff-add: #8ed6a6;
-  --diff-del: #ff9d94;
-
-  --display: "Avenir Next Condensed", "Bahnschrift", "Arial Narrow", "Helvetica Neue", sans-serif;
-  --body: system-ui, -apple-system, "Segoe UI", sans-serif;
-  --mono: ui-monospace, "SF Mono", "Cascadia Mono", monospace;
-
-  --text-2xs: 11px;
-  --text-xs: 12px;
-  --text-sm: 13px;
-  --text-base: 15px;
-  --text-lg: 18px;
-  --text-xl: 24px;
-  --text-2xl: 36px;
-
   /* Legacy aliases — the rest of this app's CSS references these names. */
   --text: var(--chalk);
   --text-h: var(--chalk);
@@ -66,14 +15,13 @@
      read as a warning. The palette blocks set --selected-border, --selected-bg, --selected-text. */
   --social-bg: var(--scree-2);
   --shadow:
-    rgba(0, 0, 0, 0.5) 0 10px 15px -3px, rgba(0, 0, 0, 0.3) 0 4px 6px -2px;
+    var(--shadow-5) 0 10px 15px -3px, var(--shadow-3) 0 4px 6px -2px;
 
   --sans: var(--body);
   --heading: var(--display);
 
   font: 16px/145% var(--sans);
   letter-spacing: 0.18px;
-  color-scheme: dark;
   color: var(--text);
   background: var(--bg);
   font-synthesis: none;
@@ -82,121 +30,6 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Deep Slate — LIGHT + explicit data-theme overrides (mirror of brand/tokens.css).
-   Only palette tokens change; the aliases above resolve through them. */
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {
-    color-scheme: light;
-    --terminal-black: #313d4f;
-    --terminal-red: #b83636;
-    --terminal-green: #257342;
-    --terminal-yellow: #82570c;
-    --terminal-blue: #2559b0;
-    --terminal-magenta: #8741a5;
-    --terminal-cyan: #177582;
-    --terminal-white: #c2ccd8;
-    --terminal-bright-black: #606b79;
-    --terminal-bright-red: #bc3a3a;
-    --terminal-bright-green: #2b7c49;
-    --terminal-bright-yellow: #8c6015;
-    --terminal-bright-blue: #2861bf;
-    --terminal-bright-magenta: #9047ad;
-    --terminal-bright-cyan: #197581;
-    --terminal-bright-white: #f2f6fa;
-    --basalt: #eef1f6;
-    --scree: #f7f9fc;
-    --scree-2: #ffffff;
-    --stone: #d4dbe5;
-    --fog: #48525f;
-    --fog-dim: #6b7684;
-    --chalk: #131820;
-    --blaze: #d9531e;
-    --blaze-soft: #d9531e1a;
-    --lichen: #2f8a52;
-    --amber: #b7791f;
-    --danger: #d24747;
-    --batch: #2f6fd6;
-    --selected-border: #2f6fd6;
-    --selected-bg: #2f6fd61f;
-    --selected-text: #2559b0;
-    --diff-add: #2f8a52;
-    --diff-del: #cf4b4b;
-  }
-}
-:root[data-theme="light"] {
-  color-scheme: light;
-  --terminal-black: #313d4f;
-  --terminal-red: #b83636;
-  --terminal-green: #257342;
-  --terminal-yellow: #82570c;
-  --terminal-blue: #2559b0;
-  --terminal-magenta: #8741a5;
-  --terminal-cyan: #177582;
-  --terminal-white: #c2ccd8;
-  --terminal-bright-black: #606b79;
-  --terminal-bright-red: #bc3a3a;
-  --terminal-bright-green: #2b7c49;
-  --terminal-bright-yellow: #8c6015;
-  --terminal-bright-blue: #2861bf;
-  --terminal-bright-magenta: #9047ad;
-  --terminal-bright-cyan: #197581;
-  --terminal-bright-white: #f2f6fa;
-  --basalt: #eef1f6;
-  --scree: #f7f9fc;
-  --scree-2: #ffffff;
-  --stone: #d4dbe5;
-  --fog: #48525f;
-  --fog-dim: #6b7684;
-  --chalk: #131820;
-  --blaze: #d9531e;
-  --blaze-soft: #d9531e1a;
-  --lichen: #2f8a52;
-  --amber: #b7791f;
-  --danger: #d24747;
-  --batch: #2f6fd6;
-  --selected-border: #2f6fd6;
-  --selected-bg: #2f6fd61f;
-  --selected-text: #2559b0;
-  --diff-add: #2f8a52;
-  --diff-del: #cf4b4b;
-}
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --terminal-black: #161c26;
-  --terminal-red: var(--danger);
-  --terminal-green: #63d68b;
-  --terminal-yellow: var(--amber);
-  --terminal-blue: var(--batch);
-  --terminal-magenta: #d8a0ef;
-  --terminal-cyan: #65cfdb;
-  --terminal-white: #c2ccd8;
-  --terminal-bright-black: #48525f;
-  --terminal-bright-red: var(--diff-del);
-  --terminal-bright-green: #8ed6a6;
-  --terminal-bright-yellow: #f4ca6c;
-  --terminal-bright-blue: #6aadff;
-  --terminal-bright-magenta: #e4bdf4;
-  --terminal-bright-cyan: #9ae2e9;
-  --terminal-bright-white: #f2f6fa;
-  --basalt: #0d1117;
-  --scree: #161c26;
-  --scree-2: #1e2633;
-  --stone: #313d4f;
-  --fog: #c2ccd8;
-  --fog-dim: #8b97a7;
-  --chalk: #f2f6fa;
-  --blaze: #ff6a3d;
-  --blaze-soft: #ff6a3d33;
-  --lichen: #63d68b;
-  --amber: #e8b13d;
-  --danger: #ff6b63;
-  --batch: #4c9bff;
-  --selected-border: #4c9bff;
-  --selected-bg: #4c9bff29;
-  --selected-text: #6aadff;
-  --diff-add: #8ed6a6;
-  --diff-del: #ff9d94;
-}
 
 #root {
   width: 100%;
@@ -291,7 +124,7 @@ h2 {
 
 h1 {
   font-size: 56px;
-  letter-spacing: -1.68px;
+  letter-spacing: -0.03em;
   margin: 32px 0;
   @media (max-width: 1024px) {
     font-size: 36px;
@@ -392,7 +225,7 @@ code {
   transition: border-color .15s, background-color .15s;
 }
 .btn:hover:not(:disabled) { border-color: var(--fog-dim); background-color: var(--scree); }
-.btn.primary { background-color: var(--accent); border-color: var(--accent); color: var(--accent-fg, #fff); }
+.btn.primary { background-color: var(--accent); border-color: var(--accent); color: var(--runner-primary-fg, var(--accent-fg, var(--chalk))); }
 .btn.primary:hover:not(:disabled) { background-color: color-mix(in srgb, var(--accent) 85%, var(--chalk)); border-color: var(--accent); }
 .btn.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--stone)); }
 .btn.danger:hover:not(:disabled) { border-color: var(--danger); background-color: color-mix(in srgb, var(--danger) 10%, transparent); }
@@ -416,6 +249,39 @@ code {
 .btn:disabled,
 .select:disabled { opacity: .5; cursor: default; }
 @media (max-width: 640px) {
-  .btn, .select { min-height: 40px; }
-  .btn.small { min-height: 36px; }
+  .btn, .select { min-height: 44px; }
+  .btn.small { min-height: 44px; }
 }
+
+/* Identity paints over the left border. State borders keep the other three sides. */
+.workspace-color-bar::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  left: calc(-1 * var(--workspace-left-border, 1px));
+  z-index: 1;
+  border-radius: inherit;
+  background: linear-gradient(to right, var(--workspace-color, transparent) 0 4px, transparent 4px);
+  pointer-events: none;
+}
+.session-card:hover, .session-card:focus-within { outline: 1px solid var(--fog); outline-offset: 1px; }
+.session-color-picker { display: inline-flex; width: max-content; max-width: 100%; align-items: center; gap: 0; }
+.session-color-popover {
+  /* Card actions exist before a chat loads its theme stylesheet. Own the shared
+     popover's token mapping here so its surface and selected ring stay opaque. */
+  --chat-surface-2: var(--scree-2);
+  --chat-fg: var(--chalk);
+  --chat-border: var(--stone);
+  width: max-content;
+  max-width: calc(100vw - 16px);
+  padding: 8px;
+}
+.session-color-grid { display: grid; grid-template-columns: repeat(4, 36px); }
+.session-color-error { display: block; max-width: 144px; color: var(--danger); font-size: 12px; }
+.session-color-swatch { display: grid; place-items: center; width: 36px; height: 44px; padding: 0; border: 0; background: transparent; cursor: pointer; }
+.session-color-disc, .session-color-none { width: 20px; height: 20px; border-radius: 50%; background: currentColor; }
+.session-color-none { box-sizing: border-box; border: 2px solid currentColor; background: linear-gradient(135deg, transparent 45%, currentColor 46% 54%, transparent 55%); }
+.session-color-swatch[aria-checked="true"] > span { box-shadow: 0 0 0 2px var(--chat-surface-2), 0 0 0 4px var(--chalk); }
+.session-color-swatch:focus-visible { outline: 2px solid var(--selected-border); outline-offset: -2px; border-radius: 6px; }
+.session-color-swatch[aria-disabled="true"] { cursor: wait; }
+

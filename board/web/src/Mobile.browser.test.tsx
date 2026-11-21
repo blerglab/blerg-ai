@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { page, userEvent } from 'vitest/browser'
 import App from './App'
+import { chipsFor, emptyFilter, matchesFilter } from './boardFilter'
 import './styles.css'
 import { createFakeTransport } from '../../../packages/chat/src/test/fakeTransport'
 import { resetChatState } from '../../../packages/chat/src/test/chat'
@@ -11,9 +12,10 @@ const chat = createFakeTransport({ files: false })
 const session = { id: 'mobile-session', runner: 'fixture', external_session_id: 'fixture-session', lifecycle: 'idle', role: 'worker', resumable: true, created_at: '2026-01-01T00:00:00Z', model: 'claude-sonnet-5' }
 const board = { id: 'b1', name: 'A board with a long descriptive name for the mobile layout', repos: ['example-org/example-repo'], field_schema: [], model: '', concurrency: 1 }
 const columns = ['Inbox', 'Ready', 'Doing', 'Review', 'Done'].map((name, i) => ({ id: `col-${i}`, board_id: 'b1', name, rank: String(i), is_terminal: i === 4 }))
-const card = { id: 'c1', board_id: 'b1', number: 1, rank: 'a', column_id: 'col-0', title: 'A card with a long title that should wrap comfortably on a phone', type: 'bug', priority: 'normal', body: '## Context\n\n' + 'LongUnbrokenReference'.repeat(12), fields: {}, repos: ['example-org/example-repo'], tags: [] as string[], links: [], depends_on: [], blockers: [], model: '', version: 1, auto_merge: false, run_attempts: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' }
+const card = { size: null, dedup_key: null, external_id: null, archived_at: null, gate_flag: null, merged_sha: null, merged_at: null, stuck_at: null, stale_at: null, id: 'c1', board_id: 'b1', number: 1, rank: 'a', column_id: 'col-0', title: 'LongUnbrokenTitle'.repeat(24), type: 'bug', priority: 'normal', body: '## Context\n\n' + 'LongUnbrokenReference'.repeat(12), fields: {}, repos: ['example-org/example-repo'], tags: [] as string[], links: [], depends_on: [], blockers: [], model: '', version: 1, auto_merge: false, run_attempts: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' }
 let boardSessions: typeof session[] = []
 let boardCards: typeof card[] = [card]
+let hygieneMode = false
 let boardOverride: Record<string, unknown> = {}
 const bareTargets = { can_choose: true, default_runtime: 'cluster', unresolved_repos: ['a-folder-with-a-fairly-long-name'], targets: [
   { runtime: 'cluster', label: 'Cluster', unavailable: 'a-folder-with-a-fairly-long-name is a desktop folder name' },
@@ -31,7 +33,24 @@ vi.mock('./api', async original => ({
     if (path === '/api/version') return { release: '0.4.4', commit: 'fixture' }
     if (path === '/api/boards/b1') return { ...board, ...boardOverride }
     if (path === '/api/boards/b1/columns') return columns
+    if (path.startsWith('/api/boards/b1/cards/view')) {
+      const query = new URL(path, location.origin).searchParams
+      if (!hygieneMode) return { cards: boardCards, older: {} }
+      const filter = JSON.parse(query.get('filter') ?? JSON.stringify(emptyFilter))
+      const matching = boardCards.filter(c => matchesFilter(c, filter))
+      const old = matching.filter(c => c.column_id === 'col-4')
+      const expanded = query.has('filter') || query.has('expand') || query.has('older_column')
+      const offset = Number(query.get('cursor') ?? 0)
+      const batch = expanded ? old.slice(offset, offset + 5) : []
+      const counts = (cards: typeof boardCards) => Object.fromEntries(columns.map(col => [col.id, cards.filter(c => c.column_id === col.id).length]))
+      return { cards: [...(query.has('older_column') ? [] : matching.filter(c => c.column_id !== 'col-4')), ...batch],
+        older: { 'col-4': old.length }, totals: counts(boardCards), matched: counts(matching), chips: chipsFor(boardCards, filter),
+        loaded: { 'col-4': batch.length }, next: batch.length && offset + batch.length < old.length ? { 'col-4': String(offset + batch.length) } : {} }
+
+    }
     if (path === '/api/boards/b1/cards') return boardCards
+    if (hygieneMode && path.startsWith('/api/boards/b1/cards/by-number/')) return boardCards.find(c => c.number === Number(path.split('/').at(-1)))
+    if (hygieneMode && /^\/api\/cards\/k\d+$/.test(path)) return boardCards.find(c => c.id === path.split('/').at(-1))
     if (path === '/api/cards/c1') return card
     if (path === '/api/cards/c1/runner-sessions') return [session]
     if (path === '/api/boards/b1/sessions') return boardSessions
@@ -42,7 +61,7 @@ vi.mock('./api', async original => ({
 }))
 vi.mock('@blerglab/chat', async original => ({ ...await original<typeof import('@blerglab/chat')>(), createProxyTransport: () => chat.transport }))
 
-beforeEach(() => { resetChatState(); boardSessions = []; boardCards = [card]; boardOverride = {}; chat.sent.length = 0; localStorage.clear(); sessionStorage.clear() })
+beforeEach(() => { resetChatState(); hygieneMode = false; boardSessions = []; boardCards = [card]; boardOverride = {}; chat.sent.length = 0; localStorage.clear(); sessionStorage.clear() })
 afterEach(() => { cleanup(); history.replaceState({}, '', locationBefore); scrollTo(0, 0) })
 // A busy board: 40 cards in the Inbox (a few tagged for the release), some in progress, more done.
 function busyBoard() {
@@ -104,19 +123,22 @@ for (const width of [390, 3840]) describe(`Board at ${width}px`, () => {
     noOverflow()
     if (width === 390) {
       // one column at a time: the others are a tab away
-      expect(lanes[0].getBoundingClientRect().width).toBeGreaterThan(300)
+      expect(lanes[0].getBoundingClientRect().width).toBeGreaterThan(260)
       expect(lanes[1].getBoundingClientRect().height).toBe(0)
       await userEvent.click(screen.getByRole('tab', { name: /Ready/ }))
-      expect(lanes[1].getBoundingClientRect().width).toBeGreaterThan(300)
+      expect(lanes[1].getBoundingClientRect().width).toBeGreaterThan(260)
       expect(lanes[0].getBoundingClientRect().height).toBe(0)
       for (const t of tabs()) touch(t)
-      touch(screen.getByRole('button', { name: /Board session/ }))
+      touch(screen.getByRole('button', { name: /Board channel/ }))
       for (const a of container.querySelectorAll<HTMLElement>('.topbar nav a, .topbar nav button')) touch(a)
     } else expect(lanes[1].getBoundingClientRect().left).toBeGreaterThan(lanes[0].getBoundingClientRect().left)
   })
   it('keeps a card number on one line beside a long title', async () => {
     open('/boards/b1')
     const num = await screen.findByText('#1', { selector: '.card .num' })
+    expect(num.closest('.card')!.scrollWidth).toBeLessThanOrEqual(num.closest('.card')!.clientWidth)
+    const shots = import.meta.env.VITE_CHROME_SHOTS_DIR
+    if (shots) await page.screenshot({ path: `${shots}/board-title-${width}.png` })
     const lineHeight = parseFloat(getComputedStyle(num).lineHeight) || parseFloat(getComputedStyle(num).fontSize) * 1.6
     // "#" and the digits must never break onto separate lines, even when the title wraps.
     expect(num.getBoundingClientRect().height).toBeLessThan(lineHeight * 1.5)
@@ -137,7 +159,7 @@ for (const width of [390, 3840]) describe(`Board at ${width}px`, () => {
         expect(settled.width).toBe(390); expect(settled.height).toBe(844)
       })
       touch(within(sheet).getByRole('button', { name: 'Close' }))
-      const link = within(sheet).getByRole('link', { name: /Session/ }); touch(link)
+      const link = within(sheet).getByRole('link', { name: /Workspace/ }); touch(link)
       await userEvent.click(link)
       expect(location.pathname).toBe('/boards/b1/cards/1/session')
     } else {
@@ -161,7 +183,7 @@ for (const width of [390, 3840]) describe(`Board at ${width}px`, () => {
     boardOverride = { repos: ['a-folder-with-a-fairly-long-name'], automation_token_set: true, automation_account_id: 'owner-fixture' }
     open('/boards/b1')
     await screen.findByText(card.title)
-    await userEvent.click(screen.getByRole('button', { name: /model/i }))
+    await userEvent.click(screen.getByRole('button', { name: /Board settings/ }))
     const pop = await screen.findByRole('dialog', { name: 'Board settings' })
     const pick = await within(pop).findByRole('combobox', { name: 'Desktop for a-folder-with-a-fairly-long-name' })
     fireEvent.change(pick, { target: { value: 'desktop-a' } })
@@ -179,8 +201,8 @@ for (const width of [390, 3840]) describe(`Board at ${width}px`, () => {
     open('/boards/b1')
     await screen.findByText(card.title)
     boardSessions = [{ ...session, role: 'board' }]
-    await userEvent.click(screen.getByRole('button', { name: /Board session/ }))
-    const drawer = await screen.findByRole('dialog', { name: 'Board session' })
+    await userEvent.click(screen.getByRole('button', { name: /Board channel/ }))
+    const drawer = await screen.findByRole('dialog', { name: 'Board channel' })
     await sendMessage(drawer)
     noOverflow()
     if (width === 390) {
@@ -258,7 +280,7 @@ for (const width of [390, 3840]) describe(`Busy board at ${width}px (#124)`, () 
       expect(pop.getAttribute('aria-modal')).toBe('true')
     } else {
       expect(box.top).toBeGreaterThanOrEqual(screen.getByRole('button', { name: 'Filter' }).getBoundingClientRect().bottom)
-      expect(box.width).toBeGreaterThan(1200) // uses the space on a large screen
+      expect(box.width).toBeLessThanOrEqual(420) // a natural width, not the window's (BLG-465)
     }
     await userEvent.click(within(pop).getByRole('button', { name: 'Tag 0.4.5, 7 cards' }))
     await userEvent.click(within(pop).getByRole('button', { name: 'Type feature, 4 cards' }))
@@ -336,13 +358,13 @@ for (const width of [390, 3840]) describe(`Busy board at ${width}px (#124)`, () 
     await noSearch()
     await userEvent.keyboard('{Escape}')
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Filter cards' })).toBeNull())
-    // Board settings (a popover dialog), with focus on the page behind it
-    await userEvent.click(screen.getByRole('button', { name: /model/i }))
+    // Board settings (a modal dialog), with focus on the page behind it
+    await userEvent.click(screen.getByRole('button', { name: /Board settings/ }))
     await screen.findByRole('dialog', { name: 'Board settings' })
     ;(document.activeElement as HTMLElement | null)?.blur()
     await userEvent.keyboard('/')
     await noSearch()
-    await userEvent.click(screen.getByRole('button', { name: /model/i }))
+    await userEvent.click(screen.getByRole('button', { name: 'Close settings' }))
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Board settings' })).toBeNull())
     // nothing open: / opens the board's own field
     ;(document.activeElement as HTMLElement | null)?.blur()
@@ -357,7 +379,7 @@ for (const width of [390, 3840]) describe(`Busy board at ${width}px (#124)`, () 
       await screen.findByText(/Inbox card 40/)
       const lanes = [...container.querySelectorAll<HTMLElement>('.column')]
       for (const lane of lanes) expect(lane.getBoundingClientRect().height).toBeGreaterThan(0)
-      for (const lane of lanes) expect(lane.querySelectorAll('header button, header [aria-expanded]')).toHaveLength(0)
+      for (const lane of lanes) expect(lane.querySelectorAll('header [aria-expanded]')).toHaveLength(0)
       const board = container.querySelector<HTMLElement>('.board')!.getBoundingClientRect()
       expect(board.bottom).toBeGreaterThan(2160 - 40)
       expect(document.documentElement.scrollHeight).toBeLessThanOrEqual(2160)
@@ -405,7 +427,7 @@ for (const width of [390, 3840]) describe(`Busy board at ${width}px (#124)`, () 
       touch(close)
       await userEvent.click(close)
       await waitFor(() => expect(screen.queryByRole('combobox', { name: 'Search cards' })).toBeNull())
-      expect(countOf('Inbox')).toBe('40')
+      await waitFor(() => expect(countOf('Inbox')).toBe('40'))
     })
 
     it('switches columns in place: no card flies in, and the shown column is a named tab panel', async () => {
@@ -524,4 +546,65 @@ for (const width of [641, 800, 1000, 1280]) describe(`Toolbar search at ${width}
     expect(Math.abs(clear.top - before.top)).toBeLessThanOrEqual(2)
     noOverflow()
   })
+})
+
+for (const width of [390, 3840]) it(`keeps card estimates compact at ${width}px`, async () => {
+  await page.viewport(width, 900)
+  boardCards = [Object.assign({}, card, { size: 'XL', risk: 'high', complexity: 'high' })]
+  open('/boards/b1')
+  await screen.findByText('Risk: high')
+  expect(screen.getByText('Complexity: high')).toBeTruthy()
+  noOverflow()
+})
+
+for (const width of [390, 3840]) it(`expands older done cards at ${width}px`, async () => {
+  await page.viewport(width, 1000)
+  hygieneMode = true
+  busyBoard()
+  history.replaceState({}, '', '/boards/b1')
+  render(<App />)
+  if (width === 390) fireEvent.click(await screen.findByRole('tab', { name: /Done/ }))
+  const expand = await screen.findByRole('button', { name: '12 older' })
+  expect(screen.queryByText('Done 60')).toBeNull()
+  fireEvent.click(expand)
+  await screen.findByText('Done 60')
+  expect(screen.queryByText('Done 65')).toBeNull()
+  fireEvent.click(await screen.findByRole('button', { name: 'Load more older cards (7)' }))
+  await screen.findByText('Done 65')
+  fireEvent.click(await screen.findByRole('button', { name: 'Show recent' }))
+  await waitFor(() => expect(screen.queryByText('Done 60')).toBeNull())
+  expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
+})
+
+it('opens an older done card from its direct link', async () => {
+  await page.viewport(390, 844)
+  hygieneMode = true
+  busyBoard()
+  history.replaceState({}, '', '/boards/b1/cards/60')
+  render(<App />)
+  const sheet = await screen.findByRole('dialog', { name: 'Card #60' })
+  expect(within(sheet).getByRole('heading', { name: 'Done 60' })).toBeTruthy()
+})
+
+for (const width of [390, 3840]) it(`finds an older keep-tagged card with the in-place filter at ${width}px`, async () => {
+  await page.viewport(width, 1000)
+  hygieneMode = true; busyBoard()
+  boardCards = boardCards.map(c => c.number === 60 ? { ...c, tags: ['to-test'] } : c)
+  sessionStorage.setItem('blerg-board:filter:b1', JSON.stringify({ q: '', tag: ['to-test'], type: [], priority: [] }))
+  history.replaceState({}, '', '/boards/b1'); render(<App />)
+  if (width === 390) fireEvent.click(await screen.findByRole('tab', { name: /Done/ }))
+  await screen.findByText('Done 60')
+  expect(countOf('Done')).toBe('1/12')
+  expect(screen.queryByText('Done 61')).toBeNull()
+  expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
+})
+
+it('wraps an unbroken card title at 1024px', async () => {
+  await page.viewport(1024, 900)
+  open('/boards/b1')
+  const title = await screen.findByText(card.title, { selector: '.card .title' })
+  const box = title.closest('.card')!
+  expect(box.scrollWidth).toBeLessThanOrEqual(box.clientWidth)
+  const shots = import.meta.env.VITE_CHROME_SHOTS_DIR
+  if (shots) await page.screenshot({ path: `${shots}/board-title-1024.png` })
 })

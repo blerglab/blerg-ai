@@ -285,6 +285,7 @@ func TestHTTPCoreClientRedirectAndNotFound(t *testing.T) {
 		case "route":
 			http.NotFound(w, r)
 		default:
+			w.Header().Set("X-Blerg-Standing-State", "revoked")
 			http.Error(w, "not found", http.StatusNotFound)
 		}
 	}))

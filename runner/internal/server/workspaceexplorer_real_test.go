@@ -65,6 +65,7 @@ func TestWorkspaceQuickOpenRealSearchAndViewer(t *testing.T) {
 		t.Fatal(err)
 	}
 	dc.SetSandboxClones(true)
+	dc.SetWorkBranches(true) // current daemon: immutable recorded branch names
 	fx.api.hub.Register(dc)
 	fx.api.hub.SetSessionOwner(fx.sess, dc.ID)
 	if !dc.AuthorizeWorkspaceRuntime(fx.sess, binding.WorkspaceRuntimeRef) {

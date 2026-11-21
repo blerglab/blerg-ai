@@ -7,16 +7,22 @@ import (
 	"os"
 	"strings"
 
+	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+
 	"golang.org/x/sys/unix"
 )
 
 // A listing retains its complete ancestry once. Each child open revalidates
 // every edge, just like workspaceWalkOpen, without reopening the entire chain
-// (and repeatedly checking every prefix) for every directory entry.
+// (and repeatedly checking every prefix) for every directory entry. Expected
+// metadata stays fixed; cache its representation instead of formatting it again
+// for each child. Current metadata and every ancestry edge are still rechecked.
 type workspaceListingChain struct {
-	files []*os.File
-	infos []os.FileInfo
-	parts []string
+	files        []*os.File
+	infos        []os.FileInfo
+	parts        []string
+	fingerprints []string
+	identities   []protocol.WorkspaceRoot
 }
 
 func (c *workspaceListingChain) close() error {
@@ -30,17 +36,17 @@ func (c *workspaceListingChain) close() error {
 func (c *workspaceListingChain) valid() bool {
 	for i, file := range c.files {
 		info, err := file.Stat()
-		if err != nil || !os.SameFile(info, c.infos[i]) || workspaceMetadataFingerprint(info) != workspaceMetadataFingerprint(c.infos[i]) {
+		if err != nil || !os.SameFile(info, c.infos[i]) || workspaceMetadataFingerprint(info) != c.fingerprints[i] {
 			return false
 		}
 		if i == 0 {
 			continue
 		}
 		var child, parent unix.Stat_t
-		if unix.Fstatat(int(c.files[i-1].Fd()), c.parts[i-1], &child, unix.AT_SYMLINK_NOFOLLOW) != nil || workspaceUnixIdentity(child) != workspaceRootIdentity(c.infos[i]) {
+		if unix.Fstatat(int(c.files[i-1].Fd()), c.parts[i-1], &child, unix.AT_SYMLINK_NOFOLLOW) != nil || workspaceUnixIdentity(child) != c.identities[i] {
 			return false
 		}
-		if unix.Fstatat(int(file.Fd()), "..", &parent, unix.AT_SYMLINK_NOFOLLOW) != nil || workspaceUnixIdentity(parent) != workspaceRootIdentity(c.infos[i-1]) {
+		if unix.Fstatat(int(file.Fd()), "..", &parent, unix.AT_SYMLINK_NOFOLLOW) != nil || workspaceUnixIdentity(parent) != c.identities[i-1] {
 			return false
 		}
 	}
@@ -59,7 +65,7 @@ func (c *workspaceListingChain) openChild(name string) (*os.File, error) {
 	file := os.NewFile(uintptr(fd), name)
 	info, err := file.Stat()
 	var named unix.Stat_t
-	if err != nil || workspaceRootIdentity(info).Device != workspaceRootIdentity(c.infos[0]).Device || !c.valid() || unix.Fstatat(int(parent.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW) != nil || workspaceUnixIdentity(named) != workspaceRootIdentity(info) {
+	if err != nil || workspaceRootIdentity(info).Device != c.identities[0].Device || !c.valid() || unix.Fstatat(int(parent.Fd()), name, &named, unix.AT_SYMLINK_NOFOLLOW) != nil || workspaceUnixIdentity(named) != workspaceRootIdentity(info) {
 		_ = file.Close()
 		return nil, os.ErrPermission
 	}
@@ -84,6 +90,8 @@ func workspaceRetainedListing(e *LocalExplorer, name string) (*workspaceListing,
 		return nil, err
 	}
 	c.infos = append(c.infos, info)
+	c.fingerprints = append(c.fingerprints, workspaceMetadataFingerprint(info))
+	c.identities = append(c.identities, workspaceRootIdentity(info))
 	if relative != "." {
 		c.parts = strings.Split(relative, "/")
 		for i := range c.parts {
@@ -99,6 +107,8 @@ func workspaceRetainedListing(e *LocalExplorer, name string) (*workspaceListing,
 				return nil, os.ErrPermission
 			}
 			c.infos = append(c.infos, info)
+			c.fingerprints = append(c.fingerprints, workspaceMetadataFingerprint(info))
+			c.identities = append(c.identities, workspaceRootIdentity(info))
 		}
 	}
 	if !c.valid() {

@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/blerglab/blerg-ai/runner/internal/workbranch"
 	"log"
 	"net/http"
 	"time"
@@ -33,20 +34,34 @@ const assistantTextKind = "assistant_text"
 // read here would be a cheap way to make the runner do expensive work.
 const resultAssistantScanLimit = 400
 
+type childNote struct {
+	MessageID string `json:"message_id"`
+	Body      string `json:"body"`
+}
+
 // sessionResult is the documented Result schema (openapi.json). Every field is
 // emitted, including the empty ones: a broker's schema check should not have to
 // treat "absent" and "empty" as the same thing. There is deliberately no
 // callback_secret field — the secret signs webhooks and never leaves the server.
 type sessionResult struct {
-	SessionID            string `json:"session_id"`
-	Lifecycle            string `json:"lifecycle"`
-	Terminal             bool   `json:"terminal"`
-	Runtime              string `json:"runtime"`
-	Repo                 string `json:"repo"`
-	GitURL               string `json:"git_url"`
-	Branch               string `json:"branch"`
-	LastAssistantMessage string `json:"last_assistant_message"`
-	ErrorReason          string `json:"error_reason"`
+	Notes                []childNote            `json:"notes,omitempty"`
+	Truncated            bool                   `json:"truncated,omitempty"`
+	ClosedQuestions      []childQuestionOutcome `json:"closed_questions,omitempty"`
+	OpenAsks             []childOpenAsk         `json:"open_asks,omitempty"`
+	WorkerDataNotice     string                 `json:"worker_data_notice,omitempty"`
+	SyncProblem          string                 `json:"sync_problem,omitempty"`
+	RuntimeTargetID      string                 `json:"runtime_target_id,omitempty"`
+	SessionID            string                 `json:"session_id"`
+	Lifecycle            string                 `json:"lifecycle"`
+	Status               string                 `json:"status"`
+	TurnComplete         bool                   `json:"turn_complete"`
+	Terminal             bool                   `json:"terminal"`
+	Runtime              string                 `json:"runtime"`
+	Repo                 string                 `json:"repo"`
+	GitURL               string                 `json:"git_url"`
+	Branch               string                 `json:"branch"`
+	LastAssistantMessage string                 `json:"last_assistant_message"`
+	ErrorReason          string                 `json:"error_reason"`
 	// EndReason is why the session ended (a fixed code, "" while it has not
 	// or when nothing was recorded); EndedBy the kind of actor that ended it,
 	// null when none did. The actor's account is never included here.
@@ -124,15 +139,15 @@ func (a *API) runnerRuntimeAxis(sessionID, storedRuntime string) string {
 }
 
 // sessionWorkBranch is the branch a session's commits land on, when its runtime makes one. It is
-// a convention, not a column, so it is derived the same way here. Two runtimes make one: a cluster
-// pod (pushed as wip/<id>) and any sandboxed session (its own clone on wip/<id>, fetched into the
+// a persisted launch fact, with a legacy fallback for older rows. Two runtimes make one: a cluster
+// pod and any sandboxed session (its own clone, fetched into the
 // repository on the daemon's machine). A host session works in its checkout, on whatever branch is
 // there; a session with no repository has no branch. Those report "".
 func sessionWorkBranch(row *db.SessionRow) string {
 	if scratch.IsNoRepo(row.Repo) || derefOrEmpty(row.Runtime) == runnerRuntimeDaemon {
 		return ""
 	}
-	return "wip/" + row.ID
+	return workbranch.Effective(row.ID, row.WorkBranch)
 }
 
 // buildSessionResult assembles the result body for one session. It returns an
@@ -160,23 +175,29 @@ func (a *API) buildSessionResult(ctx context.Context, sessionID string, viewers 
 	}
 	lifecycle := runnerLifecycle(row.Status, runtime == "job_finished")
 	res := sessionResult{
-		SessionID:   row.ID,
-		Lifecycle:   lifecycle,
-		Terminal:    runnerLifecycleTerminal(lifecycle),
-		Runtime:     runtime,
-		Repo:        row.Repo,
-		GitURL:      derefOrEmpty(row.GitURL),
-		Branch:      sessionWorkBranch(row),
-		ErrorReason: derefOrEmpty(row.ErrorReason),
-		AutoStop:    row.AutoStop,
-		StartedAt:   row.StartedAt.UTC().Format(time.RFC3339),
-		Artifacts:   []map[string]any{},
+		SessionID:       row.ID,
+		Lifecycle:       lifecycle,
+		Status:          row.Status,
+		Terminal:        runnerLifecycleTerminal(lifecycle),
+		Runtime:         runtime,
+		RuntimeTargetID: derefOrEmpty(row.RuntimeTargetID),
+		Repo:            row.Repo,
+		GitURL:          derefOrEmpty(row.GitURL),
+		Branch:          sessionWorkBranch(row),
+		ErrorReason:     derefOrEmpty(row.ErrorReason),
+		AutoStop:        row.AutoStop,
+		StartedAt:       row.StartedAt.UTC().Format(time.RFC3339),
+		Artifacts:       []map[string]any{},
 	}
 	viewer := ""
 	if len(viewers) > 0 {
 		viewer = viewers[0]
 	}
 	res.ErrorReason = podErrorReasonFor(row, viewer, res.ErrorReason)
+	if clusterPodInterrupted(row) && ownsSession(viewer, row) {
+		recovery, _ := failureWork(ctx, a.dbPool, row)
+		res.ErrorReason += " " + recovery
+	}
 	res.WorkspaceResults = []protocol.WorkspaceMemberResult{}
 	ws, err := db.GetSessionWorkspace(ctx, a.dbPool, sessionID)
 	if err != nil {
@@ -185,22 +206,13 @@ func (a *API) buildSessionResult(ctx context.Context, sessionID string, viewers 
 	if ws != nil && ws.Kind == "folder" {
 		res.Repo, res.GitURL, res.Branch = "", "", ""
 	}
-	expectedRuntime := derefOrEmpty(row.Runtime)
-	switch expectedRuntime {
-	case "daemon":
-		expectedRuntime = "host"
-	case "docker":
-		expectedRuntime = "sandbox"
-	}
 	// A missing viewer is an internal caller, not permission to expose desktop
 	// member or recovery metadata. Callbacks supply their persisted recipient.
-	if visible && ws != nil && ws.Manifest != nil && len(viewers) > 0 && viewers[0] != "" &&
-		ws.Manifest.OwnerID == derefOrEmpty(row.SpawningAccountID) && ws.Manifest.Runtime == expectedRuntime &&
-		ownsSession(viewers[0], row) {
+	if workspaceResultVisible(visible, row, ws, viewer) {
 		res.Workspace = ws.Manifest
 		res.WorkspaceResults = ws.Results
 		if ws.Kind != "folder" && ws.Manifest.Runtime == "host" && derefOrEmpty(row.ParentSessionID) != "" {
-			res.Branch = "wip/" + row.ID
+			res.Branch = workbranch.Effective(row.ID, row.WorkBranch)
 		}
 		if res.WorkspaceResults == nil {
 			res.WorkspaceResults = []protocol.WorkspaceMemberResult{}
@@ -211,6 +223,15 @@ func (a *API) buildSessionResult(ctx context.Context, sessionID string, viewers 
 	}
 	var turnErr string
 	res.LastAssistantMessage, turnErr = a.lastTurnAnswer(ctx, sessionID)
+	// An idle screen can precede dispatch of a newly accepted input. Do not
+	// report its previous turn as complete while the new one is queued.
+	turnRows, err := db.ListAgentEventsTailKinds(ctx, a.dbPool, sessionID,
+		[]string{turnDoneKind, "user_message", "input_accepted"}, 1)
+	if err != nil {
+		return sessionResult{}, fmt.Errorf("turn state lookup: %w", err)
+	}
+	res.TurnComplete = len(turnRows) > 0 && turnRows[0].Kind == turnDoneKind
+
 	if res.ErrorReason == "" {
 		// The session did not fail, but its last turn did: that is the reason the caller lacks
 		// an answer.
@@ -227,6 +248,19 @@ func (a *API) buildSessionResult(ctx context.Context, sessionID string, viewers 
 	return res, nil
 }
 
+func workspaceResultVisible(visible bool, row *db.SessionRow, ws *db.SessionWorkspace, viewer string) bool {
+	expectedRuntime := derefOrEmpty(row.Runtime)
+	switch expectedRuntime {
+	case "daemon":
+		expectedRuntime = "host"
+	case "docker":
+		expectedRuntime = "sandbox"
+	}
+	return visible && ws != nil && ws.Manifest != nil && viewer != "" &&
+		ws.Manifest.OwnerID == derefOrEmpty(row.SpawningAccountID) && ws.Manifest.Runtime == expectedRuntime &&
+		ownsSession(viewer, row)
+}
+
 // lastTurnAnswer reads the session's last turn — the one in progress, or else the last one to end
 // (its turn_done and the events since the turn_done before it) — and returns the main agent's last
 // completed text in it. A turn that failed (stop reason "error") has no answer: the text is "" and
@@ -241,6 +275,10 @@ func (a *API) lastTurnAnswer(ctx context.Context, sessionID string) (text, failu
 		log.Printf("runner result %s: assistant event query: %v", sessionID, err)
 		return "", ""
 	}
+	return turnAnswer(rows)
+}
+
+func turnAnswer(rows []db.AgentEventRow) (text, failure string) {
 	errored, lastErr := false, ""
 scan:
 	for i, ev := range rows { // newest first

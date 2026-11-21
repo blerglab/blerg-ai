@@ -1,5 +1,10 @@
 # Cluster workspace runtime integration
 
+Get a session's recorded branch with `blerg-runner session result <id>` and use
+its `branch` value wherever `<work-branch>` appears below. For a child, pass the
+child's ID. Branch names stay fixed after a rename; never derive them from IDs
+or titles. Workspace results also report each member's branch.
+
 P3 consumes persisted P0 selections through `SessionJobSpec.Workspace` and
 private `WorkspaceMembers`. P1 owns human selection authorization. P3 never
 infers membership from a folder or from mutable repository configuration.
@@ -192,7 +197,7 @@ refuse. The approval card and unloaded Needs you review list the exact IDs.
 
 Dispatch re-reads the parent manifest and server-private contexts, rechecks the
 stored launch, then creates a fresh child manifest, volume and runtime binding.
-Each member checks out `wip/<child-id>`. Credentials are fetched afresh for the
+Each member checks out `<work-branch>`. Credentials are fetched afresh for the
 owner, and shell grants are not inherited. Resume uses the child's retained
 manifest/results/claim, never the parent PVC or a remote reconstruction fallback.
 

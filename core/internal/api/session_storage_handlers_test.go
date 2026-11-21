@@ -173,6 +173,37 @@ func TestInternalAccountStandingIsTheAccountsRealRole(t *testing.T) {
 			t.Errorf("%s: %d %s, want %s", tc.account, code, body, tc.want)
 		}
 	}
+	raw, _ := json.Marshal(map[string]any{"account": member, "include_username": true})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/internal/accounts/standing", bytes.NewReader(raw))
+	req.Header.Set("X-Internal-Key", childLimitsInternalKey)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var named struct {
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&named); err != nil || named.Username != "standing-member" {
+		t.Fatalf("branch identity = %q, %v", named.Username, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE accounts SET provider='github',provider_subject='1234567',email='example-person' WHERE id=$1`, member); err != nil {
+		t.Fatal(err)
+	}
+	githubRaw, _ := json.Marshal(map[string]any{"account": member, "include_username": true})
+	githubReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/internal/accounts/standing", bytes.NewReader(githubRaw))
+	githubReq.Header.Set("X-Internal-Key", childLimitsInternalKey)
+	githubRes, err := http.DefaultClient.Do(githubReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer githubRes.Body.Close()
+	var githubName struct {
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(githubRes.Body).Decode(&githubName); err != nil || githubName.Username != "example-person" {
+		t.Fatalf("GitHub branch username=%q, %v", githubName.Username, err)
+	}
 	if code, _ := ask(admin, "wrong"); code != http.StatusUnauthorized {
 		t.Fatalf("wrong key = %d", code)
 	}

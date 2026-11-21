@@ -43,6 +43,7 @@ func TestAutomaticCodexClusterResumeUsesOnlyPersonalCredentials(t *testing.T) {
 			backend.mu.Lock()
 			beforeJobs, beforeSecrets := len(backend.created), len(backend.createdSecrets)
 			backend.credentialFetchSessionIDs = nil
+			backend.credentialFetchStanding = nil
 			backend.credentialFetchTokenIDs = nil
 			backend.mu.Unlock()
 			if err := resumeClusterSessionStrict(ctx, api.hub, pool, resp.SessionID, limitResumePrompt, "owner", testSID); err != nil {
@@ -51,6 +52,11 @@ func TestAutomaticCodexClusterResumeUsesOnlyPersonalCredentials(t *testing.T) {
 
 			backend.mu.Lock()
 			defer backend.mu.Unlock()
+			for _, standing := range backend.credentialFetchStanding {
+				if standing {
+					t.Fatal("limit resume sent standing authority")
+				}
+			}
 			if len(backend.created) != beforeJobs+1 || len(backend.createdSecrets) != beforeSecrets+1 {
 				t.Fatal("resume did not create exactly one replacement Job and credential Secret")
 			}

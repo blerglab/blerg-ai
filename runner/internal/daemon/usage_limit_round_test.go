@@ -110,7 +110,7 @@ func TestClaudeAssistantLimitTextCannotSchedule(t *testing.T) {
 		em := &collectEmitter{}
 		d := newClaudeCodeDriver("", "", "", em, nil)
 		d.emitTurnMessage(agent.UserMessagePayload{Text: "continue", Source: "chat"})
-		d.onLine(&ccProc{}, []byte(line))
+		d.onLine(claudeTestProc(t, d, &ccProc{}), []byte(line))
 		if contains(em.kinds(), "usage_limit") {
 			t.Fatal("ordinary assistant/tool text scheduled a continuation")
 		}

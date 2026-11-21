@@ -24,7 +24,7 @@ export function workspaceProvider(sessionId: string, openFile: (path: string) =>
         const query = new URLSearchParams({ op: 'search', path: '', filter })
         const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/workspace?${query}`, { signal })
         if (!response.ok) {
-          if (response.status === 404) throw new Error('Workspace search is unavailable for this session.')
+          if (response.status === 404) throw new Error('Workspace search is unavailable for this workspace.')
           if (response.status === 403) throw new Error('You do not have permission to search this workspace.')
           throw new Error('Workspace search is unavailable or busy. Try again.')
         }

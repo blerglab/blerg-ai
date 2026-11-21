@@ -1,10 +1,32 @@
 import { describe, expect, it } from 'vitest'
 import {
-  CODE_THEMES, CODE_TOKEN_KEYS, CODE_TOKEN_NAMES, DEFAULT_CODE_COLOURS, applyCodeColours, applyCodeTheme, codeColourVars,
+  currentCodeMode, CODE_THEMES, CODE_TOKEN_KEYS, CODE_TOKEN_NAMES, DEFAULT_CODE_COLOURS, applyCodeColours, applyCodeTheme, codeColourVars,
   codeThemes, isHexColour, normaliseCodeColours, resolveCodeTokens, validateCodeColours,
 } from './codeThemes'
+import { THEMES } from '../../../settings/theme'
+
+// Every real theme id (packages/settings/theme.ts) and the mode it should resolve to — read from
+// the shared source of truth rather than duplicating the list, so a theme added there is covered
+// here automatically (BLG-474 review: a hand-copied list previously missed every bundled scheme).
+const EXPECTED_MODE: Record<string, 'light' | 'dark'> = {
+  dark: 'dark', light: 'light', 'colorblind-dark': 'dark', 'colorblind-light': 'light', 'high-contrast': 'dark',
+  'catppuccin-mocha': 'dark', 'catppuccin-latte': 'light', dracula: 'dark', nord: 'dark', 'tokyo-night': 'dark',
+}
 
 describe('codeThemes', () => {
+  it('uses the preset mode for syntax colors even when the OS disagrees', () => {
+    const original = document.documentElement.getAttribute('data-theme')
+    try {
+      for (const { id } of THEMES) {
+        if (id === 'system') continue
+        document.documentElement.setAttribute('data-theme', id)
+        expect(currentCodeMode(), id).toBe(EXPECTED_MODE[id])
+      }
+    } finally {
+      if (original === null) document.documentElement.removeAttribute('data-theme')
+      else document.documentElement.setAttribute('data-theme', original)
+    }
+  })
   it('lists the ten themes, Blerg first', () => {
     expect(CODE_THEMES.map(x => x.id)).toEqual([
       'blerg', 'github-dark', 'github-light', 'one-dark', 'dracula', 'monokai', 'solarized-dark', 'solarized-light', 'nord', 'gruvbox-dark',

@@ -5,10 +5,16 @@ import type { CSSProperties } from 'react'
 
 /** Every token of the contract, by its property name. */
 export const TOKEN_NAMES = {
+  documentBg: '--chat-document-bg',
+  mediaBg: '--chat-media-bg',
+  backdrop: '--chat-backdrop',
+  shadowOverlay: '--chat-shadow-overlay',
   bg: '--chat-bg',
   surface: '--chat-surface',
   surface2: '--chat-surface-2',
   fg: '--chat-fg',
+  chartSequentialLow: '--chat-chart-sequential-low',
+  chartSequentialHigh: '--chat-chart-sequential-high',
   muted: '--chat-muted',
   muted2: '--chat-muted-2',
   accent: '--chat-accent',
@@ -21,6 +27,7 @@ export const TOKEN_NAMES = {
   info: '--chat-info',
   danger: '--chat-danger',
   border: '--chat-border',
+  buttonBg: '--chat-button-bg',
   radius: '--chat-radius',
   font: '--chat-font',
   fontMono: '--chat-font-mono',

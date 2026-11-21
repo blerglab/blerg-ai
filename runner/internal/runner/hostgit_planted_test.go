@@ -35,7 +35,7 @@ func TestPodGitIgnoresPlantedConfiguration(t *testing.T) {
 	}
 	probe := hostgittest.Plant(t, filepath.Join(workDir, ".git"))
 	hostgittest.Attributes(t, workDir)
-	PushWip(workDir, "planted")
+	PushWip(workDir, "planted", "", false)
 	probe.Check(t)
 	// The push reached the planted origin: its receive-pack ran none of the origin's hooks or
 	// configured commands either (the pod names its own serving command).
@@ -61,7 +61,7 @@ func TestPodGitUsesOnlyTheCloneURLsTransport(t *testing.T) {
 	if out, err := commit.CombinedOutput(); err != nil {
 		t.Fatalf("commit: %v: %s", err, out)
 	}
-	PushWip(workDir, "ext")
+	PushWip(workDir, "ext", "", false)
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatal("an ext:: remote ran")
 	}

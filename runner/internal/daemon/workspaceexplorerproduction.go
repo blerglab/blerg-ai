@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -47,16 +46,29 @@ func (w *LocalWorkspace) runtimeExplorer(ctx context.Context, d *DockerWorkspace
 	if err := w.authorize(ctx); err != nil {
 		return nil, err
 	}
-	binding := *w.state.Binding
-	start := WorkspaceExplorerStart{SessionID: w.state.Session, Manifest: w.state.Launch, Runtime: binding.WorkspaceRuntimeRef, Binding: &binding, GitTargets: map[string]string{}}
-	for _, member := range w.state.Members {
-		start.GitTargets[member.Member.ID] = member.Source.Objects
-	}
-	remote := newDockerWorkspaceExplorer(d.Context, d.ID, start)
+	remote := newDockerWorkspaceExplorer(d.Context, d.ID, w.explorerStart())
 	if err := remote.startHelper(ctx); err != nil {
 		return nil, err
 	}
-	return &boundWorkspaceExplorer{workspace: w, remote: remote}, nil
+	w.reader = &boundWorkspaceExplorer{workspace: w, remote: remote}
+	return w.reader, nil
+}
+
+func (w *LocalWorkspace) explorerStart() WorkspaceExplorerStart {
+	binding := *w.state.Binding
+	start := WorkspaceExplorerStart{SessionID: w.state.Session, Manifest: w.state.Launch, Runtime: binding.WorkspaceRuntimeRef, Binding: &binding, GitTargets: map[string]string{}}
+	for _, member := range w.state.Members {
+		if !member.Source.OwnObjects {
+			start.GitTargets[member.Member.ID] = member.Source.Objects
+		}
+	}
+	return start
+}
+
+// installMembership moves the in-container helper to a committed revision. Every
+// surviving member must keep its pinned identity across the replacement.
+func (r *boundWorkspaceExplorer) installMembership(ctx context.Context, start WorkspaceExplorerStart) error {
+	return r.remote.installMembership(ctx, start)
 }
 func (r *boundWorkspaceExplorer) run(ctx context.Context, ref protocol.WorkspaceRuntimeRef, operation func()) string {
 	w := r.workspace
@@ -64,16 +76,30 @@ func (r *boundWorkspaceExplorer) run(ctx context.Context, ref protocol.Workspace
 		return "busy"
 	}
 	defer w.mu.Unlock()
-	if !ref.Matches(w.state.Binding) || w.state.Stopped || w.state.StopRequested || w.state.Unavailable || w.authorize == nil || ctx.Err() != nil || w.authorize(ctx) != nil {
+	if !ref.Matches(w.state.Binding) || w.state.Stopped || w.state.StopRequested || w.state.Unavailable || w.authorize == nil {
+		logDaemonFailure("workspace read binding refused", nil)
+		return "unavailable"
+	}
+	if err := ctx.Err(); err != nil {
+		logDaemonFailure("workspace read context", err)
+		return "unavailable"
+	}
+	if err := w.authorize(ctx); err != nil {
+		logDaemonFailure("workspace read authority", err)
 		return "unavailable"
 	}
 	operation()
-	if r.remote.failed {
+	if r.remote.failed && !r.remote.installFailed {
 		w.state.Unavailable = true
 		_ = w.save()
 		return "unavailable"
 	}
-	if ctx.Err() != nil || w.authorize(ctx) != nil {
+	if err := ctx.Err(); err != nil {
+		logDaemonFailure("workspace reply context", err)
+		return "unavailable"
+	}
+	if err := w.authorize(ctx); err != nil {
+		logDaemonFailure("workspace reply authority", err)
 		return "unavailable"
 	}
 	return ""
@@ -206,6 +232,47 @@ func (r *authorizedHostExplorer) ReadFile(ctx context.Context, req protocol.Read
 	}
 	return result
 }
+
+// installMembership replaces the reader with one bound to a committed revision.
+// Its readers were canceled and joined by the fence, and resume only after this.
+func (r *authorizedHostExplorer) installMembership(state workspacePrivateManifest) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || state.Binding == nil {
+		return errors.New("host reader closed")
+	}
+	if r.binding == *state.Binding {
+		return nil // a retry after a later step failed
+	}
+	live := func() bool { return !r.closed }
+	var next WorkspaceExplorer
+	var err error
+	if hostStateVirtual(state) {
+		sources := map[string]HostWorkspaceSource{}
+		for _, source := range state.Sources {
+			sources[source.Member.ID] = HostWorkspaceSource{Path: source.Path, Root: source.RootIdentity}
+		}
+		next, err = NewVirtualHostExplorer(state.Root, state.Launch, *state.Binding, sources, live)
+	} else {
+		next, err = NewLocalExplorer(state.Root, state.Launch, *state.Binding, live)
+	}
+	if err != nil {
+		return err
+	}
+	if c, ok := r.reader.(io.Closer); ok {
+		_ = c.Close()
+	}
+	r.reader, r.binding = next, *state.Binding
+	aliases := map[string]string{}
+	if !hostStateVirtual(state) {
+		aliases[state.Root] = ""
+	}
+	for _, source := range state.Sources {
+		aliases[source.Path] = source.Member.Path
+	}
+	r.aliases = aliases
+	return nil
+}
 func (r *authorizedHostExplorer) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -228,6 +295,9 @@ func (m *Manager) prepareHostWorkspace(ctx context.Context, msg protocol.SpawnSe
 // Keep the platform refusal ahead of selection pinning, journaling and authority
 // allocation. The seam exercises Darwin admission on Linux without enabling it.
 func (m *Manager) prepareHostWorkspaceForPlatform(ctx context.Context, msg protocol.SpawnSession, platform string) (string, WorkspaceExplorer, error) {
+	if err := recordWorkBranch(msg); err != nil {
+		return "", nil, err
+	}
 	if !protocol.WorkspaceRuntimeEnabled("host", platform) {
 		return "", nil, errors.New("workspace sessions are not supported on macOS hosts yet")
 	}
@@ -383,15 +453,7 @@ func (m *Manager) rebindResumedSelection(ctx context.Context, state workspacePri
 		sources = append(sources, source.Path)
 	}
 	if err := m.discovery.RebindResumed(ctx, state.Launch, state.Root, sources); err != nil {
-		log.Printf("agent session %s: resumed, but it cannot start host children: %v", state.Session, err)
-	}
-}
-
-// Terminal sandboxes use the same in-container legacy reader as agent sessions.
-func (m *Manager) bindTerminalExplorer(id string) {
-	binding := m.workspaceFileBinding(id)
-	if binding.inRuntimeOnly && binding.live != nil {
-		m.BindWorkspaceExplorer(id, &legacySandboxExplorer{id: id, alias: binding.root, live: binding.live})
+		logDaemonFailure("resume host children binding", err)
 	}
 }
 

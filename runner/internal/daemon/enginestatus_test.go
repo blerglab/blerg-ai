@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -384,4 +385,50 @@ func TestEngineCheckHandlerAnswersAndKicks(t *testing.T) {
 	if res.RequestID != "abc" || res.Type != "engine_check_result" || len(res.Statuses) != 1+len(engineOrder) || res.AvailableEngines == nil {
 		t.Fatalf("%+v", res)
 	}
+}
+
+// Exercise the real capture command, rather than replacing loginShellCommand.
+// The fixture mirrors a profile sourcing an rc file that loads nvm.
+func TestLoginPathCapturesNvmFirstEntry(t *testing.T) {
+	home, _ := fakeEngineHost(t)
+	nodeBin := filepath.Join(home, ".nvm", "versions", "node", "v22.12.0", "bin")
+	writeExe(t, filepath.Join(nodeBin, "node"), "echo fake-node")
+	writeEngineFile(t, filepath.Join(home, ".nvm", "nvm.sh"), `PATH="$HOME/.nvm/versions/node/v22.12.0/bin:/usr/bin:/bin"; export PATH`)
+	writeEngineFile(t, filepath.Join(home, ".bashrc"), `case $- in *i*) ;; *) return ;; esac
+. "$HOME/.nvm/nvm.sh"`)
+	writeEngineFile(t, filepath.Join(home, ".profile"), `. "$HOME/.bashrc"`)
+	shell := filepath.Join(home, "shell")
+	writeExe(t, shell, `flags="$1"
+shift
+case "$flags" in
+  -ilc) exec /bin/bash -ic '. "$HOME/.profile"; eval "$1"' fixture "$1" ;;
+  -lc) exec /bin/bash -c '. "$HOME/.profile"; eval "$1"' fixture "$1" ;;
+  *) exit 2 ;;
+esac`)
+	t.Setenv("SHELL", shell)
+	noninteractive, err := loginShellCommand(context.Background(), shell, false)
+	if err != nil || strings.Contains(string(noninteractive), nodeBin) {
+		t.Fatalf("noninteractive shell loaded guarded nvm: %q, %v", noninteractive, err)
+	}
+	state := t.TempDir()
+	added, saveErr, err := redetectPath(context.Background(), state)
+	if err != nil || saveErr != nil {
+		t.Fatalf("redetect: %v, save: %v", err, saveErr)
+	}
+	if !slices.Contains(added, nodeBin) {
+		t.Fatalf("nvm bin missing: %q", added)
+	}
+	assertNode := func() {
+		t.Helper()
+		out, err := exec.CommandContext(t.Context(), "node").Output()
+		if err != nil || string(out) != "fake-node\n" {
+			t.Fatalf("node: %q, %v", out, err)
+		}
+	}
+	assertNode()
+	if err := os.Setenv("PATH", "/usr/bin:/bin"); err != nil {
+		t.Fatal(err)
+	}
+	ApplySavedLoginPath(state)
+	assertNode()
 }

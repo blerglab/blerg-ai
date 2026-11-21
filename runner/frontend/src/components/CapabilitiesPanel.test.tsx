@@ -213,7 +213,7 @@ describe('tool schema refresh capability', () => {
   it('uses adapter metadata even for an unfamiliar engine name', () => {
     render(<CapabilitiesPanel report={{ ...report, payload: { ...report.payload, engine: 'fixture-engine', tool_schema_refresh: 'new_session' } }} onClose={() => {}} />)
     fireEvent.click(screen.getByRole('button', { name: 'About this list' }))
-    expect(screen.getByTestId('tool-schema-guidance').textContent).toContain('Start a new session and select the current MCP connections and tools')
+    expect(screen.getByTestId('tool-schema-guidance').textContent).toContain('Start a new workspace and select the current MCP connections and tools')
   })
 
   it('does not claim legacy reports can reload tools', () => {

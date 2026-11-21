@@ -70,7 +70,8 @@ func StartReconcileLoop(ctx context.Context, st db.Store, svc *Service, org, ghT
 // "github"-provider account, flip accounts.disabled_at both ways to match:
 // a member no longer listed gets disabled (RevokeAccountEverywhere, then
 // disabled_at = now()); an account previously disabled that IS listed again
-// gets re-enabled (Unrevoke "sub", then disabled_at = NULL). Each branch is
+// gets re-enabled, unless an administrator disabled it. Re-enabling and removing its
+// subject revocation run atomically under the account session fence. Each branch is
 // gated on the account's *current* disabled state, so a tick that observes
 // no change (still a member and still enabled, or still gone and already
 // disabled) does nothing — re-running the same listing twice must not
@@ -150,13 +151,12 @@ func reconcileOnce(ctx context.Context, st db.Store, svc *Service, org, ghToken 
 		member := a.login != "" && members[a.login]
 		switch {
 		case member && a.disabled:
-			// Un-revoke FIRST: if it fails we retry next tick because disabled_at is still set.
-			if err := svc.Unrevoke(ctx, "sub", a.id); err != nil {
-				log.Printf("identity: reconcile: un-revoke account %s: %v", a.id, err)
+			changed, err := svc.reenableOrgAccount(ctx, a.id)
+			if err != nil {
+				log.Printf("identity: reconcile: re-enable account %s: %v", a.id, err)
 				continue
 			}
-			if _, err := st.Pool().Exec(ctx, `UPDATE accounts SET disabled_at = NULL WHERE id = $1`, a.id); err != nil {
-				log.Printf("identity: reconcile: re-enable account %s: %v", a.id, err)
+			if !changed {
 				continue
 			}
 			log.Printf("identity: reconcile: re-enabled account %s (login %q) — back in org %s", a.id, a.login, org)
@@ -220,4 +220,28 @@ func listOrgMembers(ctx context.Context, ghClient *http.Client, org, token strin
 		}
 	}
 	return members, nil
+}
+
+// Reconciliation may reverse its own disable, never an administrator's. The session fence
+// and guarded update serialize this with an administrator disabling the same account.
+func (s *Service) reenableOrgAccount(ctx context.Context, id string) (bool, error) {
+	tx, err := s.st.Pool().Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := s.lockAccountSessions(ctx, tx, id); err != nil {
+		return false, err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE accounts SET disabled_at=NULL WHERE id=$1 AND NOT admin_disabled`, id)
+	if err != nil {
+		return false, err
+	}
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM revocations WHERE kind='sub' AND value=$1`, id); err != nil {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
 }

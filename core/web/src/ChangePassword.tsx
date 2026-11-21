@@ -155,7 +155,7 @@ export default function ChangePassword() {
           return;
         }
         if (refreshHere()) return;
-        setError("Your session expired. Reload the page and try again.");
+        setError("Your sign-in expired. Reload the page and try again.");
         return;
       }
       if (!res.ok) {

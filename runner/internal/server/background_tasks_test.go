@@ -31,6 +31,7 @@ func TestBackgroundTasksCountedOnIngest(t *testing.T) {
 	hub.RegisterBrowser(browser)
 	dc := &DaemonConn{ID: daemonID, send: make(chan []byte, 16)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	ingest := func(id, kind string) {
 		taskID := "t"
 		if strings.HasSuffix(id, "000000000002") {

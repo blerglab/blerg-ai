@@ -99,6 +99,15 @@ func TestLocalWorkspaceTransportLostCompletionReceipt(t *testing.T) {
 	if err = authority.Bind(t.Context(), launch, binding); err != nil {
 		t.Fatal(err)
 	}
+	// Repeated cleanup of an immutable mismatched journal is terminal, too.
+	replaced := binding
+	replaced.Root.Inode++
+	for _, recoverWorkspace := range []func(context.Context, protocol.SupervisorLaunch, protocol.WorkspaceRuntimeBinding) (protocol.SupervisorLaunch, error){authority.Recover, authority.CleanupRecover} {
+		_, err = recoverWorkspace(t.Context(), launch, replaced)
+		if refused := (*daemon.WorkspaceRefusedError)(nil); !errors.As(err, &refused) {
+			t.Fatalf("replaced binding must stop retries across the wire: %v", err)
+		}
+	}
 	final := protocol.WorkspaceFinalization{Binding: binding, Message: protocol.SessionEnded{Type: "session_ended", SessionID: f.sess}, Results: []protocol.WorkspaceMemberResult{{WorkspaceMemberRef: protocol.WorkspaceMemberRef{LaunchGeneration: m.LaunchGeneration, MemberID: "one"}, Pending: true, SyncError: "retained fixture"}}}
 	short, stop := context.WithTimeout(t.Context(), 300*time.Millisecond)
 	_, err = authority.CommitFinal(short, launch, final)
@@ -118,6 +127,11 @@ func TestLocalWorkspaceTransportLostCompletionReceipt(t *testing.T) {
 	err = authority.Current(t.Context(), launch, binding)
 	if refused := (*daemon.WorkspaceRefusedError)(nil); !errors.As(err, &refused) {
 		t.Fatalf("ordinary Current on an ended session must be a definitive refusal: %v", err)
+	}
+	// A heartbeat's stale journal can refer to a session that has been deleted.
+	_, err = authority.TrustedLaunch(t.Context(), newUUID())
+	if refused := (*daemon.WorkspaceRefusedError)(nil); !errors.As(err, &refused) {
+		t.Fatalf("unknown session must stop retries across the wire: %v", err)
 	}
 	final.Message.ExitCode = 1
 	if _, err = authority.CommitFinal(t.Context(), launch, final); err == nil {

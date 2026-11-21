@@ -1,0 +1,24 @@
+Failure rule
+============
+Initial-state database collection has a five-second deadline, including pool acquisition and SQL lock waits. Delivery projection and the final ownership fence are bounded too. A canceled, timed out, or failed query logs a safe typed cause through the shared failure recorder (with repeat suppression). Failed SQL collection or delivery closes the socket for reconnect; it must not replace complete client history with an empty or partial list. Malformed optional workspace manifests/results are omitted per session, with one safe session-id/decode diagnostic; the conversation remains listed.
+
+Client dependencies inspected before implementation
+==================================================
+- runner/frontend/src/hooks/useSessionStore.ts:119 replaces the whole session store on every initial_state. Missing rows also participate in desktop-access invalidation.
+- runner/frontend/src/components/SessionList.tsx selects starred, automated, active, archived and stopped/error history from that store. Its search preserves a parent when a child matches. The history section renders old sessions from the same loaded list.
+- runner/frontend/src/lib/sessionSelection.ts reads only the session store, selects all history/archive sections and searches via sessionTree.ts; there is no REST pagination fallback.
+- SessionList routing resolves the root session from that store, including parent/child links.
+- Persisted unread and starred values must survive refresh/reconnect. Workspace manifests/results and pending repository requests must retain the shared mapper's projection and owner restrictions.
+- Message sessions absent from the initial snapshot are looked up with the same bounded context, preserving questions created mid-connect. Initial-state detection parses the top-level envelope type, never nested payload text.
+- Messages seed open/recent threads and Needs you; answerability depends on owner, child escalation, person-required state and failure alerts.
+- This path has no older-session pagination. Recent-only scoping would remove established visible history and search results.
+
+Scope decision
+==============
+Keep every authorized session, including old and archived rows, in existing order. Preserve cross-account visibility of public conversations. Exclude other accounts' private rows in SQL. No pagination, UI or protocol change. Batch metadata at collection and rebuild a fresh read projection for each delivery check; retain the final desktop ownership fence.
+
+Reproduction
+============
+TestInitialStateSeededConnect in initial_state_performance_test.go seeds an isolated database with 1,000 sessions (750 visible to the fixture account), 100 asks, mixed runtime/privacy/status/unread/starred/archive state, five workspaces, a current membership revision, a legacy reader attachment and five pending membership requests. It compares all visible SessionInfo fields and message answerability with the established per-row mappers, then measures three real WebSocket connections including delivery-time privacy checks. Its application-pool query counter excludes the separate advisory-lock pool. Its query-count bound detects the N+1 regression without a scheduler-sensitive latency gate.
+
+The companion failure tests cover a failed query, a table lock under a caller deadline, a table lock under the internal deadline and privacy-safe, rate-limited cause logging.

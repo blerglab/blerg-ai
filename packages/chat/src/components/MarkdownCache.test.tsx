@@ -1,3 +1,4 @@
+import { Profiler } from 'react'
 import { render } from '@testing-library/react'
 import { beforeEach, expect, it } from 'vitest'
 import Markdown, { markdownCacheForTest } from './Markdown'
@@ -43,4 +44,13 @@ it('stays within its size bound and never keeps a huge text', () => {
   expect(markdownCacheForTest.misses()).toBe(2)
   for (let i = 0; i < 400; i++) render(<Markdown text={`entry ${i} ${'y'.repeat(20_000)}`} />).unmount()
   expect(markdownCacheForTest.chars()).toBeLessThanOrEqual(4_000_000)
+})
+
+// Text links need no DOM destination for an image Retry control. A ref-state update
+// for every link otherwise schedules a second commit on every transcript mount.
+it('mounts ordinary links without a nested update', () => {
+  const phases: string[] = []
+  const view = render(<Profiler id="links" onRender={(_id, phase) => phases.push(phase)}><Markdown text="[First](https://example.com) and [Second](https://example.org)" /></Profiler>)
+  expect(view.container.querySelectorAll('a')).toHaveLength(2)
+  expect(phases).toEqual(['mount'])
 })

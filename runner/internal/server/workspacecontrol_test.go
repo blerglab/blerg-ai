@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
@@ -166,6 +167,11 @@ func TestLocalWorkspaceCurrentRefusesOnlyDefinitively(t *testing.T) {
 	if r := current(launch.Launch, other); r.OK || r.Refused == "" {
 		t.Fatalf("a replaced runtime binding must be refused definitively: %+v", r)
 	}
+	for _, operation := range []string{"recover", "cleanup_recover"} {
+		if r := call(protocol.LocalWorkspaceControl{Operation: operation, Launch: launch.Launch, Binding: other}); r.OK || r.Refused == "" {
+			t.Fatalf("%s must definitively refuse a replaced binding: %+v", operation, r)
+		}
+	}
 	// A reconnect the daemon has not yet recovered is not a verdict.
 	dc.DesktopGeneration = newUUID()
 	if err := db.WithDesktopFence(t.Context(), f.pool, dc.ID, func(ctx context.Context) error {
@@ -188,5 +194,58 @@ func TestLocalWorkspaceCurrentRefusesOnlyDefinitively(t *testing.T) {
 	}
 	if r := current(recovered.Launch, binding); r.OK || r.Refused == "" {
 		t.Fatalf("an ended session must be refused definitively: %+v", r)
+	}
+}
+
+func TestLocalWorkspaceUnknownSessionIsTerminal(t *testing.T) {
+	f := newTopicFx(t)
+	dc := workspaceOwnedDesktop(t, f.api.hub, f.pool, topicOwner, "unknown-workspace-desktop")
+	var reply protocol.LocalWorkspaceControlResult
+	err := db.WithDesktopFence(t.Context(), f.pool, dc.ID, func(ctx context.Context) error {
+		reply = f.api.hub.localWorkspaceControl(ctx, f.pool, dc, protocol.LocalWorkspaceControl{RequestID: newUUID(), SessionID: newUUID(), Operation: "manifest"})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.OK || reply.Refused == "" {
+		t.Fatalf("unknown session was retryable: %+v", reply)
+	}
+}
+
+func TestLocalWorkspaceExpiredDesktopCannotRetireUnknownSession(t *testing.T) {
+	f := newTopicFx(t)
+	dc := workspaceOwnedDesktop(t, f.api.hub, f.pool, topicOwner, "expired-workspace-desktop")
+	dc.DesktopBinding.ExpiresAt = time.Now().Add(-time.Minute)
+	var reply protocol.LocalWorkspaceControlResult
+	err := db.WithDesktopFence(t.Context(), f.pool, dc.ID, func(ctx context.Context) error {
+		reply = f.api.hub.localWorkspaceControl(ctx, f.pool, dc, protocol.LocalWorkspaceControl{RequestID: newUUID(), SessionID: newUUID(), Operation: "manifest"})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.OK || reply.Refused != "" {
+		t.Fatalf("expired desktop made a terminal verdict: %+v", reply)
+	}
+}
+
+func TestLocalWorkspaceForeignSessionIsTerminal(t *testing.T) {
+	f := newTopicFx(t)
+	dc := workspaceOwnedDesktop(t, f.api.hub, f.pool, topicOwner, "foreign-workspace-desktop")
+	other := workspaceOwnedDesktop(t, f.api.hub, f.pool, topicOwner, "other-workspace-desktop")
+	if _, err := f.pool.Exec(t.Context(), `UPDATE sessions SET daemon_id=$2,spawning_account_id=$3 WHERE id=$1`, f.sess, other.ID, topicOwner); err != nil {
+		t.Fatal(err)
+	}
+	var reply protocol.LocalWorkspaceControlResult
+	err := db.WithDesktopFence(t.Context(), f.pool, dc.ID, func(ctx context.Context) error {
+		reply = f.api.hub.localWorkspaceControl(ctx, f.pool, dc, protocol.LocalWorkspaceControl{RequestID: newUUID(), SessionID: f.sess, Operation: "manifest"})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.OK || reply.Refused == "" {
+		t.Fatalf("foreign journal remained retryable: %+v", reply)
 	}
 }

@@ -11,7 +11,7 @@ import (
 )
 
 var supportedCardSearchParams = []string{
-	"archived", "column", "cursor", "field.{key}", "include_archived", "limit", "page", "priority", "q", "tag", "type",
+	"release_id", "archived", "column", "cursor", "field.{key}", "include_archived", "limit", "page", "priority", "q", "tag", "type", "size", "risk", "complexity",
 }
 
 // Both card endpoints use the same filters; columns are repeatable (OR).
@@ -42,8 +42,8 @@ func parseCardSearchParams(boardID string, q url.Values) (db.SearchParams, error
 		limit = n
 	}
 	params := db.SearchParams{
-		BoardID: boardID, Query: q.Get("q"), Type: q.Get("type"),
-		Tag: q.Get("tag"), Priority: q.Get("priority"), Columns: q["column"],
+		ReleaseID: q.Get("release_id"), BoardID: boardID, Query: q.Get("q"), Type: q.Get("type"),
+		Size: q.Get("size"), Risk: q.Get("risk"), Complexity: q.Get("complexity"), Tag: q.Get("tag"), Priority: q.Get("priority"), Columns: q["column"],
 		IncludeArchived: q.Get("include_archived") == "1", ArchivedOnly: q.Get("archived") == "1", Limit: limit,
 		Fields: map[string]string{},
 	}

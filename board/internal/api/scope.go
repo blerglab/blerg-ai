@@ -61,8 +61,17 @@ type routeScope struct {
 
 // routeScopes is keyed by the exact mux pattern.
 var routeScopes = map[string]routeScope{
-	"GET /api/board-key-suggestion":                 {scopeDeny, "instance-wide availability for board creation; requires unscoped board.admin"},
-	"GET /api/boards/{id}/cards/by-number/{number}": {scopeBoard, "one card on this board, including archived cards; requires card.read and principal redaction"},
+	"GET /api/boards/{id}/automation/identity":       {scopeBoard, "only the stored automation credential owner name; requires card.read on this board"},
+	"DELETE /api/boards/{id}/releases/{release}":     {scopeBoard, "release planning on one board"},
+	"GET /api/boards/{id}/burn":                      {scopeBoard, "milestone progress on one board"},
+	"GET /api/boards/{id}/releases":                  {scopeBoard, "release planning on one board"},
+	"POST /api/boards/{id}/releases":                 {scopeBoard, "release planning on one board"},
+	"GET /api/boards/{id}/releases/{release}":        {scopeBoard, "release planning on one board"},
+	"PATCH /api/boards/{id}/releases/{release}":      {scopeBoard, "release planning on one board"},
+	"POST /api/boards/{id}/releases/{release}/close": {scopeBoard, "release planning on one board"},
+	"POST /api/boards/{id}/metadata-approved":        {scopeBoard, "one signed approved metadata patch"},
+	"GET /api/board-key-suggestion":                  {scopeDeny, "instance-wide availability for board creation; requires unscoped board.admin"},
+	"GET /api/boards/{id}/cards/by-number/{number}":  {scopeBoard, "one card on this board, including archived cards; requires card.read and principal redaction"},
 
 	"POST /api/boards/{id}/file-card":              {scopeBoard, "one approved card, signed intent/digest and account bound; no other permission granted"},
 	"GET /api/boards/{id}/run-targets":             {scopeBoard, "execution targets for this board; handler requires card.write and only its automation owner can choose"},
@@ -76,6 +85,8 @@ var routeScopes = map[string]routeScope{
 	"GET /openapi.json":                            {scopePublic, "static spec"},
 	"GET /ws":                                      {scopeSelf, "handleWS requires card.read on the named board (token scoped elsewhere: 403) before upgrading"},
 	"GET /api/me":                                  {scopeSelf, "returns the caller's own identity, incl. its board_id"},
+	"GET /api/me/theme":                            {scopeDeny, "account theme requires a human browser session"},
+	"PUT /api/me/theme":                            {scopeDeny, "account theme requires a human browser session"},
 	"GET /api/boards":                              {scopeSelf, "handler filters the list to the token's board"},
 	"POST /api/boards":                             {scopeDeny, "creating a board is instance-wide"},
 	"POST /api/boards/create-approved":             {scopeDeny, "one approved board, signed intent/digest and account bound; never a board-scoped token"},
@@ -97,6 +108,8 @@ var routeScopes = map[string]routeScope{
 	"GET /api/boards/{id}/columns":                {scopeBoard, "columns of the board"},
 	"POST /api/boards/{id}/columns":               {scopeBoard, "create column"},
 	"GET /api/boards/{id}/cards":                  {scopeBoard, "cards of the board"},
+	"POST /api/boards/{id}/archive-preview":       {scopeBoard, "preview board retention; requires board admin"},
+	"GET /api/boards/{id}/cards/view":             {scopeBoard, "recent cards and older done counts within the board"},
 	"POST /api/boards/{id}/cards":                 {scopeBoard, "create card"},
 	"GET /api/boards/{id}/cards/search":           {scopeBoard, "search within the board"},
 	"GET /api/boards/{id}/schema":                 {scopeBoard, "field schema"},

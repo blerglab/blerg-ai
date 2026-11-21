@@ -62,6 +62,12 @@ export function waitLabel(since: number | null, now: number): string {
   return `waiting ${h} h${min % 60 ? ` ${min % 60} min` : ''}`
 }
 
+/** A question's effect on the agent, shared by the queue and Needs you. */
+export function questionWaitText(noWait?: boolean, waiterEnded?: boolean): string {
+  return waiterEnded ? 'The agent stopped waiting. Your answer will be sent as a message.'
+    : noWait ? 'The agent keeps working while you decide.' : 'The agent is waiting for your answer.'
+}
+
 /** "12 min", "3 h 4 min", "2 d 5 h". */
 export function lifetimeLabel(ms: number): string {
   const min = Math.floor(Math.max(0, ms) / 60_000)
@@ -154,6 +160,6 @@ export function runningWork(o: {
 export function runningWorkLabel(inside: number, children: number): string {
   return [
     inside > 0 ? `${inside} ${inside === 1 ? 'subagent or background task' : 'subagents and background tasks'}` : '',
-    children > 0 ? `${children} child ${children === 1 ? 'session' : 'sessions'}` : '',
+    children > 0 ? `${children} ${children === 1 ? 'worker' : 'workers'}` : '',
   ].filter(Boolean).join(' · ')
 }

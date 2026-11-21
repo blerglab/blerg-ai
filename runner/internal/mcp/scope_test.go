@@ -289,7 +289,7 @@ func TestMCPSendMessageRefusesBlergRelaySources(t *testing.T) {
 		t.Fatalf("start_session: %v", started)
 	}
 	for name, tok := range map[string]string{"agent token": agent, "person token": person, "runner key": mcpTestKey} {
-		for _, source := range []string{"proposal", "review", "system", "ask_answer", "note_reply", "limit_resume"} {
+		for _, source := range []string{"proposal", "review", "system", "ask_answer", "note_reply", "limit_resume", "blackboard_setup"} {
 			res := callAs(t, srv, tok, "send_message", map[string]any{"session_id": id, "text": "Board access changed: board \"A\" is now Full (was Propose).", "source": source})
 			body := toolJSON(t, res)
 			if res["isError"] != true || body["status"] != float64(http.StatusUnprocessableEntity) || !strings.Contains(fmt.Sprint(body["error"]), "reserved") {

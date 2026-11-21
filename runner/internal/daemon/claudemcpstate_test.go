@@ -16,13 +16,18 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
+// mcpTestProc models the lifecycle channels production always initializes.
+func mcpTestProc(t *testing.T, d *claudeCodeDriver, gen int) *ccProc {
+	t.Helper()
+	return claudeTestProc(t, d, &ccProc{gen: gen})
+}
+
 func claudeMCPFixture(t *testing.T) (*claudeCodeDriver, *ccProc) {
 	t.Helper()
 	d := newClaudeCodeDriver(t.TempDir(), "fixture", "", &collectEmitter{}, nil)
 	d.steer.legacy = false
-	p := &ccProc{gen: 7, writeCh: make(chan []byte, 8), done: make(chan struct{}), closeReq: make(chan struct{})}
+	p := mcpTestProc(t, d, 7)
 	d.steer.proc = p
-	t.Cleanup(func() { close(p.done) })
 	return d, p
 }
 
@@ -204,7 +209,7 @@ func TestClaudeMCPRequestPairingAndGeneration(t *testing.T) {
 		t.Fatal("duplicate request IDs")
 	}
 	// The same ID from another process must not satisfy either waiter.
-	other := &ccProc{gen: 8}
+	other := mcpTestProc(t, d, 8)
 	claudeMCPResponse(d, other, id1, `{"mcpServers":[{"name":"foreign","status":"connected"}]}`)
 	claudeMCPResponse(d, p, id2, `{"mcpServers":[{"name":"second","status":"connected"}]}`)
 	claudeMCPResponse(d, p, id1, `{"mcpServers":[{"name":"first","status":"connected"}]}`)
@@ -415,8 +420,9 @@ func TestClaudeMCPRejectsReplyAfterProcessReplacement(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { _, err := d.MCPStatus(context.Background()); done <- err }()
 	id := claudeMCPRequest(t, p)
+	replacement := mcpTestProc(t, d, 8)
 	d.sm.Lock()
-	d.steer.proc = &ccProc{gen: 8}
+	d.steer.proc = replacement
 	d.sm.Unlock()
 	claudeMCPResponse(d, p, id, `{"mcpServers":[]}`)
 	select {
@@ -427,6 +433,7 @@ func TestClaudeMCPRejectsReplyAfterProcessReplacement(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("old response blocked")
 	}
+	d.closeStdin(d.steer.proc)
 }
 
 func TestClaudeMCPRejectsIncompleteInventory(t *testing.T) {

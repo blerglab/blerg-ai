@@ -27,7 +27,7 @@ describe('ShellLimitsSection', () => {
     render(<ShellLimitsSection />)
     const desktopDetached = await screen.findByRole('combobox', { name: 'Desktop: close a shell with no browser attached after' })
     expect(desktopDetached).toHaveValue('default')
-    expect(desktopDetached).toHaveDisplayValue('Default (until the session ends)')
+    expect(desktopDetached).toHaveDisplayValue('Default (until the workspace ends)')
     expect(screen.getByRole('combobox', { name: 'Desktop: close a shell with no typing after' })).toHaveValue('default')
     expect(screen.getByRole('combobox', { name: 'Cluster: close a shell with no browser attached after' })).toHaveDisplayValue('Default (5 minutes)')
     expect(screen.getByRole('combobox', { name: 'Cluster: close a shell with no typing after' })).toHaveDisplayValue('Default (30 minutes)')

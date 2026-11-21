@@ -1,3 +1,4 @@
+import { CodeActions } from './ContentActions'
 // A fenced code block in the chat: copy (always the whole block), colour for the common
 // languages, and a cap on length.
 //
@@ -43,6 +44,7 @@ export default function CodeBlock({ children, note, lang = null, closed = false 
   const highlighted = useHighlight(lang, shown, closed)
   return (
     <div ref={box} className={`md-codeblock${collapsed ? ' is-capped' : ''}`}>
+      <CodeActions inline text={text} lang={lang} content={() => { const node = document.createElement('pre'); node.textContent = text; const box = document.createElement('div'); box.append(node); return box }} />
       {canCopy && (
         <button
           type="button"

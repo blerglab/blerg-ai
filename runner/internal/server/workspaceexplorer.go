@@ -21,17 +21,44 @@ type workspaceExplorerWaiter struct {
 	ch  chan protocol.WorkspaceExplorerResult
 }
 type workspaceExplorerRequests struct {
-	mu       sync.Mutex
-	pending  map[string]workspaceExplorerWaiter
-	active   int
-	users    map[string]int
-	daemons  map[string]int
-	statuses map[string]bool
+	mu            sync.Mutex
+	pending       map[string]workspaceExplorerWaiter
+	active        int
+	users         map[string]int
+	daemons       map[string]int
+	statuses      map[string]bool
+	waitingStatus int
+}
+
+func (h *Hub) waitWorkspaceStatus(ctx context.Context, dc *DaemonConn, user, sid string) (func(), bool) {
+	// Queue status only, under the existing admission limits. Keep a bounded
+	// number of HTTP waiters; navigation and the request deadline cancel them.
+	r := &h.explorerReqs
+	r.mu.Lock()
+	if r.waitingStatus >= 32 {
+		r.mu.Unlock()
+		return nil, false
+	}
+	r.waitingStatus++
+	r.mu.Unlock()
+	defer func() { r.mu.Lock(); r.waitingStatus--; r.mu.Unlock() }()
+	for ctx.Err() == nil {
+		changed := h.workspaceReadChanged()
+		if release, ok := h.acquireWorkspaceExplorer(dc, user, sid, true); ok {
+			return release, true
+		}
+		select {
+		case <-ctx.Done():
+			return nil, false
+		case <-changed:
+		}
+	}
+	return nil, false
 }
 
 // Explorer leases sit beneath viewer leases. At most two of the four global
 // viewer slots and one of each daemon/person's two slots can be explorer work.
-// Admission refuses immediately: tree retries cannot queue ahead of viewers.
+// Tree admission refuses immediately; status may wait without holding a slot.
 func (h *Hub) acquireWorkspaceExplorer(dc *DaemonConn, user, sid string, status bool) (func(), bool) {
 	r := &h.explorerReqs
 	r.mu.Lock()
@@ -75,16 +102,23 @@ func (h *Hub) acquireWorkspaceExplorer(dc *DaemonConn, user, sid string, status 
 func (h *Hub) requestWorkspaceExplorer(ctx context.Context, dc *DaemonConn, req protocol.WorkspaceExplorerRequest) (protocol.WorkspaceExplorerResult, error) {
 	authorized, ok := dc.authorizedWorkspaceRuntime(req.SessionID)
 	if !ok || authorized != req.WorkspaceRuntimeRef {
-		return protocol.WorkspaceExplorerResult{}, errWorkspaceUnavailable
+		return protocol.WorkspaceExplorerResult{}, errWorkspaceRuntimeMismatch
 	}
 	req.Type = "workspace_explorer"
 	req.RequestID = newUUID()
 	waiter := workspaceExplorerWaiter{dc: dc, req: req, ch: make(chan protocol.WorkspaceExplorerResult, 1)}
 	r := &h.explorerReqs
 	r.mu.Lock()
-	if len(r.pending) >= 2 {
+	// Replaced connections and unrelated daemons must not consume this RPC cap.
+	count := 0
+	for _, pending := range r.pending {
+		if pending.dc == dc {
+			count++
+		}
+	}
+	if count >= 2 {
 		r.mu.Unlock()
-		return protocol.WorkspaceExplorerResult{}, errWorkspaceUnavailable
+		return protocol.WorkspaceExplorerResult{}, errWorkspaceBusy
 	}
 	if r.pending == nil {
 		r.pending = map[string]workspaceExplorerWaiter{}
@@ -101,13 +135,16 @@ func (h *Hub) requestWorkspaceExplorer(ctx context.Context, dc *DaemonConn, req 
 		h.trySendToDaemon(dc, raw)
 	}()
 	raw, _ := json.Marshal(req)
-	if h.FindDaemonForSession(req.SessionID) != dc || !h.trySendToDaemon(dc, raw) {
-		return protocol.WorkspaceExplorerResult{}, errWorkspaceUnavailable
+	if h.FindDaemonForSession(req.SessionID) != dc {
+		return protocol.WorkspaceExplorerResult{}, errWorkspaceDaemonGone
+	}
+	if !h.trySendToDaemon(dc, raw) {
+		return protocol.WorkspaceExplorerResult{}, errWorkspaceSendFailed
 	}
 	select {
 	case res, ok := <-waiter.ch:
 		if !ok || h.GetDaemon(dc.ID) != dc || h.FindDaemonForSession(req.SessionID) != dc {
-			return protocol.WorkspaceExplorerResult{}, errWorkspaceUnavailable
+			return protocol.WorkspaceExplorerResult{}, errWorkspaceDaemonGone
 		}
 		return res, nil
 	case <-ctx.Done():
@@ -172,7 +209,7 @@ func validExplorerResult(req protocol.WorkspaceExplorerRequest, res protocol.Wor
 			if want == "" {
 				want = "."
 			}
-			if parent != want {
+			if parent != want && (want != "." || !entry.Repository || !protocol.ReservedMemberPath(entry.Path)) {
 				return false
 			}
 		} else if req.Path != "" && !strings.HasPrefix(entry.Path, req.Path+"/") {
@@ -292,7 +329,12 @@ func (a *API) HandleGetWorkspaceExplorer(w http.ResponseWriter, r *http.Request)
 		workspaceFileProblem(w, 409, workspaceCodeUnavailable, "The desktop authority changed.")
 		return
 	}
-	release, ok := a.hub.acquireWorkspaceExplorer(dc, p.Sub, sid, req.Operation == "status")
+	var release func()
+	if req.Operation == "status" {
+		release, ok = a.hub.waitWorkspaceStatus(ctx, dc, p.Sub, sid)
+	} else {
+		release, ok = a.hub.acquireWorkspaceExplorer(dc, p.Sub, sid, false)
+	}
 	if !ok {
 		workspaceFileProblem(w, 409, workspaceCodeBusy, "The workspace explorer is busy.")
 		return
@@ -300,7 +342,7 @@ func (a *API) HandleGetWorkspaceExplorer(w http.ResponseWriter, r *http.Request)
 	defer release()
 	res, err := a.hub.requestWorkspaceExplorer(ctx, dc, req)
 	if err != nil {
-		workspaceFileProblem(w, 409, workspaceCodeDaemonTimeout, "The workspace runtime did not reply.")
+		workspaceRequestProblem(w, sid, dc.ID, req.Operation, err)
 		return
 	}
 	if !validExplorerResult(req, res) || !validExplorerMembers(manifest, res) {

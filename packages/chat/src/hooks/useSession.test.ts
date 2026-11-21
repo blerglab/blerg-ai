@@ -104,7 +104,7 @@ describe('useSession fetches older pages lazily', () => {
     expect(result.current.hasOlder).toBe(false)
   })
 
-  it('a reconnect asks for at most one page', async () => {
+  it('a reconnect leaves older history to the reader', async () => {
     const { t, result } = mount()
     deliverTail(t)
     await answer(t, 601, 800)
@@ -112,6 +112,10 @@ describe('useSession fetches older pages lazily', () => {
 
     act(() => t.setConnected(false))
     act(() => t.setConnected(true))
+    expect(t.older).toHaveLength(1)
+    act(() => t.replayDone({ lastSeq: 1000, hasMore: false }))
+    expect(t.older).toHaveLength(1)
+    await act(async () => { void result.current.loadOlder() })
     expect(t.older).toHaveLength(2)
     await answer(t, 401, 600)
     // The page that came in after the reconnect does not start another.
@@ -119,7 +123,7 @@ describe('useSession fetches older pages lazily', () => {
     expect(result.current.loadingOlder).toBe(false)
   })
 
-  it('a reconnect after a drop that cut the page short asks for it again, once', async () => {
+  it('a reader can retry older history after a reconnect', async () => {
     const { t, result } = mount()
     deliverTail(t)
     await act(async () => {
@@ -129,13 +133,34 @@ describe('useSession fetches older pages lazily', () => {
     // Nothing is in flight any more.
     expect(result.current.loadingOlder).toBe(false)
     act(() => t.setConnected(true))
+    expect(t.older).toHaveLength(1)
+    act(() => t.replayDone({ lastSeq: 1000, hasMore: false }))
+    expect(t.older).toHaveLength(1)
+    await act(async () => { void result.current.loadOlder() })
     expect(t.older).toHaveLength(2)
     expect(t.older[1]).toEqual({ sessionId: SESSION, beforeSeq: 801, limit: OLDER_PAGE })
     await answer(t, 601, 800)
     expect(t.older).toHaveLength(2)
   })
 
-  it('a later visit asks for at most one page', async () => {
+  it('keeps the reader at the top pending until an empty return catch-up finishes', async () => {
+    const t = createFakeTransport()
+    const first = mount(t)
+    deliverTail(t)
+    await answer(t, 601, 800)
+    first.unmount()
+    const second = mount(t)
+    await act(async () => { await second.result.current.loadOlder(); await second.result.current.loadOlder() })
+    expect(t.older).toHaveLength(1)
+    act(() => t.replayDone({ lastSeq: 1000, hasMore: false }))
+    expect(t.older).toHaveLength(2)
+    expect(t.older[1]).toEqual({ sessionId: SESSION, beforeSeq: 601, limit: OLDER_PAGE })
+    expect(second.result.current.loadingOlder).toBe(true)
+    await answer(t, 401, 600)
+    expect(t.older).toHaveLength(2)
+  })
+
+  it('a later visit catches up before the reader asks for older history', async () => {
     const t = createFakeTransport()
     const first = mount(t)
     deliverTail(t)
@@ -143,6 +168,14 @@ describe('useSession fetches older pages lazily', () => {
     first.unmount()
 
     const second = mount(t)
+    expect(t.older).toHaveLength(1)
+    expect(second.result.current.events.at(-1)?.seq).toBe(1000)
+    expect(t.older).toHaveLength(1)
+    act(() => t.replayDone({ lastSeq: 1000, hasMore: true }))
+    expect(t.older).toHaveLength(1)
+    act(() => t.replayDone({ lastSeq: 1000, hasMore: false }))
+    expect(t.older).toHaveLength(1)
+    await act(async () => { void second.result.current.loadOlder() })
     expect(t.older).toHaveLength(2)
     expect(t.older[1]).toEqual({ sessionId: SESSION, beforeSeq: 601, limit: OLDER_PAGE })
     expect(second.result.current.loadingOlder).toBe(true)
@@ -228,6 +261,37 @@ describe('useSession and the statuses a replay passes through', () => {
 describe('queued messages survive leaving a session', () => {
   beforeEach(resetChatState)
 
+  it('fails an old unacknowledged send after an empty return replay', async () => {
+    const t = createFakeTransport()
+    const first = mount(t)
+    act(() => { t.emit(ev(1)); t.replayDone({ lastSeq: 1, hasMore: false }) })
+    await act(async () => { await first.result.current.send('Never received') })
+    first.unmount()
+    const second = mount(t)
+    expect(second.result.current.queued[0].stale).not.toBe(true)
+    act(() => t.replayDone({ lastSeq: 1, hasMore: false }))
+    expect(second.result.current.queued[0]).toMatchObject({ text: 'Never received', stale: true })
+    expect(t.sent).toHaveLength(1)
+  })
+
+  it('does not fail a message sent during catch-up or one the server accepted', async () => {
+    const t = createFakeTransport()
+    const first = mount(t)
+    act(() => { t.emit(ev(1)); t.replayDone({ lastSeq: 1, hasMore: false }) })
+    await act(async () => { await first.result.current.send('Accepted while away') })
+    const accepted = first.result.current.queued[0]
+    first.unmount()
+    const second = mount(t)
+    await act(async () => { await second.result.current.send('New during catch-up') })
+    act(() => {
+      t.emit({ ...ev(2), kind: 'input_accepted', payload: { client_id: accepted.id, text: accepted.text } })
+      t.replayDone({ lastSeq: 2, hasMore: false })
+    })
+    expect(second.result.current.queued).toHaveLength(2)
+    expect(second.result.current.queued.every(message => !message.stale)).toBe(true)
+    expect(second.result.current.queued.find(message => message.id === accepted.id)?.accepted).toBe(true)
+  })
+
   it('restores an unconsumed message after switching sessions and remounting', async () => {
     const t = createFakeTransport()
     const hook = renderHook(({ id }) => useSession(t.transport, id, { meta: row }), { initialProps: { id: SESSION } })
@@ -283,5 +347,55 @@ describe('a send completing after navigation', () => {
     expect(hook.result.current.pending).toBeNull()
     hook.rerender({ id: SESSION })
     expect(hook.result.current.queued[0].text).toBe('For the first session')
+  })
+})
+
+describe('Stop acts on current work', () => {
+ beforeEach(resetChatState)
+ it('does not send a stale turn identity after a new turn or restart', async () => {
+  const fake=createFakeTransport()
+  const calls: unknown[][]=[]
+  fake.transport.interrupt=async (...args: unknown[])=>{calls.push(args)}
+  const {result}=mount(fake)
+  act(()=>fake.emit({...ev(1),kind:'status_changed',payload:{status:'running',reason:'turn'}}))
+  const pressed=result.current.interrupt!
+  await act(async()=>pressed())
+  act(()=>{
+   fake.emit({...ev(2),kind:'status_changed',payload:{status:'idle',reason:'turn_done'}})
+   fake.emit({...ev(3),kind:'status_changed',payload:{status:'running',reason:'turn'}})
+  })
+  await act(async()=>pressed())
+  await act(async()=>result.current.interrupt!())
+  expect(calls).toEqual([[SESSION],[SESSION],[SESSION]])
+ })
+})
+
+// A live file's own republish (BLG-470) is never persisted and never replayed: a browser that
+// missed it (a reconnect, or a gap-driven backfill while the connection never dropped) only
+// catches up if something explicitly re-reads the file list.
+describe('useSession refetches the file list on reconnect and on a gap (BLG-470 round 2 #3)', () => {
+  beforeEach(resetChatState)
+
+  it('refetches after a reconnect, not on the first connect', async () => {
+    const t = createFakeTransport()
+    mount(t)
+    await act(async () => {})
+    const callsAfterMount = t.files!.listCalls
+
+    act(() => t.setConnected(false))
+    act(() => t.setConnected(true))
+    await act(async () => {})
+    expect(t.files!.listCalls).toBe(callsAfterMount + 1)
+  })
+
+  it('refetches when a gap-driven backfill runs (the connection never dropped)', async () => {
+    const t = createFakeTransport()
+    mount(t)
+    await act(async () => {})
+    const before = t.files!.listCalls
+
+    act(() => t.triggerArtifactsStale())
+    await act(async () => {})
+    expect(t.files!.listCalls).toBe(before + 1)
   })
 })

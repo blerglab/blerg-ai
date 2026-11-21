@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { PINS_REFRESH_MS, checkAccount, readLiveBoardCard, resetLiveBoardCardsForTest, useLiveBoardCard, useLiveBoardCards } from './liveBoardCard'
+import { moveLiveBoardCard, PINS_REFRESH_MS, checkAccount, readLiveBoardCard, resetLiveBoardCardsForTest, useLiveBoardCard, useLiveBoardCards } from './liveBoardCard'
 import { renderHook, waitFor } from '@testing-library/react'
 
 const apiFetch = vi.fn()
@@ -61,4 +61,37 @@ describe('useLiveBoardCards', () => {
     checkAccount()
     expect(hc).toHaveBeenCalledTimes(1)
   })
+})
+
+it('reads a tab card under its workspace rule instead of reusing a pinned read', async () => {
+ token = jwt('ann')
+ apiFetch.mockResolvedValueOnce(card('Pinned card'))
+ await readLiveBoardCard('b', 1, 's')
+ apiFetch.mockResolvedValueOnce({ ok: false, status: 403, json: async () => ({ error: 'Workspace grant lowered' }) })
+ const { result } = renderHook(() => useLiveBoardCard({ board: 'b', number: 1 }, 's', true, true))
+ await waitFor(() => expect(result.current.state).toBe('failed'))
+ expect(result.current.read).toBeNull()
+ expect(apiFetch.mock.calls[1][0]).toBe('/api/board-cards/b/1?session=s&tab=1')
+})
+
+it('refreshes a conflict with the real upstream error shape before another person action', async () => {
+ token = jwt('ann')
+ apiFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ card: { id: 'c', board_id: 'b', number: 1, title: 'Card', version: 0 } }) })
+ await readLiveBoardCard('b', 1, 's')
+ apiFetch.mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({ error: 'the board refused: {"error": "stale version"}' }) })
+ apiFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ card: { id: 'c', board_id: 'b', number: 1, title: 'Card', version: 1 } }) })
+ await expect(moveLiveBoardCard('b', 1, 'done', 's', 0)).rejects.toThrow('The card changed. Review its current status and try again.')
+ expect(apiFetch).toHaveBeenCalledTimes(3)
+ const { result } = renderHook(() => useLiveBoardCard({ board: 'b', number: 1 }, 's'))
+ expect(result.current.read?.card.version).toBe(1)
+ expect(apiFetch.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1)
+})
+
+it('blocks another move when the conflict refresh fails', async () => {
+ token = jwt('ann')
+ apiFetch.mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({ error: 'the board refused: {"error": "stale version"}' }) })
+ apiFetch.mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({ error: 'unavailable' }) })
+ await expect(moveLiveBoardCard('b', 1, 'done', 's', 0)).rejects.toThrow('The card changed.')
+ await expect(moveLiveBoardCard('b', 1, 'done', 's', 0)).rejects.toThrow('Read the current card')
+ expect(apiFetch.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1)
 })

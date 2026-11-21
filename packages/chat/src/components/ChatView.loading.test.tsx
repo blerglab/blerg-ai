@@ -5,6 +5,7 @@ import { createFakeTransport, type FakeTransport } from '../test/fakeTransport'
 import { SESSION, ev as mk, meta, resetChatState } from '../test/chat'
 import type { SessionMeta } from '../transport/types'
 import type { AgentEvent } from '../types'
+import { installIntersectionObserver, intersect } from '../test/intersection'
 
 // The working line while a long history loads: its "waiting on" suffix and its background words are
 // read from the events held, and a page that has not arrived yet (a call's result, a task's end, the
@@ -13,6 +14,14 @@ import type { AgentEvent } from '../types'
 const S = 1000
 const H = 3600 * S
 const NOW = new Date(2026, 9, 15, 12, 0, 0).getTime()
+
+// History after a cached return is requested by reaching the transcript's top.
+beforeEach(() => installIntersectionObserver())
+afterEach(() => vi.unstubAllGlobals())
+const requestOlder = () => {
+  act(() => intersect()) // Reveal the older rows already held.
+  act(() => intersect()) // Reach the top of those rows and request the next page.
+}
 
 let seq = 0
 function ev(kind: string, payload: unknown, at: number): AgentEvent {
@@ -125,8 +134,8 @@ describe('the working line while the history loads', () => {
     expect(screen.queryByTestId('waiting-on')).toBeNull()
     await answerOlder(t, page1, true)
     expect(screen.getByTestId('waiting-on').textContent).toBe(' · waiting on Bash · make a 0:10')
-    // Another older page on its way (a reconnect asks for one): the line holds.
-    act(() => { t.setConnected(false); t.setConnected(true) })
+    // The reader requests another older page: the line holds.
+    requestOlder()
     expect(t.pendingOlder).toBe(1)
     tick(S)
     expect(screen.getByTestId('waiting-on').textContent).toBe(' · waiting on Bash · make a 0:11')
@@ -155,14 +164,14 @@ describe('what the working line holds while an older page loads', () => {
     vi.useRealTimers()
   })
 
-  // A tail and the page behind it, so the line has settled; then a reconnect asks for another older
-  // page, which is left on its way.
+  // A tail and the page behind it, so the line has settled; then the reader asks for
+  // another older page, which is left on its way.
   async function settleThenLoadOlder(t: FakeTransport, tail: AgentEvent[]) {
     const page1 = [userMsg(NOW - 2 * H), call('old1', NOW - 2 * H), result('old1', NOW - 2 * H + S), turnDone(NOW - 2 * H + S)]
     page1.forEach((e, i) => { e.seq = 50 + i })
     deliver(t, tail, { lastSeq: tail[tail.length - 1].seq, hasMore: false, older: true, hasOlder: true, firstSeq: tail[0].seq })
     await answerOlder(t, page1, true)
-    act(() => { t.setConnected(false); t.setConnected(true) })
+    requestOlder()
     expect(t.pendingOlder).toBe(1)
     const page2 = [call('older', NOW - 3 * H), result('older', NOW - 3 * H + S)]
     page2.forEach((e, i) => { e.seq = 10 + i })

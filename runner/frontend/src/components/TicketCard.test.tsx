@@ -12,7 +12,6 @@ vi.mock('../lib/boardApi', () => ({
   newOpId: vi.fn(() => 'op-test-123'),
   createTicket: vi.fn(),
   getBoard: vi.fn(),
-  spawnAssist: vi.fn(),
 }))
 
 vi.mock('../ws', () => import('../test/wsMock'))
@@ -97,6 +96,11 @@ beforeEach(() => {
 
 describe('TicketCard', () => {
   describe('rendering', () => {
+    it('wraps a long unbroken title', () => {
+      const title = 'LongUnbrokenTitle'.repeat(24)
+      renderCard(makeTicket({ title }))
+      expect(screen.getByText(title)).toHaveStyle({ overflowWrap: 'anywhere' })
+    })
     it('renders the ticket title', () => {
       renderCard(makeTicket({ title: 'Fix the bug' }))
       expect(screen.getByText('Fix the bug')).toBeInTheDocument()

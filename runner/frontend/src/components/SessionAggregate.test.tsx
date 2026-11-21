@@ -19,20 +19,20 @@ it.each([
   ['idle', 'idle', 'idle'],
 ] as const)('self %s and child %s aggregate as %s', (self, child, expected) => {
   const parent = makeSession({ id: 'parent', status: self })
-  const descendant = makeSession({ id: 'child', parent_session_id: parent.id, status: child })
+  const descendant = makeSession({ id: 'child', started_by: { kind: 'session' }, parent_session_id: parent.id, status: child })
   expect(selectSessionAggregate(parent, [parent, descendant]).state).toBe(expected)
 })
 
 it('bounds traversal of malformed cyclic ancestry', () => {
-  const parent = makeSession({ id: 'parent', status: 'idle', parent_session_id: 'child' })
-  const child = makeSession({ id: 'child', status: 'running', parent_session_id: parent.id })
+  const parent = makeSession({ id: 'parent', status: 'idle', started_by: { kind: 'session' }, parent_session_id: 'child' })
+  const child = makeSession({ id: 'child', status: 'running', started_by: { kind: 'session' }, parent_session_id: parent.id })
   expect(selectSessionAggregate(parent, [parent, child]).state).toBe('running')
 })
 
 it.each(['cards', 'tiles'])('%s aggregate the whole tree, even when descendants are hidden by search', mode => {
   const parent = makeSession({ id: 'aggregate-parent', title: 'Parent work', status: 'idle' })
-  const child = makeSession({ id: 'aggregate-child', title: 'Child work', parent_session_id: parent.id, status: 'idle' })
-  const grandchild = makeSession({ id: 'aggregate-grandchild', parent_session_id: child.id, status: 'running' })
+  const child = makeSession({ id: 'aggregate-child', title: 'Child work', started_by: { kind: 'session' }, parent_session_id: parent.id, status: 'idle' })
+  const grandchild = makeSession({ id: 'aggregate-grandchild', started_by: { kind: 'session' }, parent_session_id: child.id, status: 'running' })
   useSessionListFilters.setState({ query: 'Parent work', focus: null, clusterConfigured: false })
   useSessionStore.setState({ sessions: [parent, child, grandchild], daemons: [] })
   render(<MemoryRouter>{mode === 'cards' ? <SessionCard session={parent} daemon={undefined} /> : <SessionTiles />}</MemoryRouter>)
@@ -63,15 +63,28 @@ it.each(['cards', 'tiles'])('%s aggregate the whole tree, even when descendants 
 
 it.each(['waiting', 'idle'] as const)('keeps a %s child paused by restart from raising parent attention', status => {
   const parent = makeSession({ id: 'parent', status: 'idle' })
-  const child = makeSession({ id: 'child', parent_session_id: parent.id, status, paused_reason: 'restart' })
+  const child = makeSession({ id: 'child', started_by: { kind: 'session' }, parent_session_id: parent.id, status, paused_reason: 'restart' })
   expect(selectSessionAggregate(parent, [parent, child])).toMatchObject({ state: 'idle', paused: false, label: 'idle' })
   expect(selectSessionAggregate(child, [parent, child])).toMatchObject(status === 'waiting'
-    ? { state: 'waiting-parent', paused: false, label: 'Waiting for its parent session' }
+    ? { state: 'waiting-parent', paused: false, label: 'Waiting for Main' }
     : { state: 'idle', paused: false, label: 'idle' })
 })
 
 it('shows a child question as waiting on its live parent', () => {
   const parent = makeSession({ id: 'parent', status: 'idle' })
-  const child = makeSession({ id: 'child', parent_session_id: 'parent', status: 'waiting' })
-  expect(selectSessionAggregate(child, [parent, child])).toMatchObject({ state: 'waiting-parent', paused: false, label: 'Waiting for its parent session' })
+  const child = makeSession({ id: 'child', started_by: { kind: 'session' }, parent_session_id: 'parent', status: 'waiting' })
+  expect(selectSessionAggregate(child, [parent, child])).toMatchObject({ state: 'waiting-parent', paused: false, label: 'Waiting for Main' })
+})
+
+it('shows a waiting channel as waiting on the person', () => {
+  const parent = makeSession({ id: 'main', status: 'idle' })
+  const channel = makeSession({ id: 'channel', parent_session_id: parent.id, started_by: null, status: 'waiting' })
+  expect(selectSessionAggregate(channel, [parent, channel])).toMatchObject({ state: 'waiting', label: 'waiting' })
+})
+
+it('names the coordinating worker in a nested wait tooltip', () => {
+  const root = makeSession({ id: 'root' })
+  const coordinator = makeSession({ id: 'lead', title: 'Release checks', parent_session_id: root.id, started_by: { kind: 'session' } })
+  const worker = makeSession({ id: 'worker', parent_session_id: coordinator.id, started_by: { kind: 'session' }, status: 'waiting' })
+  expect(selectSessionAggregate(worker, [root, coordinator, worker]).label).toBe('Waiting for Release checks')
 })

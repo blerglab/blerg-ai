@@ -13,7 +13,8 @@ daemon does not know the session existed, and the server leaves the row in `erro
 finalizes it as `daemon_lost` thirty minutes later. The session cannot be continued. A message
 sent to it meanwhile is dropped, and the contract's `send_message` answers `{"ok": true}`.
 
-Terminal (tmux) sessions have an on-disk record and a recovery pass. Cluster pods are resumed by
+At the time of this design, Terminal (tmux) sessions had an on-disk record and a recovery pass
+(the session kind was removed in 0.5.0). Cluster pods are resumed by
 the next message. Desktop agent sessions are the gap, and they are the sessions a person works
 in. It also makes the daemon impossible to develop from a desktop session: the update that tests
 a change ends the session that made it.
@@ -206,9 +207,15 @@ once it is; a `kill_session` for it means it is never hosted. For each record:
 
    Process attribution accepts ordinary installer commands, make invocations and
    background launches followed by wait loops, without a whole-command allowlist.
-   The wait must be in the **same tool call**, with a Bash timeout covering the build
-   and restart (120 seconds by default, 600 seconds maximum); if that call finishes
-   or times out first, ordinary recovery applies.
+   A delayed Linux user timer can instead be attributed by its literal, uniquely
+   named `systemd-run --user --unit=NAME --on-active=5s` invocation and the installer's
+   kernel cgroup membership. Agents should arm the timer and end the tool step,
+   without polling across the restart. The arming call remains observed until the
+   next tool or new turn, for at most 45 minutes; the engine must still be alive.
+   This also covers the older single-call arm-and-wait shape. The normal installer's
+   begin/prepare ancestry and replacement executable checks still apply. Session
+   done files (including `rc=0`) are never recovery proof. Unsupported timer shapes
+   fail closed. See [daemon recovery](../../install/desktop/DAEMON.md#commands-a-restart-never-continues).
    Recovery still checks the full shell input for additional destructive work.
    Another session, a changed call, two interrupted calls, pending background work,
    an unsuccessful update or expired evidence keeps the normal pause. Conversation,
@@ -325,6 +332,13 @@ The reconcile path sets it without an unread badge or a push.
   answering an ask nobody reads. Their cards show the waiting "?" with the tooltip "paused by a
   restart" (a banner count with a "Resume all" button was tried and removed for 0.2.0; it may
   come back in a better form).
+- **A refused adoption identifies the session in diagnostics.** The `adoption refused`
+  failure includes `session_id` and a developer-owned refusal `reason`, retaining the fixed
+  `safety_check` cause. Repeated failures are bounded per session so one refusal cannot hide
+  another session. Workspace paths are omitted; unrecognized startup errors point to the
+  session's full restart pause detail and preceding typed failure causes. The existing
+  `session_paused` path carries that detail to the chat's paused banner and a retryable
+  transcript error, retaining the recovery record for a later retry.
 - **A daemon is told which of its sessions have a question open** (`open_asks`, after each
   hello), for the continue rule above.
 - **A daemon that does not have a session it is asked to message says so**, with a retryable
@@ -440,3 +454,37 @@ Shell recovery accepts an interrupted `syncing` phase, but only reopens admissio
 after the existing teardown/reconciliation proof succeeds. Terminal phases remain
 terminal. Failed adoption retains its record and session claim, reports a pause
 and a retryable error in the session, and retries when a message arrives.
+
+## Refused input and ending a lost host session (BLG-760)
+
+If adoption fails, each held chat input receives a correlated
+`input_recovery_failed` error. This settles its durable outbox entry; the chat
+returns the original accepted text to the composer once, preserving a newer
+draft. Retrying adoption cannot also replay the returned batch. Waiting for the
+initial server handshake is not a refusal: those inputs remain held for the
+connection retry. Recovery refusals retain the existing pause detail and failure
+alert, including its notification to Main.
+
+A workstation session whose process and daemon ownership are gone can be ended
+from any active status. A connected daemon acknowledges End even when there is
+no process left to emit an exit. Failed legacy recovery with no managed workspace
+also permits End; it does not remove the original host files. Managed workspaces
+continue through their settlement coordinator, retaining their work and reporting
+incomplete cleanup rather than claiming delivery succeeded.
+
+### Review corrections
+
+Every session with a workspace manifest enters strict settlement before the
+legacy orphan-End path, including an unpaused managed host session whose daemon
+is gone. An unavailable daemon leaves a durable stop request and an explicit
+cleanup-pending error. When the daemon and End race to apply final effects
+after the durable receipt commits, End retries only the busy completion lock
+within its existing cleanup deadline. Other cleanup failures still refuse End.
+
+Chat 1.60.4 claims refused input through the owner-only
+`POST /api/sessions/{id}/inputs/{client}/return` route. A durable
+`input_return_claimed` event admits one device across server restarts. The route
+returns the original chat text from the server outbox, never text supplied by the
+daemon. Relayed inputs cannot be claimed. Old per-browser recovered-input keys
+are removed when the session composer mounts. Failure rows use neutral retry
+wording; they never promise that a relay or another device's input was restored.

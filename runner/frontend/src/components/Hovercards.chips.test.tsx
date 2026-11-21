@@ -84,7 +84,7 @@ describe('Plan and Files chips', () => {
     expect(hover(screen.getByRole('button', { name: 'second-change.diff' }))).toHaveAttribute('data-kind', 'file')
     expect(screen.getByTestId('hovercard-name')).toHaveTextContent('second-change.diff')
     leave()
-    fireEvent.click(screen.getByRole('tab', { name: /Files/ }))
+    fireEvent.click(screen.getByRole('tab', { name: /Shared/ }))
     expect(hover(screen.getByRole('button', { name: 'View notes.md' }))).toHaveAttribute('data-kind', 'file')
     expect(screen.getByTestId('hovercard-name')).toHaveTextContent('notes.md')
   })
@@ -92,7 +92,7 @@ describe('Plan and Files chips', () => {
   it('a review waiting on a file says so in its card', () => {
     const files = filesOf(diffFiles)!
     rail(makeLive({ files }), { reviewRequests: [{ request_id: 'r1', artifact_id: 'n1', artifact_name: 'notes.md', artifact_version: 1, artifact_view: 'markdown', ask: 'Look', created_at: '2026-10-21T10:00:00Z' }] })
-    fireEvent.click(screen.getByRole('tab', { name: /Files/ }))
+    fireEvent.click(screen.getByRole('tab', { name: /Shared/ }))
     hover(screen.getByRole('button', { name: 'View notes.md' }))
     expect(screen.getByTestId('hovercard-review')).toHaveTextContent('review open')
   })

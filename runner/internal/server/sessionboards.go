@@ -35,12 +35,18 @@ type sessionBoardLister interface {
 }
 
 func (c *HTTPMCPCoreClient) ListSessionBoards(ctx context.Context, proof mcpgw.Proof) ([]SessionBoard, error) {
+	// Launch discovery verifies the original exact proof, even for a human login.
+	return c.listSessionBoards(ctx, proof, "", false)
+}
+
+func (c *HTTPMCPCoreClient) listSessionBoards(ctx context.Context, proof mcpgw.Proof, boardID string, standing bool) ([]SessionBoard, error) {
+	standing = standing && mcpgw.PersonBehind(proof)
 	if !proof.Valid() || proof.AccountID == "" || c.BaseURL == "" || c.InternalKey == "" {
 		return nil, errors.New("board discovery is not configured")
 	}
 	ctx, cancel := context.WithTimeout(ctx, boardDiscoveryTimeout)
 	defer cancel()
-	raw, _ := json.Marshal(coreListRequest{AccountID: proof.AccountID, TokenID: proof.TokenID, SessionID: proof.SessionID})
+	raw, _ := json.Marshal(coreListRequest{BoardID: boardID, AccountID: proof.AccountID, TokenID: proof.TokenID, SessionID: proof.SessionID, Standing: standing})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.BaseURL, "/")+"/internal/boards/list", bytes.NewReader(raw)) //nolint:gosec // BaseURL is the operator-configured Core address, never a browser-supplied destination.
 	if err != nil {
 		return nil, errors.New("board discovery request could not be created")
@@ -53,12 +59,18 @@ func (c *HTTPMCPCoreClient) ListSessionBoards(ctx context.Context, proof mcpgw.P
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, coreNotFound(resp)
+		return nil, coreNotFound(resp, standing)
 	}
 	if resp.StatusCode == http.StatusForbidden {
-		return nil, ErrMCPProofInvalid
+		if !standing {
+			return nil, ErrMCPProofInvalid
+		}
+		return nil, coreNotFound(resp, true)
 	}
 	if resp.StatusCode != http.StatusOK {
+		if standing && resp.Header.Get("X-Blerg-Standing-Cause") == "board_owner_missing" {
+			return nil, mcpgw.ErrBoardOwnerMissing
+		}
 		return nil, errors.New("board discovery is unavailable")
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxSessionBoardsBytes+1))
@@ -77,6 +89,11 @@ func (c *HTTPMCPCoreClient) ListSessionBoards(ctx context.Context, proof mcpgw.P
 			return nil, errors.New("board discovery response is invalid")
 		}
 		seen[b.ID] = true
+	}
+	// An older Core can ignore board_id and omit ownerless boards. Only a
+	// scoped response from a Core that classified the request proves absence.
+	if standing && boardID != "" && !seen[boardID] && resp.Header.Get("X-Blerg-Standing-State") != "active" {
+		return nil, errCorePrincipalUnavailable
 	}
 	return out.Boards, nil
 }

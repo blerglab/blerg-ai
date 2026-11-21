@@ -256,7 +256,7 @@ func RevokeProposalGrant(ctx context.Context, pool *pgxpool.Pool, id, accountID,
 
 // RevokeSessionProposalGrants ends every live grant of the session and, with children, of the
 // sessions it started. It returns how many it ended.
-func RevokeSessionProposalGrants(ctx context.Context, pool *pgxpool.Pool, sessionID, reason string, children bool) (int64, error) {
+func RevokeSessionProposalGrants(ctx context.Context, pool Querier, sessionID, reason string, children bool) (int64, error) {
 	if !proposalUUID.MatchString(sessionID) {
 		return 0, nil
 	}
@@ -318,7 +318,7 @@ func scanBoardGrantState(row pgx.Row) (*BoardGrantState, error) {
 // revoked one), else the newest revoked row, or nil when there is none (its level is then propose, or full for the board the session's
 // launch gave it a connection to: the caller decides). Read on every board call, so a change of
 // level holds at the next call.
-func LatestBoardGrant(ctx context.Context, pool *pgxpool.Pool, sessionID, boardID string) (*BoardGrantState, error) {
+func LatestBoardGrant(ctx context.Context, pool DBTX, sessionID, boardID string) (*BoardGrantState, error) {
 	if !proposalUUID.MatchString(sessionID) || boardID == "" {
 		return nil, nil
 	}

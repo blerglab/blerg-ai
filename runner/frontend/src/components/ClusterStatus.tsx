@@ -113,7 +113,7 @@ export function PodLimits({ status, onSaved }: { status: ClusterStatusApi; onSav
     } else if (cap !== shownCap) {
       const n = Number(cap)
       if (cap.trim() === '' || !Number.isInteger(n) || n < MIN_SESSIONS || n > MAX_SESSIONS) {
-        setMsg({ ok: false, text: `Max concurrent session pods must be a whole number from ${MIN_SESSIONS} to ${MAX_SESSIONS}.` })
+        setMsg({ ok: false, text: `Max concurrent workspace pods must be a whole number from ${MIN_SESSIONS} to ${MAX_SESSIONS}.` })
         return
       }
       capChange = n
@@ -137,7 +137,7 @@ export function PodLimits({ status, onSaved }: { status: ClusterStatusApi; onSav
       onSaved(body as ClusterStatusApi)
       // The sidebar's Cluster pill reads the cap on its own; tell it, so it shows the new one at once.
       window.dispatchEvent(new CustomEvent('blerg:cluster-settings-saved', { detail: body }))
-      setMsg({ ok: true, text: 'Saved. Applies to sessions started from now on.' })
+      setMsg({ ok: true, text: 'Saved. Applies to workspaces started from now on.' })
     } catch {
       setMsg({ ok: false, text: 'Could not save.' })
     } finally {
@@ -151,7 +151,7 @@ export function PodLimits({ status, onSaved }: { status: ClusterStatusApi; onSav
   }
   return (
     <div style={card}>
-      <span style={sectionLabel}>Session pod limits (administrators)</span>
+      <span style={sectionLabel}>Workspace pod limits (administrators)</span>
       <div style={row}>
         <label htmlFor="pod-idle-hours">End a pod after idle (hours, 0 = never)</label>
         <input id="pod-idle-hours" type="number" min={0} step={0.5} value={idle} onChange={e => setIdle(e.target.value)} style={input} />
@@ -161,7 +161,7 @@ export function PodLimits({ status, onSaved }: { status: ClusterStatusApi; onSav
         <input id="pod-ttl-hours" type="number" min={1} step={1} value={ttl} onChange={e => setTtl(e.target.value)} style={input} />
       </div>
       <div style={{ ...row, borderBottom: 'none', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-        <label htmlFor="max-session-pods">Max concurrent session pods</label>
+        <label htmlFor="max-session-pods">Max concurrent workspace pods</label>
         <span style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           {status.active_sessions >= 0 && <span style={{ color: 'var(--fog)', fontSize: '0.75rem' }}>{status.active_sessions} in use</span>}
           {capDefault != null && <span style={{ color: 'var(--fog)', fontSize: '0.75rem' }}>default {capDefault}</span>}
@@ -175,9 +175,9 @@ export function PodLimits({ status, onSaved }: { status: ClusterStatusApi; onSav
         </span>
       </div>
       <p style={{ color: 'var(--fog)', fontSize: '0.75rem', margin: '8px 0' }}>
-        Idle means no message sent and no turn finished. An ended session keeps its history and can be resumed.
+        Idle means no message sent and no turn finished. An ended workspace keeps its history and can be resumed.
         {status.cpu_request && status.mem_request && (
-          <> Each session pod asks for about {fmtCPU(status.cpu_request)} and {fmtMem(status.mem_request)}, so more pods need more cluster capacity.</>
+          <> Each workspace pod asks for about {fmtCPU(status.cpu_request)} and {fmtMem(status.mem_request)}, so more pods need more cluster capacity.</>
         )}
       </p>
       <button className="btn primary" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
@@ -259,7 +259,7 @@ export default function ClusterStatus() {
               <div style={row}><span>Namespace</span><span>{status.namespace}</span></div>
               <div style={row}><span>Image</span><span style={{ wordBreak: 'break-all', textAlign: 'right' }}>{status.image}</span></div>
               <div style={row}><span>Secret</span><span>{status.secret_name}{status.oauth_secret_name && status.oauth_secret_name !== status.secret_name ? ` + ${status.oauth_secret_name}` : ''}</span></div>
-              <div style={row}><span>Max concurrent sessions</span><span>{status.max_sessions}</span></div>
+              <div style={row}><span>Max concurrent workspaces</span><span>{status.max_sessions}</span></div>
               <div style={row}><span>CPU / memory request</span><span>{status.cpu_request} / {status.mem_request}</span></div>
               <div style={row}><span>CPU / memory limit</span><span>{status.cpu_limit} / {status.mem_limit}</span></div>
               <div style={row}><span>Pod idle timeout</span><span>{status.pod_idle_timeout_seconds ? fmtSeconds(status.pod_idle_timeout_seconds) : 'never'}</span></div>
@@ -321,14 +321,14 @@ export default function ClusterStatus() {
             </div>
 
             <div style={card}>
-              <span style={sectionLabel}>Running sessions</span>
+              <span style={sectionLabel}>Running workspaces</span>
               <div style={{ marginBottom: 8, fontSize: '0.85rem', color: 'var(--fog)' }}>
                 {status.active_sessions < 0
                   ? 'Active Job count unavailable (check RBAC — see CLUSTER-RUNTIME.md)'
                   : `${status.active_sessions} active Job${status.active_sessions === 1 ? '' : 's'} of ${status.max_sessions} max`}
               </div>
               {sessions.length === 0 ? (
-                <div style={{ color: 'var(--fog)', fontSize: '0.85rem' }}>No cluster sessions recorded.</div>
+                <div style={{ color: 'var(--fog)', fontSize: '0.85rem' }}>No cluster workspaces recorded.</div>
               ) : (
                 sessions.map(s => (
                   <div key={s.id} style={row}>

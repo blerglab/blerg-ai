@@ -12,7 +12,7 @@ label.settings-field { display: grid; gap: .4rem; }
 /* The anonymous label text stays left; the control moves right. */
 label.settings-field:has(.settings-toggle-control), .settings-toggle { display: flex; align-items: center; justify-content: space-between; gap: 1rem; width: 100%; max-width: 48rem; margin-block: .65rem; }
 input.settings-toggle-control, button.settings-toggle-control { appearance: none; flex: 0 0 2.75rem; order: 1; box-sizing: border-box; width: 2.75rem; min-width: 2.75rem; height: 1.6rem; padding: 2px; margin: 0; border: 1px solid var(--stone, #777); border-radius: 2rem; background: var(--stone, #808080); cursor: pointer; }
-.settings-toggle-control::before { content: ''; display: block; width: 1.2rem; height: 1.2rem; border-radius: 50%; background: #fff; transition: transform .15s; }
+.settings-toggle-control::before { content: ''; display: block; width: 1.2rem; height: 1.2rem; border-radius: 50%; background: var(--knob-fg, #fff); transition: transform .15s; }
 .settings-toggle-control:checked, .settings-toggle-control[aria-checked=true] { background: var(--blaze, #365ebd); }
 .settings-toggle-control:checked::before, .settings-toggle-control[aria-checked=true]::before { transform: translateX(1.1rem); }
 @media (prefers-reduced-motion: reduce) { .settings-toggle-control::before { transition: none; } }

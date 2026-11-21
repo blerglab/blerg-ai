@@ -10,7 +10,7 @@ This change does not advertise a diff command before that feature is available.
 
 - Native unrestricted sessions, including granted MCP sessions, use the shared
   developer prompt. Both new threads and resumed threads receive it.
-- Terminal sessions get an owned `AGENTS.override.md` in their private Codex home.
+- Legacy terminal recovery uses an owned `AGENTS.override.md` in their private Codex home.
   Host and sandbox launches use the same preparation path. Recovery refreshes
   this file before resuming, including homes created before this change.
 - Restricted sessions have no shell and keep their restricted prompt; it does

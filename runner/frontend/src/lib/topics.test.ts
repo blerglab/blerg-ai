@@ -45,7 +45,7 @@ describe('unmarkedLabel', () => {
     expect(unmarkedLabel(u(2, 0))).toBe('Unmarked work · 2 agents')
   })
   it('the empty state names the marker command', () => {
-    expect(EMPTY_HISTORY).toBe('No topics yet. The agent marks a topic when it starts a piece of work: blerg-runner topic "<title>", and a decision, milestone or finding with blerg-runner mark decision "<text>".')
+    expect(EMPTY_HISTORY).toBe('Decisions, milestones and findings will appear here as the agent records its work.')
   })
 })
 
@@ -92,4 +92,9 @@ describe('dismissed strokes (card #155)', () => {
     expect(strokeWords({ kind: 'attention', by: 'person', state: 'expired', source: 'review' })).toBe('Asked of you · dismissed by you')
     expect(strokeWords({ kind: 'attention', state: 'expired', source: 'ask' })).toBe('Asked of you · closed')
   })
+})
+
+it('names the coordinator when a worker answers a question', () => {
+  expect(strokeWords({ kind: 'attention', by: 'parent', state: 'resolved', source: 'ask' }, 'Release checks')).toBe('Asked of you · answered by Release checks')
+  expect(strokeWords({ kind: 'attention', by: 'parent', state: 'resolved', source: 'ask' })).toBe('Asked of you · answered by Main')
 })

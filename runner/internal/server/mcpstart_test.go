@@ -18,6 +18,55 @@ func clusterTarget() grantTarget {
 	return grantTarget{Runtime: runnerRuntimeCluster, Kind: "agent"}
 }
 
+// TestResolvedGrantHasGitProviderConnection: BLG-460 L5's pure URL check.
+func TestResolvedGrantHasGitProviderConnection(t *testing.T) {
+	cases := []struct {
+		name          string
+		urls          []string
+		workspaceHost string
+		want          bool
+	}{
+		{"nil grant", nil, "", false},
+		{"github", []string{"https://github.com/acme/widget"}, "", true},
+		{"gitlab", []string{"https://gitlab.com/acme/widget"}, "", true},
+		{"github subdomain", []string{"https://api.github.com/graphql"}, "", true},
+		{"unrelated host", []string{"https://mcp.example.test/sse"}, "", false},
+		{"mixed, one git", []string{"https://mcp.example.test/sse", "https://gitlab.com/acme/widget"}, "", true},
+		// security review finding 3: the official GitHub MCP server is not a repository host,
+		// but still reaches GitHub.
+		{"github copilot mcp server", []string{"https://api.githubcopilot.com/mcp/"}, "", true},
+		// security review finding 3: GitHub Enterprise / self-hosted GitLab have no fixed
+		// hostname — refused only because it matches this launch's own workspace host.
+		{"enterprise host matching workspace", []string{"https://git.acme-corp.internal/mcp"}, "git.acme-corp.internal", true},
+		{"enterprise host not matching workspace", []string{"https://git.acme-corp.internal/mcp"}, "git.other-corp.internal", false},
+		{"enterprise host with no workspace hosts given", []string{"https://git.acme-corp.internal/mcp"}, "", false},
+		// security review round-4 finding 1: CredentialHost (u.Host) keeps a non-default
+		// port; the connection URL's Hostname() never carries one. Both sides must be
+		// compared as bare hostnames, or a ported host never matches at all.
+		{"enterprise host with port matching workspace", []string{"https://git.corp:8443/mcp"}, "git.corp:8443", true},
+		{"enterprise host with port, workspace host has no port", []string{"https://git.corp:8443/mcp"}, "git.corp", true},
+		{"enterprise host with port, different workspace host", []string{"https://git.corp:8443/mcp"}, "other.corp:8443", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var g *ResolvedGrant
+			if tc.urls != nil {
+				g = &ResolvedGrant{}
+				for _, u := range tc.urls {
+					g.Connections = append(g.Connections, mcpgw.GrantSpec{URL: u})
+				}
+			}
+			var hosts []string
+			if tc.workspaceHost != "" {
+				hosts = []string{tc.workspaceHost}
+			}
+			if got := g.hasGitProviderConnection(hosts...); got != tc.want {
+				t.Errorf("hasGitProviderConnection(%v, %v) = %v, want %v", tc.urls, hosts, got, tc.want)
+			}
+		})
+	}
+}
+
 func (fx *mcpFx) dockerTarget() grantTarget {
 	return grantTarget{Runtime: runnerRuntimeDocker, Kind: "agent", Daemon: fx.dc}
 }
@@ -26,8 +75,9 @@ func echoSel(fx *mcpFx, mode, hash string) []MCPSelection {
 	return []MCPSelection{{Connection: fx.connID, Tools: map[string]MCPToolSelection{"echo": {Mode: mode, Hash: hash}}}}
 }
 
-// Every refusal a start with MCP connections can get, each with its own message, and none
-// of them leaves a row, a grant or an upstream session behind.
+// Transport/storage refusals and representative selector failures retain real
+// gateway/SQL proof. Requester, placement and selector vocabulary lives in the
+// direct policy tables; early-refusal wiring is checked separately below.
 func TestResolveGrantRefusals(t *testing.T) {
 	type tc struct {
 		name   string
@@ -40,41 +90,7 @@ func TestResolveGrantRefusals(t *testing.T) {
 	}
 	echoOK := func(fx *mcpFx) []MCPSelection { return echoSel(fx, "allow", fx.up.hash("echo")) }
 	cluster := func(*mcpFx) grantTarget { return clusterTarget() }
-	docker := func(fx *mcpFx) grantTarget { return fx.dockerTarget() }
 	cases := []tc{
-		{name: "agent principal", who: grantRequester{Kind: "agent", Account: mcpAcct}, sel: echoOK, target: cluster,
-			status: 403, want: msgMCPHumanOnly},
-		{name: "runner key (no kind)", who: grantRequester{}, sel: echoOK, target: cluster, status: 403, want: msgMCPHumanOnly},
-		{name: "service principal", who: grantRequester{Kind: "service", Account: mcpAcct, Sid: testSID}, sel: echoOK, target: cluster,
-			status: 403, want: msgMCPHumanOnly},
-		{name: "human without a login session", who: grantRequester{Kind: "human", Account: mcpAcct}, sel: echoOK, target: cluster,
-			status: 401, want: msgMCPSignIn},
-		{name: "engine hermes", who: humanWho(), sel: echoOK, status: 422, want: msgMCPEngine,
-			target: func(*mcpFx) grantTarget {
-				return grantTarget{Runtime: runnerRuntimeCluster, Kind: "agent", Engine: "hermes"}
-			}},
-		{name: "kind terminal", who: humanWho(), sel: echoOK, status: 422, want: msgMCPKind,
-			target: func(*mcpFx) grantTarget { return grantTarget{Runtime: runnerRuntimeCluster, Kind: ""} }},
-		{name: "bare host", who: humanWho(), sel: echoOK, status: 422, want: msgMCPRuntime,
-			target: func(fx *mcpFx) grantTarget {
-				return grantTarget{Runtime: daemonRuntimeName, Kind: "agent", Daemon: fx.dc}
-			}},
-		{name: "no runtime", who: humanWho(), sel: echoOK, status: 422, want: msgMCPRuntime,
-			target: func(*mcpFx) grantTarget { return grantTarget{Kind: "agent"} }},
-		{name: "daemon without mcp_gateway", who: humanWho(), sel: echoOK, target: docker, status: 422, want: msgMCPDaemonOld,
-			setup: func(fx *mcpFx) { fx.dc.SetMCPGateway(false) }},
-		{name: "docker with no daemon", who: humanWho(), sel: echoOK, status: 422, want: msgMCPDaemonOld,
-			target: func(*mcpFx) grantTarget { return grantTarget{Runtime: runnerRuntimeDocker, Kind: "agent"} }},
-		{name: "gateway not configured", who: humanWho(), sel: echoOK, target: cluster, status: 503, want: msgMCPNoGateway,
-			setup: func(fx *mcpFx) { fx.api.setMCPStart(&mcpStartConfig{GatewayURL: mcpGatewayURL, Core: fx.list}) }},
-		{name: "never wired", who: humanWho(), sel: echoOK, target: cluster, status: 503, want: msgMCPNoGateway,
-			setup: func(fx *mcpFx) { fx.api.setMCPStart(nil) }},
-		{name: "no gateway URL for sessions", who: humanWho(), sel: echoOK, target: cluster, status: 503, want: msgMCPNoGatewayURL,
-			setup: func(fx *mcpFx) {
-				cfg := *fx.hub.mcpStart.get()
-				cfg.GatewayURL = ""
-				fx.api.setMCPStart(&cfg)
-			}},
 		{name: "core not configured", who: humanWho(), sel: echoOK, target: cluster, status: 503, want: msgMCPNoCore,
 			setup: func(fx *mcpFx) {
 				cfg := *fx.hub.mcpStart.get()
@@ -99,14 +115,6 @@ func TestResolveGrantRefusals(t *testing.T) {
 			setup: func(fx *mcpFx) { fx.list.conns[0].Name = "Not A Name" }},
 		{name: "tool without a hash", who: humanWho(), target: cluster, status: 400, want: "hash you saw",
 			sel: func(fx *mcpFx) []MCPSelection { return echoSel(fx, "allow", "") }},
-		{name: "mode off is not selectable", who: humanWho(), target: cluster, status: 400, want: "mode must be",
-			sel: func(fx *mcpFx) []MCPSelection { return echoSel(fx, "off", fx.up.hash("echo")) }},
-		{name: "unknown mode", who: humanWho(), target: cluster, status: 400, want: "mode must be",
-			sel: func(fx *mcpFx) []MCPSelection { return echoSel(fx, "yolo", fx.up.hash("echo")) }},
-		{name: "a present but empty tools object", who: humanWho(), target: cluster, status: 400, want: "selects no tools",
-			sel: func(fx *mcpFx) []MCPSelection {
-				return []MCPSelection{{Connection: fx.connID, Tools: map[string]MCPToolSelection{}}}
-			}},
 		{name: "no tools and no defaults", who: humanWho(), target: cluster, status: 422, want: "no default tools",
 			sel:   func(fx *mcpFx) []MCPSelection { return []MCPSelection{{Connection: fx.connID}} },
 			setup: func(fx *mcpFx) { fx.list.conns[0].DefaultTools = nil }},
@@ -134,9 +142,10 @@ func TestResolveGrantRefusals(t *testing.T) {
 		{name: "upstream down", who: humanWho(), sel: echoOK, target: cluster, status: 502, want: "could not list the tools",
 			setup: func(fx *mcpFx) { fx.up.mu.Lock(); fx.up.status = 500; fx.up.mu.Unlock() }},
 	}
+	pool := runnerContractPool(t)
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			fx := newMCPFx(t)
+			fx := newMCPFxWithPool(t, pool)
 			if c.setup != nil {
 				c.setup(fx)
 			}
@@ -161,13 +170,16 @@ func TestResolveGrantRefusals(t *testing.T) {
 func TestResolveGrantEarlyRefusalsMakeNoCalls(t *testing.T) {
 	fx := newMCPFx(t)
 	for _, who := range []grantRequester{{Kind: "agent", Account: mcpAcct}, {Kind: "human", Account: mcpAcct}} {
-		if _, apiErr := fx.api.resolveGrant(context.Background(), who, echoSel(fx, "allow", "h"), clusterTarget()); apiErr == nil {
+		if grant, apiErr := fx.api.resolveGrant(context.Background(), who, echoSel(fx, "allow", "h"), clusterTarget()); apiErr == nil || grant != nil {
 			t.Fatal("expected a refusal")
 		}
 	}
-	if _, apiErr := fx.api.resolveGrant(context.Background(), humanWho(), echoSel(fx, "allow", "h"),
-		grantTarget{Runtime: daemonRuntimeName, Kind: "agent", Daemon: fx.dc}); apiErr == nil {
+	if grant, apiErr := fx.api.resolveGrant(context.Background(), humanWho(), echoSel(fx, "allow", "h"),
+		grantTarget{Runtime: daemonRuntimeName, Kind: "agent", Daemon: fx.dc}); apiErr == nil || grant != nil {
 		t.Fatal("bare host accepted")
+	}
+	if fx.count("session_mcp_grants") != 0 || fx.count("sessions") != 0 {
+		t.Error("an early refusal left rows behind")
 	}
 	if len(fx.list.proofs) != 0 || fx.up.listCount() != 0 {
 		t.Errorf("early refusals reached core (%d) or the upstream (%d)", len(fx.list.proofs), fx.up.listCount())

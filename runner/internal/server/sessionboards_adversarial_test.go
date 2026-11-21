@@ -26,11 +26,11 @@ func TestSessionBoardTransportHoldsOwnerProofAndNeverReturnsCredentials(t *testi
 		if r.URL.Path != "/internal/boards/list" || r.Method != http.MethodPost || r.Header.Get("X-Internal-Key") != "fixture-internal" {
 			t.Error("discovery changed internal route or authentication")
 		}
-		var got map[string]string
+		var got map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Error(err)
 		}
-		if len(got) != 2 || got["account_id"] != proof.AccountID || got["session_id"] != proof.SessionID {
+		if len(got) != 2 || got["standing"] != nil || got["account_id"] != proof.AccountID || got["session_id"] != proof.SessionID {
 			t.Error("discovery widened or substituted owner proof")
 		}
 		_, _ = w.Write([]byte(`{"boards":[{"id":"fixture-board","name":"Work","token":"fixture-private-upstream"}],"token":"fixture-private-upstream"}`))
@@ -124,6 +124,13 @@ func TestSessionBoardTransportDistinguishesOldCoreFromDeadProof(t *testing.T) {
 	for _, old := range []bool{false, true} {
 		t.Run(map[bool]string{true: "old-core", false: "dead-proof"}[old], func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body coreListRequest
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				if body.Standing {
+					t.Error("exact discovery opted into standing authorization")
+				}
 				if old {
 					http.NotFound(w, r)
 				} else {
@@ -182,5 +189,20 @@ func TestSessionBoardScopedHumanDiscoveryFiltersToCredentialBoard(t *testing.T) 
 	}
 	if len(list.proofs) != 1 || list.proofs[0] != (mcpgw.Proof{AccountID: mcpAcct, SessionID: testSID}) {
 		t.Fatal("scoped discovery substituted account/session proof")
+	}
+}
+
+func TestSessionBoardTransportExactForbiddenProof(t *testing.T) {
+	for _, proof := range []mcpgw.Proof{{AccountID: "a", SessionID: "s"}, {AccountID: "a", TokenID: "token"}} {
+		t.Run(proof.SessionID+proof.TokenID, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+			}))
+			defer srv.Close()
+			c := &HTTPMCPCoreClient{BaseURL: srv.URL, InternalKey: "fixture", HTTP: srv.Client()}
+			if _, err := c.ListSessionBoards(t.Context(), proof); !errors.Is(err, ErrMCPProofInvalid) {
+				t.Fatalf("exact forbidden proof: got %v, want %v", err, ErrMCPProofInvalid)
+			}
+		})
 	}
 }

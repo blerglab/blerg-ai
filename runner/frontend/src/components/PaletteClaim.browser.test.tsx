@@ -44,6 +44,7 @@ const json = (body: unknown) => new Response(JSON.stringify(body), { headers: { 
 beforeEach(() => {
   wsMock.resetWsMock()
   localStorage.clear()
+  localStorage.setItem('blerg-runner.session-dock.windows', JSON.stringify({ active: 'files', panels: [], ratio: .5 }))
   useTranscriptStore.setState({ sessions: {} })
   useSessionStore.setState({ daemons: [makeDaemon()], sessions: [makeSession({ kind: 'agent', status: 'idle' })] })
   vi.mocked(openShell).mockReset().mockResolvedValue(new FakeShell('palette-shell'))
@@ -116,12 +117,13 @@ for (const [width, height] of [[390, 844], [3840, 2160]]) describe(`palette clai
       expect(viewer.hasAttribute('aria-modal')).toBe(false)
       expect(viewer.querySelector('[aria-modal="true"]')).toBeNull()
       console.info(`palette baseline during ${name}: old guard matches ${oldGuardMatches().length}`)
-      await userEvent.click(width === 390 ? screen.getByRole('button', { name: /← Chat/ }) : screen.getByRole('tab', { name: /Chat/ }))
+      await userEvent.click(width === 390 ? screen.getByRole('button', { name: /← Main/ }) : screen.getByRole('tab', { name: /Main/ }))
       await fromComposer(name)
     }
     const challenge = { challenge_id: 'palette-challenge', machine_id: 'fixture-machine', account: 'fixture-account', uid: 1000, shell: '/bin/bash', cwd: '/prepared/project' }
     vi.mocked(openShell).mockRejectedValueOnce(new HostShellConsentRequired(challenge))
-    await userEvent.click(await screen.findByRole('button', { name: 'New shell' }))
+    if (width === 390) await userEvent.click(screen.getByTestId('open-tab-menu'))
+    await userEvent.click(await screen.findByRole(width === 390 ? 'menuitem' : 'button', { name: 'New shell' }))
     const consent = await screen.findByRole('dialog', { name: 'Allow a shell on this machine?' })
     const cancel = within(consent).getByRole('button', { name: 'Cancel' })
     expect(cancel).toHaveFocus()
@@ -134,11 +136,12 @@ for (const [width, height] of [[390, 844], [3840, 2160]]) describe(`palette clai
     }
     await userEvent.click(cancel)
     await fromComposer('shell consent')
-    await userEvent.click(await screen.findByRole('button', { name: 'New shell' }))
+    if (width === 390) await userEvent.click(screen.getByTestId('open-tab-menu'))
+    await userEvent.click(await screen.findByRole(width === 390 ? 'menuitem' : 'button', { name: 'New shell' }))
     await waitFor(() => expect(vi.mocked(openShell)).toHaveBeenCalled())
     await waitFor(() => expect(document.querySelector('.shell-terminal')).toBeVisible())
     expect(document.querySelector('.shell-terminal textarea')).toBeTruthy()
-    await userEvent.click(width === 390 ? screen.getByRole('button', { name: /← Chat/ }) : screen.getByRole('tab', { name: /Chat/ }))
+    await userEvent.click(width === 390 ? screen.getByRole('button', { name: /← Main/ }) : screen.getByRole('tab', { name: /Main/ }))
     await fromComposer('shell')
     await userEvent.click(screen.getByTestId('rail-toggle'))
     await screen.findByTestId('rail-session')
@@ -256,7 +259,7 @@ async function tabKey(key: string, modifier = 'Alt') {
 }
 
 for (const platform of ['Linux x86_64', 'MacIntel']) describe(`global tab shortcuts on ${platform}`, () => {
-  it('claims tab navigation from the composer, file, explorer and panel and lists palette shortcuts', async () => {
+  it('keeps dock shortcuts separate, claims workspace tab navigation and lists palette shortcuts', async () => {
     await page.viewport(3840, 2160)
     const mockedPlatform = vi.spyOn(navigator, 'platform', 'get').mockReturnValue(platform)
     try {
@@ -279,11 +282,15 @@ for (const platform of ['Linux x86_64', 'MacIntel']) describe(`global tab shortc
       await userEvent.click(screen.getByRole('button', { name: 'Toggle explorer' }))
       const search = await screen.findByRole('combobox', { name: 'Search workspace files' })
       search.focus()
+      // Sidebar tools have their own tab group (#372); workspace keys must not escape it.
+      expect((await tabKey('4', modifier)).defaultPrevented).toBe(false)
+      expect(screen.getByRole('tab', { name: /Main/ })).toHaveAttribute('aria-selected', 'true')
+      screen.getByRole('tab', { name: /app.ts/ }).focus()
       expect((await tabKey('4', modifier)).defaultPrevented).toBe(true)
       await screen.findByRole('region', { name: 'Commit abcdef1' })
       if (screen.getByTestId('rail-toggle').getAttribute('aria-expanded') !== 'true') await userEvent.click(screen.getByTestId('rail-toggle'))
       await waitFor(() => expect(screen.getByTestId('rail-session')).toBeVisible())
-      within(screen.getByRole('tablist', { name: 'Session panel views' })).getByRole('tab', { selected: true }).focus()
+      within(screen.getByRole('tablist', { name: 'Workspace panel views' })).getByRole('tab', { selected: true }).focus()
       expect((await tabKey('5', modifier)).defaultPrevented).toBe(true)
       const artifact = await screen.findByRole('region', { name: 'report.md' })
       expect(artifact).toHaveFocus()
@@ -293,7 +300,9 @@ for (const platform of ['Linux x86_64', 'MacIntel']) describe(`global tab shortc
       expect(composer).toHaveFocus()
       expect(composer.value).toBe('Unsent draft')
       expect((await tabKey('w', modifier)).defaultPrevented).toBe(true)
-      expect(screen.getByRole('tab', { name: /Chat/ })).toHaveAttribute('aria-selected', 'true')
+      expect(screen.queryByRole('tab', { name: /Main/ })).toBeNull()
+      await tabKey('Escape', '')
+      expect(screen.getByRole('tab', { name: /Main/ })).toHaveAttribute('aria-selected', 'true')
       // Browser close stays native on Windows/Linux. macOS Control+W is the owned tab key.
       if (platform !== 'MacIntel') {
         const nativeClose = new KeyboardEvent('keydown', { key: 'w', ctrlKey: true, bubbles: true, cancelable: true })
@@ -302,11 +311,11 @@ for (const platform of ['Linux x86_64', 'MacIntel']) describe(`global tab shortc
       }
       await userEvent.keyboard('{Control>}k{/Control}')
       const input = screen.getByRole('combobox', { name: /^Search commands/ })
-      await userEvent.fill(input, '>Back to Chat')
-      const back = await screen.findByRole('option', { name: /Back to Chat/ })
-      expect(back.querySelector('kbd')?.textContent).toBe(`Esc / ${modifier}+1`)
-      await userEvent.fill(input, '>Go to tab 3')
-      expect((await screen.findByRole('option', { name: /Go to tab 3/ })).querySelector('kbd')?.textContent).toBe(`${modifier}+3`)
+      await userEvent.fill(input, '>Back to Main')
+      const back = await screen.findByRole('option', { name: /Back to Main/ })
+      expect(back.querySelector('kbd')?.textContent).toBe('Esc')
+      await userEvent.fill(input, '>Go to tab 2')
+      expect((await screen.findByRole('option', { name: /Go to tab 2/ })).querySelector('kbd')?.textContent).toBe(`${modifier}+2`)
       await userEvent.keyboard('{Enter}')
       expect(await screen.findByRole('region', { name: 'changes.diff' })).toHaveFocus()
     } finally { mockedPlatform.mockRestore() }
@@ -344,7 +353,7 @@ for (const platform of ['Linux x86_64', 'MacIntel']) describe(`tab shortcut owne
       mountSession()
       const modifier = platform === 'MacIntel' ? 'Control' : 'Alt'
       const mods = modifier === 'Control' ? { ctrlKey: true } : { altKey: true }
-      const chat = screen.getByRole('tab', { name: /Chat/ })
+      const chat = screen.getByRole('tab', { name: /Main/ })
       const composer = document.querySelector<HTMLTextAreaElement>('.agent-composer textarea')!
       composer.focus()
       await tabKey('Escape', '')
@@ -392,7 +401,7 @@ for (const platform of ['Linux x86_64', 'MacIntel']) describe(`tab shortcut owne
       expect(screen.getByRole('tab', { name: /app.ts/ })).toHaveAttribute('aria-selected', 'true')
       menu.remove()
       await userEvent.click(screen.getByTestId('stop-session'))
-      const popover = await screen.findByRole('alertdialog', { name: 'End this session?' })
+      const popover = await screen.findByRole('alertdialog', { name: 'End this workspace?' })
       const cancel = within(popover).getByRole('button', { name: 'Cancel' })
       expect((await tabKey('1', modifier)).defaultPrevented).toBe(true)
       expect(cancel).toHaveFocus()

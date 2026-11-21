@@ -959,6 +959,7 @@ func TestHTTPCoreClient(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		if status != http.StatusOK {
 			if status == http.StatusNotFound && !bare404 {
+				w.Header().Set("X-Blerg-Standing-State", "revoked")
 				http.Error(w, "not found", status) // core's own uniform answer
 				return
 			}

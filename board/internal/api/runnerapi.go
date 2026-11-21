@@ -111,7 +111,7 @@ func (a *API) runnerRoutes(mux *http.ServeMux, authed func(func(http.ResponseWri
 }
 
 // handleSpawnFromCard: mint a board-scoped token, start a session on the
-// card's primary repo, record it, link the card. The prompt points the agent
+// card's repositories, record it, link the card. The prompt points the agent
 // at /onboard and the claim conventions.
 func (a *API) handleSpawnFromCard(w http.ResponseWriter, r *http.Request, p auth.Principal) {
 	if a.runner == nil {
@@ -137,8 +137,9 @@ func (a *API) handleSpawnFromCard(w http.ResponseWriter, r *http.Request, p auth
 		Mode   string `json:"mode"` // "run" (default): execute the card | "discuss": talk about it
 		// Runtime and DaemonID: where this run goes, when the person chose
 		// (runTarget). Empty: the board's default, as always.
-		Runtime  string `json:"runtime"`
-		DaemonID string `json:"daemon_id"`
+		RuntimeTargetID string `json:"runtime_target_id"`
+		Runtime         string `json:"runtime"`
+		DaemonID        string `json:"daemon_id"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	if req.Mode == "" {
@@ -149,6 +150,17 @@ func (a *API) handleSpawnFromCard(w http.ResponseWriter, r *http.Request, p auth
 	if err != nil {
 		writeDBError(w, err)
 		return
+	}
+	if req.RuntimeTargetID != "" {
+		if req.RuntimeTargetID != "cluster" {
+			writeError(w, 422, "unknown runtime target")
+			return
+		}
+		if req.Runtime != "" && req.Runtime != "cluster" {
+			writeError(w, 422, "runtime target requires the cluster runtime")
+			return
+		}
+		req.Runtime = "cluster"
 	}
 	target := runTarget{Runtime: req.Runtime, DaemonID: req.DaemonID}
 	if status, msg := a.checkRunTarget(p, board, target); status != 0 {
@@ -290,7 +302,7 @@ func detached(ctx context.Context, d time.Duration) (context.Context, context.Ca
 }
 
 // spawnSession mints a board-scoped token, starts a runner session on the
-// card's primary repo in the given role, records it, and links the card.
+// card's repositories in the given role, records it, and links the card.
 //
 // It runs on the board's default target with no per-spawn model: the card's
 // own model, else the board's role override, else board.Model.
@@ -330,12 +342,13 @@ func (a *API) spawnSessionAt(ctx context.Context, board db.Board, card db.Card, 
 	}
 	var configured runner.StartRequest
 	extID, configured, err = a.startOnRunnerConfigured(ctx, card.BoardID, runner.StartRequest{
-		Repo:   card.Repos[0],
-		Title:  title,
-		Prompt: prompt,
-		Model:  model,
-		Effort: effort,
-		GitURL: boardGitURL(board, card.Repos[0]),
+		Repo:         card.Repos[0],
+		Repositories: cardRepositories(board, card.Repos),
+		Title:        title,
+		Prompt:       prompt,
+		Model:        model,
+		Effort:       effort,
+		GitURL:       boardGitURL(board, card.Repos[0]),
 		// By role: a discussion has its person in the chat, a run or a
 		// review does not.
 		Interaction:   interactionForRole(role),
@@ -823,4 +836,16 @@ func boardGitURL(board db.Board, repo string) string {
 
 func sameOptionalBool(a, b *bool) bool {
 	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
+}
+
+// Single-repository starts keep their original wire shape for older runners.
+func cardRepositories(board db.Board, repos []string) []runner.Repository {
+	if len(repos) < 2 {
+		return nil
+	}
+	out := make([]runner.Repository, 0, len(repos))
+	for _, repo := range repos {
+		out = append(out, runner.Repository{Repo: repo, GitURL: boardGitURL(board, repo)})
+	}
+	return out
 }

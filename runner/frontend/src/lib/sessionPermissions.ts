@@ -97,7 +97,7 @@ export function boardDetail(b: BoardAccess): string {
 /** For a started session's board held below its own level: "Capped at Read by the session that started it". */
 export function capNote(b: BoardAccess): string {
   if (!b.parent_level || !b.own_level || boardLevelRank(b.own_level) <= boardLevelRank(b.parent_level)) return ''
-  return `capped at ${BOARD_LEVEL_LABELS[b.parent_level]} by the session that started it (its own level is ${BOARD_LEVEL_LABELS[b.own_level]})`
+  return `capped at ${BOARD_LEVEL_LABELS[b.parent_level]} by the workspace that started it (its own level is ${BOARD_LEVEL_LABELS[b.own_level]})`
 }
 
 export function grantScope(g: ProposalGrant): string {
@@ -106,17 +106,32 @@ export function grantScope(g: ProposalGrant): string {
 
 
 /** Why a dormant grant does not approve, as the panel says it. */
-export function inactiveLabel(g: ProposalGrant): string {
-  return g.inactive === 'tool_changed' ? 'The tool changed since; allow it again to approve the new version'
-    : 'Needs you signed in: it was given from a sign-in that has ended; allow it again'
+export function authorityLabel(state: string | undefined): string {
+  switch (state) {
+    case 'board_owner_missing': return 'The board has no recorded owner. Ask the owner or an administrator to assign an owner.'
+    case 'unavailable': return 'Access could not be verified. Retry when the authorization service is available.'
+    case 'revoked': return 'Permission expired. Check session Permissions and grant access again.'
+    case 'signed_out': return 'Needs you signed in: Renew it, or choose another level'
+    case 'tool_changed': return 'The tool changed since; allow it again to approve the new version'
+    default: return 'Access suspended. Sign in to restore it automatically, and finish any required password change.'
+  }
 }
+export function authorityShort(state: string | undefined): string {
+  if (state === 'signed_out') return 'Needs you signed in'
+  if (state === 'board_owner_missing') return 'No owner'
+  if (state === 'unavailable') return 'Unavailable'
+  if (state === 'revoked') return 'Expired'
+  if (state === 'tool_changed') return 'tool changed'
+  return 'Suspended'
+}
+export function inactiveLabel(g: ProposalGrant): string { return authorityLabel(g.inactive) }
 
 /** The target alone, for a chip: the board's name, or "connection · tool". */
 export function grantTarget(g: ProposalGrant): string {
   return g.kind === 'board_file' ? (g.board_name || g.board_id || '') : `${g.connection_name} · ${g.tool}`
 }
 
-const HOW: Record<string, string> = { card: 'Given from a card in the chat', panel: 'Given in the session panel', launch: 'Given at launch', parent: 'Passed down by the session that started it' }
+const HOW: Record<string, string> = { card: 'Given from a card in the chat', panel: 'Given in the workspace panel', launch: 'Given at launch', parent: 'Passed down by the workspace that started it' }
 
 /** How and when a grant was given, as the Permissions modal lists it. */
 export function grantDetail(g: ProposalGrant): string {

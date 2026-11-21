@@ -334,17 +334,24 @@ func (d *claudeCodeDriver) closeBackgroundSubagent(n ccNotice) {
 		}
 	}
 	d.forgetRunLocked(id, s)
-	var closeProc *ccProc
+	wake := false
 	if s.resumed && d.backgroundRunningLocked() == 0 {
-		closeProc = d.backgroundIdleLocked()
+		// backgroundIdleLocked's refresh (a fresh idle window before this function's own reporting
+		// work) must still happen unconditionally, as in closeBackgroundTask.
+		d.backgroundIdleLocked()
+		if !s.resumedBg {
+			// A resumed run whose original launched in the foreground is counted by
+			// backgroundRunningLocked (its own comment: "a resumed run of a foreground one is
+			// counted here") but trackResumedRunLocked refuses to track it in bgTasks, so
+			// closeBackgroundTask never sees it and can never wake on its end. This is the only
+			// place that can arm the fallback for it (BLG-447).
+			wake = d.idleNowLocked()
+		}
 	}
 	d.reportOpenWorkLocked()
 	p := s.payload()
 	p.DurationMs = d.clock().Sub(s.started).Milliseconds()
 	d.subMu.Unlock()
-	if closeProc != nil {
-		defer d.finishStdinClose(closeProc)
-	}
 
 	if p.Usage == nil && n.tokens > 0 && !s.resumed {
 		// Either form's figure (<subagent_tokens>, usage.total_tokens) is the subagent's TOTAL, not
@@ -377,4 +384,9 @@ func (d *claudeCodeDriver) closeBackgroundSubagent(n ccNotice) {
 		}
 	}
 	d.emit("subagent_done", p)
+	if wake {
+		d.armWakeFallback(agent.BackgroundTaskDonePayload{
+			TaskID: id, CallID: id, Kind: "agent", Status: n.status, Summary: p.Summary, Description: s.p.Summary,
+		})
+	}
 }

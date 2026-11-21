@@ -190,3 +190,51 @@ func TestExchangeTokensAreHiddenAndUncounted(t *testing.T) {
 	}
 	t.Fatal("exchange tokens have no cap of their own")
 }
+
+func TestCreateExchangeTokenConcurrentCap(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	svc, st := agentTokenSvc(t)
+	acct := insertAccount(t, st, "exch-concurrent", "member")
+	limits := DefaultBoardLimits
+	limits.LiveExchangeTokens = 10
+	limits.UnrevokedPerAccount = 2
+	if err := svc.SetBoardLimits(ctx, acct, limits); err != nil {
+		t.Fatal(err)
+	}
+	// Leave one slot so simultaneous counts contend for the same allowance.
+	for i := 0; i < limits.LiveExchangeTokens-1; i++ {
+		if _, _, err := svc.CreateExchangeToken(ctx, acct, "board", "b", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const issuers = 32
+	start := make(chan struct{})
+	results := make(chan error, issuers)
+	for i := 0; i < issuers; i++ {
+		go func() {
+			<-start
+			_, _, err := svc.CreateExchangeToken(ctx, acct, "board", "b", nil)
+			results <- err
+		}()
+	}
+	close(start)
+	successes := 0
+	for i := 0; i < issuers; i++ {
+		err := <-results
+		if err == nil {
+			successes++
+		} else if !errors.Is(err, ErrTooManyTokens) {
+			t.Errorf("issuer: %v", err)
+		}
+	}
+	var live int
+	if err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM agent_tokens
+		WHERE account_id = $1 AND kind = $2 AND revoked_at IS NULL AND expires_at > now()`,
+		acct, AgentTokenKindExchange).Scan(&live); err != nil {
+		t.Fatal(err)
+	}
+	if successes != 1 || live != limits.LiveExchangeTokens {
+		t.Fatalf("concurrent issuers succeeded=%d live=%d, want 1 and cap %d", successes, live, limits.LiveExchangeTokens)
+	}
+}

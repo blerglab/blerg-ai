@@ -47,7 +47,7 @@ func TestBrowserMessageCannotClaimAReservedSource(t *testing.T) {
 		}
 	}
 
-	for _, source := range []string{"review", "proposal", "system", "ask_answer", "note_reply", "limit_resume", "runner"} {
+	for _, source := range []string{"page_result", "review", "proposal", "system", "ask_answer", "note_reply", "limit_resume", "runner"} {
 		drain(dc.send)
 		clientID := newUUID()
 		handleBrowserAgentMessage(ctx, hub, browser, pool, protocol.AgentUserMessage{
@@ -80,6 +80,7 @@ func TestBrowserMessageCannotClaimAReservedSource(t *testing.T) {
 	})
 	dc2 := &DaemonConn{ID: dc.ID, Name: dc.Name, ReposRoot: dc.ReposRoot, send: make(chan []byte, 8)}
 	dc2.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc2.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	hub.Register(dc2)
 	hub.deliverHeld(t.Context(), dc2)
 	got := forwarded(dc2.send)

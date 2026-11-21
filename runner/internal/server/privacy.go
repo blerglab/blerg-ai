@@ -21,7 +21,7 @@ package server
 //     names a private session from every socket but its owner's (a payload's
 //     session is read from its own JSON, so a new broadcast site cannot forget)
 //   - /ws/browser, inbound: every frame that names a session is refused for a
-//     socket that may not see it (Hub.accountCanSee)
+//     socket that may not see it (browserSessionAccess reads persisted privacy)
 //   - completion webhooks and push notifications: see webhook.go / push sites
 //
 // privacy_guard_test.go fails when a route or a broadcast call site appears
@@ -63,7 +63,7 @@ func canSee(p runnerPrincipal, row *db.SessionRow) bool {
 	// A parent session acting for its children (delegation.go) sees its own children and
 	// nothing else: not itself, not its owner's other sessions, private or not.
 	if p.Kind == sessionDelegateKind {
-		return p.Sub != "" && row.ParentSessionID != nil && *row.ParentSessionID == p.Sub &&
+		return (!row.Private || row.DelegationVia != "person") && p.Sub != "" && row.ParentSessionID != nil && *row.ParentSessionID == p.Sub &&
 			p.OnBehalfOf != "" && ownsSession(p.OnBehalfOf, row)
 	}
 	if row.Private {
@@ -212,6 +212,7 @@ func (h *Hub) applyPrivacyLoad(owners map[string]string, err error) {
 		h.privacy.owners = map[string]string{}
 	}
 	for id, owner := range owners {
+		id = privacySessionKey(id)
 		if _, known := h.privacy.owners[id]; !known {
 			h.privacy.owners[id] = owner
 		}
@@ -264,7 +265,16 @@ func (h *Hub) notePrivate(sessionID, owner string) {
 	if h.privacy.owners == nil {
 		h.privacy.owners = map[string]string{}
 	}
-	h.privacy.owners[sessionID] = owner
+	h.privacy.owners[privacySessionKey(sessionID)] = owner
+}
+
+// UUID spelling must not change authority: PostgreSQL accepts uppercase hex,
+// while persisted rows use lowercase. Keep synthetic non-UUID hub IDs intact.
+func privacySessionKey(id string) string {
+	if db.ValidUUID(id) {
+		return strings.ToLower(id)
+	}
+	return id
 }
 
 // privateOwners returns the private sessions among ids and their owners ("" =
@@ -284,7 +294,7 @@ func (h *Hub) privateOwners(ids []string) (owners map[string]string, ok bool) {
 		return nil, false
 	}
 	for _, id := range ids {
-		if owner, private := h.privacy.owners[id]; private {
+		if owner, private := h.privacy.owners[privacySessionKey(id)]; private {
 			if owners == nil {
 				owners = map[string]string{}
 			}
@@ -372,6 +382,8 @@ func (a *API) MarkPrivate(ctx context.Context, sessionID string) error {
 			owner = *row.SpawningAccountID
 		}
 		a.hub.notePrivate(sessionID, owner)
+		a.hub.invalidateDatasetSession(ctx, a.dbPool, sessionID, false)
+		a.hub.invalidateDatasetSession(ctx, a.dbPool, sessionID, true)
 		a.hub.evictForeignSubscribers(sessionID, owner)
 	}
 	return nil

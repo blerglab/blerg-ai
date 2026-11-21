@@ -25,7 +25,7 @@ echo "the binary of the running daemon" > "$inst/repo/bin/blerg-runner-daemon"
 bin="$inst/bin"
 mkdir -p "$bin"
 for x in git python3 bash sh cat grep sed tr id dirname date awk head cut wc mkdir seq sleep mv chmod rm cmp \
-         mktemp find touch kill printf env basename timeout iconv base64 tail; do
+         mktemp find touch kill printf env basename timeout iconv base64 tail cp; do
   p="$(command -v "$x" 2>/dev/null)" && [ "$p" != "$x" ] && ln -sf "$p" "$bin/$x"
 done
 cat > "$bin/loginctl" <<'EOF'
@@ -46,6 +46,23 @@ echo build >> "$FAKE_LOG"
 while [ "$1" != -o ]; do shift; done
 cat > "$2" <<'BIN'
 #!/bin/sh
+if [ "$1" = shell-keeper ] && [ "${FAKE_REAL_KEEPER:-0}" = 1 ]; then
+  exec "$BLERG_TEST_REAL_KEEPER_BIN" "$@"
+fi
+if [ "$1" = shell-keeper ] && [ "$2" = install ]; then
+  echo keeper-check-update >> "$FAKE_LOG"
+  [ "${FAKE_KEEPER_CHECK_RC:-0}" = 0 ] || exit "$FAKE_KEEPER_CHECK_RC"
+  cp "$0" "$3"
+  exit $?
+fi
+if [ "$1" = shell-keeper ] && [ "$2" = init ]; then
+  echo keeper-init >> "$FAKE_LOG"
+  exit "${FAKE_KEEPER_INIT_RC:-0}"
+fi
+if [ "$1" = shell-keeper ] && [ "$2" = check-update ]; then
+  echo keeper-check-update >> "$FAKE_LOG"
+  exit "${FAKE_KEEPER_CHECK_RC:-0}"
+fi
 if [ "$1" = prepare-update ]; then
   echo "prepare-update:$BLERG_RUNNER_DAEMON_STATE_DIR" >> "$FAKE_LOG"
 fi
@@ -69,6 +86,11 @@ EOF
 cat > "$bin/systemctl" <<'EOF'
 #!/bin/sh
 case "$*" in
+  '--user enable --now --no-block blerg-shell-keeper.service')
+    echo keeper-enable >> "$FAKE_LOG"; exit "${FAKE_KEEPER_ENABLE_RC:-0}" ;;
+  *show-environment*)
+    [ "${FAKE_START_USER:-0}" != 1 ] || [ -f "$FAKE_LOG.user-started" ] ;;
+  'start user@'*) touch "$FAKE_LOG.user-started" ;;
   *is-active*) [ "$FAKE_RUNNING" = 1 ] ;;
   *restart*)
     echo "restart" >> "$FAKE_LOG"
@@ -109,13 +131,18 @@ case "$FAKE_CURL" in
   *)       printf '503 application/json' ;;
 esac
 EOF
+cat > "$bin/sudo" <<'EOF'
+#!/bin/sh
+exec "$@"
+EOF
+chmod +x "$bin/sudo"
 chmod +x "$bin/wslpath" "$bin/powershell.exe" "$bin/loginctl" "$bin/uname" "$bin/go" "$bin/systemctl" "$bin/curl"
 # stat for the header-file check: from the system, under a name curl's stub can find.
 p="$(command -v stat)" && ln -sf "$p" "$bin/stat"
 
 state="$inst/state"
 run_install() { # [VAR=value...] ; runs install.sh install; output in $inst/out, exit code in $rc
-  rm -f "$inst/systemctl.log" "$inst/curl.log" "$inst/curl.header"
+  rm -f "$inst/systemctl.log" "$inst/systemctl.log.user-started" "$inst/curl.log" "$inst/curl.header"
   [ "${KEEP_SERVICE:-0}" = 1 ] || rm -rf "$inst/home/.config" "$inst/home/Library"
   if [ "${FAKE_NO_ENV:-0}" = 1 ]; then
     rm -f "$inst/repo/install/desktop/.env"  # a new machine: no desktop stack, no .env
@@ -127,7 +154,7 @@ run_install() { # [VAR=value...] ; runs install.sh install; output in $inst/out,
     # A running daemon that logs every #235 handoff step it is asked for.
     printf '#!/bin/sh\necho "daemon:$*" >> "$FAKE_LOG"\nexit 0\n' > "$inst/repo/bin/blerg-runner-daemon"
   else
-    printf '#!/bin/sh\n[ "$1" = begin-update ] && echo begin-update >> "$FAKE_LOG"\nexit 0\n' > "$inst/repo/bin/blerg-runner-daemon"
+    printf '#!/bin/sh\n[ "$1" = begin-update ] && echo begin-update >> "$FAKE_LOG"\n[ "$1" = cancel-update ] && echo cancel-update >> "$FAKE_LOG"\nexit 0\n' > "$inst/repo/bin/blerg-runner-daemon"
     chmod +x "$inst/repo/bin/blerg-runner-daemon"
   fi
   chmod +x "$inst/repo/bin/blerg-runner-daemon"
@@ -138,6 +165,8 @@ run_install() { # [VAR=value...] ; runs install.sh install; output in $inst/out,
       BLERG_DAEMON_CONNECT_WAIT=3 BLERG_PROC_VERSION="$inst/pv" XDG_RUNTIME_DIR="$inst/run"
     unset WSL_DISTRO_NAME CLAUDE_CODE_OAUTH_TOKEN BLERG_RUNNER_SERVER_URL http_proxy https_proxy HTTP_PROXY HTTPS_PROXY FAKE_SHOW_DELAY
     for kv in "$@"; do export "$kv"; done
+    [ "${FAKE_FRESH_DESTINATION:-0}" != 1 ] || rm -f "$inst/repo/bin/blerg-runner-daemon"
+    [ "${FAKE_UNSET_USER:-0}" != 1 ] || unset USER
     opts=("${FAKE_CMD:-install}")
     [ "${FAKE_STARTUP_FLAG:-0}" = 1 ] && opts+=(--wsl-startup)
     [ "${FAKE_INSTALL_YES:-0}" = 1 ] && opts+=(--yes)
@@ -155,30 +184,121 @@ no_token_anywhere() { # the token never reaches the output, curl's command line 
   [ -z "$(ls -A "$inst/tmp")" ] || t "$1: temp files left behind: $(ls -A "$inst/tmp")"
 }
 
+if [ "${BLERG_REAL_KEEPER_INSTALL_CASES_ONLY:-0}" = 1 ]; then
+  # A broken keeper on a genuinely fresh destination still installs agents.
+  # Services below are stubs; no keeper or shell is live in this scratch tree.
+  mkdir -p "$state/shell-keeper"
+  chmod 700 "$state/shell-keeper"
+  printf 'preserve partial identity\n' > "$state/shell-keeper/partial-state"
+  run_install FAKE_REAL_KEEPER=1 FAKE_RUNNING=0 FAKE_FRESH_DESTINATION=1
+  [ "$rc" = 0 ] || t "real keeper init failure blocked fresh agents: $rc: $(out)"
+  restarted || t "real keeper init failure prevented daemon restart"
+  grep -q 'Warning: host shells are unavailable' "$inst/out" || t 'real init failure lost warning'
+  grep -q 'preserve partial identity' "$state/shell-keeper/partial-state" || t 'partial keeper state changed'
+  run_install FAKE_REAL_KEEPER=1 FAKE_RUNNING=0
+  [ "$rc" = 0 ] || t "real broken-state upgrade blocked agents with a free lock: $rc: $(out)"
+  restarted || t "real broken-state upgrade prevented daemon restart"
+  grep -q 'Warning: host shells are unavailable' "$inst/out" || t 'real broken-state upgrade lost repair warning'
+  grep -q 'preserve partial identity' "$state/shell-keeper/partial-state" || t 'real broken-state upgrade changed repair state'
+  rm -rf "$state/shell-keeper"
+  # Actual daemon CLI, scratch state and fake services: reproduce the first
+  # enable failure, retry before enable, uninstall, then install again.
+  run_install FAKE_REAL_KEEPER=1 FAKE_RUNNING=0 FAKE_KEEPER_ENABLE_RC=8
+  [ "$rc" = 0 ] || t "keeper enable failure blocked real daemon installation: $rc: $(out)"
+  restarted || t "keeper enable failure prevented daemon restart"
+  cp "$state/shell-keeper/daemon-key.json" "$inst/original-key"
+  run_install FAKE_REAL_KEEPER=1 FAKE_RUNNING=0
+  [ "$rc" = 0 ] || t "real keeper retry wedged: $rc: $(out)"
+  run_install FAKE_REAL_KEEPER=1 FAKE_CMD=uninstall FAKE_RUNNING=0
+  [ "$rc" = 0 ] || t "scratch uninstall: $rc: $(out)"
+  run_install FAKE_REAL_KEEPER=1 FAKE_RUNNING=0
+  [ "$rc" = 0 ] || t "real keeper reinstall after uninstall wedged: $rc: $(out)"
+  cmp -s "$inst/original-key" "$state/shell-keeper/daemon-key.json" || t "retry rotated identity"
+  [ "$fail" = 0 ] || exit 1
+  echo 'real keeper installer retries: ok'
+  exit 0
+fi
+
+keeper_failure_cases() {
+  for failure in FAKE_KEEPER_INIT_RC=7 FAKE_KEEPER_ENABLE_RC=8; do
+    run_install "$failure"
+    [ "$rc" = 0 ] || t "$failure: keeper outage blocked agent installation: $(out)"
+    restarted || t "$failure: daemon was not started"
+    grep -q 'Warning: host shells are unavailable' "$inst/out" || t "$failure: no shell-only warning"
+    grep -q 'Preserve keeper keys and live custody' "$inst/out" || t "$failure: no repair instructions"
+  done
+  for failure in FAKE_KEEPER_CHECK_RC=9; do
+    mkdir -p "$state/shell-keeper"
+    run_install "$failure"
+    [ "$rc" = 0 ] || t "$failure: keeper blocked daemon installation"
+    grep -q '^keeper-check-update$' "$inst/systemctl.log" && t "$failure: installer consulted keeper"
+    restarted || t "$failure: daemon was not restarted"
+  done
+}
+if [ "${BLERG_KEEPER_INSTALL_CASES_ONLY:-0}" = 1 ]; then
+  keeper_failure_cases
+  [ "$fail" = 0 ] || exit 1
+  echo 'keeper installer failure cases: ok'
+  exit 0
+fi
+
 # Development updates notify the running daemon; only that daemon writes evidence.
 run_make_update() {
   rm -f "$inst/systemctl.log"
+  mkdir -p "$state/shell-keeper"
+  [ "${4:-existing}" != fresh ] || rm -rf "$state/shell-keeper"
   mkdir -p "$inst/repo/runner/bin"
-  printf '#!/bin/sh\n[ "$1" = begin-update ] && echo begin-update >> "$FAKE_LOG"\nexit 0\n' > "$inst/repo/runner/bin/blerg-runner-daemon"
+  printf '#!/bin/sh\n[ "$1" = begin-update ] && echo begin-update >> "$FAKE_LOG"\n[ "$1" = cancel-update ] && echo cancel-update >> "$FAKE_LOG"\nexit 0\n' > "$inst/repo/runner/bin/blerg-runner-daemon"
   chmod +x "$inst/repo/runner/bin/blerg-runner-daemon"
-  printf 'BLERG_RUNNER_DAEMON_STATE_DIR=%s\n' "$state" > "$inst/repo/runner/.env.daemon"
+  printf 'BLERG_RUNNER_DAEMON_STATE_DIR=%s\nBLERG_HOST_SHELL_CGROUP=%s\n' "$state" "${5:-0}" > "$inst/repo/runner/.env.daemon"
   ( export HOME="$inst/home" PATH="$bin:/usr/bin:/bin" FAKE_LOG="$inst/systemctl.log" \
       FAKE_RUNNING=1 FAKE_CONN_STATE=connected FAKE_PID=4242 BLERG_RUNNER_DAEMON_STATE_DIR="$state" \
-      FAKE_RESTART_RC="${2:-0}"
+      FAKE_RESTART_RC="${2:-0}" FAKE_KEEPER_CHECK_RC="${3:-0}" FAKE_KEEPER_INIT_RC="${6:-0}" FAKE_KEEPER_ENABLE_RC="${7:-0}"
     make -C "$inst/repo/runner" GO="$bin/go" "$1" > "$inst/make.out" 2>&1 )
   rc=$?
 }
 for target in install-daemon restart-daemon; do
+  for keeper_failure in init enable; do
+    if [ "$keeper_failure" = init ]; then
+      run_make_update "$target" 0 0 existing 0 9 0
+    else
+      run_make_update "$target" 0 0 existing 0 0 9
+    fi
+    [ "$rc" = 0 ] || t "$target $keeper_failure failure blocked agent installation: $(cat "$inst/make.out")"
+    restarted || t "$target $keeper_failure failure omitted daemon restart"
+    grep -q 'Warning: keeper' "$inst/make.out" || t "$target $keeper_failure failure omitted repair warning"
+  done
+  run_make_update "$target" 0 0 fresh
+  [ "$rc" = 0 ] || t "$target fresh install failed: $(cat "$inst/make.out")"
+  grep -q '^keeper-init$' "$inst/systemctl.log" || t "$target fresh install omitted keeper init"
+  grep -q '^keeper-enable$' "$inst/systemctl.log" || t "$target fresh install omitted keeper enable"
   run_make_update "$target"
   [ "$rc" = 0 ] || t "$target failed: $(cat "$inst/make.out")"
   grep -q '^update-receipt:' "$inst/systemctl.log" && t "$target called the removed receipt helper"
   [ "$(grep -E '^(begin-update|build)$' "$inst/systemctl.log" | head -2)" = $'begin-update\nbuild' ] || t "$target did not bind the initiating call before build"
   grep -q "^prepare-update:$state$" "$inst/systemctl.log" || t "$target did not notify the daemon"
+  grep -q '^keeper-check-update$' "$inst/systemctl.log" && t "$target consulted keeper during installation"
+  grep -q '^keeper-init$' "$inst/systemctl.log" || t "$target omits keeper identity initialization"
+  grep -q '^keeper-enable$' "$inst/systemctl.log" || t "$target leaves the daemon fenced without a keeper"
+  grep -q 'Type=notify' "$inst/home/.config/systemd/user/blerg-shell-keeper.service" || t "$target omits keeper unit"
+  grep -q '^Environment=BLERG_HOST_SHELL_CGROUP=0$' "$inst/home/.config/systemd/user/blerg-shell-keeper.service" || t "$target leaves keeper feature flag unrendered"
+  grep -q 'KillMode=mixed' "$inst/home/.config/systemd/user/blerg-runner-daemon.service" || t "$target weakens daemon containment"
+  run_make_update "$target" 0 9
+  [ "$rc" = 0 ] || t "$target keeper blocked daemon update"
+  restarted || t "$target keeper prevented restart"
   run_make_update "$target" 7
   [ "$rc" != 0 ] || t "$target did not propagate restart failure"
   grep -q '^update-failed$' "$inst/systemctl.log" && t "$target called the removed receipt helper on failure"
   grep -q '^cancel-update$' "$inst/systemctl.log" || t "$target did not cancel failed restart"
+  run_make_update "$target" 0 0 existing 1
+  [ "$rc" = 0 ] || t "$target feature flag install failed"
+  grep -q '^Environment=BLERG_HOST_SHELL_CGROUP=1$' "$inst/home/.config/systemd/user/blerg-shell-keeper.service" || t "$target did not preserve privileged cgroup opt-in"
 done
+
+run_install BLERG_HOST_SHELL_CGROUP=1
+[ "$rc" = 0 ] || t "keeper feature flag install failed: $(out)"
+grep -q '^Environment=BLERG_HOST_SHELL_CGROUP=1$' "$inst/home/.config/systemd/user/blerg-shell-keeper.service" || t "installer did not configure keeper privileged cgroup opt-in"
+grep -q '^Environment=BLERG_HOST_SHELL_CGROUP=1$' "$inst/home/.config/systemd/user/blerg-runner-daemon.service" || t "installer did not keep daemon and keeper flags consistent"
 
 # --- token accepted, daemon connects: installed, restarted, says connected
 rm -rf "$state"
@@ -196,6 +316,9 @@ grep -q '^URL: http://localhost:8083/api/daemon/whoami?name=test-box$' "$inst/cu
 grep -q "^OPT: --noproxy \*$" "$inst/curl.log" || t "a loopback check does not bypass the shell's proxy"
 grep -q '^ARGS: -q ' "$inst/curl.log" || t "curl's first argument is not -q (a ~/.curlrc could change the check): $(cat "$inst/curl.log")"
 no_token_anywhere "accepted"
+
+# Keeper failures after prepare-update must cancel the handoff on every exit.
+keeper_failure_cases
 
 # --- a remote wss server: https, no proxy bypass
 rm -rf "$state"
@@ -325,6 +448,51 @@ status_out="$( export PATH="$bin" HOME="$inst/home" BLERG_RUNNER_DAEMON_STATE_DI
   "$inst/repo/install/desktop/daemon/install.sh" status </dev/null 2>&1 )"
 grep -q 'Connection: no record' <<<"$status_out" || t "status without a file: $status_out"
 
+# A freshly started user manager uses the UID account even in a minimal shell.
+for identity in unset wrong; do
+  run_install FAKE_CMD=preflight FAKE_START_USER=1 FAKE_RUNNING=0 USER=wrong "FAKE_UNSET_USER=$([ "$identity" = unset ] && echo 1 || echo 0)"
+  [ "$rc" = 0 ] || t "preflight with $identity USER: exit $rc: $(out)"
+  grep -qx "linger-user:$(id -un)" "$inst/systemctl.log" || t "preflight trusted $identity USER instead of the UID account"
+done
+
+# Exercise the complete desktop entrypoint; no real Docker or service calls.
+entry="$tmp/entry"
+mkdir -p "$entry/repo/install/desktop/daemon" "$entry/repo/runner" "$entry/bin"
+cp blerg-up.sh brand.sh hostcheck.sh "$entry/repo/install/desktop/"
+cat > "$entry/bin/docker" <<'EOF'
+#!/bin/sh
+echo "$*" >> "$ENTRY_DOCKER_LOG"
+exit 0
+EOF
+cat > "$entry/bin/curl" <<'EOF'
+#!/bin/sh
+printf '{"id":"local","setup":"open"}'
+EOF
+cat > "$entry/repo/install/desktop/daemon/install.sh" <<'EOF'
+#!/bin/sh
+[ "$1" != preflight ] || exit "$ENTRY_PREFLIGHT_RC"
+exit "$ENTRY_DAEMON_RC"
+EOF
+chmod +x "$entry/bin/"* "$entry/repo/install/desktop/daemon/install.sh"
+for phase in preflight daemon enrollment success; do
+  rm -f "$entry/repo/install/desktop/.env" "$entry/docker.log"
+  preflight_rc=0; daemon_rc=0; expected=13
+  [ "$phase" != preflight ] || preflight_rc=13
+  [ "$phase" != daemon ] || daemon_rc=13
+  if [ "$phase" = enrollment ]; then daemon_rc=7; expected=7; fi
+  [ "$phase" != success ] || expected=0
+  ( export PATH="$entry/bin:$PATH" ENTRY_DOCKER_LOG="$entry/docker.log" ENTRY_PREFLIGHT_RC="$preflight_rc" ENTRY_DAEMON_RC="$daemon_rc"
+    "$entry/repo/install/desktop/blerg-up.sh" --no-open > "$entry/out" 2>&1 ); entry_rc=$?
+  [ "$entry_rc" = "$expected" ] || t "$phase failure: desktop entrypoint returned $entry_rc, want $expected"
+  if [ "$expected" != 0 ]; then
+    grep -q "that's success" "$entry/out" && t "$phase failure: desktop entrypoint claimed success"
+  fi
+  if [ "$phase" = preflight ]; then
+    [ ! -e "$entry/repo/install/desktop/.env" ] || t "preflight failure created settings"
+    grep -q 'compose -f .* up' "$entry/docker.log" && t "preflight failure started the stack"
+  fi
+done
+
 # --- blerg-up.sh: knows install.sh's refused exit code, and never prints the daemon token
 grep -q '^EXIT_TOKEN_REFUSED=6$' daemon/install.sh && grep -q '^    6) # install.sh.s EXIT_TOKEN_REFUSED' blerg-up.sh \
   || t "blerg-up.sh and install.sh disagree on the token-refused exit code"
@@ -372,7 +540,11 @@ echo "args:$1" >> "$HOME/.fake_shell.log"
 [ -f "$HOME/.fake_shell_child" ] && { "$HOME/.fake_child.sh"; :; }
 env >> "$HOME/.fake_shell.log"
 [ -f "$HOME/.fake_shell_fail" ] && exit 1
-PATH="$(cat "$HOME/.fake_login_path")"; export PATH
+if [ -f "$HOME/.fake_nvm_profile" ]; then
+  . "$HOME/.profile"
+else
+  PATH="$(cat "$HOME/.fake_login_path")"; export PATH
+fi
 shift
 exec /bin/sh -c "$1"
 SH
@@ -435,6 +607,33 @@ grep -q old-node "$state/login-path.json" || t "an unreadable login shell must l
 printf '{"path":["/opt/old-node/bin","/usr/bin"]}\n' > "$state/login-path.json"
 KEEP_SERVICE=1 run_install FAKE_CMD=refresh-path "${shell_env[@]}"
 grep -q old-node "$state/login-path.json" && t "the app's older saved PATH survived refresh-path"
+# A real fake-nvm layout, loaded through profile -> rc -> nvm.sh, not a
+# precomputed PATH. refresh-path must update both the service and saved PATH.
+mkdir -p "$h/.nvm/versions/node/v22.12.0/bin"
+printf '#!/bin/sh\necho fake-node\n' > "$h/.nvm/versions/node/v22.12.0/bin/node"
+chmod +x "$h/.nvm/versions/node/v22.12.0/bin/node"
+printf '. "$HOME/.bashrc"\n' > "$h/.profile"
+printf '. "$HOME/.nvm/nvm.sh"\n' > "$h/.bashrc"
+# A redundant slash is a valid directory spelling (including in NVM_DIR).
+# Capture succeeds, but filtering must not silently discard node's directory.
+printf 'NVM_DIR="$HOME//.nvm"\nPATH="$NVM_DIR/versions/node/v22.12.0/bin:/usr/bin:/bin"; export PATH\n' > "$h/.nvm/nvm.sh"
+touch "$h/.fake_nvm_profile"
+KEEP_SERVICE=1 run_install FAKE_CMD=refresh-path "${shell_env[@]}"
+[ "$rc" = 0 ] || t "nvm refresh-path: exit $rc: $(out)"
+grep -q 'Service PATH from your login shell (fakeshell)' "$inst/out" || t "nvm refresh-path: capture source missing"
+grep -qxF "Environment=PATH=$h/.nvm/versions/node/v22.12.0/bin:/usr/bin:/bin:$h/.local/bin:/usr/local/bin:/usr/sbin:/sbin" "$unit" || t "nvm refresh-path: service PATH missing node"
+python3 - "$state/login-path.json" "$h/.nvm/versions/node/v22.12.0/bin" "$unit" <<'PYTEST' || t "nvm refresh-path: saved/service PATH missing node"
+import json, subprocess, sys
+with open(sys.argv[1]) as f:
+    dirs = json.load(f)['path']
+assert dirs[0] == sys.argv[2], dirs
+with open(sys.argv[3]) as f:
+    service_path, = [line.strip().removeprefix('Environment=PATH=') for line in f if line.startswith('Environment=PATH=')]
+assert service_path == ':'.join(dirs), service_path
+assert subprocess.check_output(['node'], env={'PATH': service_path}, text=True) == 'fake-node\n'
+PYTEST
+restarted || t "nvm refresh-path: not restarted"
+rm -f "$h/.fake_nvm_profile"
 # refresh-path takes #235's planned-update handoff: begin before anything changes,
 # prepare right before the restart, cancel when the restart fails.
 handoff() { grep -E '^(daemon:(begin|prepare|cancel)-update|restart)$' "$inst/systemctl.log" | tr '\n' ' '; }
@@ -618,6 +817,8 @@ grep -q "^prepare-update:$state$" "$inst/systemctl.log" || t "installer did not 
 run_install FAKE_RESTART_RC=7
 [ "$rc" = 7 ] || t "failed restart lost its status: $rc"
 grep -q '^cancel-update$' "$inst/systemctl.log" || t "installer did not cancel failed restart"
+grep -q 'Daemon install failed (exit 7); update handoff canceled' "$inst/out" || t "installer hid the actual restart failure"
+grep -q 'preceding build, file operation, or daemon service error' "$inst/out" || t "installer blamed keeper state for a daemon failure"
 grep -q 'protected-' "$inst/systemctl.log" && t "installer attempted privileged routing"
 
 [ "$fail" = 0 ] && echo "daemon_install_test: ok"

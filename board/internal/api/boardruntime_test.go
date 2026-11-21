@@ -375,3 +375,27 @@ func TestUnplacedStartWithoutTargetInventoryNeverUsesTheHost(t *testing.T) {
 		})
 	}
 }
+
+func TestNamedRuntimeTargetHTTP(t *testing.T) {
+	_, _, board, card, do := runtimeFixture(t, true)
+	for _, target := range []string{"missing", "cluster"} {
+		resp := do("PATCH", "/api/boards/"+board, map[string]any{"run_runtime": "cluster", "run_daemon_id": "", "runtime_target_id": target})
+		if target == "missing" {
+			if resp.StatusCode != 422 {
+				t.Fatalf("unknown target: %d %s", resp.StatusCode, readAll(t, resp))
+			}
+			resp.Body.Close()
+		} else {
+			var saved map[string]any
+			decodeBody(t, resp, &saved)
+			if saved["runtime_target_id"] != "cluster" {
+				t.Fatalf("saved target: %+v", saved)
+			}
+		}
+	}
+	resp := do("POST", "/api/cards/"+card+"/spawn", map[string]any{"runtime": "cluster", "runtime_target_id": "missing"})
+	if resp.StatusCode != 422 {
+		t.Fatalf("unknown spawn target: %d %s", resp.StatusCode, readAll(t, resp))
+	}
+	resp.Body.Close()
+}

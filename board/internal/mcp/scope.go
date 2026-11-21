@@ -46,6 +46,11 @@ type toolScope struct {
 }
 
 var toolScopes = map[string]toolScope{
+	"blerg_release_delete":       {toolBoardArg, "release planning on one board"},
+	"blerg_release_list":         {toolBoardArg, "release planning on one board"},
+	"blerg_release_get":          {toolBoardArg, "release planning on one board"},
+	"blerg_release_save":         {toolBoardArg, "release planning on one board"},
+	"blerg_release_close":        {toolBoardArg, "release planning on one board"},
 	"blerg_board_launch_options": {toolBoardArg, "board-scoped launch option discovery"},
 	"blerg_board_list":           {toolSelf, "filtered to the token's board"},
 	"blerg_board_get":            {toolBoardArg, "board read"},

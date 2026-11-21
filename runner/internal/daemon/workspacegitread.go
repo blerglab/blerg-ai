@@ -9,6 +9,12 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
+// Refusal names are fixed at the checks below, never supplied by a peer.
+func gitReadRefusal(check string) protocol.CommitResult {
+	logDaemonFailure("git read: "+check, nil)
+	return protocol.CommitResult{ErrorCode: "unavailable"}
+}
+
 // All v2 Git consumers enter the registered reader/lifecycle boundary, including
 // suspended or retired readers. A missing registration cannot downgrade to cwd.
 type workspaceGitReader interface {
@@ -24,14 +30,26 @@ func (r *WorkspaceExplorerRouter) readGit(ctx context.Context, req protocol.Read
 		r.mu.Unlock()
 		return failed, false
 	}
-	if r.closed || registration == nil || registration.suspended || r.active >= 4 {
+	if r.closed {
 		r.mu.Unlock()
-		return failed, true
+		return gitReadRefusal("router_closed"), true
+	}
+	if registration == nil {
+		r.mu.Unlock()
+		return gitReadRefusal("reader_not_registered"), true
+	}
+	if registration.suspended {
+		r.mu.Unlock()
+		return gitReadRefusal("reader_suspended"), true
+	}
+	if r.active >= 4 {
+		r.mu.Unlock()
+		return gitReadRefusal("reader_capacity"), true
 	}
 	reader, ok := registration.runtime.(workspaceGitReader)
 	if !ok {
 		r.mu.Unlock()
-		return failed, true
+		return gitReadRefusal("reader_unsupported"), true
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -42,7 +60,7 @@ func (r *WorkspaceExplorerRouter) readGit(ctx context.Context, req protocol.Read
 	if _, exists := r.pending[key]; exists {
 		r.mu.Unlock()
 		cancel()
-		return failed, true
+		return gitReadRefusal("duplicate_request"), true
 	}
 	r.pending[key] = explorerWork{session: req.SessionID, cancel: cancel, done: done}
 	r.active++
@@ -62,7 +80,7 @@ func (r *WorkspaceExplorerRouter) readGit(ctx context.Context, req protocol.Read
 	current := r.runtimes[req.SessionID] == registration && !registration.suspended && !r.closed
 	r.mu.Unlock()
 	if !current || ctx.Err() != nil {
-		return failed, true
+		return gitReadRefusal("reader_changed_or_canceled"), true
 	}
 	return result, true
 }
@@ -75,22 +93,36 @@ func readGitBinding(ctx context.Context, req protocol.ReadCommit, origin bool, b
 		}
 		return protocol.CommitResult{OK: true, Commit: &protocol.CommitInfo{SHA: commit}}
 	}
+	if req.BoardHistory {
+		return readBoardHistory(ctx, req, binding)
+	}
+	if req.DatasetMerges {
+		return readDatasetMerges(ctx, req, binding)
+	}
+	if req.Graph {
+		return readBranchGraph(ctx, req.SessionID, binding, req.Depth)
+	}
 	if req.MergedChild != "" {
 		if !req.IsZero() {
 			if req.ChildLaunchGeneration == "" || !protocol.ValidSessionOriginCommit(req.ChildBase) {
 				return protocol.CommitResult{ErrorCode: "invalid"}
 			}
-			return readChildMergedBase(ctx, req.SessionID, binding, req.MergedChild, req.ChildBase, "")
+			return readChildMergedBase(ctx, req.SessionID, binding, req.MergedChild, req.ChildBase, "", req.ChildBranch)
 		}
-		return readChildMerged(ctx, req.SessionID, binding, req.MergedChild)
+		return readChildMergedBase(ctx, req.SessionID, binding, req.MergedChild, "", "", req.ChildBranch)
 	}
-	return readWorkspaceCommit(ctx, req.SessionID, binding, req.SHA, req.Patch)
+	if req.Branch != "" {
+		return readWorkspaceBranch(ctx, req.SessionID, binding, req.Branch, req.Base, req.Patch)
+	}
+	return readWorkspaceCommit(ctx, req.SessionID, binding, req.SHA, req.Patch, req)
 }
 
 func (e *LocalExplorer) readGit(ctx context.Context, req protocol.ReadCommit, origin bool) protocol.CommitResult {
-	failed := protocol.CommitResult{ErrorCode: "unavailable"}
-	if req.Validate(e.manifest, e.generation) != nil || !e.valid() {
-		return failed
+	if err := req.Validate(e.manifest, e.generation); err != nil {
+		return gitReadRefusal("local_reference_invalid")
+	}
+	if !e.valid() {
+		return gitReadRefusal("local_root_changed")
 	}
 	// Only pinned launch members participate. Discovery and request paths cannot
 	// create a Git context. Runtime clones with alternates use P2's source adapter.
@@ -102,25 +134,31 @@ func (e *LocalExplorer) readGit(ctx context.Context, req protocol.ReadCommit, or
 		}
 	}
 	if member.ID == "" || !e.memberAvailable(member.Path) {
-		return failed
+		return gitReadRefusal("local_member_unavailable")
 	}
 	anchor := e.anchors[member.ID]
 	if anchor.info == nil {
-		return failed
+		return gitReadRefusal("local_anchor_missing")
 	}
 	live := func() bool {
 		if !e.valid() || !e.memberAvailable(member.Path) {
+			gitReadRefusal("local_delivery_root_or_member_changed")
 			return false
 		}
 		st, err := anchor.root.Lstat(".git")
 		if err != nil || workspaceRootIdentity(st) != e.gitRoots[member.ID] {
+			gitReadRefusal("local_git_root_changed")
 			return false
 		}
 		if worktree, ok := e.worktrees[member.ID]; ok {
 			if !worktree.publicMatches(anchor.root, ".") {
+				gitReadRefusal("local_worktree_pointer_changed")
 				return false
 			}
 			_, safe := worktree.check(ctx)
+			if !safe {
+				gitReadRefusal("local_worktree_metadata_refused")
+			}
 			return safe
 		}
 		return true
@@ -128,34 +166,39 @@ func (e *LocalExplorer) readGit(ctx context.Context, req protocol.ReadCommit, or
 	binding := workspaceFileBinding{root: anchor.folder, info: anchor.info, live: live}
 	result := readGitBinding(ctx, req, origin, binding)
 	if !live() {
-		return failed
+		return gitReadRefusal("local_git_binding_changed")
 	}
 	return result
 }
 func (v *VirtualHostExplorer) readGit(ctx context.Context, req protocol.ReadCommit, origin bool) protocol.CommitResult {
 	if req.Validate(v.manifest, v.namespace.generation) != nil || !v.namespace.valid() {
-		return protocol.CommitResult{ErrorCode: "unavailable"}
+		return gitReadRefusal("virtual_reference_or_namespace_invalid")
 	}
 	member := v.members[req.MemberID]
 	if member == nil {
-		return protocol.CommitResult{ErrorCode: "unavailable"}
+		return gitReadRefusal("virtual_member_missing")
 	}
 	return member.readGit(ctx, req, origin)
 }
 func (r *authorizedHostExplorer) readGit(ctx context.Context, req protocol.ReadCommit, origin bool) protocol.CommitResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	failed := protocol.CommitResult{ErrorCode: "unavailable"}
-	if req.SessionID != r.launch.SessionID || !req.Matches(&r.binding) || !r.current(ctx) {
-		return failed
+	if req.SessionID != r.launch.SessionID {
+		return gitReadRefusal("host_session_mismatch")
+	}
+	if !req.Matches(&r.binding) {
+		return gitReadRefusal("host_runtime_mismatch")
+	}
+	if !r.current(ctx) {
+		return gitReadRefusal("host_authority_unavailable")
 	}
 	reader, ok := r.reader.(workspaceGitReader)
 	if !ok {
-		return failed
+		return gitReadRefusal("host_reader_unsupported")
 	}
 	result := reader.readGit(ctx, req, origin)
 	if !r.current(ctx) {
-		return failed
+		return gitReadRefusal("host_delivery_authority_changed")
 	}
 	return result
 }
@@ -197,7 +240,7 @@ func (r *boundWorkspaceExplorer) readGit(ctx context.Context, req protocol.ReadC
 				if req.ChildLaunchGeneration == "" || !protocol.ValidSessionOriginCommit(req.ChildBase) {
 					return errors.New("child provenance missing")
 				}
-				result = readChildMergedBase(ctx, req.SessionID, binding, req.MergedChild, req.ChildBase, "refs/heads/wip/"+req.SessionID)
+				result = readChildMergedBase(ctx, req.SessionID, binding, req.MergedChild, req.ChildBase, "refs/heads/"+sandboxBranch(req.SessionID), req.ChildBranch)
 			} else {
 				result = readGitBinding(ctx, req, false, binding)
 			}
@@ -206,6 +249,7 @@ func (r *boundWorkspaceExplorer) readGit(ctx context.Context, req protocol.ReadC
 		return errors.New("member missing")
 	})
 	if err != nil {
+		logDaemonFailure("git read: bound_member_failed", err)
 		return failed
 	}
 	return result
@@ -213,7 +257,7 @@ func (r *boundWorkspaceExplorer) readGit(ctx context.Context, req protocol.ReadC
 
 func readLegacyGit(ctx context.Context, req protocol.ReadCommit, origin bool, binding workspaceFileBinding) protocol.CommitResult {
 	if !req.IsZero() {
-		return protocol.CommitResult{ErrorCode: "unavailable"}
+		return gitReadRefusal("legacy_reference_rejected")
 	}
 	if origin && isSandboxClone(binding.root, req.SessionID) {
 		commit, ok := readSandboxOrigin(binding)

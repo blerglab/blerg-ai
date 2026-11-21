@@ -5,7 +5,7 @@
 // Chromium with the real viewer layout: a mark drawn at a natural pixel shows over that pixel on
 // screen, lands on that pixel in the flattened PNG, and a pin there reports that fraction.
 import { afterEach, describe, expect, it } from 'vitest'
-import { render, waitFor } from '@testing-library/react'
+import { act, render, waitFor } from '@testing-library/react'
 import { page, userEvent } from 'vitest/browser'
 import { fireEvent } from '@testing-library/react'
 import { ArtifactViewer, ChatContext, localStorageChatStorage, type ArtifactInfo, type ChatContextValue, type TransportFiles } from '@blerglab/chat'
@@ -60,6 +60,8 @@ describe('image mark-up lands where it was drawn', () => {
     await page.viewport(vw, vh)
     const blob = await png(iw, ih)
     const sent: File[] = []
+    let resolveSubmitted!: () => void
+    const submitted = new Promise<void>(resolve => { resolveSubmitted = resolve })
     const files: TransportFiles = {
       list: async () => [], raw: async () => blob, download: async () => {}, remove: async () => {},
       upload: async () => { throw new Error('unused') },
@@ -68,7 +70,7 @@ describe('image mark-up lands where it was drawn', () => {
       sessionId: 'markup-place', files: null, view: () => {}, latestVersion: () => undefined, byName: () => undefined,
       reviewFor: async () => null,
       // Keep the editor open after Send so the pins can be checked too.
-      submitFeedback: async (_text, attached) => { sent.push(...attached); return false },
+      submitFeedback: async (_text, attached) => { sent.push(...attached); resolveSubmitted(); return false },
     }
     const artifact: ArtifactInfo = { id: 'shot', name: 'shot.png', size: blob.size, content_type: 'image/png', view: 'image' }
     const view = render(
@@ -120,7 +122,10 @@ describe('image mark-up lands where it was drawn', () => {
 
     // In the flattened PNG: the same natural pixel, the same square.
     await userEvent.click(view.getByRole('button', { name: 'Send' }))
-    await waitFor(() => expect(sent.length).toBe(1))
+    // PNG encoding uses an asynchronous browser task. Await the transport boundary
+    // rather than giving it waitFor's separate one-second deadline under load.
+    await act(async () => { await submitted })
+    expect(sent).toHaveLength(1)
     const bitmap = await createImageBitmap(sent[0]!)
     expect([bitmap.width, bitmap.height]).toEqual([iw, ih])
     const out = document.createElement('canvas'); out.width = iw; out.height = ih

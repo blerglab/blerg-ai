@@ -2,10 +2,14 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -160,5 +164,125 @@ func TestOpenclawContextBudgetChars(t *testing.T) {
 	t.Setenv("BLERG_OPENCLAW_CONTEXT_CHARS", "not-a-number")
 	if got := openclawContextBudgetChars(); got != defaultOpenclawContextBudgetChars {
 		t.Errorf("garbage env: got %d, want default %d", got, defaultOpenclawContextBudgetChars)
+	}
+}
+
+func openclawStopFixture(t *testing.T, childFile string) (*openclawDriver, *collectEmitter, func()) {
+	t.Helper()
+	bin := t.TempDir()
+	script := `#!/usr/bin/env python3
+import json,sys,time,os,subprocess
+if 'first request' in sys.argv[3]:
+ if os.getenv('FAKE_OPENCLAW_CHILD'):
+  child=subprocess.Popen(['sleep','60'])
+  with open(os.environ['FAKE_OPENCLAW_CHILD'],'w') as f:f.write(str(child.pid))
+ time.sleep(60)
+print(json.dumps({'ok':True,'final':'done'}),flush=True)
+`
+	if err := os.WriteFile(filepath.Join(bin, "openclaw"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	if childFile != "" {
+		t.Setenv("FAKE_OPENCLAW_CHILD", childFile)
+	}
+	em := &collectEmitter{}
+	d := newOpenclawDriver(AgentDriverOpts{Spec: engineRegistry["openclaw"], WorkDir: t.TempDir(), Emitter: em})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	stop := func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			t.Error("OpenClaw worker did not stop")
+		}
+	}
+	return d, em, func() { go func() { defer close(done); d.Run(ctx) }(); t.Cleanup(stop) }
+}
+
+func TestOpenclawStopDuringStartupDeliversQueuedInput(t *testing.T) {
+	d, em, start := openclawStopFixture(t, "")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var starts atomic.Int32
+	d.startCommand = func(cmd *exec.Cmd) error {
+		if starts.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		return cmd.Start()
+	}
+	start()
+	d.Enqueue("first request", "chat")
+	<-entered
+	d.Interrupt()
+	d.EnqueueInput(agent.Input{Text: "next request", ClientID: "next"})
+	close(release)
+	waitIdle(t, em, 2)
+	if em.count("turn_done:interrupted") != 1 || em.count("user:next request") != 1 || countKind(em, "error") != 0 {
+		t.Fatal(em.outline())
+	}
+}
+
+func TestOpenclawStopRefusalKeepsQueuedInputForRetry(t *testing.T) {
+	d, em, start := openclawStopFixture(t, "")
+	var refuse atomic.Bool
+	refuse.Store(true)
+	ready := make(chan struct{})
+	d.startCommand = func(cmd *exec.Cmd) error {
+		cmd.Cancel = func() error {
+			if refuse.Load() {
+				return errors.New("fixture stop refusal")
+			}
+			return cmd.Process.Kill()
+		}
+		err := cmd.Start()
+		if err == nil {
+			select {
+			case <-ready:
+			default:
+				close(ready)
+			}
+		}
+		return err
+	}
+	start()
+	t.Cleanup(func() { refuse.Store(false) })
+	d.Enqueue("first request", "chat")
+	<-ready
+	d.Interrupt()
+	d.EnqueueInput(agent.Input{Text: "next request", ClientID: "next"})
+	waitUntil(t, "visible OpenClaw refusal", func() bool { return em.count("error:") > 0 })
+	if countKind(em, "turn_done") != 0 || em.count("user:next request") != 0 {
+		t.Fatal("refused Stop pretended to finish the turn", em.outline())
+	}
+	refuse.Store(false)
+	d.Interrupt()
+	waitIdle(t, em, 2)
+	if em.count("turn_done:interrupted") != 1 || em.count("user:next request") != 1 {
+		t.Fatal(em.outline())
+	}
+}
+
+func TestOpenclawStopEndsInheritedShellWait(t *testing.T) {
+	childFile := filepath.Join(t.TempDir(), "child")
+	d, em, start := openclawStopFixture(t, childFile)
+	start()
+	d.Enqueue("first request", "chat")
+	waitUntil(t, "inherited shell", func() bool { _, err := os.Stat(childFile); return err == nil })
+	raw, err := os.ReadFile(childFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Kill(pid, syscall.SIGKILL) }()
+	d.Interrupt()
+	d.Enqueue("next request", "chat")
+	waitIdle(t, em, 2)
+	if em.count("turn_done:interrupted") != 1 || em.count("user:next request") != 1 || countKind(em, "error") != 0 {
+		t.Fatal(em.outline())
 	}
 }

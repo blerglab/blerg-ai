@@ -34,55 +34,6 @@ func TestSandboxRegistry(t *testing.T) {
 	}
 }
 
-// TestRunTmuxForRouting verifies runTmuxFor builds a bare `tmux` command for an
-// unregistered session and a `docker exec <container> tmux` command for a
-// registered one — the single branch point every tmux.go helper shares.
-func TestRunTmuxForRouting(t *testing.T) {
-	const bareID = "bare-session"
-	const sandboxID = "sandbox-session"
-	const container = "blerg-sandbox-sandbox-session"
-
-	registerSandbox(sandboxID, container)
-	t.Cleanup(func() { unregisterSandbox(sandboxID) })
-
-	bareCmd := runTmuxFor(bareID, "capture-pane", "-p")
-	wantBare := []string{"tmux", "capture-pane", "-p"}
-	if !reflect.DeepEqual(bareCmd.Args, wantBare) {
-		t.Errorf("runTmuxFor(bare) args = %v, want %v", bareCmd.Args, wantBare)
-	}
-
-	sandboxCmd := runTmuxFor(sandboxID, "capture-pane", "-p")
-	wantSandbox := []string{"docker", "exec", container, "tmux", "capture-pane", "-p"}
-	if !reflect.DeepEqual(sandboxCmd.Args, wantSandbox) {
-		t.Errorf("runTmuxFor(sandbox) args = %v, want %v", sandboxCmd.Args, wantSandbox)
-	}
-}
-
-// TestTmuxAttachCommandRouting mirrors TestRunTmuxForRouting for
-// tmuxAttachCommand specifically: it needs -it (an interactive PTY, unlike the
-// one-shot helpers) and is built independently since its result is a []string
-// handed to NewSession rather than an *exec.Cmd.
-func TestTmuxAttachCommandRouting(t *testing.T) {
-	const bareID = "bare-attach-session"
-	const sandboxID = "sandbox-attach-session"
-	const container = "blerg-sandbox-sandbox-attach-session"
-
-	registerSandbox(sandboxID, container)
-	t.Cleanup(func() { unregisterSandbox(sandboxID) })
-
-	got := tmuxAttachCommand(bareID)
-	want := []string{"tmux", "attach-session", "-d", "-t", tmuxSessionName(bareID)}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("tmuxAttachCommand(bare) = %v, want %v", got, want)
-	}
-
-	got = tmuxAttachCommand(sandboxID)
-	want = []string{"docker", "exec", "-it", container, "tmux", "attach-session", "-d", "-t", tmuxSessionName(sandboxID)}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("tmuxAttachCommand(sandbox) = %v, want %v", got, want)
-	}
-}
-
 // TestSandboxRunArgsAreHardened verifies the docker run flags built by
 // sandboxRunArgs (desktop-security I7 / R1 part 2): capability drop,
 // no-new-privileges, pids/memory limits, no --restart, only the engine
@@ -172,22 +123,6 @@ func TestDockerContainerName(t *testing.T) {
 	want := "blerg-sandbox-abc-123"
 	if got != want {
 		t.Errorf("dockerContainerName(%q) = %q, want %q", "abc-123", got, want)
-	}
-}
-
-// TestKillTmuxSessionRemovesSandboxContainer verifies killTmuxSession's docker
-// cleanup runs only for a registered session and unregisters it afterward,
-// without actually invoking docker or tmux — both binaries here run against
-// nonexistent names/containers and are expected to fail silently (killTmuxSession
-// only ever best-effort `_ = cmd.Run()`s them).
-func TestKillTmuxSessionRemovesSandboxContainer(t *testing.T) {
-	const id = "kill-test-session"
-	registerSandbox(id, "blerg-sandbox-"+id)
-
-	killTmuxSession(id)
-
-	if _, ok := sandboxContainer(id); ok {
-		t.Errorf("killTmuxSession(%q) left the session registered as a sandbox", id)
 	}
 }
 
@@ -289,17 +224,6 @@ func TestStartSandboxContainerFailsWhenTheNetworkCannotBeChecked(t *testing.T) {
 	}
 	if sandboxNetworkWarned.Load() || strings.Contains(logs.String(), "not found") {
 		t.Errorf("missing-network warning consumed by an unrelated error: %q", logs.String())
-	}
-}
-
-// The terminal kind returns the same error from createDockerSandbox.
-func TestCreateDockerSandboxFailsWhenTheNetworkCannotBeChecked(t *testing.T) {
-	recordDockerCalls(t, errors.New("permission denied"))
-	t.Cleanup(func() { unregisterSandbox("s-term-down") })
-	err := createDockerSandbox("s-term-down", sandboxTestClone(t, "s-term-down"), []string{"claude"}, nil,
-		SandboxOptions{Network: "blerg-sandbox"})
-	if err == nil || !strings.Contains(err.Error(), "could not check the sandbox network: docker network inspect failed: permission denied") {
-		t.Fatalf("err = %v, want the network check failure", err)
 	}
 }
 
@@ -666,44 +590,6 @@ func TestStartSandboxContainerSkipsAMissingMessagingCLI(t *testing.T) {
 	}
 }
 
-// TestCreateDockerSandboxGetsTheNetworkAndCLI: a terminal-kind sandbox goes
-// through the same container start as an agent-kind one. The fake docker
-// records the run and succeeds every in-container tmux call without running it.
-func TestCreateDockerSandboxGetsTheNetworkAndCLI(t *testing.T) {
-	dockerDir, logPath := fakeDocker(t)
-	t.Setenv("PATH", dockerDir+":"+os.Getenv("PATH"))
-	t.Setenv("FAKE_DOCKER_LOG", logPath)
-	t.Setenv("FAKE_DOCKER_EXEC_NOOP", "1")
-	t.Setenv("HOME", t.TempDir())
-	orig := dockerRun
-	dockerRun = func(args ...string) error { return exec.Command("docker", args...).Run() }
-	t.Cleanup(func() { dockerRun = orig; unregisterSandbox("s-term") })
-	repoRoot := t.TempDir()
-	cli := writeMessagingCLI(t, repoRoot)
-
-	if err := createDockerSandbox("s-term", sandboxTestClone(t, "s-term"), []string{"claude"}, hostSessionEnv(),
-		SandboxOptions{Network: "blerg-sandbox", RepoRoot: repoRoot}); err != nil {
-		t.Fatalf("createDockerSandbox: %v", err)
-	}
-	calls := dockerCalls(t, logPath)
-	for _, want := range []string{
-		"network inspect blerg-sandbox",
-		"--network blerg-sandbox",
-		"-e BLERG_BOARD_URL=http://blerg-board:8080",
-		"-e BLERG_RUNNER_SERVER_HTTP=http://blerg-runner:8080",
-		"--mount type=bind,src=" + cli + ",dst=/home/agent/.local/bin/blerg-runner,readonly",
-		"new-session -d -s " + tmuxSessionName("s-term"),
-	} {
-		if !strings.Contains(calls, want) {
-			t.Errorf("missing %q; calls:\n%s", want, calls)
-		}
-	}
-	if strings.Contains(calls, "BLERG_RUNNER_SERVER_URL") {
-		t.Errorf("host websocket URL forwarded:\n%s", calls)
-	}
-	assertNoMasterToken(t, calls)
-}
-
 // TestManagerPassesSandboxOptionsToBothKinds: the manager's settings reach the
 // terminal path (sandboxOptions) and the agent host alike.
 func TestManagerPassesSandboxOptionsToBothKinds(t *testing.T) {
@@ -743,5 +629,15 @@ func TestSandboxRestrictedEngineMountsOnlySelectedLogin(t *testing.T) {
 	unknown := strings.Join(sandboxRunArgs("container", "/workspace", home, nil, sandboxRunExtras{restrictedEngine: "unknown", sandboxHome: "/state/sandbox-homes/container"}), " ")
 	if strings.Contains(unknown, "/home/agent/.codex") || strings.Contains(unknown, "/home/agent/.claude") {
 		t.Fatal("unknown restricted engine broadened login mounts")
+	}
+}
+
+func TestSandboxMetricsRuntimeDoesNotBorrowHostPath(t *testing.T) {
+	got := strings.Join(sandboxRunArgs("c", "/p", t.TempDir(), []string{"BLERG_RUNNER_METRICS_BIN=/private/host-runtime"}, sandboxRunExtras{}), " ")
+	if strings.Contains(got, "BLERG_RUNNER_METRICS_BIN=/private/host-runtime") {
+		t.Fatal("host-only metrics executable forwarded")
+	}
+	if !strings.Contains(got, "BLERG_RUNNER_METRICS_BIN=/usr/local/bin/blerg-workspace-metrics") {
+		t.Fatal("sandbox runtime missing")
 	}
 }

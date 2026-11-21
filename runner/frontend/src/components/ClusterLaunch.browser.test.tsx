@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { expect, it } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { page, userEvent } from 'vitest/browser'
@@ -6,7 +7,7 @@ import type { StartAttempt } from '../../../../packages/chat/src/model/startStag
 import '../index.css'
 import '@blerglab/chat/blerg.css'
 
-it.each([390, 3840])('shows protected cluster launch failures and details at %i px', async width => {
+it.each(browserWidths([390, 3840]))('shows protected cluster launch failures and details at %i px', async width => {
   await page.viewport(width, width === 390 ? 844 : 2160)
   const labels = [
     ['selection', 'Authorizing selection'], ['manifest', 'Saving workspace manifest'],

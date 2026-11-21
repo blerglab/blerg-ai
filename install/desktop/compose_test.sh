@@ -25,9 +25,9 @@ if grep -E 'localhost:808[123]' <<<"$out" | grep -qv '^#'; then echo "FAIL: a li
 
 # The build args carry the git commit the apps show beside the release version: "dev" unless
 # blerg-up.sh (or the caller) sets BLERG_COMMIT.
-[ "$(grep -c 'COMMIT: dev' <<<"$out")" -eq 3 ] || { echo "FAIL: core, board and runner do not all default COMMIT to dev"; fail=1; }
+[ "$(grep -c 'COMMIT: dev' <<<"$out")" -eq 4 ] || { echo "FAIL: core, board, runner and PKI initializer do not all default COMMIT to dev"; fail=1; }
 out_commit="$(BLERG_COMMIT=abc1234 BLERG_CORE_INTERNAL_KEY=k BLERG_CORE_LOCAL_KEY=$(openssl rand -base64 32) docker compose --env-file /dev/null config)"
-[ "$(grep -c 'COMMIT: abc1234' <<<"$out_commit")" -eq 3 ] || { echo "FAIL: BLERG_COMMIT is not passed to the core, board and runner builds"; fail=1; }
+[ "$(grep -c 'COMMIT: abc1234' <<<"$out_commit")" -eq 4 ] || { echo "FAIL: BLERG_COMMIT is not passed to the core, board, runner and PKI initializer builds"; fail=1; }
 
 # R2: ports are published on loopback unless BLERG_BIND_ADDR says otherwise.
 grep -qE 'host_ip: 127\.0\.0\.1' <<<"$out" || { echo "FAIL: ports not bound to 127.0.0.1 by default"; fail=1; }
@@ -113,12 +113,12 @@ fi
 # survives a real chmod failure under set -euo pipefail (a faked chmod that
 # always fails stands in for a read-only home / NFS / wrong-owner file,
 # which we can't reliably provoke as an unprivileged test).
-tighten_behaviour="$(
-  fakebin="$(mktemp -d)"
-  cat > "$fakebin/chmod" <<'FAKECHMOD'
+fakebin="$(mktemp -d)"
+cat > "$fakebin/chmod" <<'FAKECHMOD'
 #!/usr/bin/env bash
 exit 1
 FAKECHMOD
+tighten_behaviour="$(
   chmod +x "$fakebin/chmod"
   target="$(mktemp)"
   PATH="$fakebin:$PATH" bash -c 'set -euo pipefail; [ -f "$1" ] && chmod 600 "$1" 2>/dev/null || true; echo survived' _ "$target"

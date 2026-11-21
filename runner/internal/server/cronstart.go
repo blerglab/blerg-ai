@@ -106,6 +106,12 @@ func credentialErrorf(format string, args ...any) error {
 
 // startFailureCause names the typed causes CreateSessionJob's failures carry, for APIError.Cause.
 func startFailureCause(err error) error {
+	if clusterRefusal(err) != nil {
+		if errors.Is(err, errRepositoryUnreadable) {
+			return errors.Join(ErrNoPersonalCredential, err)
+		}
+		return err
+	}
 	switch {
 	case errors.Is(err, ErrNoPersonalCredential), errors.Is(err, errRepositoryUnreadable), errors.Is(err, errRepositoryAddress):
 		return ErrNoPersonalCredential
@@ -533,14 +539,38 @@ func (s *CronService) start(ctx context.Context, c *db.Cron, run *db.CronRun) (s
 		}
 	}
 
+	// Older daemons must never silently skip an approved static step.
+	if c.CommandSteps != nil {
+		if err := c.CommandSteps.Validate(); err != nil || (len(c.CommandSteps.Steps) > 0 && c.CommandSteps.Runtime != "" && (c.CommandSteps.Runtime != c.Runtime || c.CommandSteps.DaemonID != derefOrEmpty(c.DaemonID) || c.CommandSteps.RuntimeTargetID != derefOrEmpty(c.RuntimeTargetID))) {
+			return "", credentialErrorf("invalid fixed command approval")
+		}
+		if dc != nil && len(c.CommandSteps.Steps) > 0 && !dc.FixedCommandSteps {
+			return "", capacityErrorf("fixed command steps require an updated Linux daemon")
+		}
+	}
 	// 6. Start.
+	targetID := ""
+	if rt == runnerRuntimeCluster {
+		targetID = derefOrEmpty(c.RuntimeTargetID)
+	}
 	req := RunnerStartRequest{
-		Title: cronSessionTitle(c, run), Prompt: c.Prompt, Model: derefOrEmpty(c.Model), Effort: derefOrEmpty(c.Effort),
-		Engine: c.Engine, Runtime: rt, AutoStop: true, NoRepo: true,
+		CommandSteps: c.CommandSteps, Title: cronSessionTitle(c, run), Prompt: c.Prompt, Model: derefOrEmpty(c.Model), Effort: derefOrEmpty(c.Effort),
+		Engine: c.Engine, Runtime: rt, RuntimeTargetID: targetID, AutoStop: true, NoRepo: true,
 		Grant: grant, CronID: c.ID, NoOperatorFallback: true, IdemScope: scope,
 	}
 	if dc != nil {
 		req.DaemonID = dc.ID
+	}
+	if c.CommandSteps != nil {
+		var auditedRun string
+		err := a.dbPool.QueryRow(ctx, `INSERT INTO cron_command_run_audit (run_id,cron_id,definition_hash,definition,runtime,daemon_id)
+   VALUES ($1::uuid,$2::uuid,$3,$4::jsonb,$5,$6) ON CONFLICT (run_id) DO UPDATE SET run_id=EXCLUDED.run_id
+ WHERE cron_command_run_audit.definition_hash=EXCLUDED.definition_hash
+ AND cron_command_run_audit.runtime=EXCLUDED.runtime AND cron_command_run_audit.daemon_id=EXCLUDED.daemon_id
+ RETURNING run_id`, run.ID, c.ID, c.CommandSteps.Hash, c.CommandSteps, req.Runtime, req.DaemonID).Scan(&auditedRun)
+		if err != nil {
+			return "", errors.New("could not record fixed command run approval")
+		}
 	}
 	resp, apiErr := a.StartSession(ctx, principal, req, key)
 	if apiErr != nil {

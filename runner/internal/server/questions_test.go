@@ -21,6 +21,9 @@ import (
 func TestNoWaitQuestionIsAnsweredByTheOwnerAndSentToTheAgent(t *testing.T) {
 	f := newPrivFixture(t)
 	ctx := context.Background()
+	if _, err := db.AnswerMessage(ctx, f.pool, f.pubMsg, "fixture complete"); err != nil {
+		t.Fatal(err)
+	}
 	board, err := db.CreateBoard(ctx, f.pool, "questions", nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -149,6 +152,16 @@ func TestNoWaitQuestionNeedsASignedInOwner(t *testing.T) {
 func TestQuestionAnswerSourceIsReserved(t *testing.T) {
 	if !reservedMessageSource(questionAnswerSource) {
 		t.Fatal("question_answer is not reserved")
+	}
+}
+
+// No caller writes in the voice the server uses for the "Set it up with Main" relay (M1, BLG-450
+// review): reservedMessageSource must block it from SendMessage the same way it blocks the other
+// Blerg-own relay sources, so a REST caller cannot forge a message that renders as if Blerg itself
+// asked Main to run the planning setup flow.
+func TestBlackboardSetupSourceIsReserved(t *testing.T) {
+	if !reservedMessageSource(blackboardSetupSource) {
+		t.Fatal("blackboard_setup is not reserved")
 	}
 }
 
@@ -344,6 +357,9 @@ func TestNoWaitAnswerWhileTheDaemonIsAwayStaysTiedToItsQuestion(t *testing.T) {
 func TestNoWaitQuestionEntryPoints(t *testing.T) {
 	f := newPrivFixture(t)
 	ctx := context.Background()
+	if _, err := db.AnswerMessage(ctx, f.pool, f.pubMsg, "fixture complete"); err != nil {
+		t.Fatal(err)
+	}
 	if _, apiErr := f.api.SendMessage(ctx, runnerPrincipal{Kind: "human", Sub: privAcctA}, f.pubSession, "Answer to your question x: yes", questionAnswerSource); apiErr == nil || apiErr.Status != http.StatusUnprocessableEntity {
 		t.Fatalf("SendMessage with source question_answer = %+v, want 422", apiErr)
 	}

@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 import { page, userEvent } from 'vitest/browser'
@@ -10,7 +11,7 @@ import '@blerglab/chat/blerg.css'
 afterEach(async () => { await page.viewport(1280, 900) })
 
 describe('project README references from chat', () => {
-  it.each([390, 3840])('opens a project reference in the viewer at %d px', async width => {
+  it.each(browserWidths([390, 3840]))('opens a project reference in the viewer at %d px', async width => {
     await page.viewport(width, 1000)
     resetChatState()
     const path = '/workspace/example-app/README.md'

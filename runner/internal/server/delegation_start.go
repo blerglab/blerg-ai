@@ -136,6 +136,14 @@ func parseChildStart(raw []byte, host childHost) (childStart, childHost, *APIErr
 		return fail(apiErrorf(http.StatusRequestEntityTooLarge, "%s", childPromptTooLarge))
 	}
 	cs.Title = cleanSessionTitle(cs.Title)
+	explicitKind := cs.WorkerKind
+	var kindErr error
+	cs.WorkerKind, kindErr = resolveWorkerKind(cs.WorkerKind, cs.Title)
+	cs.workerKindInferred = explicitKind == "" && cs.WorkerKind != ""
+	if kindErr != nil {
+		log.Printf("delegation start: invalid worker kind")
+		return fail(apiErrorf(http.StatusUnprocessableEntity, "%s", kindErr))
+	}
 	if utf8.RuneCountInString(cs.Title) > maxDelegationTitleRunes {
 		return fail(apiErrorf(http.StatusUnprocessableEntity, "title is longer than %d characters", maxDelegationTitleRunes))
 	}
@@ -152,6 +160,15 @@ func parseChildStart(raw []byte, host childHost) (childStart, childHost, *APIErr
 	dc := host.dc
 	switch {
 	case host.workspace != nil:
+		// BLG-501: see the matching branch in startChildScoped (delegation.go) for why this
+		// is its own case — the network half (member repository resolution, --base check)
+		// runs later, in a.hostClusterChildWorkspace, once a session row exists.
+		if host.workspace.Runtime == "host" && cs.Runtime == runnerRuntimeCluster {
+			if apiErr := selectHostClusterChildSelectors(&cs, *host.workspace); apiErr != nil {
+				return fail(apiErr)
+			}
+			break
+		}
 		if host.workspace.Runtime == "cluster" {
 			if apiErr := selectClusterChild(&cs, *host.workspace); apiErr != nil {
 				return fail(apiErr)
@@ -297,7 +314,7 @@ func engineLabel(engine string) string {
 // through the contract RestrictTools and its principal's started_by_kind (recordStartedBy, which
 // fails the start rather than leave it unmarked), a child its parent.
 func trustDirect(parent *db.SessionRow) bool {
-	if parent == nil || isChildSession(parent) || parent.RestrictTools {
+	if parent == nil || parent.DelegationVia == "person" || isChildSession(parent) || parent.RestrictTools {
 		return false
 	}
 	if parent.StartedByKind != "" && parent.StartedByKind != "human" {
@@ -318,7 +335,7 @@ const (
 )
 
 // msgSandboxedClusterChildren is the Cluster row's reason for a sandboxed desktop session under "once".
-const msgSandboxedClusterChildren = "A sandboxed session asks you for each cluster child, because the pod gets your credentials."
+const msgSandboxedClusterChildren = "A sandboxed session asks you for each cluster worker, because the pod gets your credentials."
 
 // sandboxClusterChildren is the one reading of BLERG_RUNNER_SANDBOX_CLUSTER_CHILDREN: "any" when set
 // to that, else "once" (unset, empty or any other value fails closed). Read per call, so a change
@@ -360,7 +377,7 @@ func confinementReason(runtime string) string {
 	if runtime == runnerRuntimeCluster {
 		return msgSandboxedClusterChildren
 	}
-	return "A sandboxed parent cannot preapprove unsandboxed children."
+	return "A sandboxed workspace cannot preapprove unsandboxed workers."
 }
 
 // standingRulesApply: the person's standing rules for runtime may start this parent's child. A rule
@@ -461,8 +478,8 @@ func (a *API) checkDelegationLimits(ctx context.Context, parent *db.SessionRow, 
 	if err != nil {
 		return dbErr(err)
 	}
-	if n >= maxRunningChildrenPerAccount {
-		return limitErr(60, "your sessions already run %d started sessions; stop one first", maxRunningChildrenPerAccount)
+	if accountLimit := accountRunningLimit(limits); n >= accountLimit {
+		return limitErr(60, "your sessions already run %d started sessions; stop one first", accountLimit)
 	}
 	n, oldest, err := db.AccountStartsSince(ctx, a.dbPool, account, since)
 	if err != nil {
@@ -575,6 +592,10 @@ func (a *API) withDelegationLock(ctx context.Context, account string, fn func() 
 
 // childRequestHash is the hash of the canonical (resolved) childStart.
 func childRequestHash(cs childStart) string {
+	// Inference is server metadata, not a change to the caller's request.
+	if cs.workerKindInferred {
+		cs.WorkerKind = ""
+	}
 	cs.Boards = childBoardsHashKey(cs.Boards)
 	raw, _ := json.Marshal(cs)
 	sum := sha256.Sum256(raw)
@@ -592,17 +613,24 @@ func childRunnerRequest(parent *db.SessionRow, cs childStart, via string) runner
 		}
 	}
 	var clusterRepos []string
-	var clusterLaunch string
+	var clusterLaunch, base string
 	if cs.Runtime == "cluster" {
 		clusterRepos, clusterLaunch = cs.Repos, cs.WorkspaceLaunch
+		if cs.Workspace == nil {
+			// BLG-501: a host Main's cluster worker never carries a Workspace manifest of
+			// its own (see selectHostClusterChildSelectors); --base travels alongside the
+			// member selection instead.
+			base = cs.Base
+		}
 	}
 	return runnerStartRequest{
 		Workspace:      cs.Workspace,
-		WorkspaceRepos: clusterRepos, WorkspaceLaunch: clusterLaunch,
+		WorkspaceRepos: clusterRepos, WorkspaceLaunch: clusterLaunch, Base: base,
 		Engine: cs.Engine, Model: cs.Model, Effort: cs.Effort,
 		Repo: repo, NoRepo: cs.NoRepo, Runtime: cs.Runtime, Provider: cs.Provider, resolvedRepoProvider: cs.Provider != "",
-		Title: cs.Title, Prompt: workspacePrompt(cs.Prompt, cs.Workspace),
+		Title: cs.Title, Prompt: cs.Prompt, WorkerKind: cs.WorkerKind, workerKindResolved: true, workerKindInferred: cs.workerKindInferred,
 		Interaction:     protocol.InteractionUnattended,
+		Verbosity:       cs.Verbosity,
 		DaemonID:        childDaemonID(parent, cs.Runtime),
 		ParentSessionID: parent.ID,
 		ParentEpoch:     parent.DelegationEndedAt,
@@ -762,6 +790,19 @@ func (a *API) HandlePostChildren(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if idem != nil {
+			if idem.RefusalCode != "" {
+				matches, err := childStartHashMatches(childRunnerRequest(parent, cs, idem.RefusalVia), idem.RequestHash)
+				if err != nil {
+					return err
+				}
+				if !matches {
+					out = conflict
+					return nil
+				}
+				refusal := &clusterAuthorizationRefusal{code: idem.RefusalCode}
+				out = outcomeError(apiErrorCause(422, refusal, "%s", refusal.Error()))
+				return nil
+			}
 			child, err := db.GetSession(ctx, a.dbPool, idem.SessionID)
 			if err != nil {
 				return err
@@ -770,11 +811,11 @@ func (a *API) HandlePostChildren(w http.ResponseWriter, r *http.Request) {
 				out = outcomeError(apiErrorf(http.StatusGone, "%s", msgChildKeyDeleted))
 				return nil
 			}
-			want, err := startRequestHash(childRunnerRequest(parent, cs, child.DelegationVia))
+			matches, err := childStartHashMatches(childRunnerRequest(parent, cs, child.DelegationVia), idem.RequestHash)
 			if err != nil {
 				return err
 			}
-			if want != idem.RequestHash {
+			if !matches {
 				out = conflict
 				return nil
 			}
@@ -807,6 +848,9 @@ func (a *API) HandlePostChildren(w http.ResponseWriter, r *http.Request) {
 				return nil
 			}
 			log.Printf("delegation: parent %s started child %s via %s", parent.ID, resp.SessionID, via)
+			// Best-effort and after the child is actually live (BLG-454): a worker starting never
+			// fails or slows down because of this check.
+			a.maybeRecommendBlackboardForSession(context.WithoutCancel(ctx), parent.ID)
 			out = childOutcome{status: http.StatusCreated, body: childReply(resp.SessionID, cs, via, budget)}
 			return nil
 		}
@@ -879,20 +923,32 @@ func delegationEventID(requestID, kind string) string {
 	return protocol.SessionMessageEventID("delegation:"+requestID, kind)
 }
 
-// pushForDelegation pushes a new request like an ask (pushForMessage's rules): never for a private
-// parent (subscriptions belong to no account) nor a headless one (nobody attends it).
+// pushForDelegation pushes a new request like an ask (pushForMessage's rules): never for a
+// headless parent (nobody attends it). Private parents notify only their owner.
 func (a *API) pushForDelegation(parent db.SessionRow, req db.DelegationRequest, engineLabel string) {
-	if parent.Private || headlessSession(&parent) {
+	if headlessSession(&parent) {
 		return
 	}
 	var stored storedChildRequest
 	_ = json.Unmarshal(req.Request, &stored)
-	heading := sessionLabel(derefOrEmpty(parent.Title), parent.Repo, parent.ID) + " — wants to start a session"
-	body := fmt.Sprintf("Start a %s session: %s", engineLabel, stored.Title)
+	heading := sessionLabel(derefOrEmpty(parent.Title), parent.Repo, parent.ID) + " — wants to start a worker"
+	body := fmt.Sprintf("Start a %s worker: %s", engineLabel, stored.Title)
 	link := "/sessions/" + parent.ID
 	if a.delegationPush != nil {
 		a.delegationPush(heading, body, link)
 		return
 	}
-	SendPush(a.dbPool, heading, body, link)
+	SendPushForSession(a.dbPool, parent.ID, heading, body, link)
+}
+
+// Before workspace instructions moved out of chat, the child's canonical start
+// included the generated suffix. A retry may still reference that saved hash.
+func childStartHashMatches(req runnerStartRequest, stored string) (bool, error) {
+	want, err := startRequestHash(req)
+	if err != nil || want == stored || req.Workspace == nil {
+		return want == stored, err
+	}
+	req.Prompt = workspacePrompt(req.Prompt, req.Workspace)
+	legacy, err := startRequestHash(req)
+	return legacy == stored, err
 }

@@ -16,9 +16,15 @@ import (
 // status plus the spawn_session the daemon received (nil if none).
 func postSession(t *testing.T, body map[string]any) (int, *protocol.SpawnSession) {
 	t.Helper()
+	return postSessionRequest(t, body, false)
+}
+
+func postSessionRequest(t *testing.T, body map[string]any, viaHTTP bool) (int, *protocol.SpawnSession) {
+	t.Helper()
 	hub := NewHub()
 	dc := &DaemonConn{ID: "00000000-0000-4000-8000-0000000000f1", Name: "laptop", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	hub.Register(dc)
 	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
 	tok := enableBrowserAuth(t, api)("session.start")
@@ -38,7 +44,26 @@ func postSession(t *testing.T, body map[string]any) (int, *protocol.SpawnSession
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(string(raw)))
 	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
-	api.HandlePostSessions(rec, req)
+	if viaHTTP {
+		mux := http.NewServeMux()
+		mux.HandleFunc("POST /api/sessions", api.HandlePostSessions)
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/api/sessions", strings.NewReader(string(raw)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		rec.Code = resp.StatusCode
+	} else {
+		api.HandlePostSessions(rec, req)
+	}
 	select {
 	case m := <-dc.send:
 		var msg protocol.SpawnSession
@@ -96,7 +121,7 @@ func TestPostSessionsRecordsLaunchEffort(t *testing.T) {
 	}
 }
 
-func TestPostSessionsRejectsBadModelOrEffort(t *testing.T) {
+func TestModelRulesRejectBadModelOrEffort(t *testing.T) {
 	for _, body := range []map[string]any{
 		{"model": "sonnet --dangerously-skip-permissions"},
 		{"model": "-p"},
@@ -114,12 +139,11 @@ func TestPostSessionsRejectsBadModelOrEffort(t *testing.T) {
 		// OpenClaw registers no effort levels, so it takes none.
 		{"engine": "openclaw", "effort": "high"},
 	} {
-		code, msg := postSession(t, body)
-		if code != http.StatusUnprocessableEntity {
-			t.Errorf("%v: status %d, want 422", body, code)
-		}
-		if msg != nil {
-			t.Errorf("%v: a spawn reached the daemon", body)
+		engine, _ := body["engine"].(string)
+		model, _ := body["model"].(string)
+		effort, _ := body["effort"].(string)
+		if problem := modelRuleProblem(engine, model, effort); problem == "" {
+			t.Errorf("%v: accepted invalid launch arguments", body)
 		}
 	}
 }
@@ -151,6 +175,7 @@ func TestCodexThroughTheRealRoutes(t *testing.T) {
 	hub := NewHub()
 	dc := &DaemonConn{ID: "00000000-0000-4000-8000-0000000000f1", Name: "laptop", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	dc.SetCheckedOutRepos([]string{"app"})
 	hub.Register(dc)
 	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
@@ -224,6 +249,7 @@ func TestRunnerStartCarriesEffortToDaemon(t *testing.T) {
 	hub := NewHub()
 	dc := &DaemonConn{ID: "00000000-0000-4000-8000-0000000000f1", Name: "laptop", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	dc.SetCheckedOutRepos([]string{"app"})
 	hub.Register(dc)
 	api := ownedInventoryAPI(t, hub, "daemon-tok-1234567890", nil, "")
@@ -274,6 +300,7 @@ func TestResumeAfterBadInChatValueDropsIt(t *testing.T) {
 			hub := NewHub()
 			dc := &DaemonConn{ID: daemonID, send: make(chan []byte, 8)}
 			dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+			dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 			HandleAgentEvent(ctx, hub, pool, dc, protocol.AgentEvent{
 				Type: "agent_event", SessionID: tc.id, ClientEventID: newUUID(), Kind: "model_changed", Payload: payload,
 			})
@@ -337,5 +364,12 @@ func TestClusterJobCarriesEffort(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("manifest missing %s", want)
 		}
+	}
+}
+
+func TestPostSessionsRejectsBadModelOrEffort(t *testing.T) {
+	code, msg := postSessionRequest(t, map[string]any{"model": "sonnet --dangerously-skip-permissions"}, true)
+	if code != http.StatusUnprocessableEntity || msg != nil {
+		t.Fatalf("status %d, spawn %v: invalid arguments must be rejected before dispatch", code, msg)
 	}
 }

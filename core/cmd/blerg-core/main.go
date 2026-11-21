@@ -8,12 +8,14 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"github.com/blerglab/blerg-ai/contracts/health"
 	"github.com/blerglab/blerg-ai/contracts/logsafe"
 	"github.com/blerglab/blerg-ai/contracts/netguard"
@@ -27,9 +29,11 @@ import (
 	"github.com/blerglab/blerg-ai/core/internal/identity"
 	"github.com/blerglab/blerg-ai/core/internal/keybackend"
 	"github.com/blerglab/blerg-ai/core/internal/landing"
+	"github.com/blerglab/blerg-ai/core/internal/livedata"
 	"github.com/blerglab/blerg-ai/core/internal/mcpconn"
 	"github.com/blerglab/blerg-ai/core/internal/plugins"
 	"github.com/blerglab/blerg-ai/core/internal/projects"
+	"github.com/blerglab/blerg-ai/core/internal/releasenotes"
 	"github.com/blerglab/blerg-ai/core/internal/shellpolicy"
 )
 
@@ -455,6 +459,15 @@ func loginLimiter() *api.LoginLimiter {
 // identity.StartReconcileLoop, which needs RevokeAccountEverywhere — not part of that
 // narrower interface.
 func buildDeps(ctx context.Context, st *db.PgStore) (api.Deps, *identity.Service, error) {
+	if release := landing.Release(); releasenotes.Valid(release) {
+		if _, err := st.Pool().Exec(ctx, `INSERT INTO app_release_baseline(singleton,version) VALUES(true,$1)
+   ON CONFLICT(singleton) DO UPDATE SET version=EXCLUDED.version
+   WHERE string_to_array(ltrim(EXCLUDED.version,'v'),'.')::numeric[] >
+         string_to_array(ltrim(app_release_baseline.version,'v'),'.')::numeric[]`, release); err != nil {
+			return api.Deps{}, nil, fmt.Errorf("register release baseline: %w", err)
+		}
+	}
+
 	kp, err := identity.LoadOrGenerateSigningKey(ctx, st)
 	if err != nil {
 		return api.Deps{}, nil, err
@@ -501,6 +514,32 @@ func buildDeps(ctx context.Context, st *db.PgStore) (api.Deps, *identity.Service
 
 func main() {
 	logsafe.Install()
+	if len(os.Args) > 1 && os.Args[1] == "live-data-renew-job" {
+		if runLiveLeafJob(context.Background()) != nil {
+			failurelog.Default.Event("live_data_tls_renewal_job_failed", slog.LevelWarn)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "live-data-fence" {
+		if runLiveDataFence(os.Args[2:]) != nil {
+			log.Fatal("live_data_authority_fence_failed")
+		}
+		failurelog.Default.Event("live_data_authority_fenced", slog.LevelWarn)
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "live-data-renew" {
+		if runLiveDataRenew(os.Args[2:]) != nil {
+			failurelog.Default.Event("live_data_tls_renewal_unavailable", slog.LevelWarn)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "live-data-pki" {
+		if err := runLiveDataPKI(os.Args[2:]); err != nil {
+			failurelog.Default.Event("live_data_tls_provision_failed", slog.LevelWarn)
+		}
+		return
+	}
 
 	if len(os.Args) > 1 && os.Args[1] == "mint" {
 		runMint(os.Args[2:])
@@ -534,6 +573,8 @@ func main() {
 // serve opens the store, wires the service and serves HTTP until the listener fails. It
 // returns rather than exiting so the deferred store close runs on every failure path.
 func serve(ctx context.Context) error {
+	ctx, cancelService := context.WithCancel(ctx)
+	defer cancelService()
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		return errors.New("DATABASE_URL is required")
@@ -559,6 +600,27 @@ func serve(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("build deps: %w", err)
 	}
+
+	liveTLS := configureLiveDataTLS(&deps)
+	if liveTLS == nil && (os.Getenv("BLERG_LIVE_DATA_TLS_DIR") != "" || os.Getenv("BLERG_LIVE_DATA_TLS_WARNING") != "") {
+		srv.SetWarning("live_data_tls_unavailable")
+	}
+	if liveTLS != nil {
+		srv.SetWarningCheck(func() string { return liveTLS.Warning(time.Now()) })
+	}
+
+	liveBoot := configureRecoveringLiveDataIssuer(ctx, &deps, liveTLS, pool)
+	srv.SetWarningCheck(func() string {
+		if liveTLS != nil {
+			if warning := liveTLS.Warning(time.Now()); warning != "" {
+				return warning
+			}
+		}
+		if liveBoot.Unavailable() {
+			return "live_data_issuer_unavailable"
+		}
+		return ""
+	})
 
 	// Saved administrator settings override the environment seed; database failures deny checks.
 	updates := identitySvc.ReleaseChecker(landing.Release(), landing.Version())
@@ -603,13 +665,23 @@ func serve(ctx context.Context) error {
 	}
 
 	mcpconn.StartPruneLoop(ctx, deps.MCPConnections, 24*time.Hour)
+	mcpconn.StartSessionSweepLoop(ctx, deps.MCPConnections)
+	go (livedata.Postgres{Pool: pool}).RunMaintenance(ctx)
 	identity.StartExchangePruneLoop(ctx, identitySvc, time.Hour)
 
 	log.Printf("blerg-core listening on %s", addr)
 	app := spaHandler(webDistDir())
 	deps.App = app
 	handler := withSPAFallback(api.NewRouter(deps), app)
-	srv.SetHandler(handler)
+	privateTLS, err := startLiveDataTLS(ctx, liveTLS, failurelog.Default.HTTP("core-live-data", liveBoot), func() { srv.SetWarning("live_data_tls_unavailable") })
+	if err != nil {
+		srv.SetWarning("live_data_tls_unavailable")
+		failurelog.Default.Event("live_data_tls_listener_unavailable", slog.LevelWarn)
+	}
+	if privateTLS != nil {
+		defer func() { _ = privateTLS.Close() }()
+	}
+	srv.SetHandler(failurelog.Default.HTTP("core", handler))
 	// On SIGTERM: drain, then shut down gracefully (health.ServeUntilSignal), so a rolling update
 	// does not cut requests the ingress still sends here.
 	return srv.ServeUntilSignal(ctx, log.Printf)

@@ -11,6 +11,7 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/daemon"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/blerglab/blerg-ai/runner/internal/testsupport"
 	"io"
 	"net"
 	"net/http"
@@ -289,95 +290,111 @@ func TestP6Inventory304AndUnsupportedWriter(t *testing.T) {
 }
 
 func TestP6MemberResultsRecipientAndDelivery(t *testing.T) {
-	for _, endpoint := range []string{"result", "mcp-builder", "polling-sse", "live-sse", "callback", "queued"} {
-		for _, state := range []string{"owner", "foreign", "unknown", "reassigned", "runtime-changed"} {
-			t.Run(endpoint+"/"+state, func(t *testing.T) {
-				f := newPrivFixture(t)
-				sid := f.pubSession
-				dc := f.dc
-				if _, err := f.pool.Exec(t.Context(), `UPDATE sessions SET runtime='docker' WHERE id=$1`, sid); err != nil {
+	// Each state gets fresh rows, API, Hub and authority. Only the owning
+	// matrix's private database is shared; no state is reset or truncated.
+	pool := privPool(t)
+	for _, state := range []string{"owner", "foreign", "unknown", "reassigned", "runtime-changed"} {
+		t.Run(state, func(t *testing.T) {
+			f := newPrivFixtureWithPool(t, pool, newUUID())
+			// This table proves recipient serialization, not one-second polling.
+			// Reuse the stream's existing test pacing seam.
+			f.api.ssePollInterval = time.Nanosecond
+			setupPhase := testsupport.Phase(t, "member_setup")
+			sid := f.pubSession
+			dc := f.dc
+			if _, err := f.pool.Exec(t.Context(), `UPDATE sessions SET runtime='docker' WHERE id=$1`, sid); err != nil {
+				t.Fatal(err)
+			}
+			m := protocol.WorkspaceManifest{Version: 2, Kind: "folder", Runtime: "sandbox", OwnerID: privAcctA, LaunchGeneration: "launch", Digest: "digest", Members: []protocol.WorkspaceMember{{ID: "one", Name: "private-member", Path: "one", SourceIdentity: "private-source", CommonDirectoryIdentity: "common", Destination: "destination"}}}
+			if err := db.InsertSessionWorkspace(t.Context(), f.pool, sid, m); err != nil {
+				t.Fatal(err)
+			}
+			results := []protocol.WorkspaceMemberResult{{WorkspaceMemberRef: protocol.WorkspaceMemberRef{MemberID: "one", LaunchGeneration: "launch"}, Head: "private-head", Pending: true, PushError: "private-rejection", RecoveryLocation: "/private-recovery"}}
+			if err := db.SetWorkspaceResults(t.Context(), f.pool, sid, "launch", results); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now()
+			if err := db.EndSessionStatus(t.Context(), f.pool, sid, "stopped", &now, systemEnd(db.EndReasonProcessExited)); err != nil {
+				t.Fatal(err)
+			}
+			setupPhase.End()
+			snapshotPhase := testsupport.Phase(t, "member_snapshot")
+			before, err := f.api.buildSessionResult(t.Context(), sid, privAcctA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot, _ := json.Marshal(before)
+			snapshotPhase.End()
+			statePhase := testsupport.Phase(t, "member_state")
+			viewer := privAcctA
+			if state == "foreign" {
+				viewer = privAcctB
+			}
+			if state == "unknown" {
+				if _, err := f.pool.Exec(t.Context(), `UPDATE daemons SET desktop_owner_id=NULL WHERE id=$1`, dc.ID); err != nil {
 					t.Fatal(err)
 				}
-				m := protocol.WorkspaceManifest{Version: 2, Kind: "folder", Runtime: "sandbox", OwnerID: privAcctA, LaunchGeneration: "launch", Digest: "digest", Members: []protocol.WorkspaceMember{{ID: "one", Name: "private-member", Path: "one", SourceIdentity: "private-source", CommonDirectoryIdentity: "common", Destination: "destination"}}}
-				if err := db.InsertSessionWorkspace(t.Context(), f.pool, sid, m); err != nil {
+			}
+			if state == "reassigned" {
+				if err := db.WithDesktopFence(t.Context(), f.pool, dc.ID, func(ctx context.Context) error {
+					_, err := db.AssignDesktop(ctx, f.pool, dc.ID, privAcctB, 1)
+					return err
+				}); err != nil {
 					t.Fatal(err)
 				}
-				results := []protocol.WorkspaceMemberResult{{WorkspaceMemberRef: protocol.WorkspaceMemberRef{MemberID: "one", LaunchGeneration: "launch"}, Head: "private-head", Pending: true, PushError: "private-rejection", RecoveryLocation: "/private-recovery"}}
-				if err := db.SetWorkspaceResults(t.Context(), f.pool, sid, "launch", results); err != nil {
+			}
+			if state == "runtime-changed" {
+				if _, err := f.pool.Exec(t.Context(), `UPDATE sessions SET runtime='cluster' WHERE id=$1`, sid); err != nil {
 					t.Fatal(err)
 				}
-				now := time.Now()
-				if err := db.EndSessionStatus(t.Context(), f.pool, sid, "stopped", &now, systemEnd(db.EndReasonProcessExited)); err != nil {
-					t.Fatal(err)
-				}
-				before, err := f.api.buildSessionResult(t.Context(), sid, privAcctA)
-				if err != nil {
-					t.Fatal(err)
-				}
-				snapshot, _ := json.Marshal(before)
-				viewer := privAcctA
-				if state == "foreign" {
-					viewer = privAcctB
-				}
-				if state == "unknown" {
-					if _, err := f.pool.Exec(t.Context(), `UPDATE daemons SET desktop_owner_id=NULL WHERE id=$1`, dc.ID); err != nil {
-						t.Fatal(err)
+			}
+			statePhase.End()
+			for _, endpoint := range []string{"result", "mcp-builder", "polling-sse", "live-sse", "callback", "queued"} {
+				t.Run(endpoint, func(t *testing.T) {
+					deliveryPhase := testsupport.Phase(t, "member_delivery")
+					var raw []byte
+					switch endpoint {
+					case "mcp-builder":
+						res, err := f.api.Result(t.Context(), RunnerPrincipal{Kind: "human", Sub: viewer}, sid)
+						if err != nil {
+							t.Fatal(err)
+						}
+						raw, _ = json.Marshal(res)
+					case "queued":
+						raw, _ = f.hub.desktopPayloadFor(t.Context(), viewer, snapshot)
+					case "callback":
+						client := &http.Client{Transport: p6CaptureTransport{capture: func(b []byte) { raw = b }}}
+						if _, err := f.api.postCompletionSnapshot(t.Context(), client, "https://callback.example.test", sid, "delivery", "", snapshot, viewer); err != nil {
+							t.Fatal(err)
+						}
+					default:
+						handler := f.api.HandleRunnerResult
+						if endpoint == "polling-sse" {
+							handler = f.api.HandleRunnerEventStream
+						}
+						if endpoint == "live-sse" {
+							handler = f.api.HandleRunnerEventsLive
+						}
+						response := privDo(handler, "GET", "/", sid, f.tok(t, "human", viewer, "session.start"), "")
+						if response.Code != 200 {
+							t.Fatalf("response %d %s", response.Code, response.Body)
+						}
+						raw = response.Body.Bytes()
 					}
-				}
-				if state == "reassigned" {
-					if err := db.WithDesktopFence(t.Context(), f.pool, dc.ID, func(ctx context.Context) error {
-						_, err := db.AssignDesktop(ctx, f.pool, dc.ID, privAcctB, 1)
-						return err
-					}); err != nil {
-						t.Fatal(err)
+					deliveryPhase.End()
+					if state == "owner" {
+						if !strings.Contains(string(raw), "private-rejection") || !strings.Contains(string(raw), "private-recovery") {
+							t.Fatalf("outcomes missing: %s", raw)
+						}
+					} else if strings.Contains(string(raw), "private-") {
+						t.Fatalf("member metadata leaked: %s", raw)
 					}
-				}
-				if state == "runtime-changed" {
-					if _, err := f.pool.Exec(t.Context(), `UPDATE sessions SET runtime='cluster' WHERE id=$1`, sid); err != nil {
-						t.Fatal(err)
+					if !strings.Contains(string(raw), `"workspace_results":[`) {
+						t.Fatalf("delivery lost shared result schema: %s", raw)
 					}
-				}
-				var raw []byte
-				switch endpoint {
-				case "mcp-builder":
-					res, err := f.api.Result(t.Context(), RunnerPrincipal{Kind: "human", Sub: viewer}, sid)
-					if err != nil {
-						t.Fatal(err)
-					}
-					raw, _ = json.Marshal(res)
-				case "queued":
-					raw, _ = f.hub.desktopPayloadFor(t.Context(), viewer, snapshot)
-				case "callback":
-					client := &http.Client{Transport: p6CaptureTransport{capture: func(b []byte) { raw = b }}}
-					if _, err := f.api.postCompletionSnapshot(t.Context(), client, "https://callback.example.test", sid, "delivery", "", snapshot, viewer); err != nil {
-						t.Fatal(err)
-					}
-				default:
-					handler := f.api.HandleRunnerResult
-					if endpoint == "polling-sse" {
-						handler = f.api.HandleRunnerEventStream
-					}
-					if endpoint == "live-sse" {
-						handler = f.api.HandleRunnerEventsLive
-					}
-					response := privDo(handler, "GET", "/", sid, f.tok(t, "human", viewer, "session.start"), "")
-					if response.Code != 200 {
-						t.Fatalf("response %d %s", response.Code, response.Body)
-					}
-					raw = response.Body.Bytes()
-				}
-				if state == "owner" {
-					if !strings.Contains(string(raw), "private-rejection") || !strings.Contains(string(raw), "private-recovery") {
-						t.Fatalf("outcomes missing: %s", raw)
-					}
-				} else if strings.Contains(string(raw), "private-") {
-					t.Fatalf("member metadata leaked: %s", raw)
-				}
-				if !strings.Contains(string(raw), `"workspace_results":[`) {
-					t.Fatalf("delivery lost shared result schema: %s", raw)
-				}
-			})
-		}
+				})
+			}
+		})
 	}
 }
 

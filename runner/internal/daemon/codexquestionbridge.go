@@ -14,6 +14,11 @@ import (
 // messaging tool. The server records the answer once; the poll never starts a
 // second engine turn or retains the daemon token in the Codex process.
 func codexQuestionHandler(base, token string, tokenSource func() string, sessionID string, emitter agent.Emitter, currentTurn ...func() string) func(context.Context, string) (string, error) {
+	return hostedQuestionHandler(0, base, token, tokenSource, sessionID, emitter, currentTurn...)
+}
+
+// hostedQuestionHandler is codexQuestionHandler for one hosting of the session.
+func hostedQuestionHandler(generation int64, base, token string, tokenSource func() string, sessionID string, emitter agent.Emitter, currentTurn ...func() string) func(context.Context, string) (string, error) {
 	return func(ctx context.Context, body string) (string, error) {
 		if base == "" || (token == "" && tokenSource == nil) {
 			return "", errors.New("questions are unavailable for this session")
@@ -21,7 +26,7 @@ func codexQuestionHandler(base, token string, tokenSource func() string, session
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 		type result struct {
-			answer string
+			answer agent.AskAnswer
 			failed bool
 		}
 		answers := make(chan result, 1)
@@ -33,7 +38,7 @@ func codexQuestionHandler(base, token string, tokenSource func() string, session
 			turnID = childTurn
 		}
 		ownerOnly, _ := ctx.Value(ownerOnlyAsk{}).(bool)
-		messenger := &httpMessenger{base: base, token: token, tokenSource: tokenSource, sessionID: sessionID, turnID: turnID, ownerOnly: ownerOnly, client: &http.Client{Timeout: 30 * time.Second}, ctx: ctx, onAnswer: func(answer string) {
+		messenger := &httpMessenger{lateAnswerRelay: true, hostGeneration: generation, base: base, token: token, tokenSource: tokenSource, sessionID: sessionID, turnID: turnID, ownerOnly: ownerOnly, client: &http.Client{Timeout: 30 * time.Second}, ctx: ctx, onAnswerFrame: func(answer agent.AskAnswer) {
 			select {
 			case answers <- result{answer: answer}:
 			case <-ctx.Done():
@@ -58,12 +63,15 @@ func codexQuestionHandler(base, token string, tokenSource func() string, session
 				messenger.CloseAsk(id, "") //nolint:contextcheck // Closing the UI card must outlive the canceled question context.
 				return "", errors.New("the question is no longer available")
 			}
-			answer := reply.answer
 			if ctx.Err() != nil {
 				messenger.CloseAsk(id, "") //nolint:contextcheck // Closing the UI card must outlive the canceled question context.
 				return "", errors.New("question interrupted")
 			}
-			return answer, nil
+			// Options match the raw answer; only free text can carry a label.
+			if free, _ := ctx.Value(freeTextQuestion{}).(bool); free {
+				return reply.answer.Label + reply.answer.Text, nil
+			}
+			return reply.answer.Text, nil
 		case <-ctx.Done():
 			messenger.CloseAsk(id, "") //nolint:contextcheck // Closing the UI card must outlive the canceled question context.
 			return "", errors.New("question interrupted")
@@ -71,15 +79,33 @@ func codexQuestionHandler(base, token string, tokenSource func() string, session
 	}
 }
 
+// NewQuestionHandler is the answer path of a Codex or Hermes session's AskUser.
+func NewQuestionHandler(base string, tokenSource func() string, sessionID string, emitter agent.Emitter) func(context.Context, string) (string, error) {
+	return codexQuestionHandler(base, "", tokenSource, sessionID, emitter)
+}
+
+// freeTextQuestion marks a question with no options to match its answer against.
+type freeTextQuestion struct{}
+
+// WithFreeTextQuestion lets a question's answer carry a child's source label.
+func WithFreeTextQuestion(ctx context.Context) context.Context {
+	return context.WithValue(ctx, freeTextQuestion{}, true)
+}
+
 // questionAsker is the AskUser of a Codex or Hermes session: native questions, and Hermes approvals, go to
 // the session's chat with the marker code taken out (scrubQuestions). currentTurn may be nil.
 func (h *AgentHost) questionAsker(sessionID string, emitter agent.Emitter, nonce string, currentTurn func() string, initialTokens ...string) func(context.Context, string) (string, error) {
+	return h.questionAskerAt(0, sessionID, emitter, nonce, currentTurn, initialTokens...)
+}
+
+// questionAskerAt is questionAsker for one hosting of the session.
+func (h *AgentHost) questionAskerAt(generation int64, sessionID string, emitter agent.Emitter, nonce string, currentTurn func() string, initialTokens ...string) func(context.Context, string) (string, error) {
 	initial := ""
 	if len(initialTokens) > 0 {
 		initial = initialTokens[0]
 	}
 	tokenSource := h.nativeHTTPToken(protocol.SpawnSession{SessionID: sessionID, SessionToken: initial})
-	return scrubQuestions(codexQuestionHandler(h.cfg.ServerHTTP, "", tokenSource, sessionID, emitter, currentTurn), nonce)
+	return scrubQuestions(hostedQuestionHandler(generation, h.cfg.ServerHTTP, "", tokenSource, sessionID, emitter, currentTurn), nonce)
 }
 
 // scrubQuestions takes the session's marker code out of a question before it is posted.

@@ -25,7 +25,7 @@ func CommitLocalWorkspaceFinal(ctx context.Context, pool *pgxpool.Pool, id, toke
 	var rawManifest, rawBinding, saved []byte
 	var gen int64
 	var digest *string
-	err = tx.QueryRow(ctx, `SELECT w.manifest,w.runtime_binding,w.runtime_generation,a.final_digest,a.final_outcome FROM sessions s JOIN session_workspaces w ON w.session_id=s.id JOIN local_workspace_authority a ON a.session_id=s.id AND a.token=$2 AND NOT a.aborted AND a.runtime_generation=w.runtime_generation AND a.launch_generation=w.launch_generation WHERE s.id=$1 FOR UPDATE OF s,w,a`, id, token).Scan(&rawManifest, &rawBinding, &gen, &digest, &saved)
+	err = tx.QueryRow(ctx, `SELECT COALESCE((SELECT r.manifest FROM session_workspace_revisions r WHERE r.session_id=w.session_id AND r.revision=w.membership_revision),w.manifest),w.runtime_binding,w.runtime_generation,a.final_digest,a.final_outcome FROM sessions s JOIN session_workspaces w ON w.session_id=s.id JOIN local_workspace_authority a ON a.session_id=s.id AND a.token=$2 AND NOT a.aborted AND a.runtime_generation=w.runtime_generation AND a.launch_generation=w.launch_generation WHERE s.id=$1 FOR UPDATE OF s,w,a`, id, token).Scan(&rawManifest, &rawBinding, &gen, &digest, &saved)
 	if err != nil {
 		return protocol.WorkspaceFinalReceipt{}, refuse
 	}

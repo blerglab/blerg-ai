@@ -1,4 +1,5 @@
-import { ModelReconnectAction } from './ModelCatalogNotice'
+import { IconButton } from '@blerglab/chat'
+import { ClusterCodexConnectionNotice, ModelReconnectAction } from './ModelCatalogNotice'
 import RuntimeIcon from './RuntimeIcon'
 import '../../../../packages/settings/settings.css'
 import type { ReactNode, CSSProperties } from 'react'
@@ -97,6 +98,7 @@ export interface RunColumnProps {
   daemons: RunDaemon[]
   selectedDaemon: RunDaemon | null
   onDaemonChange: (d: RunDaemon) => void
+  clusterTargetName?: string
   clusterConfigured: boolean
 
   // Engine availability, already resolved for the chosen runtime by the sheet
@@ -131,12 +133,13 @@ export default function RunColumn(props: RunColumnProps) {
   const {
     runtime, onRuntimeChange, kind, engine, onEngineChange,
     models, modelsLoading, modelsFallback, modelsError, modelsRefreshing, onModelsRetry, model, onModelChange, effort, onEffortChange, modelFreeText,
-    daemons, selectedDaemon, onDaemonChange, clusterConfigured,
+    daemons, selectedDaemon, onDaemonChange, clusterConfigured, clusterTargetName,
     availableEnginesHere, clusterEngineBlocked, clusterGitMissing, settingsLink, engineMissingNote,
-    dangerouslySkipPermissions, onSkipPermissionsChange, daemonNotes,
+    daemonNotes,
     onReposRootChanged,
   } = props
 
+  const codexConnectionRequired = runtime === 'cluster' && engine === 'codex' && (clusterEngineBlocked || props.modelsReconnect === true)
   const engineMissingHere = availableEnginesHere !== null && !availableEnginesHere.includes(engine)
   const daemonChoice = daemons.length > 1 ||
     (daemons.length === 1 && !!selectedDaemon && selectedDaemon.id !== daemons[0].id)
@@ -177,7 +180,7 @@ export default function RunColumn(props: RunColumnProps) {
                 }}
               >
                 <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600, fontSize: '0.9rem', color: selected ? 'var(--selected-text)' : 'var(--chalk)' }}>
-                  <RuntimeIcon runtime={card.id} machine={selectedDaemon?.name} /> {card.title}
+                  <RuntimeIcon runtime={card.id} machine={selectedDaemon?.name} /> {card.id === 'cluster' ? (clusterTargetName ?? card.title) : card.title}
                 </span>
                 <span style={{ display: 'block', fontSize: '0.75rem', marginTop: 3, color: 'var(--fog)' }}>
                   {card.body}
@@ -247,7 +250,7 @@ export default function RunColumn(props: RunColumnProps) {
         {daemons.length === 0 && (
           <div style={{ color: 'var(--fog)', fontSize: '0.85rem', padding: '8px 0' }}>
             {clusterConfigured
-              ? 'No workstation daemon connected — sessions will run as cluster pods.'
+              ? 'No workstation daemon connected — workspaces will run as cluster pods.'
               : 'No daemon connected. Start it: ./daemon/install.sh status (from install/desktop), or see DAEMON.md.'}
           </div>
         )}
@@ -264,10 +267,11 @@ export default function RunColumn(props: RunColumnProps) {
         {daemonNotes}
 
         {/* Cluster preflight lives under Where it runs — the choice it is about. */}
-        {clusterEngineBlocked && (
+        {codexConnectionRequired && <ClusterCodexConnectionNotice />}
+        {clusterEngineBlocked && !codexConnectionRequired && (
           <p data-testid="cluster-engine-block" style={{ ...warnStyle, fontSize: '0.78rem', padding: '8px 10px' }}>
             Add a {ENGINE_LABELS[engine] ?? engine} credential in {settingsLink} before launching a
-            cluster session.
+            cluster workspace.
           </p>
         )}
         {clusterGitMissing && (
@@ -283,7 +287,7 @@ export default function RunColumn(props: RunColumnProps) {
               margin: '8px 0 0',
             }}
           >
-            No GitHub credential — this session can only clone public repositories and cannot push.
+            No GitHub credential — this workspace can only clone public repositories and cannot push.
             Add one in {settingsLink}.
           </p>
         )}
@@ -295,7 +299,7 @@ export default function RunColumn(props: RunColumnProps) {
           <p role="status" style={noteStyle}>Checking available engines…</p>
         ) : props.engineDiscoveryState === 'unknown' ? (
           <p role="status" style={warnStyle}>{props.engineDiscoveryError ?? 'Engine availability is unknown.'}{' '}
-            {props.onEngineDiscoveryRetry && <button type="button" className="settings-action btn small" onClick={props.onEngineDiscoveryRetry}>Retry engines</button>}
+            {props.onEngineDiscoveryRetry && <IconButton label="Retry engines" onClick={props.onEngineDiscoveryRetry} />}
           </p>
         ) : (availableEnginesHere ?? []).length === 0 ? (
           <p role="status" style={warnStyle}>{(props.unavailableEngines?.length ?? 0) > 0
@@ -323,7 +327,7 @@ export default function RunColumn(props: RunColumnProps) {
         )}
         {props.engineDiscoveryState === 'known' && props.engineDiscoveryError && <p role="status" style={noteStyle}>
           {props.engineDiscoveryError}{' '}
-          {props.onEngineDiscoveryRetry && <button type="button" className="settings-action btn small" onClick={props.onEngineDiscoveryRetry}>Retry engines</button>}
+          {props.onEngineDiscoveryRetry && <IconButton label="Retry engines" onClick={props.onEngineDiscoveryRetry} />}
         </p>}
         {/* OpenClaw pins the session to the daemon host — with no daemon
             connected that leaves all three cards greyed out and no
@@ -355,8 +359,8 @@ export default function RunColumn(props: RunColumnProps) {
       {modelsRefreshing && <p role="status" style={noteStyle}>Refreshing {props.engineChoices?.find(e => e.id === engine)?.name ?? ENGINE_LABELS[engine] ?? engine} models… You can launch with the default model.</p>}
       {modelsError && <p role="status" data-testid="models-error" style={noteStyle}>
         {modelsError}{' '}
-        {props.modelsReconnect && <ModelReconnectAction />}{' '}
-        {onModelsRetry && <button type="button" className="settings-action btn small" onClick={onModelsRetry}>Retry</button>}
+        {props.modelsReconnect && !codexConnectionRequired && <ModelReconnectAction />}{' '}
+        {onModelsRetry && <IconButton label="Retry" onClick={onModelsRetry} />}
       </p>}
       {props.modelNotice && (
         <p role="status" data-testid="model-keep-notice" className="model-keep-notice"
@@ -386,58 +390,7 @@ export default function RunColumn(props: RunColumnProps) {
       {/* 5. Permissions */}
       <div style={{ marginBottom: 14 }}>
         <span style={sectionLabel}>Permissions</span>
-        {kind === 'agent' ? (
-          <p data-testid="agent-permissions-note" style={{ ...noteStyle, margin: 0 }}><PermissionChip permission={launchPermission(engine, kind)} /></p>
-        ) : runtime === 'docker' && engine !== 'openclaw' ? (
-          <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}>
-            <div
-              data-testid="skip-permissions-toggle"
-              role="switch"
-              aria-checked={dangerouslySkipPermissions}
-              // A div playing switch is not focusable or operable by default —
-              // this one is the most consequential control in the column, so
-              // it gets the keyboard contract a real checkbox would have.
-              tabIndex={0}
-              onClick={() => onSkipPermissionsChange(!dangerouslySkipPermissions)}
-              onKeyDown={e => {
-                if (e.key === ' ' || e.key === 'Enter') {
-                  e.preventDefault()
-                  onSkipPermissionsChange(!dangerouslySkipPermissions)
-                }
-              }}
-              title={`When enabled: ${launchPermission(engine, kind, true).description}`}
-              aria-label="No prompts"
-              aria-description={`When enabled: ${launchPermission(engine, kind, true).description}`}
-              style={{
-                width: 36,
-                height: 20,
-                borderRadius: 10,
-                background: dangerouslySkipPermissions ? 'color-mix(in srgb, var(--blaze) 22%, var(--basalt))' : 'var(--scree)',
-                border: `1px solid ${dangerouslySkipPermissions ? 'var(--blaze)' : 'var(--stone)'}`,
-                position: 'relative',
-                flexShrink: 0,
-                cursor: 'pointer',
-                transition: 'background 0.15s, border-color 0.15s',
-              }}
-            >
-              <div style={{
-                width: 14,
-                height: 14,
-                borderRadius: '50%',
-                background: dangerouslySkipPermissions ? 'var(--amber)' : 'var(--fog-dim)',
-                position: 'absolute',
-                top: 2,
-                left: dangerouslySkipPermissions ? 18 : 2,
-                transition: 'left 0.15s, background 0.15s',
-              }} />
-            </div>
-            <span style={{ fontSize: '0.85rem', color: dangerouslySkipPermissions ? 'var(--chalk)' : 'var(--fog)' }}>
-              No prompts
-            </span>
-          </label>
-        ) : (
-          <p style={{ ...noteStyle, margin: 0 }}>Uses the engine’s configured permission prompts.</p>
-        )}
+        <p data-testid="agent-permissions-note" style={{ ...noteStyle, margin: 0 }}><PermissionChip permission={launchPermission(engine, kind)} /></p>
       </div>
     </div>
   )

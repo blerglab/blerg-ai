@@ -17,6 +17,7 @@
 // card leaves it as it closes, one not started is not there yet); Plan lists them all, one glyph each.
 import { pinStateOfStatus as stateOfStatus, type ChecklistItem, type PinState, type TicketSummaryLive } from '@blerglab/chat'
 import type { LiveBoardCard } from './liveBoardCard'
+import type { CardTimeSummary } from './cardTime'
 
 /** How many pins Live lists before "+N more". */
 export const PINS_SHOWN = 3
@@ -38,6 +39,9 @@ export interface PinView {
   done: boolean
   /** A Blerg Board card whose board read has not landed yet: the pinned state stands for now. */
   pending?: boolean
+  /** BLG-444: worker time and review rounds, present only once the card has crossed its first
+   *  budget multiple (absent otherwise — under budget shows nothing, not 0h). */
+  cardTime?: CardTimeSummary
 }
 
 /** A board card's state (✓ ◐ ○) from its live read: its column, a terminal column, archived. */

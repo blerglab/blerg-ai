@@ -175,3 +175,26 @@ func TestWorkspaceRejectsLayoutChanges(t *testing.T) {
 		t.Fatal("invalid layout accepted")
 	}
 }
+
+func TestManifestAllowsOnlyTheReservedFolderBesideARootMember(t *testing.T) {
+	member := func(id, path string) WorkspaceMember {
+		return WorkspaceMember{ID: id, Name: id, Path: path, SourceIdentity: id, CommonDirectoryIdentity: id, Destination: id}
+	}
+	manifest := func(paths ...string) WorkspaceManifest {
+		m := WorkspaceManifest{Version: WorkspaceVersion, Kind: "folder", Layout: WorkspaceLayoutNames, Runtime: "host", OwnerID: "owner", LaunchGeneration: "launch", Digest: "digest"}
+		for i, p := range paths {
+			m.Members = append(m.Members, member(string(rune('a'+i)), p))
+		}
+		return m
+	}
+	for _, paths := range [][]string{{".", ".workspace/two"}, {".workspace/two", "."}, {".", ".workspace/two", ".workspace/three"}, {".workspace/two"}} {
+		if err := manifest(paths...).Validate(); err != nil {
+			t.Fatalf("%v refused: %v", paths, err)
+		}
+	}
+	for _, paths := range [][]string{{".", "two"}, {".", ".workspace"}, {".", ".workspace/a/b"}, {".", ".WORKSPACE/two"}, {".", "."}, {".", ".workspace/two", ".workspace/two"}, {".", ".workspace/.."}, {".", ".workspace/a\\b"}} {
+		if err := manifest(paths...).Validate(); err == nil {
+			t.Fatalf("%v accepted", paths)
+		}
+	}
+}

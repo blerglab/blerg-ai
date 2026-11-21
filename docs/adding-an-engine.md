@@ -12,7 +12,7 @@ Write a support table for the candidate engine:
 
 | Dimension | Questions to answer with evidence |
 | --- | --- |
-| Invocation | Agent/headless? Terminal/TUI? Native structured protocol, streamed JSON, or plain text? |
+| Invocation | Native structured protocol, streamed JSON, or plain text for agent sessions? |
 | Runtime | Host, Docker sandbox, Kubernetes? Is the executable actually installed in each image? |
 | Identity and auth | Host login, API key, imported credential, managed access token? What owns refresh authority? |
 | Discovery | Available under which principal and target? Native model catalog? Per-model efforts/defaults? |
@@ -30,7 +30,7 @@ Mark unsupported, unknown, and intentionally excluded capabilities explicitly. D
 
 ## 2. Register integration metadata, model rules and catalog sources
 
-Start with a [shared engine descriptor](../contracts/engines/engines.go). Declare its stable ID/name, implemented `Runtimes`, terminal support, restricted-tool support, plugin support and credential-import support. `LimitResume` and `UsageWindows` declare continuation and accepted limit-window semantics. Declare spend windows only when the adapter has an authoritative account source; account capacity is separate from estimated session cost or a local execution budget. Preserve an unknown billing reset rather than inventing a date. These flags describe implemented integrations; they do not prove installation, login, catalog freshness, grant authority or native confinement.
+Start with a [shared engine descriptor](../contracts/engines/engines.go). Declare its stable ID/name, implemented `Runtimes`, restricted-tool support, plugin support and credential-import support. `LimitResume` and `UsageWindows` declare continuation and accepted limit-window semantics. Declare spend windows only when the adapter has an authoritative account source; account capacity is separate from estimated session cost or a local execution budget. Preserve an unknown billing reset rather than inventing a date. These flags describe implemented integrations; they do not prove installation, login, catalog freshness, grant authority or native confinement.
 
 Declare `CredentialEnvKeys` for Cluster delivery and foreign-engine credential filtering. They are private adapter wiring, omitted from descriptor JSON. Register only keys owned by the engine; shared key aliases or multiple credential forms need an explicit adapter policy. The existing Claude adapter deliberately chooses between its OAuth/API-key forms. A future engine with several forms must implement its own choice rather than rely on the single-key helper.
 
@@ -51,7 +51,7 @@ The [readiness cache](../runner/internal/server/launch_readiness.go) keeps trans
 
 Read [EngineSpec and AgentDriverOpts](../runner/internal/daemon/engines.go), [driver selection](../runner/internal/daemon/agentdriver.go), and the daemon's driver interface. Implement typed invocation, argument rendering, availability checks, driver construction, optional model probes, plugin preparation, capability reporting and declared credential paths.
 
-- Use `EngineSpec.TerminalModelProblem` when an interactive CLI cannot safely implement a model selection supported by its agent adapter. The shared manager checks it before terminal launch and recovery; return an actionable refusal instead of dropping the selection or falling back.
+All engines use agent invocation. Legacy Terminal records are cleanup metadata and never authorize recovery.
 
 Translate the native protocol into [shared agent events](../runner/internal/agent/events.go) and [protocol messages](../runner/internal/protocol/). Shared chat, persistence, Insights and APIs should consume those events without engine-name switches. Required semantic coverage includes:
 
@@ -94,7 +94,7 @@ Keep hooks, prompts and customization within the selected engine/runtime boundar
 
 ## 6. Add native recovery deliberately
 
-For host sessions, persist native conversation IDs and enough private session metadata to adopt after daemon/process restart. Confirm the same thread resumes; merely restoring chat events is insufficient. Separate agent and terminal recovery, and native resume from any limited transcript replay fallback.
+For host sessions, persist native conversation IDs and enough private session metadata to adopt after daemon/process restart. Confirm the same thread resumes; merely restoring chat events is insufficient. Keep native resume separate from any limited transcript replay fallback.
 
 - Version private identities with `EngineSpec.NativeSessionVersion`; set `NativeSessionMinVersion` only for explicitly compatible older records (zero accepts only the current version). Write the new version with the first identity when recovery enforcement changes, so older adapters refuse it rather than ignoring new binding metadata. Persist known intended bindings early, then independently verify the native runtime before admitting input.
 
@@ -236,11 +236,9 @@ The change is complete when the advertised feature matrix is true, unsupported s
 
 Shell-capable sessions should receive the shared Blerg command guide, including
 work topics, ticket pins and checklists. Reuse the daemon's shared guide bundle;
-add new command guidance once so native prompts and managed terminal instructions
-stay aligned. A shellless restricted runtime must not advertise unavailable shell
+add new command guidance once so native prompts stay aligned. A shellless restricted runtime must not advertise unavailable shell
 commands. Preserve the person's existing engine instructions and developer
-configuration. Managed terminal instructions belong in the session's private
-engine home, with atomic writes that cannot follow a link back to the user profile.
+configuration. Inject guidance into the session rather than rewriting the user profile.
 Include recovery and sandbox launches in guide coverage tests.
 
 Host Claude and Codex sessions support owner-approved live plugin changes. Codex stops its

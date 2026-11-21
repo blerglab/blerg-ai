@@ -6,6 +6,7 @@ import { apiFetch } from '../apiFetch'
 import { ENGINE_LABELS } from '../lib/runtimes'
 import { checkEngines, parseEngineRows, type EngineStatusRow } from '../lib/engineStatus'
 import EngineStatusList from './EngineStatusList'
+import WorkerPrioritySetting from './WorkerPrioritySetting'
 
 interface Desktop { id: string; name: string; rows: EngineStatusRow[] | null }
 
@@ -66,6 +67,7 @@ export default function EngineStatusSection() {
     {desktops?.length === 0 && <p className="settings-description st-hint">No desktop is connected. Start one with daemon/install.sh install.</p>}
     {desktops?.map(desktop => <div key={desktop.id} className="settings-section st-section engine-status-desktop" data-testid={`engines-${desktop.id}`}>
       <p><strong>{desktop.name}</strong></p>
+      <WorkerPrioritySetting daemonId={desktop.id} />
       {desktop.rows === null
         ? <p className="settings-description st-hint">This desktop’s daemon is older and reports only the engines that work. Update it (daemon/install.sh install) to see why the others don’t.</p>
         : <EngineStatusList rows={desktop.rows} daemonId={desktop.id} actions={false} onChecked={refresh} testId={`engine-status-list-${desktop.id}`} />}

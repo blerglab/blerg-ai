@@ -1,6 +1,7 @@
 [Unit]
-Description=Blerg runner daemon (drives local claude CLI + tmux for agent sessions)
+Description=Blerg runner daemon (runs agent sessions through local engine CLIs)
 After=network-online.target
+Wants=blerg-shell-keeper.service
 # Keep retrying transient boot failures even with a strict distro rate limit.
 StartLimitIntervalSec=0
 

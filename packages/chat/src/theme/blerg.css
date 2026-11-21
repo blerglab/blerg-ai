@@ -1,3 +1,5 @@
+@import "./brand.css";
+
 /* The default theme: the contract mapped onto the Blerg palette, so the runner's chat looks
    exactly as it did before the package. Inside the runner the palette names (--basalt, --scree,
    --blaze, …) are live and the mapping follows them through light and dark; on their own, the
@@ -5,14 +7,21 @@
    app can load this file alone and get the Blerg look. This is the one stylesheet in the package
    allowed to name anything but --chat-* (theme/tokens.test.ts). */
 :root {
+  --chat-data-transition-ms: 180;
+  --chat-document-bg: #ffffff;
+  --chat-media-bg: #000000;
+  --chat-backdrop: rgba(0, 0, 0, 0.35);
+  --chat-shadow-overlay: rgba(0, 0, 0, 0.45);
   --chat-bg: var(--basalt, #0d1117);
   --chat-surface: var(--scree, #161c26);
   --chat-surface-2: var(--scree-2, #1e2633);
+  --chat-chart-sequential-low: var(--chart-read, var(--chat-code-title));
+  --chat-chart-sequential-high: var(--chat-fg);
   --chat-fg: var(--chalk, #f2f6fa);
   --chat-muted: var(--fog, #c2ccd8);
   --chat-muted-2: var(--fog-dim, #8b97a7);
   --chat-accent: var(--blaze, #ff6a3d);
-  --chat-accent-fg: var(--chalk, #f2f6fa);
+  --chat-accent-fg: var(--chat-primary-fg, var(--chalk, #f2f6fa));
   --chat-success: var(--lichen, #63d68b);
   --chat-warning: var(--amber, #e8b13d);
   --chat-info: var(--batch, #4c9bff);
@@ -20,6 +29,7 @@
   --chat-selected-bg: var(--selected-bg, #4c9bff29);
   --chat-selected-text: var(--selected-text, #6aadff);
   --chat-danger: var(--danger, #ff6b63);
+  --chat-button-bg: var(--fill-muted, var(--stone));
   --chat-border: var(--stone, #313d4f);
   --chat-radius: 10px;
   --chat-font: var(--body, system-ui, -apple-system, "Segoe UI", sans-serif);
@@ -32,34 +42,47 @@
   --chat-card-assistant-bg: var(--scree, #161c26);
   --chat-card-tool-bg: var(--basalt, #0d1117);
   --chat-card-system-bg: var(--scree-2, #1e2633);
-  --chat-code-keyword: #b69cf0;
-  --chat-code-string: #8fc9a0;
-  --chat-code-number: #e0b36a;
-  --chat-code-comment: #7d8798;
-  --chat-code-title: #7fb2ee;
-  --chat-code-type: #6fc7c7;
+  --chat-code-keyword: var(--code-keyword, #b69cf0);
+  --chat-code-string: var(--code-string, #8fc9a0);
+  --chat-code-number: var(--code-number, #e0b36a);
+  --chat-code-comment: var(--code-comment, #7d8798);
+  --chat-code-title: var(--code-title, #7fb2ee);
+  --chat-code-type: var(--code-type, #6fc7c7);
   --chat-diff-add: var(--diff-add, #8ed6a6);
   --chat-diff-del: var(--diff-del, #ff9d94);
   --chat-code-fg: var(--chalk, #f2f6fa);
   --chat-code-bg: var(--basalt, #0d1117);
   --chat-code-linenum: var(--fog-dim, #8b97a7);
-  --chat-code-variable: #e0b36a;
-  --chat-code-builtin: #6fc7c7;
+  --chat-code-variable: var(--code-variable, #e0b36a);
+  --chat-code-builtin: var(--code-builtin, #6fc7c7);
   --chat-code-operator: var(--fog, #c2ccd8);
+  /* Theme-independent (the same hue in every Blerg theme today): set once here, not repeated in
+     the light/dark/explicit blocks below, since an unset custom property still inherits from
+     :root on the same element. */
+  --chat-icon-blue: var(--icon-blue, #519aba);
+  --chat-icon-yellow: var(--icon-yellow, #cbcb41);
+  --chat-icon-purple: var(--icon-purple, #a074c4);
+  --chat-icon-green: var(--icon-green, #8dc149);
+  --chat-icon-orange: var(--icon-orange, #e37933);
+  --chat-icon-pink: var(--icon-pink, #f55385);
+  --chat-icon-red: var(--icon-red, #cc3e44);
+  --chat-icon-tan: var(--icon-tan, #b8a36a);
 }
 
 /* Deep Slate — LIGHT, and the explicit data-theme overrides, as index.css has them. Only the
    fallbacks change: inside the runner the palette names already carry the light values. */
 @media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {
+  :root:not([data-theme]) {
     --chat-bg: var(--basalt, #eef1f6);
     --chat-surface: var(--scree, #f7f9fc);
     --chat-surface-2: var(--scree-2, #ffffff);
-    --chat-fg: var(--chalk, #131820);
+    --chat-chart-sequential-low: var(--chart-read, var(--chat-code-title));
+  --chat-chart-sequential-high: var(--chat-fg);
+  --chat-fg: var(--chalk, #131820);
     --chat-muted: var(--fog, #48525f);
     --chat-muted-2: var(--fog-dim, #6b7684);
     --chat-accent: var(--blaze, #d9531e);
-    --chat-accent-fg: var(--chalk, #131820);
+    --chat-accent-fg: var(--chat-primary-fg, var(--chalk, #131820));
     --chat-success: var(--lichen, #2f8a52);
     --chat-warning: var(--amber, #b7791f);
     --chat-info: var(--batch, #2f6fd6);
@@ -67,7 +90,8 @@
     --chat-selected-bg: var(--selected-bg, #2f6fd61f);
     --chat-selected-text: var(--selected-text, #2559b0);
     --chat-danger: var(--danger, #d24747);
-    --chat-border: var(--stone, #d4dbe5);
+    --chat-button-bg: var(--fill-muted, var(--stone));
+  --chat-border: var(--stone, #d4dbe5);
     --chat-radius: 10px;
     --chat-font: var(--body, system-ui, -apple-system, "Segoe UI", sans-serif);
     --chat-font-mono: var(--mono, ui-monospace, "SF Mono", "Cascadia Mono", monospace);
@@ -79,19 +103,19 @@
     --chat-card-assistant-bg: var(--scree, #f7f9fc);
     --chat-card-tool-bg: var(--basalt, #eef1f6);
     --chat-card-system-bg: var(--scree-2, #ffffff);
-    --chat-code-keyword: #7a52c7;
-    --chat-code-string: #2f7a4a;
-    --chat-code-number: #a15f0d;
-    --chat-code-comment: #6b7684;
-    --chat-code-title: #2f62b8;
-    --chat-code-type: #1f7f7f;
+    --chat-code-keyword: var(--code-keyword, #7a52c7);
+    --chat-code-string: var(--code-string, #2f7a4a);
+    --chat-code-number: var(--code-number, #a15f0d);
+    --chat-code-comment: var(--code-comment, #6b7684);
+    --chat-code-title: var(--code-title, #2f62b8);
+    --chat-code-type: var(--code-type, #1f7f7f);
     --chat-diff-add: var(--diff-add, #2f8a52);
     --chat-diff-del: var(--diff-del, #cf4b4b);
     --chat-code-fg: var(--chalk, #131820);
     --chat-code-bg: var(--basalt, #eef1f6);
     --chat-code-linenum: var(--fog-dim, #6b7684);
-    --chat-code-variable: #a15f0d;
-    --chat-code-builtin: #1f7f7f;
+    --chat-code-variable: var(--code-variable, #a15f0d);
+    --chat-code-builtin: var(--code-builtin, #1f7f7f);
     --chat-code-operator: var(--fog, #48525f);
   }
 }
@@ -99,11 +123,13 @@
   --chat-bg: var(--basalt, #eef1f6);
   --chat-surface: var(--scree, #f7f9fc);
   --chat-surface-2: var(--scree-2, #ffffff);
+  --chat-chart-sequential-low: var(--chart-read, var(--chat-code-title));
+  --chat-chart-sequential-high: var(--chat-fg);
   --chat-fg: var(--chalk, #131820);
   --chat-muted: var(--fog, #48525f);
   --chat-muted-2: var(--fog-dim, #6b7684);
   --chat-accent: var(--blaze, #d9531e);
-  --chat-accent-fg: var(--chalk, #131820);
+  --chat-accent-fg: var(--chat-primary-fg, var(--chalk, #131820));
   --chat-success: var(--lichen, #2f8a52);
   --chat-warning: var(--amber, #b7791f);
   --chat-info: var(--batch, #2f6fd6);
@@ -111,35 +137,38 @@
   --chat-selected-bg: var(--selected-bg, #2f6fd61f);
   --chat-selected-text: var(--selected-text, #2559b0);
   --chat-danger: var(--danger, #d24747);
+  --chat-button-bg: var(--fill-muted, var(--stone));
   --chat-border: var(--stone, #d4dbe5);
   --chat-card-user-bg: color-mix(in srgb, var(--blaze, #d9531e) 10%, var(--scree-2, #ffffff));
   --chat-card-assistant-bg: var(--scree, #f7f9fc);
   --chat-card-tool-bg: var(--basalt, #eef1f6);
   --chat-card-system-bg: var(--scree-2, #ffffff);
-  --chat-code-keyword: #7a52c7;
-  --chat-code-string: #2f7a4a;
-  --chat-code-number: #a15f0d;
-  --chat-code-comment: #6b7684;
-  --chat-code-title: #2f62b8;
-  --chat-code-type: #1f7f7f;
+  --chat-code-keyword: var(--code-keyword, #7a52c7);
+  --chat-code-string: var(--code-string, #2f7a4a);
+  --chat-code-number: var(--code-number, #a15f0d);
+  --chat-code-comment: var(--code-comment, #6b7684);
+  --chat-code-title: var(--code-title, #2f62b8);
+  --chat-code-type: var(--code-type, #1f7f7f);
   --chat-diff-add: var(--diff-add, #2f8a52);
   --chat-diff-del: var(--diff-del, #cf4b4b);
   --chat-code-fg: var(--chalk, #131820);
   --chat-code-bg: var(--basalt, #eef1f6);
   --chat-code-linenum: var(--fog-dim, #6b7684);
-  --chat-code-variable: #a15f0d;
-  --chat-code-builtin: #1f7f7f;
+  --chat-code-variable: var(--code-variable, #a15f0d);
+  --chat-code-builtin: var(--code-builtin, #1f7f7f);
   --chat-code-operator: var(--fog, #48525f);
 }
 :root[data-theme="dark"] {
   --chat-bg: var(--basalt, #0d1117);
   --chat-surface: var(--scree, #161c26);
   --chat-surface-2: var(--scree-2, #1e2633);
+  --chat-chart-sequential-low: var(--chart-read, var(--chat-code-title));
+  --chat-chart-sequential-high: var(--chat-fg);
   --chat-fg: var(--chalk, #f2f6fa);
   --chat-muted: var(--fog, #c2ccd8);
   --chat-muted-2: var(--fog-dim, #8b97a7);
   --chat-accent: var(--blaze, #ff6a3d);
-  --chat-accent-fg: var(--chalk, #f2f6fa);
+  --chat-accent-fg: var(--chat-primary-fg, var(--chalk, #f2f6fa));
   --chat-success: var(--lichen, #63d68b);
   --chat-warning: var(--amber, #e8b13d);
   --chat-info: var(--batch, #4c9bff);
@@ -147,23 +176,24 @@
   --chat-selected-bg: var(--selected-bg, #4c9bff29);
   --chat-selected-text: var(--selected-text, #6aadff);
   --chat-danger: var(--danger, #ff6b63);
+  --chat-button-bg: var(--fill-muted, var(--stone));
   --chat-border: var(--stone, #313d4f);
   --chat-card-user-bg: color-mix(in srgb, var(--blaze, #ff6a3d) 10%, var(--scree-2, #1e2633));
   --chat-card-assistant-bg: var(--scree, #161c26);
   --chat-card-tool-bg: var(--basalt, #0d1117);
   --chat-card-system-bg: var(--scree-2, #1e2633);
-  --chat-code-keyword: #b69cf0;
-  --chat-code-string: #8fc9a0;
-  --chat-code-number: #e0b36a;
-  --chat-code-comment: #7d8798;
-  --chat-code-title: #7fb2ee;
-  --chat-code-type: #6fc7c7;
+  --chat-code-keyword: var(--code-keyword, #b69cf0);
+  --chat-code-string: var(--code-string, #8fc9a0);
+  --chat-code-number: var(--code-number, #e0b36a);
+  --chat-code-comment: var(--code-comment, #7d8798);
+  --chat-code-title: var(--code-title, #7fb2ee);
+  --chat-code-type: var(--code-type, #6fc7c7);
   --chat-diff-add: var(--diff-add, #8ed6a6);
   --chat-diff-del: var(--diff-del, #ff9d94);
   --chat-code-fg: var(--chalk, #f2f6fa);
   --chat-code-bg: var(--basalt, #0d1117);
   --chat-code-linenum: var(--fog-dim, #8b97a7);
-  --chat-code-variable: #e0b36a;
-  --chat-code-builtin: #6fc7c7;
+  --chat-code-variable: var(--code-variable, #e0b36a);
+  --chat-code-builtin: var(--code-builtin, #6fc7c7);
   --chat-code-operator: var(--fog, #c2ccd8);
 }

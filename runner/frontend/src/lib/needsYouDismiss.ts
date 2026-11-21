@@ -5,6 +5,7 @@
 import { create } from 'zustand'
 import { apiFetch } from '../apiFetch'
 import { useToastStore } from '../hooks/useToastStore'
+import { useMessageStore } from '../hooks/useMessageStore'
 import { notifyReviewRequestsChanged } from '../hooks/useMyReviewRequests'
 
 export const DISMISS_UNDO_MS = 5000
@@ -45,14 +46,14 @@ export function canDismissAsk(ask: DismissableAsk, isOwner: boolean | undefined,
 
 /** The request that dismisses key on the server. keepalive: the page is going away, so the request
  *  must outlive it. */
-function send(key: DismissKey, keepalive = false): Promise<Response> {
+function send(key: DismissKey, keepalive = false, revision = 0): Promise<Response> {
   const [kind, id] = [key.slice(0, key.indexOf(':')), key.slice(key.indexOf(':') + 1)]
   if (kind === 'review') {
     return apiFetch(`/api/review-requests/${encodeURIComponent(id)}/decide`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision: 'dismiss' }), keepalive,
     })
   }
-  return apiFetch(`/api/messages/${encodeURIComponent(id)}/dismiss`, { method: 'POST', keepalive })
+  return apiFetch(`/api/messages/${encodeURIComponent(id)}/dismiss`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({revision_seq:revision}), keepalive })
 }
 
 async function reason(resp: Response): Promise<string> {
@@ -63,17 +64,17 @@ async function reason(resp: Response): Promise<string> {
   return `the server said ${resp.status}`
 }
 
-interface Pending { timer: ReturnType<typeof setTimeout>; what: string; toastId: number }
+interface Pending { timer: ReturnType<typeof setTimeout>; what: string; toastId: number; revision: number }
 const timers = new Map<DismissKey, Pending>()
 
 /** Sends key's dismissal now. A 409 means it was already closed (the agent resolved it, or it was
  *  decided in another tab): nothing to say, and the list drops it by itself. */
-function deliver(key: DismissKey, what: string, keepalive = false) {
+function deliver(key: DismissKey, what: string, keepalive = false, revision = 0) {
   const back = (body: string) => {
     useDismissStore.getState().show(key)
     useToastStore.getState().addToast({ title: 'Could not dismiss', body: `${what}: ${body}` })
   }
-  void send(key, keepalive).then(async resp => {
+  void send(key, keepalive, revision).then(async resp => {
     if (key.startsWith('review:')) notifyReviewRequestsChanged()
     if (resp.ok) return
     if (resp.status === 409) {
@@ -91,7 +92,7 @@ export function flushPendingDismissals() {
     clearTimeout(p.timer)
     timers.delete(key)
     useToastStore.getState().removeToast(p.toastId)
-    deliver(key, p.what, true)
+    deliver(key, p.what, true, p.revision)
   }
 }
 
@@ -105,6 +106,7 @@ if (typeof window !== 'undefined') {
 /** Hides key, shows "Dismissed <what>" with Undo, and sends the dismissal once the Undo time is up. */
 export function dismissWithUndo(key: DismissKey, what: string) {
   if (timers.has(key)) return
+  const revision = useMessageStore.getState().messages.find(m => `ask:${m.id}` === key)?.question_revision ?? 0
   const store = useDismissStore.getState()
   const toasts = useToastStore.getState()
   store.hide(key)
@@ -119,9 +121,9 @@ export function dismissWithUndo(key: DismissKey, what: string) {
   const toastId = toasts.addToast({ title: 'Dismissed', body: what, action: { label: 'Undo', onClick: undo }, ttlMs: DISMISS_UNDO_MS })
   const timer = setTimeout(() => {
     timers.delete(key)
-    deliver(key, what)
+    deliver(key, what, false, revision)
   }, DISMISS_UNDO_MS)
-  timers.set(key, { timer, what, toastId })
+  timers.set(key, { timer, what, toastId, revision })
 }
 
 /** Whether key is hidden (dismissed, or waiting out its Undo). */

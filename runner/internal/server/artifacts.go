@@ -40,11 +40,20 @@ import (
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // The size and count limits are in filelimits.go.
 
-const versionLimitMsg = "This file already has 20 versions; delete an old one first."
+var versionLimitMsg = fmt.Sprintf("This file already has %d versions; delete an old one first.", db.MaxArtifactVersions)
+
+func refuseArtifactVersion(w http.ResponseWriter, count int) bool {
+	if count < db.MaxArtifactVersions {
+		return false
+	}
+	writeError(w, http.StatusConflict, versionLimitMsg)
+	return true
+}
 
 const (
 	maxArtifactName    = 120
@@ -91,6 +100,18 @@ type artifactInfo struct {
 	View        string `json:"view"`
 	Origin      string `json:"origin"`  // "agent" (published by the session) or "user" (attached by a person)
 	Version     int    `json:"version"` // 1 for the first file of this name and origin, then 2, 3, ...
+	// Live (BLG-470): this file is updated in place by every `publish --live` of the same name,
+	// instead of a new version being added. Absent (false) for an ordinary versioned file.
+	Live bool `json:"live,omitempty"`
+	// UpdatedAt is when the row's bytes last changed: set only when Live, since a versioned file's
+	// created_at already says that for each of its versions.
+	UpdatedAt string `json:"updated_at,omitempty"`
+	// SHA256 is computed by the server from the bytes it actually received (never a
+	// client-supplied header). Always set now (BLG-479): `session import` checks a downloaded
+	// result bundle against this before running any git command over it (design §4 step 2). Also
+	// used, when Live, so a client applying a live push can break a tie between two updates that
+	// happen to share the same updated_at deterministically.
+	SHA256 string `json:"sha256"`
 }
 
 type artifactListEntry struct {
@@ -128,13 +149,60 @@ func artifactFileMissing(sid string, a db.ArtifactRow) bool {
 	return errors.Is(err, os.ErrNotExist)
 }
 
+// liveIntegrityShaCheckCap: above this size, serving a live file only compares its size against
+// the row, never its content — hashing a large file on every read is not "cheap" the way the size
+// check is. Most live files (charts, small snapshots) are well under it.
+const liveIntegrityShaCheckCap = 8 << 20
+
+// liveFileIntegrityMismatch reports whether a live row's bytes on disk (already open as f, left
+// re-wound to the start on return) do not match what the row says (BLG-470 round 3 #3): a crash
+// between UpdateLiveArtifactContent's commit and its rename can leave the row describing content
+// the rename never actually wrote, with nothing else to notice. A size mismatch is always checked;
+// a sha256 mismatch only when the file is small enough for that to stay cheap on every read.
+func liveFileIntegrityMismatch(f *os.File, row db.ArtifactRow) (mismatch bool, detail string) {
+	st, err := f.Stat()
+	if err != nil {
+		return false, ""
+	}
+	if st.Size() != row.Size {
+		return true, fmt.Sprintf("size on disk %d, row says %d", st.Size(), row.Size)
+	}
+	if st.Size() > liveIntegrityShaCheckCap {
+		return false, ""
+	}
+	sum := sha256.New()
+	if _, err := io.Copy(sum, f); err != nil {
+		return false, "" // a disk read error here will fail the actual serve too; not this check's job
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return false, ""
+	}
+	if got := hex.EncodeToString(sum.Sum(nil)); got != row.SHA256 {
+		return true, fmt.Sprintf("sha256 on disk %s, row says %s", got, row.SHA256)
+	}
+	return false, ""
+}
+
 // latestVersions maps each (origin, name) of rows to its highest version.
+// latestVersions maps each (origin, name) of rows to the version a reader should treat as latest:
+// the live row's, when the name has one, else the highest version among its rows. The live row
+// wins even when some other row outranks it (BLG-470 #5): a server that does not know the live
+// column can still insert an ordinary version over a live name during a rolling update, and that
+// version's number can outrank the live row's.
 func latestVersions(rows []db.ArtifactRow) map[string]int {
 	out := map[string]int{}
+	live := map[string]int{}
 	for _, a := range rows {
-		if a.Version > out[latestKey(a)] {
-			out[latestKey(a)] = a.Version
+		k := latestKey(a)
+		if a.Live {
+			live[k] = a.Version
 		}
+		if a.Version > out[k] {
+			out[k] = a.Version
+		}
+	}
+	for k, v := range live {
+		out[k] = v
 	}
 	return out
 }
@@ -164,7 +232,12 @@ func originOf(o string) string {
 }
 
 func infoOf(a db.ArtifactRow) artifactInfo {
-	return artifactInfo{ID: a.ID, Name: a.Name, Size: a.Size, ContentType: a.ContentType, View: viewForContentType(a.ContentType), Origin: originOf(a.Origin), Version: a.Version}
+	info := artifactInfo{ID: a.ID, Name: a.Name, Size: a.Size, ContentType: a.ContentType, View: viewForContentType(a.ContentType), Origin: originOf(a.Origin), Version: a.Version, SHA256: a.SHA256}
+	if a.Live {
+		info.Live = true
+		info.UpdatedAt = a.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	return info
 }
 
 // ─── upload ───────────────────────────────────────────────────────────────────
@@ -191,11 +264,20 @@ func (h *artifactsHandler) upload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	info := h.store(w, r, sid, artifactIntake{origin: db.OriginAgent, maxFiles: maxArtifactsPerSession, maxTotal: maxArtifactBytesPerSession, noun: "files"})
+	live := r.Header.Get("X-Artifact-Live") == "true"
+	info := h.store(w, r, sid, artifactIntake{origin: db.OriginAgent, maxFiles: maxArtifactsPerSession, maxTotal: maxArtifactBytesPerSession, noun: "files", live: live})
 	if info == nil {
 		return
 	}
-	a.recordArtifactEvent(r.Context(), sid, info.artifactInfo)
+	if info.liveOverwrite {
+		// An in-place republish of a live file is not history (BLG-470 #4): pushed to open
+		// viewers without becoming a transcript event, so a chart refreshed often does not grow
+		// the session's replay or storage, and a viewer updates just this one file instead of
+		// re-reading the whole list.
+		a.fanOutLiveArtifactUpdate(sid, info.artifactInfo)
+	} else {
+		a.recordArtifactEvent(r.Context(), sid, info.artifactInfo)
+	}
 	superseded := a.supersedeReviews(context.WithoutCancel(r.Context()), sid, info.artifactInfo)
 	writeJSON(w, http.StatusCreated, struct {
 		storedArtifact
@@ -212,6 +294,12 @@ type storedArtifact struct {
 	artifactInfo
 	LatestVersion int  `json:"latest_version"`
 	Previous      *int `json:"previous"`
+	// liveOverwrite (BLG-470, unexported: never serialized): set only by overwriteLive's success
+	// path, so upload() knows this republish updated an existing live row in place rather than
+	// adding a row (a first live publish or the explicit switch from versioned) — the former is
+	// pushed live without becoming a transcript event, the latter is recorded as one, same as any
+	// other new file.
+	liveOverwrite bool
 }
 
 // artifactIntake says how store() treats one upload: who it is from and which caps apply.
@@ -221,6 +309,9 @@ type artifactIntake struct {
 	maxFiles   int    // per session, among files of the same origin
 	maxTotal   int64  // total bytes per session among files of the same origin; 0 = no cap
 	noun       string // "files" / "uploaded files", for the 409 message
+	// live (BLG-470): `publish --live`. A name with no live row yet gets one (the explicit switch,
+	// or the first publish of a new name); a name that already has one is overwritten in place.
+	live bool
 }
 
 // store reads the request body into a new file of the session and indexes it. The caller has
@@ -244,18 +335,37 @@ func (h *artifactsHandler) store(w http.ResponseWriter, r *http.Request, sid str
 		return nil
 	}
 	name := artifactNameFromRequest(r)
-	if n, err := db.CountArtifactVersions(ctx, a.dbPool, sid, in.origin, name); err != nil {
-		writeDatabaseFailure(w, "count the file's versions", "artifacts upload CountArtifactVersions", err)
-		return nil
-	} else if n >= db.MaxArtifactVersions {
-		writeError(w, http.StatusConflict, versionLimitMsg)
-		return nil
-	}
-	// The size checks come before a byte is read: answered without reading the body, a large
+	// The size check comes before a byte is read: answered without reading the body, a large
 	// upload is cut off, but the client that checked the advertised limits never sends one.
 	if r.ContentLength > maxArtifactBytes {
 		writeError(w, http.StatusRequestEntityTooLarge, tooLargeMsg(r.ContentLength))
 		return nil
+	}
+	existingLive, err := db.GetLiveArtifact(ctx, a.dbPool, sid, in.origin, name)
+	if err != nil {
+		writeDatabaseFailure(w, "find the live file", "artifacts upload GetLiveArtifact", err)
+		return nil
+	}
+	switch {
+	case in.live && existingLive != nil:
+		return h.overwriteLive(w, r, sid, *existingLive, in)
+	case in.live:
+		// No live row yet for this name: the explicit switch (a name with versioned history) or a
+		// brand new live file. Either way this publish becomes that name's one live row, the same
+		// way a first version does, just marked live (below, via InsertLiveArtifactCapped).
+	case existingLive != nil:
+		// A plain publish never silently takes over a live name's slot (switching is explicit,
+		// in either direction): without this, a later ordinary version would outrank the live row
+		// by version number and bump it out of "latest" while it stayed marked live.
+		writeError(w, http.StatusConflict, "this file is live; publish --live to update it in place, or unpublish it first to start a new versioned file under this name")
+		return nil
+	default:
+		if n, err := db.CountArtifactVersions(ctx, a.dbPool, sid, in.origin, name); err != nil {
+			writeDatabaseFailure(w, "count the file's versions", "artifacts upload CountArtifactVersions", err)
+			return nil
+		} else if refuseArtifactVersion(w, n) {
+			return nil
+		}
 	}
 	if n, total, err := db.CountArtifactsOrigin(ctx, a.dbPool, sid, in.origin); err != nil {
 		writeDatabaseFailure(w, "count the session's files", "artifacts upload CountArtifactsOrigin", err)
@@ -315,10 +425,15 @@ func (h *artifactsHandler) store(w http.ResponseWriter, r *http.Request, sid str
 	}
 	contentType, view := classifyArtifact(name, head, size)
 
-	row, err := db.InsertArtifactCapped(ctx, a.dbPool, db.ArtifactRow{
+	newRow := db.ArtifactRow{
 		ID: id, SessionID: sid, Name: name, Size: size, ContentType: contentType,
 		SHA256: hex.EncodeToString(sum.Sum(nil)), Origin: in.origin, UploadedBy: in.uploadedBy,
-	}, in.maxFiles, in.maxTotal)
+	}
+	insert := db.InsertArtifactCapped
+	if in.live {
+		insert = db.InsertLiveArtifactCapped
+	}
+	row, err := insert(ctx, a.dbPool, newRow, in.maxFiles, in.maxTotal)
 	if errors.Is(err, db.ErrArtifactVersionLimit) {
 		return fail(http.StatusConflict, versionLimitMsg)
 	}
@@ -330,17 +445,97 @@ func (h *artifactsHandler) store(w http.ResponseWriter, r *http.Request, sid str
 		writeJSON(w, http.StatusConflict, map[string]any{"error": totalLimitMsg(in), "code": "file_space_required"})
 		return nil
 	}
+	if errors.Is(err, db.ErrArtifactAlreadyLive) || isUniqueViolation(err) {
+		// Another request made this name's live row between our check above and the insert's own
+		// lock-protected re-check (ErrArtifactAlreadyLive, the deterministic path) or, failing
+		// that, the unique index itself (isUniqueViolation, defense in depth): that request won.
+		// Ask this one to retry, which will then find the row and overwrite it in place.
+		_ = os.RemoveAll(dir)
+		writeError(w, http.StatusConflict, "another publish just made this file live; publish --live again")
+		return nil
+	}
 	if err != nil {
 		_ = os.RemoveAll(dir)
 		writeDatabaseFailure(w, "record the file", "artifacts upload insert", err)
 		return nil
 	}
-	out := storedArtifact{artifactInfo: artifactInfo{
-		ID: row.ID, Name: row.Name, Size: row.Size, ContentType: row.ContentType, View: view, Origin: originOf(row.Origin), Version: row.Version,
-	}, LatestVersion: row.Version}
+	out := storedArtifact{artifactInfo: infoOf(row)}
+	out.View = view
+	out.LatestVersion = row.Version
 	if row.Previous > 0 {
 		out.Previous = &row.Previous
 	}
+	return &out
+}
+
+// isUniqueViolation reports whether err is a Postgres unique-constraint failure (23505): here,
+// the live partial index, caught when two `--live` publishes race to become a name's first live row.
+func isUniqueViolation(err error) bool {
+	var pg *pgconn.PgError
+	return errors.As(err, &pg) && pg.Code == "23505"
+}
+
+// overwriteLive republishes an existing live file in place: the new bytes replace the old ones at
+// the row's own path (same id, same version), and the index moves to match. Written to a staging
+// file first and renamed over the real one only once both the bytes and the index update have
+// succeeded, so a failed or partial upload never corrupts the file an open tab is still showing.
+func (h *artifactsHandler) overwriteLive(w http.ResponseWriter, r *http.Request, sid string, live db.ArtifactRow, in artifactIntake) *storedArtifact {
+	a := h.api
+	ctx := r.Context()
+	dir := artifactDir(sid, live.ID)
+	staging := filepath.Join(dir, liveStagingPrefix+newPublishID())
+	path := artifactPath(sid, live)
+	cleanup := func() *storedArtifact { _ = os.Remove(staging); return nil }
+	f, err := os.OpenFile(staging, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // dir is the existing row's own directory; staging has a fresh random suffix
+	if err != nil {
+		writeStorageFailure(w, "save the file", accessWrite, "artifacts upload live create", err)
+		return nil
+	}
+	sum := sha256.New()
+	disk := &errWriter{w: f}
+	size, copyErr := io.Copy(io.MultiWriter(disk, sum), http.MaxBytesReader(w, r.Body, maxArtifactBytes))
+	closeErr := f.Close()
+	var tooBig *http.MaxBytesError
+	switch {
+	case disk.err != nil:
+		writeStorageFailure(w, "save the file", accessWrite, "artifacts upload live write", disk.err)
+		return cleanup()
+	case errors.As(copyErr, &tooBig):
+		writeError(w, http.StatusRequestEntityTooLarge, tooLargeMsg(r.ContentLength))
+		return cleanup()
+	case copyErr != nil:
+		writeError(w, http.StatusBadRequest, "The upload stopped before the whole file arrived; try again.")
+		return cleanup()
+	case closeErr != nil:
+		writeStorageFailure(w, "save the file", accessWrite, "artifacts upload live close", closeErr)
+		return cleanup()
+	}
+	head := make([]byte, 512)
+	if hf, err := os.Open(staging); err == nil { //nolint:gosec // same path as above
+		n, _ := io.ReadFull(hf, head)
+		head = head[:n]
+		_ = hf.Close()
+	}
+	contentType, view := classifyArtifact(live.Name, head, size)
+	// commitFile runs after UpdateLiveArtifactContent's transaction commits, but while it still
+	// holds the per-session advisory lock across the rename (and, if that keeps failing, the
+	// restore): no other update for this session can even begin until this one's rename or
+	// restore is fully resolved, so two concurrent republishes of this file can never have their
+	// rename and their row commit interleaved.
+	commitFile := func() error { return os.Rename(staging, path) }
+	row, err := db.UpdateLiveArtifactContent(ctx, a.dbPool, sid, live.ID, size, contentType, hex.EncodeToString(sum.Sum(nil)), in.maxTotal, commitFile)
+	if errors.Is(err, db.ErrArtifactBytesLimit) {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": totalLimitMsg(in), "code": "file_space_required"})
+		return cleanup()
+	}
+	if err != nil {
+		writeDatabaseFailure(w, "record the file", "artifacts upload update live", err)
+		return cleanup()
+	}
+	out := storedArtifact{artifactInfo: infoOf(row)}
+	out.View = view
+	out.LatestVersion = row.Version
+	out.liveOverwrite = true
 	return &out
 }
 
@@ -383,6 +578,27 @@ func (a *API) recordArtifactEvent(ctx context.Context, sessionID string, info ar
 	ev.Seq = seq
 	if msg, err := json.Marshal(ev); err == nil {
 		a.hub.FanOutAgentEvent(sessionID, seq, msg)
+	}
+}
+
+// fanOutLiveArtifactUpdate pushes a live file's current state (BLG-470) to every open viewer of
+// the session without writing to the transcript: unlike recordArtifactEvent, it never calls
+// AppendAgentEvent, so an in-place republish never grows the session's replay or storage however
+// often it happens. Seq 0 and Transient mark it as never persisted, the same way a streaming
+// delta is (hubgap.go); the hub fans it out to live subscribers and drops it for one whose buffer
+// is full, same as any other transient event — a dropped one costs a client a stale card until
+// its next republish or an explicit list read, never a gap to fill in.
+func (a *API) fanOutLiveArtifactUpdate(sessionID string, info artifactInfo) {
+	raw, err := json.Marshal(info)
+	if err != nil {
+		return
+	}
+	ev := protocol.AgentEvent{
+		Type: "agent_event", SessionID: sessionID, ClientEventID: newUUID(), Transient: true,
+		Ts: time.Now().UTC().Format(time.RFC3339Nano), Kind: artifactEventKind, Payload: raw,
+	}
+	if msg, err := json.Marshal(ev); err == nil {
+		a.hub.FanOutAgentEvent(sessionID, 0, msg)
 	}
 }
 
@@ -532,7 +748,120 @@ func (h *artifactsHandler) serveSession(w http.ResponseWriter, r *http.Request, 
 	if !raw {
 		hd.Set("Content-Disposition", "attachment; filename*=UTF-8''"+escapeFilename(versionedDownloadName(row.Name, row.Version, latest)))
 	}
+	if row.Live {
+		if mismatch, detail := liveFileIntegrityMismatch(f, *row); mismatch {
+			log.Printf("artifacts: live file %s/%s (%s) does not match its row on disk (%s); the row may describe bytes a crashed update never wrote",
+				sid, row.ID, row.Name, detail)
+			hd.Set("X-Artifact-Live-Updating", "true")
+		}
+	}
 	http.ServeContent(w, r, "", time.Time{}, f)
+}
+
+// ─── snapshot (a live file's current content, saved as a normal versioned file) ──────────────
+
+// snapshotName is a live file's name with the time it was snapshotted, so a person can tell two
+// snapshots of the same chart apart: "latency-v3.png" -> "latency-v3-20261103-153045.png".
+func snapshotName(name string, at time.Time) string {
+	ext := filepath.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	if stem == "" { // a dotfile such as .env has no extension
+		stem, ext = name, ""
+	}
+	return fmt.Sprintf("%s-%s%s", stem, at.UTC().Format("20060102-150405"), ext)
+}
+
+func (h *artifactsHandler) snapshot(w http.ResponseWriter, r *http.Request) {
+	sid, ok := h.person(w, r)
+	if !ok {
+		return
+	}
+	row := h.artifact(w, r, sid)
+	if row == nil {
+		return
+	}
+	if !row.Live {
+		writeError(w, http.StatusConflict, "this file already keeps its own versions; Snapshot is only for a live file")
+		return
+	}
+	h.snapshotSession(w, r, sid, *row)
+}
+
+func (h *artifactsHandler) snapshotSession(w http.ResponseWriter, r *http.Request, sid string, live db.ArtifactRow) {
+	a := h.api
+	ctx := r.Context()
+	src, err := os.Open(artifactPath(sid, live))
+	if errors.Is(err, os.ErrNotExist) {
+		writeError(w, http.StatusGone, fileGoneMsg)
+		return
+	}
+	if err != nil {
+		writeStorageFailure(w, "read the file", accessRead, "artifacts snapshot open", err)
+		return
+	}
+	defer func() { _ = src.Close() }()
+
+	name := snapshotName(live.Name, time.Now())
+	id := newPublishID()
+	dir := artifactDir(sid, id)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		writeStorageFailure(w, "save the file", accessWrite, "artifacts snapshot mkdir", err)
+		return
+	}
+	path := filepath.Join(dir, name)
+	dst, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // dir is a freshly generated id; name derives from the existing sanitised name plus a fixed timestamp format
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		writeStorageFailure(w, "save the file", accessWrite, "artifacts snapshot create", err)
+		return
+	}
+	sum := sha256.New()
+	size, copyErr := io.Copy(io.MultiWriter(dst, sum), src)
+	closeErr := dst.Close()
+	if copyErr != nil || closeErr != nil {
+		_ = os.RemoveAll(dir)
+		logErr := copyErr
+		if logErr == nil {
+			logErr = closeErr
+		}
+		writeStorageFailure(w, "save the file", accessWrite, "artifacts snapshot write", logErr)
+		return
+	}
+	head := make([]byte, 512)
+	if hf, err := os.Open(path); err == nil { //nolint:gosec // same path as above
+		n, _ := io.ReadFull(hf, head)
+		head = head[:n]
+		_ = hf.Close()
+	}
+	_, view := classifyArtifact(name, head, size)
+
+	newRow, err := db.InsertArtifactCapped(ctx, a.dbPool, db.ArtifactRow{
+		ID: id, SessionID: sid, Name: name, Size: size, ContentType: live.ContentType,
+		SHA256: hex.EncodeToString(sum.Sum(nil)), Origin: live.Origin, UploadedBy: live.UploadedBy,
+	}, maxArtifactsPerSession, maxArtifactBytesPerSession)
+	if errors.Is(err, db.ErrArtifactVersionLimit) {
+		_ = os.RemoveAll(dir)
+		writeError(w, http.StatusConflict, versionLimitMsg)
+		return
+	}
+	if errors.Is(err, db.ErrArtifactLimit) || errors.Is(err, db.ErrArtifactBytesLimit) {
+		_ = os.RemoveAll(dir)
+		writeError(w, http.StatusConflict, "this session is at its file limit; delete one first")
+		return
+	}
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		writeDatabaseFailure(w, "record the file", "artifacts snapshot insert", err)
+		return
+	}
+	out := storedArtifact{artifactInfo: infoOf(newRow)}
+	out.View = view
+	out.LatestVersion = newRow.Version
+	a.recordArtifactEvent(ctx, sid, out.artifactInfo)
+	writeJSON(w, http.StatusCreated, struct {
+		storedArtifact
+		URL string `json:"url"`
+	}{out, "/sessions/" + sid + "?artifact=" + out.ID})
 }
 
 func (h *artifactsHandler) remove(w http.ResponseWriter, r *http.Request) {
@@ -569,6 +898,7 @@ func (h *artifactsHandler) removeSession(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	h.api.withdrawDeletedReviews(context.WithoutCancel(r.Context()), sid, row.ID)
+	h.api.closeDeletedAnswer(context.WithoutCancel(r.Context()), sid, row.ID)
 	if err := os.RemoveAll(artifactDir(sid, row.ID)); err != nil {
 		log.Printf("artifacts delete files %s/%s: %v", sid, row.ID, err)
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -45,7 +46,7 @@ func NewVirtualHostExplorer(namespaceRoot string, manifest protocol.WorkspaceMan
 	for _, member := range manifest.Members {
 		source, ok := sources[member.ID]
 		_, public := explorerPath(member.Path)
-		if !ok || !public || member.Path == "." {
+		if !ok || !public && member.Path != "." {
 			return fail()
 		}
 		info, err := os.Lstat(source.Path)
@@ -71,13 +72,25 @@ func (v *VirtualHostExplorer) Close() error {
 	return v.namespace.Close()
 }
 func (v *VirtualHostExplorer) memberFor(name string) (protocol.WorkspaceMember, *LocalExplorer, string) {
-	for _, member := range v.manifest.Members {
+	var root *protocol.WorkspaceMember
+	for i, member := range v.manifest.Members {
+		if member.Path == "." {
+			root = &v.manifest.Members[i]
+			continue
+		}
 		if name == member.Path {
 			return member, v.members[member.ID], ""
 		}
 		if strings.HasPrefix(name, member.Path+"/") {
 			return member, v.members[member.ID], strings.TrimPrefix(name, member.Path+"/")
 		}
+	}
+	// A member at the root owns every name no other member claims.
+	if root != nil {
+		if name == "." {
+			name = ""
+		}
+		return *root, v.members[root.ID], name
 	}
 	return protocol.WorkspaceMember{}, nil, ""
 }
@@ -99,7 +112,7 @@ func (v *VirtualHostExplorer) Explore(ctx context.Context, req protocol.Workspac
 		defer v.statusMu.Unlock()
 	}
 	member, local, relative := v.memberFor(name)
-	if local != nil {
+	if local != nil && (name != "." || req.Operation != "search") {
 		if req.MemberID != "" && req.MemberID != member.ID {
 			return explorerFailure(req, "forbidden")
 		}
@@ -114,6 +127,9 @@ func (v *VirtualHostExplorer) Explore(ctx context.Context, req protocol.Workspac
 			status := *result.Status
 			status.Path = req.Path
 			result.Status = &status
+		}
+		if name == "." && req.Operation == "list" {
+			v.projectReserved(req, &result)
 		}
 	} else {
 		switch req.Operation {
@@ -141,6 +157,30 @@ func (v *VirtualHostExplorer) Explore(ctx context.Context, req protocol.Workspac
 		return explorerFailure(req, "unavailable")
 	}
 	return result
+}
+
+// projectReserved shows members of the reserved folder beside the root member's
+// files, by name, and hides the folder. Their rows carry the real member path.
+func (v *VirtualHostExplorer) projectReserved(req protocol.WorkspaceExplorerRequest, result *protocol.WorkspaceExplorerResult) {
+	if !result.OK {
+		return
+	}
+	result.Entries = slices.DeleteFunc(result.Entries, func(row protocol.WorkspaceEntry) bool {
+		return row.Path == protocol.WorkspaceReservedFolder
+	})
+	for _, member := range v.manifest.Members {
+		if !protocol.ReservedMemberPath(member.Path) {
+			continue
+		}
+		if !v.members[member.ID].valid() {
+			result.UnavailableMembers = append(result.UnavailableMembers, member.ID)
+		}
+		name := path.Base(member.Path)
+		if req.Cursor == "" && strings.Contains(strings.ToLower(name), strings.ToLower(req.Filter)) {
+			result.Entries = append(result.Entries, protocol.WorkspaceEntry{Name: name, Path: member.Path, Directory: true, Repository: true, MemberID: member.ID})
+		}
+	}
+	sort.SliceStable(result.Entries, func(i, j int) bool { return result.Entries[i].Name < result.Entries[j].Name })
 }
 func (v *VirtualHostExplorer) list(req protocol.WorkspaceExplorerRequest, name string) protocol.WorkspaceExplorerResult {
 	result := explorerFailure(req, "not_found")
@@ -204,10 +244,13 @@ func (v *VirtualHostExplorer) search(ctx context.Context, req protocol.Workspace
 			result.UnavailableMembers = append(result.UnavailableMembers, member.ID)
 			continue
 		}
-		if strings.Contains(strings.ToLower(member.Name), strings.ToLower(req.Filter)) {
+		if member.Path != "." && strings.Contains(strings.ToLower(member.Name), strings.ToLower(req.Filter)) {
 			result.Entries = append(result.Entries, protocol.WorkspaceEntry{Name: path.Base(member.Path), Path: member.Path, Directory: true, Repository: true, MemberID: member.ID})
 		}
 		offset := len(strings.Split(member.Path, "/"))
+		if member.Path == "." {
+			offset = 0
+		}
 		if name != "." {
 			offset -= len(strings.Split(name, "/"))
 		}

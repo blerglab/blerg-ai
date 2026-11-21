@@ -7,7 +7,7 @@
 import { afterEach, describe, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import Insights from './Insights'
+import { InsightsDashboard as Insights } from './Insights'
 import { richInsights as report, richPrices as prices } from '../test/insightsFixture'
 
 // The app's tsconfig has no Node types: the file system comes in untyped, through a dynamic import.

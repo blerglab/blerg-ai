@@ -70,6 +70,7 @@ describe('askStates', () => {
     expect(askStates([q, ev('user_message', { text: 'x', source: 'ask_answer' })], NONE, false).byEvent.get(q.client_event_id)?.open).toBe(true)
     // The answer Blerg sends on to the agent closes nothing; the answer naming it does.
     const old = ev('ask', { body: 'no id' })
+    expect(askStates([old, ev('user_message', { text: 'Untrusted page data', source: 'page_result' })], NONE, false).open).toBe(old)
     expect(askStates([old, ev('user_message', { text: 'Answer to your question q1', source: 'question_answer' })], NONE, false).open).toBe(old)
     const done = askStates([q, ev('user_message', { text: 'yes', source: 'ask_answer', message_id: 'q1' })], NONE, false)
     expect(done.anyOpen).toBe(false)
@@ -99,10 +100,10 @@ describe('askStates and the call that asked', () => {
     expect(askStates([call, ask, ev('tool_result', { call_id: 'b9', output: '', is_error: false, duration_ms: 1 })], NONE, false).open).toBeNull()
   })
 
-  it("the native loop's ask closes when its tool returns, id or not", () => {
+  it("the native loop's server-held ask remains open when its tool returns", () => {
     const call = ev('tool_call', { tool: 'ask', call_id: 'a9', input: { question: 'Go?' } })
     const ask = ev('ask', { body: 'Go?', message_id: 'm9' })
-    expect(askStates([call, ask, ev('tool_result', { call_id: 'a9', output: '[ask closed without an answer]', is_error: false, duration_ms: 1 })], NONE, false).open).toBeNull()
+    expect(askStates([call, ask, ev('tool_result', { call_id: 'a9', output: '[question discussion continues]', is_error: false, duration_ms: 1 })], NONE, false).open).toBe(ask)
   })
 
   it("closes when the native loop's ask tool returns, and keeps the answer recorded before it", () => {
@@ -118,4 +119,26 @@ describe('askStates and the call that asked', () => {
     const ask = ev('ask', { body: 'Now?', message_id: 'm3' })
     expect(askStates([call, other, ask, ev('tool_result', { call_id: 'b3', output: '', is_error: false, duration_ms: 1 })], NONE, false).open).toBe(ask)
   })
+})
+
+it('keeps a bound clarification on its question without recording a decision', () => {
+ const ask = ev('ask', { body: 'Plan changes', message_id: 'bound' })
+ const note = ev('bound_ask_note', {message_id:'bound', text:'Not applied: reply to this question.'})
+ expect(askStates([ask,note],NONE,false).byEvent.get(ask.client_event_id)).toEqual({open:true,answer:'',note:'Not applied: reply to this question.'})
+})
+
+it('a bound ask never advertises the untargeted composer as its answer path', () => {
+ const ask = ev('ask', {body:'Plan changes',message_id:'bound',bound:true})
+ const state=askStates([ask],NONE,false)
+ expect(state.open).toBeNull()
+ expect(state.anyOpen).toBe(true)
+})
+it('revises the original question in place and retains it after an explicit answer',()=>{
+ const ask=ev('ask',{body:'Deploy?',message_id:'q1'})
+ const revision=ev('question_thread',{message_id:'q1',kind:'revision',body:'Deploy to staging?',question_turn:'person'})
+ const reply=ev('question_thread',{message_id:'q1',kind:'reply',body:'Which database?',question_turn:'main'})
+ const state=askStates([ask,revision,reply],NONE,false)
+ expect(state.byEvent.get(ask.client_event_id)).toMatchObject({open:true,question:'Deploy to staging?',turn:'main'})
+ const done=askStates([ask,revision,reply,ev('user_message',{source:'ask_answer',message_id:'q1',text:'yes'})],NONE,false)
+ expect(done.byEvent.get(ask.client_event_id)).toMatchObject({open:false,question:'Deploy to staging?',answer:'yes'})
 })

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/desktopauth"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
@@ -18,6 +19,7 @@ func TestBackgroundBlockedDaemonDoesNotStallOtherDaemonEvents(t *testing.T) {
 	h := fx.api.hub
 	blocked := &DaemonConn{ID: topicDaemonID, BackgroundTaskLifetime: newUUID(), send: make(chan []byte, 8)}
 	blocked.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	blocked.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	h.Register(blocked)
 	if _, _, _, err := db.AppendBackgroundTaskEventAt(t.Context(), fx.pool, fx.sess, newUUID(), backgroundStartedKind, `{"task_id":"orphan","daemon_lifetime":"old-process"}`, time.Time{}); err != nil {
 		t.Fatal(err)
@@ -64,6 +66,7 @@ func TestBackgroundBlockedDaemonDoesNotStallOtherDaemonEvents(t *testing.T) {
 	}
 	other := &DaemonConn{ID: otherID, BackgroundTaskLifetime: newUUID(), send: make(chan []byte, 8)}
 	other.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	other.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	flowing := make(chan struct{})
 	go func() {
 		defer close(flowing)
@@ -153,5 +156,88 @@ func TestDaemonWorkFencePinsWaitersAndReclaimsEntries(t *testing.T) {
 	h.mu.RUnlock()
 	if remaining != 0 {
 		t.Fatalf("unused daemon fences retained: %d", remaining)
+	}
+}
+
+// A busy session row must not retain the desktop fence for other frames.
+func TestHeartbeatReconcileDoesNotHoldDesktopFenceOnBlockedSession(t *testing.T) {
+	fx := newLiveFx(t)
+	h := fx.api.hub
+	generation := newUUID()
+	binding := desktopauth.Binding{DesktopID: topicDaemonID, OwnerID: "fixture-owner", Revision: 3, ExpiresAt: time.Now().Add(time.Hour)}
+	dc := &DaemonConn{ID: topicDaemonID, DesktopBinding: &binding, DesktopGeneration: generation, BackgroundTaskLifetime: newUUID(), send: make(chan []byte, 32), desktopDone: make(chan struct{})}
+	if _, err := fx.pool.Exec(t.Context(), `UPDATE daemons SET desktop_owner_id=$2,ownership_revision=$3,connection_generation=$4 WHERE id=$1`, dc.ID, binding.OwnerID, binding.Revision, generation); err != nil {
+		t.Fatal(err)
+	}
+	h.Register(dc)
+	defer joinHeartbeatReplay(t, dc)
+	ids := []string{fx.sess}
+	for i := 0; i < 19; i++ {
+		id := newUUID()
+		if err := db.InsertSession(t.Context(), fx.pool, id, dc.ID, "running", "/fixture", "fixture", "Fixture", ""); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	if _, err := fx.pool.Exec(t.Context(), `UPDATE sessions SET spawning_account_id=$2,kind='agent' WHERE id=ANY($1::uuid[])`, ids, binding.OwnerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := db.AppendBackgroundTaskEventAt(t.Context(), fx.pool, fx.sess, newUUID(), backgroundStartedKind, `{"task_id":"task","daemon_lifetime":"old"}`, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := fx.pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err = tx.Exec(t.Context(), `SELECT id FROM sessions WHERE id=$1 FOR UPDATE`, fx.sess); err != nil {
+		t.Fatal(err)
+	}
+	hb := protocol.DaemonHeartbeat{Type: "daemon_heartbeat", ActiveSessions: ids, SessionStates: map[string]string{ids[1]: "idle"}, BackgroundTasks: &protocol.BackgroundTaskInventory{Lifetime: dc.BackgroundTaskLifetime, Sessions: map[string][]string{}}}
+	raw, err := json.Marshal(hb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func() time.Duration {
+		t.Helper()
+		started := time.Now()
+		var after func()
+		ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+		defer cancel()
+		err := db.WithDesktopFence(ctx, fx.pool, dc.ID, func(fenced context.Context) error {
+			if !handleDaemonFrame(fenced, h, dc, fx.pool, raw, envelope{Type: "daemon_heartbeat"}, func(work func()) { after = work }) {
+				return context.Canceled
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("heartbeat fence: %v", err)
+		}
+		if after == nil {
+			t.Fatal("missing deferred reconciliation")
+		}
+		after()
+		elapsed := time.Since(started)
+		if ctx.Err() != nil {
+			t.Fatalf("heartbeat took %v", elapsed)
+		}
+		return elapsed
+	}
+	elapsed := run()
+	t.Logf("20-session heartbeat with locked row: %s", elapsed)
+	row, err := db.GetSession(t.Context(), fx.pool, ids[1])
+	if err != nil || row.Status != "idle" {
+		t.Fatalf("concurrent status did not reconcile: %+v %v", row, err)
+	}
+	var count int
+	if err := fx.pool.QueryRow(t.Context(), `SELECT background_tasks FROM sessions WHERE id=$1`, fx.sess).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("locked row was changed: %d %v", count, err)
+	}
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	run()
+	if err := fx.pool.QueryRow(t.Context(), `SELECT background_tasks FROM sessions WHERE id=$1`, fx.sess).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("later heartbeat did not converge: %d %v", count, err)
 	}
 }

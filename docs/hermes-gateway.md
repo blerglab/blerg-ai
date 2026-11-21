@@ -1,6 +1,6 @@
 # Hermes agent sessions
 
-Hermes agent sessions use its native TUI gateway over private stdio, with one gateway process and one native conversation per Blerg session. Terminal sessions still launch Hermes's interactive CLI. The adapter supports native desktop protocol contracts 6 and 8; the sandbox image pins Hermes v0.21.5 (`v2026.9.24`). An incompatible gateway fails explicitly instead of silently falling back to a final-text-only CLI.
+Hermes agent sessions use its native TUI gateway over private stdio, with one gateway process and one native conversation per Blerg session. The adapter supports native desktop protocol contracts 6 and 8; the sandbox image pins Hermes v0.21.5 (`v2026.9.24`). An incompatible gateway fails explicitly instead of silently falling back to a final-text-only CLI.
 
 | Behavior | Adapter behavior |
 | --- | --- |
@@ -58,3 +58,7 @@ GOWORK=off BLERG_TEST_HERMES_NATIVE_ROOT=/path/to/hermes-agent \
   BLERG_TEST_HERMES_NATIVE_PYTHON=/path/to/hermes-agent/venv/bin/python \
   go test -race ./internal/daemon -run '^TestHermesReal(NativeOfflineAdapter|NamedProviderRouting)$'
 ```
+
+Authenticated internal inference hubs need runtime-specific owner validation; see the
+[inference hub assessment and test receipt](design/inference-hubs.md). Credential-free
+discovery is not an authenticated hub compatibility claim.

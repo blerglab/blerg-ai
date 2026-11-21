@@ -21,9 +21,17 @@ type OwnerShellClientFrame struct {
 // OwnerShellInfo is authorized metadata for the exact human owner/login only, never a hub
 // broadcast. Attached means that attaching requires an explicit takeover of that controller.
 type OwnerShellInfo struct {
-	Attached bool   `json:"attached"`
-	Handle   string `json:"handle"`
-	Shell    string `json:"shell_id"`
-	Runtime  string `json:"runtime"`
-	Folder   string `json:"folder"`
+	Privileged      bool   `json:"privileged,omitempty"`
+	RuntimeTargetID string `json:"runtime_target_id,omitempty"`
+	Session         string `json:"session_id"`
+	Name            string `json:"name"`
+	OpenedAt        int64  `json:"opened_at"`
+	Persistent      bool   `json:"persistent,omitempty"`
+	Consent         string `json:"consent_id,omitempty"`
+	LifetimeUntil   int64  `json:"lifetime_until,omitempty"`
+	Attached        bool   `json:"attached"`
+	Handle          string `json:"handle"`
+	Shell           string `json:"shell_id"`
+	Runtime         string `json:"runtime"`
+	Folder          string `json:"folder"`
 }

@@ -15,6 +15,7 @@ for f in "$tmp"/*.yaml; do
     envsubst '${REGISTRY} ${TAG} ${DOMAIN} ${SCHEME} ${AGENT_IMAGE} ${WEBHOOK_ALLOW_PRIVATE} ${TRUSTED_PROXIES} ${WORKSPACE_STORAGE_CLASS} ${WORKSPACE_DEFAULT_CLASS}' < "$f" > "$f.r" && mv "$f.r" "$f"
 done
 fail=0
+python3 "$here/../live_data_tls_test.py" || fail=1
 # Render through the same helper deploy.sh uses. Explicit values (including empty)
 # win, live operator patches survive two deploys, and unknown env keys stay out.
 python3 - "$here" "$tmp" <<'PYTEST' || fail=1
@@ -29,7 +30,7 @@ helper = here / "render_runner_config.py"
 def render(text, env):
     return subprocess.check_output(["python3", str(helper), str(here / "runner-deployment.yaml"), str(live)],
         input=text, text=True, env=env)
-env = {k: v for k, v in os.environ.items() if not k.startswith("BLERG_RUNNER_")}
+env = {k: v for k, v in os.environ.items() if not k.startswith("BLERG_RUNNER_") and k != "BLERG_MCP_CLUSTER_DEPLOYMENT"}
 first = render(base, env)
 import yaml
 values = yaml.safe_load(first)["data"]
@@ -43,11 +44,21 @@ assert yaml.safe_load(render(base, env))["data"] == values
 deployment = next(d for d in yaml.safe_load_all((here / "runner-deployment.yaml").read_text()) if d["kind"] == "Deployment")
 keys = [e["valueFrom"]["configMapKeyRef"]["key"] for e in deployment["spec"]["template"]["spec"]["containers"][0]["env"]
     if e.get("valueFrom", {}).get("configMapKeyRef", {}).get("optional")]
+# The cluster flag must participate in the same explicit/live override rules.
+flag = "BLERG_MCP_CLUSTER_DEPLOYMENT"
+assert values[flag] == "true"
+requested_false = yaml.safe_load(render(base, dict(env, **{flag: "false"})))["data"][flag]
+assert requested_false == "false", f"MCP flag override ignored: requesting false renders {requested_false}"
 for key in keys:
     got = yaml.safe_load(render(base, dict(env, **{key: "operator's \"value\"\nnext line"})))['data']
     assert got[key] == "operator's \"value\"\nnext line", key
 assert yaml.safe_load(render(base, dict(env, BLERG_RUNNER_AGENT_GIT_BASE="")))["data"]["BLERG_RUNNER_AGENT_GIT_BASE"] == ""
 assert "BLERG_RUNNER_UNKNOWN" not in yaml.safe_load(render(base, dict(env, BLERG_RUNNER_UNKNOWN="no")))["data"]
+live.write_text(json.dumps({"data": {flag: "false"}}))
+retained = yaml.safe_load(render(base, env))["data"]
+assert retained[flag] == "false", "MCP live false patch was lost"
+live.write_text(json.dumps({"data": retained}))
+assert yaml.safe_load(render(base, env))["data"][flag] == "false", "MCP live false patch was lost on redeploy"
 # deploy.sh derives the standard workspace class on every run and exports it: the derived value
 # replaces a stale live one, and an empty derived value clears it.
 live.write_text(json.dumps({"data": {"BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS": "old"}}))
@@ -448,7 +459,15 @@ for line in bad:
     print("FAIL: " + line)
 sys.exit(1 if bad else 0)
 PY
-grep -qE 'emptyDir' <<<"$runner_doc" && { echo "FAIL: the runner Deployment still mounts an emptyDir"; fail=1; }
+python3 - "$tmp/runner-deployment.yaml" <<'PYVOLUME' || fail=1
+import sys, yaml
+pod = next(d for d in yaml.safe_load_all(open(sys.argv[1])) if d['kind'] == 'Deployment')['spec']['template']['spec']
+for volume in pod['volumes']:
+    if 'emptyDir' in volume:
+        assert volume['name'] in ('live-data-runtime', 'live-data-renew-work') and volume['emptyDir'].get('medium') == 'Memory', 'only temporary TLS material may use memory volumes'
+    if volume['name'] == 'data':
+        assert volume.get('persistentVolumeClaim', {}).get('claimName') == 'blerg-runner-data'
+PYVOLUME
 grep -qE '^\s+claimName: blerg-runner-data\s*$' <<<"$runner_doc" || { echo "FAIL: the runner's data volume is not the blerg-runner-data claim"; fail=1; }
 grep -A1 -E '^\s+- name: data\s*$' <<<"$runner_doc" | grep -qE '^\s+mountPath: /data\s*$' \
   || { echo "FAIL: the data volume is not mounted at /data"; fail=1; }

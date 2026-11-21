@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
@@ -20,11 +21,11 @@ vi.mock('../lib/engineModels', async original => ({
 beforeEach(() => { localStorage.clear(); document.documentElement.setAttribute('data-theme', 'dark') })
 afterEach(() => document.documentElement.removeAttribute('data-theme'))
 
-it.each([390, 3840])('keeps Session controls compact, labeled and inside the panel at %i px', async width => {
+it.each(browserWidths([390, 3840]))('keeps Session controls compact, labeled and inside the panel at %i px', async width => {
   await page.viewport(width, width === 390 ? 844 : 2160)
   const session = makeSession({ kind: 'agent', status: 'idle', engine: 'claude', runtime: 'daemon', model: 'claude-opus-5-5', effort: 'medium', limit_resume_supported: true, started_at: '2026-10-10T18:11:00Z' })
   render(<MemoryRouter><div style={{ height: '100vh' }}>
-    <SessionRail id="polish-rail" session={session} machine="blerg" live={makeLive()} tasks={[]} childSessions={[]} toolChanges={0}
+    <SessionRail id="polish-rail" session={session} machine="blerg" live={makeLive()} tasks={[]} childSessions={[{ id: 'review', title: 'Review the upload tests', engine: 'claude', model: 'claude-opus-5-5', status: 'idle', started_at: session.started_at, ended_at: null, tokens: null, asking: false }]} toolChanges={0}
       mode={width === 390 ? 'drawer' : 'panel'} open onClose={() => {}} onOpenArtifact={() => {}} />
   </div></MemoryRouter>)
   const section = screen.getByTestId('rail-session')
@@ -32,6 +33,9 @@ it.each([390, 3840])('keeps Session controls compact, labeled and inside the pan
   const effort = within(section).getByRole('combobox', { name: 'Effort' })
   section.scrollIntoView()
   expect(Math.abs(model.getBoundingClientRect().top - effort.getBoundingClientRect().top)).toBeLessThan(2)
+  // Short choices keep their natural widths, leaving room at the end of the row.
+  const controls = model.closest('.session-engine-line')!
+  expect(effort.getBoundingClientRect().right).toBeLessThan(controls.getBoundingClientRect().right - 24)
   // Agent standing rules are gone: no Rules button, no rules list.
   expect(within(section).queryByRole('button', { name: 'Rules' })).toBeNull()
   expect(within(section).queryByTestId('rules-panel')).toBeNull()
@@ -64,6 +68,7 @@ it.each([390, 3840])('keeps Session controls compact, labeled and inside the pan
     expect(r.right).toBeLessThanOrEqual(bounds.right)
   }
   expect(section.scrollWidth).toBeLessThanOrEqual(section.clientWidth)
+  expect(screen.getByTestId('rail-child-open').getBoundingClientRect().width).toBeGreaterThan(140)
   expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
   const shots = import.meta.env.VITE_CHROME_SHOTS_DIR
   if (shots) await page.screenshot({ path: `${shots}/session-polish-${width}.png` })

@@ -95,3 +95,17 @@ it("says why the list is unavailable", async () => {
   render(<DesktopsSection site={site} />);
   expect(await screen.findByRole("alert")).toHaveTextContent("BLERG_CORE_RUNNER_URL");
 });
+
+it("lets an administrator reassign an owned desktop using its current revision", async () => {
+ mock.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
+  if(url==='/api/desktops') return json({ desktops, owners:[{id:'me',name:'Me'},{id:'other',name:'Other person'}], actor:'me',can_manage_others:true });
+  if(url==='/api/desktop-enrollment-codes') return json({codes:[]});
+  if(init?.method==='PUT') { calls.push({url,method:'PUT',body:JSON.parse(init.body as string)});return json({status:'ok'}); }
+  return json({});
+ });
+ render(<DesktopsSection site={site}/>);
+ const desktop=await screen.findByTestId('desktop-d1');
+ fireEvent.change(within(desktop).getByLabelText('Owner of Work laptop'),{target:{value:'other'}});
+ fireEvent.click(within(desktop).getByRole('button',{name:'Reassign'}));
+ await waitFor(()=>expect(calls).toContainEqual({url:'/api/desktops/d1/owner',method:'PUT',body:{owner_id:'other',ownership_revision:2}}));
+});

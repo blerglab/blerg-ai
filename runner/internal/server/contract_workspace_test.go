@@ -257,3 +257,73 @@ func TestContractStartRefusesAnIncompleteListing(t *testing.T) {
 		})
 	}
 }
+
+func TestContractStartUsesEveryNamedRepository(t *testing.T) {
+	for _, runtime := range []string{"docker", "daemon"} {
+		t.Run(runtime, func(t *testing.T) {
+			f := newPrivFixture(t)
+			spawned := contractDesktop(t, f, "api", "web")
+			if runtime == "daemon" {
+				f.dc.WorkspaceCapabilities = protocol.WorkspaceCapabilitiesFor("host", "linux")
+			}
+			var req RunnerStartRequest
+			if err := json.Unmarshal([]byte(`{"repo":"api","repositories":[{"repo":"api"},{"repo":"web"}],"engine":"claude"}`), &req); err != nil {
+				t.Fatal(err)
+			}
+			req.Runtime, req.DaemonID = runtime, f.dc.ID
+			if _, problem := f.api.StartSession(t.Context(), contractPrincipal(), req, ""); problem != nil {
+				t.Fatal(problem)
+			}
+			select {
+			case msg := <-spawned:
+				if msg.Workspace == nil || len(msg.Workspace.Members) != 2 {
+					t.Fatalf("wanted both card repositories, got %+v", msg.Workspace)
+				}
+				if msg.Sandbox != (runtime == "docker") {
+					t.Fatal("workspace changed runtime")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("not dispatched")
+			}
+		})
+	}
+}
+
+func TestContractStartRefusesMultiRepoOnOldDesktop(t *testing.T) {
+	f := newPrivFixture(t)
+	spawned := contractDesktop(t, f, "api", "web")
+	f.dc.DiscoveryVersion = 0
+	_, problem := f.api.StartSession(t.Context(), contractPrincipal(), RunnerStartRequest{Repo: "api", Repositories: []ContractRepository{{Repo: "api"}, {Repo: "web"}}, Runtime: "docker", TargetDaemonID: f.dc.ID, Engine: "claude"}, "")
+	if problem == nil || problem.Status != 409 {
+		t.Fatalf("old desktop accepted partial workspace: %v", problem)
+	}
+	noContractSpawn(t, spawned)
+}
+
+func TestContractStartRefusesIncompleteMultiRepoWorkspace(t *testing.T) {
+	for _, second := range []string{"missing", "example/api"} {
+		t.Run(second, func(t *testing.T) {
+			f := newPrivFixture(t)
+			spawned := contractDesktopWithOrigins(t, f, map[string]string{"api": "example/api"})
+			_, problem := f.api.StartSession(t.Context(), contractPrincipal(), RunnerStartRequest{Repo: "api", Repositories: []ContractRepository{{Repo: "api"}, {Repo: second}}, Runtime: "docker", TargetDaemonID: f.dc.ID, Engine: "claude"}, "")
+			if problem == nil {
+				t.Fatal("partial or duplicate workspace started")
+			}
+			noContractSpawn(t, spawned)
+		})
+	}
+}
+
+func TestContractMultiRepoValidation(t *testing.T) {
+	for _, req := range []RunnerStartRequest{
+		{Repositories: []ContractRepository{{Repo: "api"}}},
+		{Repositories: []ContractRepository{{Repo: "api"}, {Repo: "../other"}}},
+		{Repositories: []ContractRepository{{Repo: "api"}, {Repo: "api"}}},
+		{Repo: "other", Repositories: []ContractRepository{{Repo: "api"}, {Repo: "web"}}},
+		{NoRepo: true, Repositories: []ContractRepository{{Repo: "api"}, {Repo: "web"}}},
+	} {
+		if problem := contractRepositoriesProblem(req, contractPrincipal()); problem == nil {
+			t.Errorf("accepted %+v", req)
+		}
+	}
+}

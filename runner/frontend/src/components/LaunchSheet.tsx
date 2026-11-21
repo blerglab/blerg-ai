@@ -1,3 +1,6 @@
+import { IconButton } from '@blerglab/chat'
+import { VerbositySelect, type Verbosity } from './VerbositySelect'
+import { CLUSTER_CODEX_CONNECTION_REASON, ModelReconnectAction } from './ModelCatalogNotice'
 import '../../../../packages/settings/settings.css'
 import { type ReactNode, useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -15,7 +18,7 @@ import { NO_LAUNCH_PERMISSIONS, effectiveLaunchPermissions, type LaunchPermissio
 import { useToastStore } from '../hooks/useToastStore'
 import type { McpSelectionEntry } from '../types'
 import { useBackdropClose } from '@blerglab/chat'
-import { ENGINE_LABELS, defaultRuntime, runtimeDisabledReason, ACK_AGENT, ACK_TERMINAL } from '../lib/runtimes'
+import { ENGINE_LABELS, defaultRuntime, runtimeDisabledReason, ACK_AGENT } from '../lib/runtimes'
 import type { RunRuntime, RunKind, RunEngine } from '../lib/runtimes'
 import { useLaunchOptions } from '../lib/launchOptions'
 import { useEngineModels, modelCatalogTarget, defaultModel, effectiveEffort, isModelIdFor, isEffortToken, FREE_TEXT_MODEL_ENGINES } from '../lib/engineModels'
@@ -216,7 +219,8 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
         creds: partState(cache.creds),
       } satisfies Record<PartName, PartState>,
       hasAny: !!(cache.repos || cache.daemons || cache.cluster || cache.creds),
-      defaults: cache.daemons || cache.cluster
+      // Both inventories are needed before choosing a safe default runtime.
+      defaults: cache.daemons && cache.cluster
         ? pickDefaults(cache.daemons?.value ?? [], !!cache.cluster?.value.configured)
         : null,
     }
@@ -226,7 +230,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const [daemons, setDaemons] = useState<DaemonApiInfo[]>(() => boot.cache.daemons?.value ?? [])
   const [search, setSearch] = useState('')
   const [selectedRepo, setSelectedRepo] = useState<RepoInfo | null>(null)
-  const [workspacePick, setWorkspacePick] = useState<{scope: string; selection: WorkspaceSelection | null; names: string[]}>({scope: '', selection: null, names: []})
+  const [workspacePick, setWorkspacePick] = useState<{scope: string; selection: WorkspaceSelection | null; names: string[]; runtime?: RunRuntime}>({scope: '', selection: null, names: []})
   const [desktopScope, setDesktopScope] = useState(0)
 
   // "No repository" is the default pick: a session tied to no repository.
@@ -273,12 +277,9 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const [mcp, setMcp] = useState<McpSelectionEntry[]>([])
   // Permissions given before the session starts (LaunchPermissions); only what still applies is sent.
   const [permissions, setPermissions] = useState<LaunchPermissionsValue>(NO_LAUNCH_PERMISSIONS)
-  // Session kind: the native agent harness (structured chat transcript, no
-  // terminal) or the classic tmux-hosted terminal CLI. Agent is the default —
-  // it is what this tool is for, and it is what the sandbox now covers.
+  // Every new session uses the agent harness.
   const [kind, setKind] = useState<RunKind>('agent')
-  // Which CLI actually drives the session. Orthogonal to kind/runtime — either
-  // engine can run as a terminal or agent session, on any runtime below.
+  // Which engine drives the agent session.
   const [engine, setEngine] = useState<RunEngine>(() => boot.defaults?.engine ?? rememberedEngine())
   // Model + effort, for whichever engine is picked (the list itself is read
   // below, once the runtime and daemon are known). pickedModels[engine] is
@@ -312,13 +313,15 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   // credentials; an unscoped daemon catalog is never used for cluster. On a
   // daemon runtime it waits until a daemon is selected rather than ask
   // without one.
-  const workspaceScope = `${desktopScope}:${runtime}:${selectedDaemon?.id ?? ''}:${selectedDaemon?.ownership_revision ?? ''}:${selectedDaemon?.connection_generation ?? ''}`
+  // Host and sandbox share source identities; runtime approval is checked separately.
+  const workspaceScope = `${desktopScope}:${runtime === 'cluster' ? 'cluster' : 'desktop'}:${selectedDaemon?.id ?? ''}:${selectedDaemon?.ownership_revision ?? ''}:${selectedDaemon?.connection_generation ?? ''}`
   const onCluster = runtime === 'cluster'
   const listDaemonId = onCluster ? undefined : selectedDaemon?.id
   // Asked at once — of the cached daemon, when the sheet opened from cache —
   // and each answer is kept per engine and daemon for the next open.
+  const [clusterStatus, setClusterStatus] = useState<ClusterStatusApi | null>(() => boot.cache.cluster?.value ?? null)
   const catalogTarget = modelCatalogTarget(runtime, listDaemonId)
-  const launchOptions = useLaunchOptions({ runtime, daemonId: listDaemonId, kind, enabled: open && (onCluster || !!selectedDaemon) })
+  const launchOptions = useLaunchOptions({ runtime, runtimeTargetId: onCluster ? (clusterStatus?.runtime_target_id ?? 'cluster') : undefined, daemonId: listDaemonId, kind, enabled: open && (onCluster || !!selectedDaemon) })
   const engineKnown = launchOptions.state === 'known' && launchOptions.engines.some(e => e.id === engine)
   // Card #151: a change of where it runs keeps the person's model and effort (each place's list is
   // matched against the pick below). It used to clear them here, so the place's default won.
@@ -379,13 +382,14 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   // finishes on its own. Off by default — a session launched from here has
   // its person in front of it. An agent session's choice only: a terminal
   // session has no chat to wait in.
+  const [verbosity, setVerbosity] = useState<Verbosity | ''>('')
   const [unattended, setUnattended] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [repositoryNotice, setRepositoryNotice] = useState<string | null>(null)
   // The name the person typed; null until they do. Until then the field shows the default, the
   // repository's name (it follows a change of repository), numbered past running sessions.
   const [typedName, setTypedName] = useState<string | null>(null)
-  const [clusterStatus, setClusterStatus] = useState<ClusterStatusApi | null>(() => boot.cache.cluster?.value ?? null)
   const [myCreds, setMyCreds] = useState<MyCredentialsApi | null>(() => boot.cache.creds?.value ?? null)
   // GET /api/repos answered with stale_at: a GitHub/GitLab list (usually the
   // person's own, from their token) failed to refresh — typically a revoked
@@ -679,7 +683,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
 
   const workspaceRuntimeReady = workspaceRuntimeAvailable(runtime === 'cluster' ? clusterStatus?.workspace_capabilities : selectedDaemon?.workspace_capabilities, runtime)
   const useWorkspacePicker = workspaceRuntimeReady && Boolean(runtime === 'cluster' || selectedDaemon?.discovery_version === 1)
-  const workspaceSelection = workspacePick.scope === workspaceScope ? workspacePick.selection : null
+  const workspaceSelection = workspacePick.scope === workspaceScope && workspacePick.runtime === runtime ? workspacePick.selection : null
   const emptyHostFolder = runtime === 'daemon' && workspaceRuntimeReady && selectedDaemon?.discovery_version === 1 && (noRepoMode || newFolderMode || Boolean(workspaceSelection?.folder && workspaceSelection.members.length === 0))
   const initializeHostGit = emptyHostFolder && initializeGit
 
@@ -752,7 +756,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   const hostClaudeBlockedReason =
     runtime === 'daemon' && kind === 'agent' && engine === 'claude' && selectedDaemon &&
     selectedDaemon.claude_cli_available === false && selectedDaemon.anthropic_key_set === false
-      ? `${selectedDaemon.name} can't run a Claude agent session: install Claude Code and log in (\`claude\` on the daemon's PATH), or set ANTHROPIC_API_KEY for the daemon — or pick another runtime or engine.`
+      ? `${selectedDaemon.name} can't run a Claude agent workspace: install Claude Code and log in (\`claude\` on the daemon's PATH), or set ANTHROPIC_API_KEY for the daemon — or pick another runtime or engine.`
       : null
   // "Local sandbox + Agent + Claude" needs a credential the container can
   // use; the daemon refuses the spawn without one. Said here, before Launch,
@@ -783,11 +787,11 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   // gateway through the server (connections never do).
   const boardOnHost = runtime === 'daemon' && selectedDaemon?.mcp_gateway_via_server === true && mcpEngineAvailable && kind === 'agent'
   const boardProblem = !boardId ? null
-    : !mcpAvailable && !boardOnHost ? 'Clear the board or choose an agent session in a supported sandbox to use its tools.'
-    : boards.state !== 'ready' ? 'Checking your board access — retry or clear the board to launch without it.'
-    : !boards.configured || !boards.boards.some(b => b.id === boardId) ? 'This board is no longer available to you. Choose another board or clear the board.'
+    : !mcpAvailable && !boardOnHost ? 'Clear the board or choose an agent workspace in a supported sandbox to use its tools.'
     : null
-  const blockedReason = boardProblem ?? runtimeBlockedReason ?? hostClaudeBlockedReason ?? cloneByNameUnsupported ?? clonePlanProblem ?? scratchNameProblem ?? daemonUnconfirmedReason
+  const codexConnectionReason = runtime === 'cluster' && engine === 'codex' && (clusterEngineBlocked || engineModels.reconnect)
+    ? CLUSTER_CODEX_CONNECTION_REASON : null
+  const blockedReason = codexConnectionReason ?? boardProblem ?? runtimeBlockedReason ?? hostClaudeBlockedReason ?? cloneByNameUnsupported ?? clonePlanProblem ?? scratchNameProblem ?? daemonUnconfirmedReason
 
 
   const canSubmit = engineKnown && hasRepoChoice &&
@@ -799,6 +803,13 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   // ── Run column handlers ────────────────────────────────────────────────────
   // Any deliberate pick pins the runtime for the life of this sheet.
   function pickRuntime(rt: RunRuntime) {
+    if (rt !== runtime && workspacePick.selection && ((rt === 'cluster') !== (runtime === 'cluster') || !workspaceRuntimeAvailable(rt === 'cluster' ? clusterStatus?.workspace_capabilities : selectedDaemon?.workspace_capabilities, rt))) {
+      setWorkspacePick({ scope: '', selection: null, names: [] })
+      setRepositoryNotice('The selected repositories were cleared because they are incompatible with this runtime. Select repositories again.')
+    } else {
+      setRepositoryNotice(null)
+      if (rt !== runtime) setWorkspacePick(pick => ({ ...pick, runtime: undefined }))
+    }
     setRuntime(rt)
     runtimePickedRef.current = true
     // The acknowledgement is about one specific runtime; re-consent when the
@@ -819,9 +830,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
     // OpenClaw only runs on the bare daemon host — no sandbox image, no
     // cluster image. Move rather than strand the sheet on a disabled card.
     if (e === 'openclaw' && runtime !== 'daemon') {
-      setRuntime('daemon')
-      runtimePickedRef.current = true
-      setAgentAck(false)
+      pickRuntime('daemon')
     }
   }
 
@@ -955,9 +964,11 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
           // daemon" default exists only for callers older than this column.
           kind,
           runtime,
+          // Omit the sole default target so launches also reach older surge pods.
           engine: engine !== 'claude' ? engine : undefined,
           // Always said for an agent session, so the choice is the sheet's and
           // not a server default; fixed for the session's life.
+          verbosity: kind === 'agent' ? verbosity || undefined : undefined,
           interaction: kind === 'agent' ? (unattended ? 'unattended' : 'interactive') : undefined,
           // Only when something is selected, and only where a grant can run at all.
           board_id: boardId || undefined,
@@ -967,7 +978,13 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
       })
       if (!res.ok) {
         const text = await res.text()
-        throw new Error(text || `HTTP ${res.status}`)
+        let message = text || `HTTP ${res.status}`
+        try {
+          const body: unknown = JSON.parse(text)
+          message = body && typeof body === 'object' && 'error' in body && typeof body.error === 'string'
+            ? body.error : `HTTP ${res.status}`
+        } catch { /* Plain-text errors are already readable. */ }
+        throw new Error(message)
       }
       const json = await res.json() as { session_id: string; permission_problems?: unknown }
       if (!json.session_id) {
@@ -981,7 +998,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
       onClose()
       navigate('/sessions/' + json.session_id)
     } catch (err: unknown) {
-      setError('Failed to launch session: ' + (err instanceof Error ? err.message : String(err)))
+      setError('Failed to launch workspace: ' + (err instanceof Error ? err.message : String(err)))
     } finally {
       setSubmitting(false)
     }
@@ -1000,7 +1017,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
       <div data-testid="no-repo-plan" style={createPlanStyle}>
         <div>
           Keeps your files in {selectedDaemon.repos_root}/{scratchFolder}.
-          <details className="launch-help"><summary>About this folder</summary><p>This scratch folder stays after the session and is hidden from the repository list.</p></details>
+          <details className="launch-help"><summary>About this folder</summary><p>This scratch folder stays after the workspace and is hidden from the repository list.</p></details>
         </div>
         {scratchRenaming ? (
           <label style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 6 }}>
@@ -1042,16 +1059,17 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
   </>
 
   return (
+    // button-guard-ignore: useBackdropClose supplies pointer handlers only; this overlay is not a button
     <div
       className="launch-overlay"
       style={{ display: open ? 'flex' : 'none' }}
       {...backdrop}
     >
-      <div className="launch-panel" role="dialog" aria-modal="true" aria-label="New Session">
+      <div className="launch-panel" role="dialog" aria-modal="true" aria-label="New Workspace">
         {/* Header */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <span style={{ color: 'var(--blaze)', fontWeight: 700, fontSize: '1rem', letterSpacing: '0.08em', textTransform: 'uppercase' }}>New Session</span>
-          <button className="settings-action"
+          <span style={{ color: 'var(--blaze)', fontWeight: 700, fontSize: '1rem', letterSpacing: '0.08em', textTransform: 'uppercase' }}>New Workspace</span>
+          <button type="button" className="settings-action" aria-label="Close" title="Close"
             onClick={onClose}
             style={{ background: 'none', border: 'none', padding: 0, color: 'var(--fog)', fontSize: '1.4rem', cursor: 'pointer', fontFamily: 'inherit' }}
           >
@@ -1078,8 +1096,10 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
             {/* Section 1: Repository */}
             <div className="launch-repo-section">
               <span style={sectionLabel}>Repository</span>
-              {!workspaceRuntimeReady && (runtime === 'cluster' || selectedDaemon?.discovery_version === 1) && <p role="status" className="workspace-note">Workspace sessions and owner shells are not enabled for this runtime.</p>}
-              {useWorkspacePicker && <WorkspacePicker key={`${workspaceScope}:${pickerReset}`} daemon={selectedDaemon} runtime={runtime} repos={repos}
+              {!workspaceRuntimeReady && (runtime === 'cluster' || selectedDaemon?.discovery_version === 1) && <p role="status" className="workspace-note">Workspaces and owner shells are not enabled for this runtime.</p>}
+              {useWorkspacePicker && <WorkspacePicker key={`${workspaceScope}:${runtime}:${pickerReset}`}
+                initialPick={workspacePick.scope === workspaceScope && workspacePick.selection ? { selection: workspacePick.selection, names: workspacePick.names } : undefined}
+                daemon={selectedDaemon} runtime={runtime} repos={repos}
                 recentRepos={recentRepos} hideTree={repoActions || newFolderMode || freeTextMode}
                 actions={<div className="launch-repo-actions">
                   <button type="button" className="settings-action btn small" aria-pressed={repoActions || newFolderMode || freeTextMode} onClick={() => {
@@ -1091,10 +1111,11 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                     selectNoRepo(); setRepoActions(false); setWorkspacePick({scope: workspaceScope, selection: null, names: []}); setPickerReset(value => value + 1)
                   }}>Empty workspace</button>
                 </div>}
-                onChange={(selection, names) => { setWorkspacePick({scope: workspaceScope, selection, names}); setNoRepoMode(false); setSelectedRepo(null); setNewFolderMode(false); setFreeTextMode(false); setRepoActions(false) }} />}
+                onChange={(selection, names) => { setWorkspacePick({scope: workspaceScope, selection, names, runtime}); setRepositoryNotice(null); setNoRepoMode(false); setSelectedRepo(null); setNewFolderMode(false); setFreeTextMode(false); setRepoActions(false) }} />}
+              {repositoryNotice && <div role="status" style={{ color: 'var(--amber)', marginTop: 8 }}>{repositoryNotice}</div>}
               {useWorkspacePicker && emptyWorkspacePlan}
               {emptyHostFolder && <label className="workspace-layout"><input type="checkbox" checked={initializeGit} onChange={event => setInitializeGit(event.target.checked)} />Initialize a Git repository here</label>}
-              {emptyHostFolder && <p className="workspace-note" style={{ minHeight: '3em' }}>{initializeGit ? 'Starts with an empty commit. Your files stay untracked.' : 'Host children won’t be available in this session.'}</p>}
+              {emptyHostFolder && <p className="workspace-note" style={{ minHeight: '3em' }}>{initializeGit ? 'Starts with an empty commit. Your files stay untracked.' : 'Host children won’t be available in this workspace.'}</p>}
               <RepositoryActions modern={useWorkspacePicker} hidden={!repoActions && !newFolderMode && !freeTextMode}>
               <input className="settings-field"
                 ref={repoInputRef}
@@ -1397,13 +1418,13 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
           <div className="launch-col-config" data-testid="launch-col-config" data-phone-order="3">
             {/* Section 4: Session name */}
             <div style={{ marginBottom: 14 }}>
-              <span style={sectionLabel}>Session Name</span>
+              <span style={sectionLabel}>Workspace Name</span>
               <input className="settings-field"
                 value={name}
                 onChange={e => setTypedName(e.target.value)}
                 placeholder={defaultName}
                 data-testid="launch-session-name"
-                aria-label="Session name"
+                aria-label="Workspace name"
                 autoCorrect="off"
                 autoCapitalize="none"
                 autoComplete="off"
@@ -1446,6 +1467,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
               />
             </div>
 
+            {kind === 'agent' && <VerbositySelect value={verbosity} onChange={setVerbosity} accountDefault />}
             {/* Interaction: whether anyone will be reading the chat. A
                 terminal session has no chat, so the choice is not offered. */}
             {kind === 'agent' && (
@@ -1467,34 +1489,30 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                 </span>
               </label>
             )}
-            {kind === 'agent' && <details className="launch-help"><summary>About unattended sessions</summary><p>{UNATTENDED_HELP}</p></details>}
+            {kind === 'agent' && <details className="launch-help"><summary>About unattended workspaces</summary><p>{UNATTENDED_HELP}</p></details>}
 
             {(boards.state !== 'ready' || boards.configured) && (
               <div style={{ marginBottom: 14 }}>
                 {boards.state === 'ready' && boards.configured ? (
                   <>
                     <label htmlFor="launch-board" style={sectionLabel}>Board</label>
-                    <select className="settings-field select" title="Adds tools for the selected board and makes the session private to you." id="launch-board" value={boardId} onChange={e => pickBoard(e.target.value)}
+                    <select className="settings-field select" title="Adds tools for the selected board and makes the workspace private to you." id="launch-board" value={boardId} onChange={e => pickBoard(e.target.value)}
                       style={{ width: '100%' }}
                     >
                       <option value="">No board</option>
-                      {boardId && !boards.boards.some(b => b.id === boardId) && <option value={boardId}>Previously selected board (unavailable)</option>}
                       {boards.boards.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
                     </select>
                     <div style={{ color: 'var(--fog)', fontSize: 12, marginTop: 6 }}>
-                      Give this private session access to a board.
+                      Give this private workspace access to a board.
                     </div>
                   </>
                 ) : boards.state === 'failed' ? (
                   <div role="status" style={{ color: 'var(--fog)', fontSize: 13 }}>
                     Couldn't load boards. You can launch without one.{' '}
-                    <button type="button" className="settings-action btn small" onClick={boards.retry}>Retry boards</button>
+                    <IconButton label="Retry boards" onClick={boards.retry} />
                   </div>
                 ) : <div role="status" style={{ color: 'var(--fog)', fontSize: 13 }}>Checking available boards…</div>}
               </div>
-            )}
-            {boardId && (boards.state !== 'ready' || !boards.configured) && (
-              <button className="settings-action" type="button" onClick={() => pickBoard('')}>Clear board</button>
             )}
 
             {/* MCP servers: all unchecked, every tool off, until the person chooses */}
@@ -1508,14 +1526,14 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                   </details>
                   {mcp.length > 0 && (
                     <div data-testid="launch-mcp-private" style={{ color: 'var(--fog)', fontSize: 12, marginTop: 6 }}>
-                      A session with MCP servers is private to you.
+                      A workspace with MCP servers is private to you.
                     </div>
                   )}
                 </>
               ) : (
                 <div data-testid="launch-mcp-unavailable" style={{ color: 'var(--fog)', fontSize: 13 }}>
                   Choose a supported sandbox to add MCP tools.
-                  <details className="launch-help"><summary>MCP availability</summary><p>MCP servers are available for Claude and Codex agent sessions in a cluster pod or an updated local sandbox, not on this machine unsandboxed.</p></details>
+                  <details className="launch-help"><summary>MCP availability</summary><p>MCP servers are available for Claude and Codex agent workspaces in a cluster pod or an updated local sandbox, not on this machine unsandboxed.</p></details>
                 </div>
               )}
             </div>
@@ -1560,6 +1578,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
             selectedDaemon={selectedDaemon}
             onDaemonChange={d => { daemonPickedRef.current = true; setSelectedDaemon(d as DaemonApiInfo) }}
             onReposRootChanged={applyReposRoot}
+            clusterTargetName={clusterStatus?.runtime_target_name}
             clusterConfigured={!!clusterStatus?.configured}
             availableEnginesHere={availableEnginesHere}
             engineChoices={launchOptions.engines}
@@ -1612,7 +1631,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                     margin: '8px 0 0',
                   }}>
                     On This machine your {providerLabel(cloneRef.provider)} token isn't used for the clone: any other
-                    session on {selectedDaemon.name} could read it while it runs. A public repository clones as it is;
+                    workspace on {selectedDaemon.name} could read it while it runs. A public repository clones as it is;
                     for a private one pick Local sandbox, where the clone runs inside the container.
                   </p>
                 )}
@@ -1666,7 +1685,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
                 checked={agentAck}
                 onChange={e => setAgentAck(e.target.checked)}
               />
-              {kind === 'agent' ? ACK_AGENT : ACK_TERMINAL}
+              {ACK_AGENT}
             </label>
           )}
 
@@ -1688,7 +1707,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
               letterSpacing: '0.05em',
             }}
           >
-            {noRepoMode || workspaceSelection ? 'Launch Session' : newFolderMode ? 'Create & Launch →' : isCheckedOut || selectedRepo?.is_local || cloneFolder?.present ? 'Launch Session' : 'Clone & Launch →'}
+            {noRepoMode || workspaceSelection ? 'Launch Workspace' : newFolderMode ? 'Create & Launch →' : isCheckedOut || selectedRepo?.is_local || cloneFolder?.present ? 'Launch Workspace' : 'Clone & Launch →'}
           </button>
           </div>
 
@@ -1707,7 +1726,7 @@ export default function LaunchSheet({ open, onClose }: LaunchSheetProps) {
           )}
 
           {error && (
-            <div style={{ color: 'var(--danger)', marginTop: 8, fontSize: 13 }}>{error}</div>
+            <div style={{ color: 'var(--danger)', marginTop: 8, fontSize: 13 }}>{error} {/cluster Codex needs a dedicated login/i.test(error) && <ModelReconnectAction />}</div>
           )}
           </div>
           </div>

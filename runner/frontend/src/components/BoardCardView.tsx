@@ -1,13 +1,16 @@
+import { IconButton } from '@blerglab/chat'
+import { useSessionBoardLinks } from '../lib/sessionBoardLinks'
+import { openSessionBoard, openSessionTicket, hasSessionBoardHost } from '../lib/openSessionBoard'
 // A pinned ticket as the session panel shows it. Any tracker's pin is the agent's copy, in the chat's
 // ticket dialog. A Blerg Board card pinned with its board (source "blerg-board", board_id, key
 // "#<number>") is shown LIVE instead: the card as the board holds it now, read with the person's own
 // board permissions (lib/liveBoardCard.ts), with its column, tags, where it was filed from, repos and
 // trail, laid out like the Board's own card sheet: the description and the trail in a main column,
 // the card's fields beside it (status as a column picker whose one click moves the card, through the
-// session's board access; type, priority, tags, repos, the worker on it, where it was filed from),
+// person's board role (workspace grants in a board tab); type, priority, tags, repos, the worker on it, where it was filed from),
 // folded under the title on a narrow dialog. The header's "Open in Board" opens the Board's page for
 // the rest (Run, Discuss, Archive). When the board cannot be read the agent's copy is shown, and says so.
-import { useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { Markdown, TicketDetails, TicketModal, TimeLabel, type Ticket } from '@blerglab/chat'
 import { boardCardUrl, useBoardOrigin } from '../lib/boardLink'
@@ -47,8 +50,8 @@ function Field({ label, testId, children }: { label: string; testId?: string; ch
 }
 
 /** Status: the board's columns, the card's own pressed. One click on another moves the card there
- *  (through the session's board access); the card held is moved in place. */
-function ColumnPicker({ card, sessionId }: { card: LiveBoardCard; sessionId: string }) {
+ *  (with the person's board role, plus workspace grants in a tab); the card held is moved in place. */
+function ColumnPicker({ card, sessionId, canMove = true, tabScoped = false }: { card: LiveBoardCard; sessionId: string; canMove?: boolean; tabScoped?: boolean }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const columns = card.columns ?? []
@@ -59,7 +62,7 @@ function ColumnPicker({ card, sessionId }: { card: LiveBoardCard; sessionId: str
     setBusy(to)
     setError(null)
     try {
-      await moveLiveBoardCard(card.board_id, card.number, to, sessionId)
+      await moveLiveBoardCard(card.board_id, card.number, to, sessionId, card.version, tabScoped)
     } catch (e) {
       setError(e instanceof LiveBoardCardError ? e.message : 'The card was not moved.')
     } finally {
@@ -73,7 +76,7 @@ function ColumnPicker({ card, sessionId }: { card: LiveBoardCard; sessionId: str
           const on = c.id === card.column_id
           return (
             <button key={c.id} type="button" className="board-card-column" aria-pressed={on} aria-busy={busy === c.id || undefined}
-              disabled={busy !== null} title={on ? `In ${c.name}` : `Move to ${c.name}`} onClick={() => void move(c.id)}>
+              disabled={!canMove || busy !== null} title={on ? `In ${c.name}` : `Move to ${c.name}`} onClick={() => void move(c.id)}>
               {c.name}
             </button>
           )
@@ -85,8 +88,8 @@ function ColumnPicker({ card, sessionId }: { card: LiveBoardCard; sessionId: str
   )
 }
 
-function LiveCardBody({ card, pinned, sessionId, worker, onShow }: {
-  card: LiveBoardCard; pinned: Ticket; sessionId: string; worker?: string; onShow?: () => void
+function LiveCardBody({ card, pinned, sessionId, worker, onShow, canMove, tabScoped }: {
+  card: LiveBoardCard; pinned: Ticket; sessionId: string; worker?: ReactNode; canMove?: boolean; tabScoped?: boolean; onShow?: () => void
 }) {
   const trail = [...(card.trail ?? [])].reverse()
   const origin = card.origin
@@ -98,7 +101,7 @@ function LiveCardBody({ card, pinned, sessionId, worker, onShow }: {
     <div className="board-card-sheet-wrap">
       <div className="board-card-sheet" data-testid="board-card-live">
         <dl className="board-card-side" data-testid="board-card-side" aria-label="Card details">
-          <Field label="Status"><ColumnPicker card={card} sessionId={sessionId} /></Field>
+          <Field label="Status"><ColumnPicker card={card} sessionId={sessionId} canMove={canMove} tabScoped={tabScoped} /></Field>
           {card.type && <Field label="Type"><span className="board-card-chip">{card.type}</span></Field>}
           {card.priority && <Field label="Priority"><span className="board-card-chip">{card.priority}</span></Field>}
           {tags.length > 0 && (
@@ -115,10 +118,17 @@ function LiveCardBody({ card, pinned, sessionId, worker, onShow }: {
           )}
           {worker && (
             <Field label="Worker" testId="board-card-worker">
-              <span className="board-card-worker" title={`${worker} works on it`}><span aria-hidden="true">↳</span> {worker}</span>
+              <span className="board-card-worker"><span aria-hidden="true">↳</span> {worker}</span>
             </Field>
           )}
           {assignee && <Field label="Assignee"><span>{assignee}</span></Field>}
+          {(card.size || card.risk || card.complexity) && <Field label="Estimate" testId="board-card-estimate"><ul className="board-card-chips">
+            {card.size && <li className="board-card-chip" title="Size">{card.size}</li>}
+            {card.risk && <li className="board-card-chip" title="Risk">Risk {card.risk}</li>}
+            {card.complexity && <li className="board-card-chip" title="Complexity">Complexity {card.complexity}</li>}
+          </ul></Field>}
+          {card.created_at && <Field label="Created" testId="board-card-created"><TimeLabel ts={card.created_at} /></Field>}
+          {card.updated_at && card.updated_at !== card.created_at && <Field label="Updated" testId="board-card-updated"><TimeLabel ts={card.updated_at} /></Field>}
           {origin && (origin.repo || origin.session_url || origin.engine) && (
             <Field label="Filed from" testId="board-card-origin">
               <ul className="board-card-chips">
@@ -165,29 +175,37 @@ function OriginSession({ url }: { url?: string }) {
     if (u.origin === location.origin && u.pathname.startsWith('/sessions/')) inApp = u.pathname + u.search
   } catch { /* not an address */ }
   return <p className="board-card-note" data-testid="board-card-origin-session">
-    {inApp ? <Link to={inApp}>Originating session</Link> : <>Originating session: <span className="board-card-url">{url}</span></>}
+    {inApp ? <Link to={inApp}>Originating workspace</Link> : <>Originating workspace: <span className="board-card-url">{url}</span></>}
   </p>
 }
 
 /** The ticket dialog of the session panel: a Blerg Board card live, any other pin as pinned. */
-export function PinnedTicketModal({ ticket, sessionId, worker, onClose, onShow }: {
-  ticket: Ticket; sessionId: string
+interface PinnedTicketProps {
+  ticket: Ticket; sessionId: string; canMove?: boolean; tabScoped?: boolean
   /** Who works on the card now (a subagent or a started session), by name: the side's ↳ Worker. */
-  worker?: string
-  onClose: () => void; onShow?: () => void
-}) {
+  worker?: ReactNode
+  onClose: () => void; onShow?: () => void; onOpenTab?: () => void
+}
+export function PinnedTicketModal(props: PinnedTicketProps) { return <PinnedTicketView {...props} /> }
+export function PinnedTicketSideView(props: PinnedTicketProps) { return <PinnedTicketView {...props} docked /> }
+
+function PinnedTicketView({ ticket, sessionId, worker, onClose, onShow, onOpenTab, canMove, tabScoped = false, docked = false }: PinnedTicketProps & { docked?: boolean }) {
+  const heading = useRef<HTMLHeadingElement>(null)
+  useEffect(() => { if (docked) heading.current?.focus() }, [docked])
   const ref = boardCardRef(ticket)
-  const live = useLiveBoardCard(ref, sessionId)
+  const live = useLiveBoardCard(ref, sessionId, true, tabScoped)
+  const links = useSessionBoardLinks(sessionId)
   const boardBase = useBoardOrigin()
-  if (!ref) return <TicketModal ticket={ticket} onClose={onClose} onShow={onShow} />
+  if (!ref) return docked ? <TicketDetails ticket={ticket} /> : <TicketModal ticket={ticket} onClose={onClose} onShow={onShow} />
   const card = live.read?.card ?? null
+  const boardLink = links.find(l => l.id === (card?.board_id ?? ref.board))
   const boardHref = live.read?.url || ticket.url || boardCardUrl(ref.board, ref.number, boardBase)
   let body: ReactNode
   if (card) {
     body = (
       <>
-        {live.state === 'failed' && <p className="board-card-error" role="alert">Could not read the card again: {live.error} <button type="button" className="btn small" onClick={live.refresh}>Retry</button></p>}
-        <LiveCardBody card={card} pinned={ticket} sessionId={sessionId} worker={worker} onShow={onShow} />
+        {live.state === 'failed' && <p className="board-card-error" role="alert">Could not read the card again: {live.error} <IconButton label="Retry" onClick={live.refresh} /></p>}
+        <LiveCardBody card={card} pinned={ticket} sessionId={sessionId} worker={worker} onShow={onShow} canMove={canMove ?? (tabScoped ? boardLink?.movable === true : true)} tabScoped={tabScoped} />
       </>
     )
   } else if (live.state === 'failed') {
@@ -203,12 +221,29 @@ export function PinnedTicketModal({ ticket, sessionId, worker, onClose, onShow }
   } else {
     body = <InitialLoader loading loadKey={`${ref.board}:${ref.number}`} label="board card" shape="facts" />
   }
+  if (docked) return <section className="session-ticket-tab" aria-label={`${ticket.key} · ${ticket.title}`}>
+    <header className="session-board-details-header"><h2 ref={heading} tabIndex={-1}>{card?.reference || ticket.key} · {card?.title || ticket.title}</h2></header>
+    {body}
+  </section>
   return (
     <TicketModal
       ticket={liveTicket(ticket, card, boardHref)}
       onClose={onClose}
       body={body}
-      actions={card ? <LiveMark /> : undefined}
+      actions={<span className="board-ticket-actions">
+        {(onOpenTab || sessionId && hasSessionBoardHost(sessionId) && boardLink?.readable) && <button
+          className="artifact-close" aria-label="Open as tab" title="Open as tab"
+          onClick={() => { if (onOpenTab) onOpenTab(); else if (openSessionTicket(sessionId, ticket)) onClose() }}
+        >↗</button>}
+        {!tabScoped && sessionId && hasSessionBoardHost(sessionId) && boardLink?.readable && <button
+          className="btn small board-ticket-open" aria-label="Open board tab" title="Open board tab"
+          onClick={() => { if (openSessionBoard(sessionId, boardLink.id, boardLink.name)) onClose() }}
+        >
+          <span className="board-ticket-open-label">Open board tab</span>
+          <span className="board-ticket-open-icon" aria-hidden="true">▦</span>
+        </button>}
+        {card && <LiveMark />}
+      </span>}
     />
   )
 }

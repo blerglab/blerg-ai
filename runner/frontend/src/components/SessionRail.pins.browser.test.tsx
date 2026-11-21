@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 // Card #127 in real Chromium, at 390 and 3840 px: Live's pin lines and Running now's work line stay
 // compact and inside the 340 px panel; a hovercard opens over the page (not clipped by the panel)
 // and stays on screen; a file's hovercard draws a Mermaid diagram with the viewer's sandboxed
@@ -30,7 +31,12 @@ const tickets = [
   pin('#122', 'Build History fold', 30),
   pin('#110', 'Older', 20),
 ]
-const MERMAID = 'graph TD\n  A[Start] --> B[Done]\n'
+// BLG-468: a plain flowchart like this now draws through Blerg's own flowchart renderer, not
+// Mermaid's <img> — this test is specifically about the hovercard's own sandboxed-renderer
+// behavior (an unhovered file is never read), not which renderer draws the diagram, so a
+// cylinder shape keeps it on the Mermaid path the same way other tests' own poison pills do
+// (VisualOutput.browser.test.tsx, VisualDownloads.browser.test.tsx, ThemeShell.browser.test.tsx).
+const MERMAID = 'graph TD\n  A[Start] --> B[(Done)]\n'
 const files: ArtifactInfo[] = [
   { id: 'm1', name: 'flow.mmd', size: MERMAID.length, content_type: 'text/plain', view: 'text', version: 1, latest_version: 1, origin: 'agent', created_at: '2026-10-21T10:00:00Z' },
   { id: 'n1', name: 'notes.md', size: 20, content_type: 'text/markdown', view: 'markdown', version: 1, latest_version: 1, origin: 'agent', created_at: '2026-10-21T09:00:00Z' },
@@ -65,7 +71,7 @@ beforeEach(async () => {
 afterEach(() => clock.uninstall())
 
 describe('Pins and hovercards, in Chromium', () => {
-  it.each([390, 3840])('at %i px: pin lines and the work line are compact and inside the panel', async width => {
+  it.each(browserWidths([390, 3840]))('at %i px: pin lines and the work line are compact and inside the panel', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 844)
     show(width)
     const section = screen.getByTestId('rail-pins')
@@ -74,6 +80,7 @@ describe('Pins and hovercards, in Chromium', () => {
     expect(lines).toHaveLength(3)
     for (const l of lines) {
       const r = l.getBoundingClientRect()
+      expect(getComputedStyle(l.querySelector('.rail-pin-title')!).whiteSpace).toBe('nowrap')
       expect(r.height).toBeLessThan(28)
       expect(r.right).toBeLessThanOrEqual(panel.right + 0.5)
     }
@@ -87,7 +94,7 @@ describe('Pins and hovercards, in Chromium', () => {
     expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
   })
 
-  it.each([390, 3840])('at %i px: hovering a pin opens its card over the page after the delay, on screen', async width => {
+  it.each(browserWidths([390, 3840]))('at %i px: hovering a pin opens its card over the page after the delay, on screen', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 844)
     show(width)
     // The panel at its narrowest (the owner's 340 px): the card is wider than it.
@@ -140,7 +147,7 @@ describe('Pins and hovercards, in Chromium', () => {
   it('a file\'s hovercard draws its Mermaid diagram (the sandboxed renderer); an unhovered file is never read', async () => {
     await page.viewport(1600, 1000)
     const { raw } = show(1600)
-    await userEvent.click(screen.getByRole('tab', { name: /Files/ }))
+    await userEvent.click(screen.getByRole('tab', { name: /Shared/ }))
     const row = await screen.findByRole('button', { name: 'View flow.mmd' })
     expect(raw).not.toHaveBeenCalled()
     await userEvent.hover(row)

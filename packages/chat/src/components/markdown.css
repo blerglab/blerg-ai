@@ -195,11 +195,33 @@
 
 /* Tables: collapsed, 6px 13px cells, every other row tinted. The wrapper scrolls a wide table. */
 .md-table-wrap {
+  position: relative;
+  max-width: 100%;
+}
+.md-table-scroll {
   overflow-x: auto;
   max-width: 100%;
 }
-.md-table-wrap.is-centered > table { margin-inline: auto; }
+/* Touch controls get their own visible row. Mouse controls float above the
+   table so revealing them on hover/focus never moves transcript content. */
+.md-table-wrap > .md-export-actions {
+  margin-left: auto;
+  background: var(--chat-surface);
+}
+@media (hover: hover) {
+  .md-table-wrap > .md-export-actions {
+    position: absolute;
+    right: 0;
+    bottom: 100%;
+    z-index: 1;
+  }
+}
+.md-table-wrap.is-centered > .md-table-scroll > table { margin-inline: auto; }
 .md table {
+  /* Unlike anywhere, break-word preserves intrinsic word widths for automatic columns. */
+  overflow-wrap: break-word;
+  word-break: normal;
+  white-space: normal;
   border-spacing: 0;
   border-collapse: collapse;
   font-variant: tabular-nums;
@@ -208,6 +230,9 @@
   padding: calc(var(--chat-md-unit) * 0.375) calc(var(--chat-md-unit) * 0.8125);
   border: 1px solid var(--chat-border);
 }
+/* Links and inline code can contain long URLs/hashes. Their columns may shrink
+   without weakening normal prose/label word boundaries throughout the table. */
+.md :is(th, td) :is(a, code) { overflow-wrap: anywhere; }
 .md th { font-weight: 600; }
 .md tr { border-top: 1px solid color-mix(in srgb, var(--chat-border) 70%, transparent); }
 .md tr:nth-child(2n) { background-color: color-mix(in srgb, var(--chat-fg) 5%, transparent); }
@@ -340,8 +365,8 @@
 
 /* A block over the cap: its first lines fade out above the actions. */
 .md-codeblock.is-capped pre {
-  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 3.2em), transparent);
-  mask-image: linear-gradient(to bottom, #000 calc(100% - 3.2em), transparent);
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 3.2em), transparent); /* themecheck:allow BLG-473: a mask-image gradient stop's RGB is irrelevant to the mask, only its alpha matters (opaque to transparent); any solid color renders identically */
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 3.2em), transparent); /* themecheck:allow BLG-473: a mask-image gradient stop's RGB is irrelevant to the mask, only its alpha matters (opaque to transparent); any solid color renders identically */
 }
 .md-codeblock-actions {
   display: flex;
@@ -367,8 +392,8 @@
 /* The compacted pasted message and its actions (a message over the cap). */
 .md-capped { position: relative; }
 .md-capped.is-capped > .md {
-  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 3.2em), transparent);
-  mask-image: linear-gradient(to bottom, #000 calc(100% - 3.2em), transparent);
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 3.2em), transparent); /* themecheck:allow BLG-473: a mask-image gradient stop's RGB is irrelevant to the mask, only its alpha matters (opaque to transparent); any solid color renders identically */
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 3.2em), transparent); /* themecheck:allow BLG-473: a mask-image gradient stop's RGB is irrelevant to the mask, only its alpha matters (opaque to transparent); any solid color renders identically */
 }
 
 /* Apps may style a bare `code` as inline (the runner's index.css uses inline-flex); a code block's
@@ -406,11 +431,11 @@
 
 /* A document in a viewer (the file viewer, the folder viewer, review mode): GitHub's box. A centered
    column with a 1px border, a 6px radius and 32px of padding around GitHub's 1012px text column, so
-   the text stays anchored at a readable width on a wide or maximized dialog. In a narrow column (a
-   phone, or review mode's page beside its source) it is the page itself: no border, the full width,
-   the viewer's own padding. The width that decides is the column's, not the screen's: the viewer's
-   body and review's page column are size containers (chat.css, review.css), and 700px matches the
-   viewer's other narrow rules. */
+   the text stays anchored at a readable width on a wide or maximized dialog. In a narrow modal
+   viewer or review page column, it is the page itself: no border, the full width, the viewer's own
+   padding. The container's width decides, not the screen's (chat.css, review.css); 700px matches
+   the viewer's other narrow rules. Embedded split groups have no outer padding, so their file
+   pages keep the frame and inner padding at every width. */
 .md.md-doc.md-box {
   box-sizing: border-box;
   width: 100%;
@@ -421,7 +446,8 @@
   border-radius: 6px;
 }
 @container (max-width: 700px) {
-  .md.md-doc.md-box {
+  .artifact-overlay-viewer .md.md-doc.md-box,
+  .review-page-col .md.md-doc.md-box {
     max-width: none;
     padding: 0;
     border: none;
@@ -450,4 +476,13 @@ button.md-ref {
 button.md-ref:hover,
 button.md-ref:focus-visible {
   text-decoration-style: solid;
+}
+
+.md-export-actions { display: flex; align-items: center; gap: 4px; width: fit-content; padding-block: 2px; }
+.inline-export-controls { display: flex; align-items: center; gap: 4px; }
+.inline-export-controls[hidden] { display: none; }
+@media (hover: hover) {
+  .md-table-wrap > .md-export-actions, .md-codeblock > .md-export-actions { opacity: 0; }
+  .md-table-wrap:hover > .md-export-actions, .md-table-wrap:focus-within > .md-export-actions,
+  .md-codeblock:hover > .md-export-actions, .md-codeblock:focus-within > .md-export-actions { opacity: 1; }
 }

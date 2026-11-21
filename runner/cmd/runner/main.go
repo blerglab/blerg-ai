@@ -4,18 +4,31 @@ package main
 import (
 	"context"
 	"errors"
+	"github.com/blerglab/blerg-ai/runner/internal/clusterworkspace"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/blerglab/blerg-ai/runner/internal/plancli"
 	"github.com/blerglab/blerg-ai/runner/internal/runner"
 	"github.com/blerglab/blerg-ai/runner/internal/shellruntime"
+	"github.com/blerglab/blerg-ai/runner/internal/testreportcli"
+	"github.com/blerglab/blerg-ai/runner/internal/workspacecli"
 )
 
 var version = "dev"
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "test" {
+		os.Exit(testreportcli.Main(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "plan" {
+		os.Exit(plancli.Main(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "workspace" {
+		os.Exit(workspacecli.Main(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if handled, code := runner.ServeClusterWriter(os.Args[1:]); handled {
 		os.Exit(code)
 	}
@@ -32,6 +45,12 @@ func main() {
 		return
 	}
 
+	if len(os.Args) == 3 && os.Args[1] == "shell-supervisor" && os.Args[2] == "--probe-persistence" {
+		if shellruntime.ProbePersistent(os.Stdin, os.Stdout) != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) == 3 && os.Args[1] == "shell-supervisor" && os.Args[2] == "--probe" {
 		if shellruntime.Probe(os.Stdout) != nil {
 			os.Exit(1)
@@ -67,6 +86,9 @@ func main() {
 	}()
 
 	if err := runner.Run(ctx, cfg); err != nil {
+		if errors.Is(err, clusterworkspace.ErrClone) {
+			return
+		}
 		runner.RecordClusterStartupFailure(err)
 		if cfg.Workspace != nil {
 			log.Fatal("runner: runtime startup or execution refused; inspect session launch stages")

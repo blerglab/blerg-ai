@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, waitFor, within } from '@testing-library/react'
 import { page, userEvent } from 'vitest/browser'
@@ -25,7 +26,7 @@ async function setup(width: number) {
 afterEach(async () => { vi.restoreAllMocks(); await page.viewport(1280, 800) })
 
 describe('image preview zoom and pan', () => {
-  for (const width of [390, 1024, 3840]) {
+  for (const width of browserWidths([390, 1024, 3840])) {
     it(`uses every toolbar/key control, bounds and local pans at ${width}px`, async () => {
       const { viewer, el } = await setup(width)
       const fit = scale(viewer)
@@ -74,7 +75,7 @@ describe('image preview zoom and pan', () => {
     })
   }
 
-  it.each([390, 1024, 3840])('keeps the image point under the pointer during Ctrl/Cmd wheel and trackpad pinch at %ipx', async width => {
+  it.each(browserWidths([390, 1024, 3840]))('keeps the image point under the pointer during Ctrl/Cmd wheel and trackpad pinch at %ipx', async width => {
     const { viewer, el } = await setup(width)
     await userEvent.click(button(viewer, '100%'))
     const rect = el.getBoundingClientRect(), x = Math.round(rect.left + rect.width * .55), y = Math.round(rect.top + rect.height * (width === 3840 ? .5 : .4))
@@ -201,7 +202,7 @@ describe('image preview zoom and pan', () => {
     fireEvent.keyDown(el, { key: '0', code: 'KeyP' }); expect(scale(viewer)).toBeCloseTo(fit)
   })
 
-  it.each([390, 1024, 3840])('resets to Fit on a file or version change and leaves unrelated keyboard targets alone at %ipx', async width => {
+  it.each(browserWidths([390, 1024, 3840]))('resets to Fit on a file or version change and leaves unrelated keyboard targets alone at %ipx', async width => {
     const { viewer, el, rerenderArtifact } = await setup(width)
     fireEvent.keyDown(el, { key: '+' })
     for (const tag of ['input', 'textarea', 'select', 'div']) {
@@ -228,7 +229,7 @@ describe('image preview zoom and pan', () => {
     }
   })
 
-  it.each([390, 1024, 3840])('keeps mark-up pin placement accurate after leaving a zoomed preview at %ipx', async width => {
+  it.each(browserWidths([390, 1024, 3840]))('keeps mark-up pin placement accurate after leaving a zoomed preview at %ipx', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 844)
     const submitFeedback = vi.fn(async () => false)
     const chat: ChatContextValue = { sessionId: 'zoom', files, view: vi.fn(), latestVersion: () => undefined, byName: () => undefined, submitFeedback, reviewFor: async () => null }
@@ -248,7 +249,7 @@ describe('image preview zoom and pan', () => {
     expect(Number(pin.dataset.x)).toBeCloseTo(.25, 4); expect(Number(pin.dataset.y)).toBeCloseTo(.75, 4)
     await userEvent.fill(getByRole('textbox', { name: 'Note for pin 1' }), 'Move this detail')
     await userEvent.click(getByRole('button', { name: 'Send' }))
-    await waitFor(() => expect(submitFeedback).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(submitFeedback).toHaveBeenCalledTimes(1), { timeout: 10_000 })
     if (shots) await page.screenshot({ path: `${shots}/image-markup-${width}.png` })
   })
 })

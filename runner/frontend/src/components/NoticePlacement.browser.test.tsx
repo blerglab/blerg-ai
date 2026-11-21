@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { createRef } from 'react'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -8,10 +9,11 @@ import type { ShellWorkspaceHandle } from './ShellWorkspace'
 import ToastContainer from './ToastContainer'
 import { useToastStore } from '../hooks/useToastStore'
 import '../index.css'
+vi.mock('../ws', () => import('../test/wsMock'))
 vi.mock('../sound', () => ({ playToastSound: vi.fn(), playMessageSound: vi.fn() }))
 afterEach(() => { useToastStore.setState({ toasts: [] }); vi.unstubAllGlobals() })
 
-for (const width of [390, 3840]) it(`keeps shell errors and every toast clear of typing at ${width}px`, async () => {
+for (const width of browserWidths([390, 3840])) it(`keeps shell errors and every toast clear of typing at ${width}px`, async () => {
   await page.viewport(width, 900)
   const ref = createRef<ShellWorkspaceHandle>()
   const unavailable = async () => { throw new Error('Shell is unavailable for this session.') }
@@ -67,7 +69,7 @@ for (const width of [390, 3840]) it(`keeps shell errors and every toast clear of
   expect(useToastStore.getState().toasts).toHaveLength(14)
 })
 
-for (const width of [390, 3840]) it(`keeps shell connection notices above their input at ${width}px`, async () => {
+for (const width of browserWidths([390, 3840])) it(`keeps shell connection notices above their input at ${width}px`, async () => {
   await page.viewport(width, 900)
   const { FakeShell } = await import('../test/shellMock')
   const shell = new FakeShell('notice'); shell.connectionState = 'connecting'
@@ -92,7 +94,7 @@ for (const width of [390, 3840]) it(`keeps shell connection notices above their 
   fireEvent.click(screen.getByRole('button', { name: 'Close Shell' }))
 })
 
-for (const width of [390, 3840]) it(`protects the real chat composer and its attachments at ${width}px`, async () => {
+for (const width of browserWidths([390, 3840])) it(`protects the real chat composer and its attachments at ${width}px`, async () => {
   await page.viewport(width, 900)
   const { ChatView } = await import('@blerglab/chat')
   const { createFakeTransport } = await import('../../../../packages/chat/src/test/fakeTransport')

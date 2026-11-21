@@ -195,6 +195,7 @@ func (a *API) handleUpdateBoard(w http.ResponseWriter, r *http.Request, p auth.P
 	body, err := decode[struct {
 		db.BoardParams
 		AutomationToken *string `json:"automation_token"`
+		RuntimeTargetID *string `json:"runtime_target_id"`
 		RunRuntime      *string `json:"run_runtime"`
 		RunDaemonID     *string `json:"run_daemon_id"`
 		// RunHostAcknowledged must be true to save a host ("This machine") target.
@@ -209,7 +210,7 @@ func (a *API) handleUpdateBoard(w http.ResponseWriter, r *http.Request, p auth.P
 		writeError(w, http.StatusUnprocessableEntity, "automation_engine: must be \"claude\", \"codex\" or \"hermes\"")
 		return
 	}
-	if body.RunRuntime != nil || body.RunDaemonID != nil {
+	if body.RunRuntime != nil || body.RunDaemonID != nil || body.RuntimeTargetID != nil {
 		if body.RunRuntime == nil || body.RunDaemonID == nil {
 			writeError(w, 422, "run_runtime and run_daemon_id must be saved together")
 			return
@@ -222,6 +223,16 @@ func (a *API) handleUpdateBoard(w http.ResponseWriter, r *http.Request, p auth.P
 		if !runTargetChooser(p, board) {
 			writeError(w, 403, msgRunTargetOwnerOnly)
 			return
+		}
+		if body.RuntimeTargetID != nil && *body.RuntimeTargetID != "" {
+			if *body.RuntimeTargetID != "cluster" {
+				writeError(w, 422, "unknown runtime target")
+				return
+			}
+			if *body.RunRuntime != "" && *body.RunRuntime != "cluster" {
+				writeError(w, 422, "runtime target requires the cluster runtime")
+				return
+			}
 		}
 		target := runTarget{Runtime: *body.RunRuntime, DaemonID: *body.RunDaemonID}
 		if status, msg := a.checkRunTarget(p, board, target); status != 0 {
@@ -421,6 +432,10 @@ func (a *API) handleCreateCard(w http.ResponseWriter, r *http.Request, p auth.Pr
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
+	if err := db.ValidateCommitSummary(req.CommitSummary); err != nil {
+		writeDBError(w, err)
+		return
+	}
 	if err := a.resolveArtifactLinks(&req.CardParams); err != nil {
 		writeDBError(w, err)
 		return
@@ -543,6 +558,10 @@ func (a *API) handleUpdateCard(w http.ResponseWriter, r *http.Request, p auth.Pr
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
+	if err := db.ValidateCommitSummary(req.CommitSummary); err != nil {
+		writeDBError(w, err)
+		return
+	}
 	if card.Sensitive && req.Body != nil {
 		if err := p.RequireAdmin(card.BoardID); err != nil {
 			writeError(w, http.StatusForbidden, "Sensitive reproduction details require board administration.")
@@ -632,7 +651,7 @@ func (a *API) handleArchiveCard(w http.ResponseWriter, r *http.Request, p auth.P
 		writeDBError(w, err)
 		return
 	}
-	if err := p.RequireBoard(card.BoardID, "card.write"); err != nil {
+	if err := p.RequireArchive(card.BoardID); err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}

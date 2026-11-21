@@ -145,7 +145,7 @@ func ValidateBoardToken(ctx context.Context, pool *pgxpool.Pool, raw string) (Bo
 // RevokeBoardTokensForSession sets revoked_at = now() on all non-revoked
 // tokens belonging to the given session. It is idempotent — calling it when
 // no tokens remain has no effect and returns nil.
-func RevokeBoardTokensForSession(ctx context.Context, pool *pgxpool.Pool, sessionID string) error {
+func RevokeBoardTokensForSession(ctx context.Context, pool Querier, sessionID string) error {
 	_, err := pool.Exec(ctx, `
 		UPDATE board_tokens
 		   SET revoked_at = now()

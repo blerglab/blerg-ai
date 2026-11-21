@@ -1,12 +1,14 @@
+import { openInsights } from './lib/openInsights'
 import { useProposalExpiryWarnings } from './hooks/useProposalExpiryWarnings'
 import { useProposalInbox } from './hooks/useProposalInbox'
-import { enableNotifications } from './lib/push'
+import { restoreNotifications } from './lib/push'
 import { useState, useEffect, useCallback } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import SessionList from './components/SessionList'
 import CommandPaletteProvider, { PaletteButton } from './components/CommandPalette'
 import RunnerCommands from './components/RunnerCommands'
 import UpdateBanner from './components/UpdateBanner'
+import WhatsNew from './components/WhatsNew'
 import SignInBanner from './components/SignInBanner'
 import { useSignInEpoch } from './signIn'
 import SessionsHome from './components/SessionsHome'
@@ -14,7 +16,7 @@ import SessionDetail from './components/SessionDetail'
 import DesktopScopeBoundary from './components/DesktopScopeBoundary'
 import LaunchSheet from './components/LaunchSheet'
 import ClusterStatus from './components/ClusterStatus'
-import Insights from './components/Insights'
+import Insights from './components/InsightsPage'
 import CronsPage from './components/CronsPage'
 import Proposals, { ProposalsBadge } from './components/Proposals'
 import { useProposalCountPoll } from './lib/proposals'
@@ -24,6 +26,7 @@ import TicketDetail from './components/TicketDetail'
 import ArchiveView from './components/ArchiveView'
 import ToastContainer from './components/ToastContainer'
 import ThemeToggle from './components/ThemeToggle'
+import { useAccountThemeSync } from './accountTheme'
 import { useCompactFoldersSync } from './lib/compactFolders'
 import { useCodeColoursSync } from './lib/codeColours'
 import { useIsMobile } from './hooks/useIsMobile'
@@ -101,7 +104,7 @@ export function BrandHeader() {
         Runner
       </span>
     </a>
-      <div className="icon-btn-group"><PaletteButton /><ThemeToggle /></div>
+      <div className="icon-btn-group"><PaletteButton /><ThemeToggle sync={false} /></div>
     </div>
   )
 }
@@ -136,12 +139,13 @@ export function TabBar({ clusterConfigured = false }: { clusterConfigured?: bool
         background: 'var(--basalt)',
         borderTop: '1px solid var(--stone)',
         display: 'flex',
+        overflowX: 'auto',
       }}
     >
       <button
         onClick={() => navigate('/sessions')}
         style={{
-          flex: 1,
+          flex: '1 0 auto',
           padding: '12px',
           textAlign: 'center',
           color: isActive('/sessions') ? 'var(--chalk)' : 'var(--fog-dim)',
@@ -153,12 +157,12 @@ export function TabBar({ clusterConfigured = false }: { clusterConfigured?: bool
           letterSpacing: '0.05em',
         }}
       >
-        Sessions
+        Workspaces
       </button>
       <button
         onClick={() => navigate('/boards')}
         style={{
-          flex: 1,
+          flex: '1 0 auto',
           padding: '12px',
           textAlign: 'center',
           color: isActive('/boards') ? 'var(--chalk)' : 'var(--fog-dim)',
@@ -175,7 +179,7 @@ export function TabBar({ clusterConfigured = false }: { clusterConfigured?: bool
       <button
         onClick={() => navigate('/crons')}
         style={{
-          flex: 1,
+          flex: '1 0 auto',
           padding: '12px',
           textAlign: 'center',
           color: isActive('/crons') ? 'var(--chalk)' : 'var(--fog-dim)',
@@ -192,7 +196,7 @@ export function TabBar({ clusterConfigured = false }: { clusterConfigured?: bool
       <button
         onClick={() => navigate('/proposals')}
         style={{
-          flex: 1,
+          flex: '1 0 auto',
           padding: '12px',
           textAlign: 'center',
           color: isActive('/proposals') ? 'var(--chalk)' : 'var(--fog-dim)',
@@ -209,9 +213,9 @@ export function TabBar({ clusterConfigured = false }: { clusterConfigured?: bool
         <ProposalsBadge style={{ position: 'absolute', top: 6, right: 4 }} />
       </button>
       <button
-        onClick={() => navigate('/insights')}
+        onClick={() => { if (!openInsights()) navigate('/insights') }}
         style={{
-          flex: 1,
+          flex: '1 0 auto',
           padding: '12px',
           textAlign: 'center',
           color: isActive('/insights') ? 'var(--chalk)' : 'var(--fog-dim)',
@@ -229,7 +233,7 @@ export function TabBar({ clusterConfigured = false }: { clusterConfigured?: bool
         onClick={() => setSettingsOpen(true)}
         data-testid="settings-tab"
         style={{
-          flex: 1,
+          flex: '1 0 auto',
           padding: '12px',
           textAlign: 'center',
           color: 'var(--fog-dim)',
@@ -247,7 +251,7 @@ export function TabBar({ clusterConfigured = false }: { clusterConfigured?: bool
         <button
           onClick={() => navigate('/cluster')}
           style={{
-            flex: 1,
+            flex: '1 0 auto',
             padding: '12px',
             textAlign: 'center',
             color: isActive('/cluster') ? 'var(--chalk)' : 'var(--fog-dim)',
@@ -307,6 +311,8 @@ function Layout() {
   const settingsDialog = settingsOpen ? <SettingsDialog onClose={() => setSettingsOpen(false)} /> : null
 
   const routes = (
+    <>
+    <WhatsNew key={signInEpoch} />
     <Routes>
       <Route path="/" element={<Navigate to="/sessions" replace />} />
       {/* On a phone /sessions IS the list. Beside the sidebar it would be a second copy of it, so the
@@ -325,8 +331,9 @@ function Layout() {
       <Route path="/cluster" element={<ClusterStatus />} />
       <Route path="/crons" element={<CronsPage />} />
       <Route path="/proposals" element={<Proposals />} />
-      <Route path="/insights" element={<Insights />} />
+      <Route path="/insights/*" element={<Insights />} />
     </Routes>
+    </>
   )
 
   if (isMobile) {
@@ -334,6 +341,7 @@ function Layout() {
       <div
         style={{
           minHeight: '100vh',
+          ...(location.pathname.startsWith('/insights') ? { height: '100dvh', display: 'flex', flexDirection: 'column' as const, boxSizing: 'border-box' as const } : {}),
           background: 'var(--basalt)',
           color: 'var(--chalk)',
           paddingBottom: '60px',
@@ -381,6 +389,7 @@ function Layout() {
 }
 
 function App() {
+  useAccountThemeSync()
   useCodeColoursSync()
   useCompactFoldersSync()
   useEffect(() => {
@@ -392,11 +401,7 @@ function App() {
   // subscription didn't survive (e.g. cleared site data), quietly restore
   // it — never re-prompt for permission here.
   useEffect(() => {
-    let wanted = false
-    try { wanted = localStorage.getItem('blerg_notifications_wanted') === '1' } catch { /* storage unavailable: treat as not opted in */ }
-    if (wanted && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-      enableNotifications().catch(console.error)
-    }
+    restoreNotifications().catch(console.error)
   }, [])
 
   return (

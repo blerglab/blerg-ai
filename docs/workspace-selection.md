@@ -14,9 +14,18 @@ and the commit identity is set for that command only. Initialization refuses fol
 inside an existing Git worktree. This also applies to new folders and scratch folders;
 sandbox and cluster launches keep their existing behavior.
 
-Turn the option off to keep a plain folder. Such a session cannot start host children,
-even if Git is initialized later: stop it and start a new session on the repository.
-Repository membership is fixed at launch.
+Turn the option off to keep a plain folder. It can't start host children until the
+repository exists and is added from the **Repositories** tab: discovering Git in the
+folder grants nothing, and a repository needs a commit before a host child can use it.
+
+Membership starts from the launch selection and changes only through the
+**Repositories** tab in the dock, or a request from Main that the person approves.
+A change waits for a safe turn boundary, shows as pending, and never interrupts a
+turn, a worker or an open shell. Removing a repository is refused while it has
+unfinished or undelivered work, and keeps its branches and checkout. Added repositories
+are available to chats and workers started afterward; running workers keep what they
+have. See [Live repository membership](design/workspace-membership.md). Cluster
+workspaces keep their launch selection for now.
 
 Desktop discovery requires an enrolled, person-owned desktop. Administrators do
 not gain access to another person's desktop inventory. Unknown desktops appear

@@ -59,6 +59,9 @@ func TestUsageNoticesCrossingsAndReset(t *testing.T) {
 	if !reservedMessageSource(usageNoticeSource) || answersAsk(usageNoticeSource) {
 		t.Fatal("usage source is not protected")
 	}
+	if !reservedMessageSource("process_limit") || answersAsk("process_limit") {
+		t.Fatal("process limit source is not protected")
+	}
 	if !reservedClientID("usage-notice-example") {
 		t.Fatal("usage ids are not reserved")
 	}

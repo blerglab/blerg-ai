@@ -1,18 +1,19 @@
+import {liveFileSupport} from '../visual/liveFile'
 // The transcript card for a published file: an inline preview when the file is an image (the
-// picture itself), a video or audio file (a play tile), an HTML page (the page, small), markdown,
+// picture itself), a video (a player), audio (a play tile), an HTML page (the page, small), markdown,
 // text, code, JSON or a table (a short excerpt), a PDF (its first page) or a diff (its files and
 // +/−), then 📎 name · v3 · size · [Download] [View]. The version shows from v2 on, and on a v1
-// whose file has later versions; a lone v1 has none. Clicking the preview opens the viewer; a video or audio
-// file then plays at once, and an HTML page becomes usable.
+// whose file has later versions; a lone v1 has none. Videos play here after Play; other previews
+// open the viewer, where audio plays at once and an HTML page becomes usable.
 import { FileIcon } from './FileIcon'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useChat } from './context'
 import { formatSize, withCsp } from '../model/artifacts'
 import { EXCERPT_KINDS, HTML_PREVIEW_PAGE, type DiffPreviewData, loadDiffPreview, loadPdfThumb, loadPreviewExcerpt, loadPreviewText, loadPreviewUrl, previewKind } from '../model/artifactPreview'
 import type { Excerpt } from '../model/previewExcerpt'
 import { patchSummaryText } from '../model/patch'
 import { useHighlight } from '../model/highlight'
-import { isViewable } from '../model/artifactViews'
+import { mediaUrl, releaseMediaUrl, isViewable } from '../model/artifactViews'
 import { fileErrorText } from '../transport/files'
 import type { TransportFiles } from '../transport/types'
 import type { ArtifactPayload } from '../types'
@@ -23,6 +24,7 @@ import ErrorId from './ErrorId'
 import Markdown from './Markdown'
 import VisualBlock from './VisualBlock'
 import { visualFile } from '../model/visualKind'
+import { artifactContentIdentity, contentKeeper } from '../model/viewCache'
 import { TimeLabel } from './TimeLabel'
 import './diff.css'
 
@@ -44,7 +46,7 @@ function useNear(ref: { current: Element | null }, enabled: boolean): boolean {
   return near
 }
 
-/** The inline preview of a file: the image, or a play tile for video and audio. The image is
+/** The inline preview of a file: an image, video player, or audio play tile. The image is
  *  fetched when the card scrolls into view (at once where IntersectionObserver is missing). */
 export function MediaPreview({ sessionId, files, artifact, onOpen }: {
   sessionId: string
@@ -81,11 +83,12 @@ export function MediaPreview({ sessionId, files, artifact, onOpen }: {
   }, [kind, near, sessionId, artifact, files])
 
   if (!kind || failed) return null
-  if (kind === 'text' && visualFile(artifact.name, artifact.view, '') === 'mermaid') return <DiagramPreview sessionId={sessionId} files={files} artifact={artifact} />
+  if (kind === 'text' && visualFile(artifact.name, artifact.view, '')) return <VisualPreview key={artifact.id} sessionId={sessionId} files={files} artifact={artifact} />
   if (kind && EXCERPT_KINDS.has(kind)) return <ExcerptPreview sessionId={sessionId} files={files} artifact={artifact} onOpen={() => onOpen(false)} />
   if (kind === 'diff') return <DiffPreview sessionId={sessionId} files={files} artifact={artifact} onOpen={() => onOpen(false)} />
   if (kind === 'pdf') return <PdfPreview sessionId={sessionId} files={files} artifact={artifact} onOpen={() => onOpen(false)} />
   if (kind === 'html') return <HtmlPreview sessionId={sessionId} files={files} artifact={artifact} onOpen={() => onOpen(false)} />
+  if (kind === 'video') return <VideoPreview key={artifact.id} sessionId={sessionId} files={files} artifact={artifact} />
   if (kind === 'media') {
     return (
       <button type="button" className="artifact-preview artifact-preview-tile" data-testid="artifact-preview-tile" onClick={() => onOpen(true)} aria-label={`Play ${artifact.name}`}>
@@ -100,6 +103,36 @@ export function MediaPreview({ sessionId, files, artifact, onOpen }: {
       {url ? <img src={url} alt={artifact.name} /> : <span className="artifact-preview-loading" />}
     </button>
   )
+}
+
+/** The transport reads whole blobs, so defer the authenticated read until Play. */
+function VideoPreview({ sessionId, files, artifact, onFailed }: {
+  sessionId: string; files: TransportFiles; artifact: ArtifactPayload; onFailed?: () => void
+}) {
+  const ref = useRef<HTMLVideoElement | null>(null)
+  const [requested, setRequested] = useState(false)
+  const [url, setUrl] = useState<string | null>(null)
+  const [failed, setFailed] = useState(false)
+  const fail = () => { setFailed(true); onFailed?.() }
+  useEffect(() => {
+    if (!requested) return
+    let live = true
+    let made: string | null = null
+    void files.raw(sessionId, artifact.id).then(bytes => mediaUrl(bytes, 'video', artifact.content_type)).then(u => {
+      made = u
+      if (live) setUrl(u)
+      else releaseMediaUrl(u)
+    }, () => { if (live) { setFailed(true); onFailed?.() } })
+    return () => { live = false; releaseMediaUrl(made) }
+  }, [requested, files, sessionId, artifact.id, artifact.content_type, onFailed])
+  useEffect(() => {
+    if (url) void ref.current?.play().catch(() => { /* Native controls allow a retry if play was blocked. */ })
+  }, [url])
+  if (failed) return null
+  return <div className="artifact-preview artifact-preview-video" data-testid="artifact-preview-video">
+    <video ref={ref} src={url ?? undefined} controls preload="none" playsInline aria-label={artifact.name} onError={fail} />
+    {!url && <button type="button" className="artifact-btn artifact-video-play" disabled={requested} onClick={() => setRequested(true)} aria-label={`Play ${artifact.name}`}>{requested ? 'Loading…' : '▶ Play'}</button>}
+  </div>
 }
 
 /** A short excerpt of a markdown, text, code, JSON or table file: the first lines, faded at the
@@ -151,9 +184,9 @@ function ExcerptPreview({ sessionId, files, artifact, onOpen }: {
   )
 }
 
-/** A published Mermaid file (.mmd): the diagram itself, drawn when the card nears the viewport,
- *  or its source and the reason it was not drawn. The card's View opens it in the viewer. */
-function DiagramPreview({ sessionId, files, artifact }: {
+/** Published charts and diagrams use the inline renderer and policy, fetched near the viewport.
+ *  Reserve the preview's height before reading; View opens the full file. */
+function VisualPreview({ sessionId, files, artifact }: {
   sessionId: string
   files: TransportFiles
   artifact: ArtifactPayload
@@ -162,21 +195,35 @@ function DiagramPreview({ sessionId, files, artifact }: {
   const near = useNear(ref, true)
   const [source, setSource] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
+  const [observed,setObserved] = useState(artifact.updated_at)
+  const [runtimeUnsupported,setRuntimeUnsupported] = useState(false)
+  const kind = visualFile(artifact.name, artifact.view, '')!
+  const unsupported = artifact.live && (runtimeUnsupported || source !== null && liveFileSupport(kind,source)==='unsupported-live')
 
+
+  useLayoutEffect(() => {
+    const node=ref.current
+    const support=()=>{if(artifact.live){const surfaces=[...node!.querySelectorAll<HTMLElement>('.visual-surface')];setRuntimeUnsupported(surfaces.some(surface=>surface.dataset.liveSupport!=='true'))}}
+    node?.addEventListener('blerg-chart-live-support',support)
+    return ()=>node?.removeEventListener('blerg-chart-live-support',support)
+  },[artifact.live])
+  const identity = artifactContentIdentity(artifact)
   useEffect(() => {
     if (!near) return
     let live = true
-    loadPreviewText(sessionId, artifact.id, id => files.raw(sessionId, id)).then(
-      t => { if (live) setSource(t) },
-      () => { if (live) setFailed(true) },
+    const keep = contentKeeper(files, sessionId, identity)
+    loadPreviewText(sessionId, artifact.id, id => files.raw(sessionId, id), artifact.updated_at).then(
+      t => { if (live) { keep({kind: 'text', text: t}, t.length * 2); setSource(t); setObserved(artifact.updated_at); setFailed(false) } },
+      () => { console.warn('artifact_visual_preview_failed', { cause: 'read_rejected' }); if (live) setFailed(true) },
     )
     return () => { live = false }
-  }, [near, sessionId, artifact.id, files])
+  }, [near, sessionId, artifact.id, artifact.updated_at, identity, files])
 
-  if (failed) return null
   return (
     <div ref={ref} className="artifact-preview-diagram" data-testid="artifact-preview-diagram">
-      {source === null ? <span className="artifact-preview-loading" /> : <VisualBlock kind="mermaid" source={source.replace(/\n$/, '')} />}
+      {artifact.live && <p className="artifact-status" title={unsupported ? 'unsupported-live: native data updates unavailable; redraws each file revision' : undefined}>Live · updated <TimeLabel ts={observed} /></p>}
+      {failed && <p className="artifact-status" role="status">Couldn’t load this preview. Open the file to retry.</p>}
+      {source === null ? failed ? null : <span className="artifact-preview-loading" /> : <VisualBlock kind={kind} source={source.replace(/\n$/, '')} fileContext={{sessionId, files}} hostedTab />}
     </div>
   )
 }
@@ -198,12 +245,12 @@ function DiffPreview({ sessionId, files, artifact, onOpen }: {
   useEffect(() => {
     if (!near) return
     let live = true
-    loadDiffPreview(sessionId, artifact.id, id => files.raw(sessionId, id)).then(
+    loadDiffPreview(sessionId, artifact.id, id => files.raw(sessionId, id), artifact.updated_at).then(
       d => { if (live) setData(d) },
       () => { if (live) setFailed(true) },
     )
     return () => { live = false }
-  }, [near, sessionId, artifact.id, files])
+  }, [near, sessionId, artifact.id, artifact.updated_at, files])
 
   if (failed || (summary && summary.files === 0)) return null
   const tile = (
@@ -249,12 +296,12 @@ function PdfPreview({ sessionId, files, artifact, onOpen }: {
   useEffect(() => {
     if (!near) return
     let live = true
-    loadPdfThumb(sessionId, artifact.id, id => files.raw(sessionId, id)).then(
+    loadPdfThumb(sessionId, artifact.id, id => files.raw(sessionId, id), artifact.updated_at).then(
       u => { if (live) setUrl(u) },
       () => { if (live) setFailed(true) },
     )
     return () => { live = false }
-  }, [near, sessionId, artifact.id, files])
+  }, [near, sessionId, artifact.id, artifact.updated_at, files])
 
   if (failed) return null
   return (
@@ -291,6 +338,9 @@ function HtmlPreview({ sessionId, files, artifact, onOpen }: {
   const [html, setHtml] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
   const [width, setWidth] = useState(0)
+  // Fetched once per revision, not once ever: a live file's id never changes, but its
+  // updated_at does on every republish, and that must still trigger a fresh read (BLG-470).
+  const fetchedRev = useRef<string | null>(null)
 
   useEffect(() => {
     const el = ref.current
@@ -314,14 +364,18 @@ function HtmlPreview({ sessionId, files, artifact, onOpen }: {
   }, [])
 
   useEffect(() => {
-    if (!near || html !== null) return
+    const rev = `${artifact.id}:${artifact.updated_at ?? ''}`
+    if (!near || fetchedRev.current === rev) return
+    fetchedRev.current = rev
     let live = true
-    loadPreviewText(sessionId, artifact.id, id => files.raw(sessionId, id)).then(
+    setHtml(null)
+    setFailed(false)
+    loadPreviewText(sessionId, artifact.id, id => files.raw(sessionId, id), artifact.updated_at).then(
       t => { if (live) setHtml(t) },
       () => { if (live) setFailed(true) },
     )
     return () => { live = false }
-  }, [near, html, sessionId, artifact.id, files])
+  }, [near, sessionId, artifact.id, artifact.updated_at, files])
 
   if (failed) return null
   const scale = (width || 480) / HTML_PREVIEW_PAGE.width
@@ -349,19 +403,42 @@ function HtmlPreview({ sessionId, files, artifact, onOpen }: {
 
 export default function ArtifactCard({ payload, ts, eventId }: { payload: ArtifactPayload; ts?: string; eventId?: string }) {
   const chat = useChat()
+  const cardRef = useRef<HTMLDivElement | null>(null)
   const files = chat?.files ?? null
   const [error, setError] = useState<{ message: string; errorId?: string } | null>(null)
   const [busy, setBusy] = useState(false)
-  const version = payload.version
-  const latest = chat?.latestVersion(payload) ?? payload.latest_version ?? version
-  const showVersion = version !== undefined && (version > 1 || (latest ?? 1) > 1)
+  const [videoFailed, setVideoFailed] = useState(false)
+  const [videoGeneration, setVideoGeneration] = useState(0)
+  const videoError = useCallback(() => setVideoFailed(true), [])
+  // A live file's card is never re-created on republish (ChatView dedupes its events): refresh
+  // its size, content type and updated_at from the session's current list instead of the stale
+  // creation-event payload, and recompute only when those fields actually change.
+  const live = payload.live ? chat?.liveArtifact?.(payload.id) : undefined
+  const artifact = useMemo<ArtifactPayload>(
+    () => live ? { ...payload, size: live.size, content_type: live.content_type, updated_at: live.updated_at } : payload,
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only live's own fields, not its object identity: an unrelated list refresh must not force every live card's previews to refetch
+    [payload, live?.size, live?.content_type, live?.updated_at],
+  )
+  const version = artifact.version
+  const latest = chat?.latestVersion(artifact) ?? artifact.latest_version ?? version
+  const showVideo = artifact.view === 'video' && (version ?? 1) >= (latest ?? 1) && !videoFailed
+  const showVersion = !artifact.live && version !== undefined && (version > 1 || (latest ?? 1) > 1)
+
+  function open() {
+    if (artifact.view === 'video') {
+      cardRef.current?.querySelector('video')?.pause()
+      // Cancel pending inline playback too, before the viewer reads the same clip.
+      setVideoGeneration(n => n + 1)
+    }
+    chat?.view(artifact)
+  }
 
   async function download() {
     if (!chat || !files) return
     setBusy(true)
     setError(null)
     try {
-      await files.download(chat.sessionId, payload.id)
+      await files.download(chat.sessionId, artifact.id)
     } catch (e) {
       setError(fileErrorText(e, 'Download failed.'))
     } finally {
@@ -370,22 +447,25 @@ export default function ArtifactCard({ payload, ts, eventId }: { payload: Artifa
   }
 
   return (
-    <div className="agent-card artifact-card" data-testid="artifact-card" data-event-id={eventId}>
-      {chat && files && <MediaPreview sessionId={chat.sessionId} files={files} artifact={payload} onOpen={autoplay => chat.view(payload, { autoplay })} />}
+    <div ref={cardRef} className="agent-card artifact-card" data-testid="artifact-card" data-event-id={eventId}>
+      {chat && files && showVideo && <VideoPreview key={`${artifact.id}:${videoGeneration}`} sessionId={chat.sessionId} files={files} artifact={artifact} onFailed={videoError} />}
+      {chat && files && artifact.view !== 'video' && <MediaPreview sessionId={chat.sessionId} files={files} artifact={artifact} onOpen={autoplay => chat.view(artifact, { autoplay })} />}
       <div className="artifact-card-row">
-        <FileIcon name={payload.name} className="artifact-card-icon" />
-        <span className="artifact-card-name">{payload.name}</span>
+        <FileIcon name={artifact.name} className="artifact-card-icon" />
+        <span className="artifact-card-name">{artifact.name}</span>
         {showVersion && <>{' '}<span className="artifact-card-version" data-testid="artifact-card-version">· v{version}</span></>}
-        {' '}<span className="artifact-card-size">· {formatSize(payload.size)}</span>
+        {' '}<span className="artifact-card-size">· {formatSize(artifact.size)}</span>
         {chat && files && (
           <span className="artifact-card-actions">
             <button type="button" disabled={busy} onClick={() => void download()}>Download</button>
-            {isViewable(payload.view) && (
-              <button type="button" onClick={() => chat.view(payload)}>View</button>
+            {isViewable(artifact.view) && (
+              <button type="button" onClick={open}>{artifact.view === 'video' ? (showVideo ? 'Open larger' : 'Open') : 'View'}</button>
             )}
           </span>
         )}
-        <TimeLabel ts={ts} className="card-time-end" />
+        {artifact.live
+          ? <span className="artifact-card-updated card-time card-time-end" data-testid="artifact-card-updated"><TimeLabel ts={artifact.updated_at ?? ts} /></span>
+          : <TimeLabel ts={ts} className="card-time-end" />}
       </div>
       {error && <div className="artifact-error" role="alert">{error.message}<ErrorId id={error.errorId} /></div>}
     </div>

@@ -46,7 +46,7 @@ func TestCardSearchFilters(t *testing.T) {
 			}
 		}
 	}
-	supported := []string{"archived", "column", "cursor", "field.{key}", "include_archived", "limit", "page", "priority", "q", "tag", "type"}
+	supported := []string{"release_id", "archived", "column", "cursor", "field.{key}", "include_archived", "limit", "page", "priority", "q", "tag", "type", "size", "risk", "complexity"}
 	for _, endpoint := range []string{"cards", "cards/search"} {
 		path := "/api/boards/" + b.ID + "/" + endpoint
 		t.Run(endpoint, func(t *testing.T) {

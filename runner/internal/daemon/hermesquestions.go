@@ -128,7 +128,11 @@ func (r *hermesRun) askWith(parent context.Context, p hermesQuestionRequest, key
 			for i, c := range q.Choices {
 				fmt.Fprintf(&b, "\n%d. %s", i+1, c)
 			}
-			answer, err := r.d.AskUser(ctx, b.String())
+			askCtx := ctx
+			if len(q.Choices) == 0 {
+				askCtx = WithFreeTextQuestion(ctx)
+			}
+			answer, err := r.d.AskUser(askCtx, b.String())
 			if err != nil || ctx.Err() != nil {
 				reply(map[string]any{})
 				r.questionDone(key, token)

@@ -12,8 +12,8 @@ import (
 func TestWorkspaceClusterReplyCanceledBehindAgentWriter(t *testing.T) {
 	client := NewWSClient(Config{})
 	client.conn = &websocket.Conn{}
-	client.writeMu.Lock()
-	defer client.writeMu.Unlock()
+	release := holdWriter(t, client)
+	defer release()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	started := time.Now()

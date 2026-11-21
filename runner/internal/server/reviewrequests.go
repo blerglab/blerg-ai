@@ -155,6 +155,11 @@ func (a *API) HandleCreateReviewRequest(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	if isChildSession(sess) {
+		log.Printf("review: create refused: worker must send work for review to Main")
+		writeError(w, http.StatusForbidden, "Workers send work for review to Main with blerg-runner ask; Main runs the review and asks the person only when their approval is needed.")
+		return
+	}
 	if terminalSessionStatus(sess.Status) {
 		writeError(w, http.StatusConflict, "session has ended")
 		return
@@ -252,10 +257,9 @@ func (a *API) resolveReviewArtifact(ctx context.Context, sid, ref string, versio
 	return *pick, nil
 }
 
-// pushForReview tells the owner's phone, like a question: never for a private session (push
-// subscriptions belong to no account) nor a headless one.
+// pushForReview tells the session recipient's phone, like a question, unless headless.
 func (a *API) pushForReview(sess db.SessionRow, r db.ReviewRequest) {
-	if sess.Private || headlessSession(&sess) {
+	if headlessSession(&sess) {
 		return
 	}
 	heading := sessionLabel(derefOrEmpty(sess.Title), sess.Repo, sess.ID) + " — review: " + r.ArtifactName
@@ -264,7 +268,7 @@ func (a *API) pushForReview(sess db.SessionRow, r db.ReviewRequest) {
 		a.reviewPush(heading, r.Ask, link)
 		return
 	}
-	SendPush(a.dbPool, heading, r.Ask, link)
+	SendPushForSession(a.dbPool, sess.ID, heading, r.Ask, link)
 }
 
 // ─── reads ───────────────────────────────────────────────────────────────────

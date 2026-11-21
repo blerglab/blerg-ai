@@ -40,7 +40,7 @@ export function actorLabel(byYou: boolean | undefined) {
   return byYou === false ? 'another account' : 'you'
 }
 
-const createdVia: Record<string, string> = { card: 'from a proposal card', panel: 'in the session’s Permissions', launch: 'at launch' }
+const createdVia: Record<string, string> = { card: 'from a proposal card', panel: 'in the workspace’s Permissions', launch: 'at launch' }
 export function permissionVia(via: string) { return createdVia[via] ?? via }
 
 // Deadlines already warned about, by "<id>:<deadline>", for the whole page: the header's bell and a

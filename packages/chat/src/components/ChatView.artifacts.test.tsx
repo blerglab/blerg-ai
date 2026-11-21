@@ -1,12 +1,13 @@
 import { composeMessage } from '../model/attachments'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { Profiler } from 'react'
 import ChatView from './ChatView'
 import { buildTimeline, isVisibleEvent } from '../model/toolGroups'
 import { useChatReportStore } from '../hooks/useLiveState'
 import { createFakeTransport, type FakeTransport } from '../test/fakeTransport'
 import { installIntersectionObserver, intersect } from '../test/intersection'
-import { COMPACT, SESSION, file, meta, resetChatState, seed } from '../test/chat'
+import { COMPACT, SESSION, file, meta, pushLiveArtifact, resetChatState, seed } from '../test/chat'
 import type { ArtifactInfo } from '../transport/types'
 import type { AgentEvent } from '../types'
 
@@ -281,26 +282,76 @@ describe('inline previews', () => {
     expect(dialog).toBeInTheDocument()
   })
 
-  it('draws a play tile for a video without fetching it, and the viewer autoplays it on click', async () => {
+  it('plays a video inline only after Play, with native controls and an error fallback', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue()
     seed(artifactEvent(clip, 1))
     const { files } = mount()
-    const tile = await screen.findByTestId('artifact-preview-tile')
-    expect(tile).toHaveTextContent('demo.mp4')
-    expect(files.rawCalls).toHaveLength(0)
-    fireEvent.click(tile)
-    const dialog = await screen.findByRole('dialog', { name: /demo\.mp4/ })
-    await waitFor(() => expect(dialog.querySelector('video')).not.toBeNull())
-    expect(dialog.querySelector('video')).toHaveAttribute('autoplay')
+    const card = await screen.findByTestId('artifact-card')
+    const video = card.querySelector('video')!
+    expect(video).not.toBeNull()
+    expect(video).toHaveAttribute('controls')
+    expect(video).toHaveAttribute('preload', 'none')
+    expect(video).not.toHaveAttribute('autoplay')
+    expect(files.rawCalls).toEqual([])
+    fireEvent.click(within(card).getByRole('button', { name: 'Play demo.mp4' }))
+    await waitFor(() => expect(video).toHaveAttribute('src', 'blob:x'))
+    expect(files.rawCalls).toEqual(['v1'])
+    fireEvent.error(video)
+    expect(card.querySelector('video')).toBeNull()
+    expect(within(card).getByRole('button', { name: 'Open' })).toBeInTheDocument()
   })
 
-  it('View (not the preview) opens a video without autoplay', async () => {
+  it('Open larger opens a video in the existing viewer without autoplay', async () => {
     seed(artifactEvent(clip, 1))
     mount()
     const card = await screen.findByTestId('artifact-card')
-    fireEvent.click(within(card).getByRole('button', { name: 'View' }))
+    fireEvent.click(within(card).getByRole('button', { name: 'Open larger' }))
     const dialog = await screen.findByRole('dialog', { name: /demo\.mp4/ })
     await waitFor(() => expect(dialog.querySelector('video')).not.toBeNull())
     expect(dialog.querySelector('video')).not.toHaveAttribute('autoplay')
+  })
+
+  it('keeps Open available when the authenticated video read is refused', async () => {
+    seed(artifactEvent(clip, 1))
+    const { files } = mount({ status: 403 })
+    const card = await screen.findByTestId('artifact-card')
+    fireEvent.click(within(card).getByRole('button', { name: 'Play demo.mp4' }))
+    expect(await within(card).findByRole('button', { name: 'Open' })).toBeInTheDocument()
+    expect(card.querySelector('video')).toBeNull()
+    expect(files.rawCalls).toEqual(['v1'])
+  })
+
+  it('does not start an inline read still pending when Open larger is pressed', async () => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue()
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
+    seed(artifactEvent(clip, 1))
+    const { files } = mount()
+    let finish!: (bytes: Blob) => void
+    vi.spyOn(files, 'raw').mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const card = await screen.findByTestId('artifact-card')
+    fireEvent.click(within(card).getByRole('button', { name: 'Play demo.mp4' }))
+    fireEvent.click(within(card).getByRole('button', { name: 'Open larger' }))
+    await screen.findByRole('dialog', { name: /demo\.mp4/ })
+    await act(async () => finish(new Blob(['video'], { type: 'video/mp4' })))
+    expect(play).not.toHaveBeenCalled()
+    expect(card.querySelector('video')).not.toHaveAttribute('src')
+  })
+
+  it('labels an older video without an inline player Open', async () => {
+    seed(artifactEvent({ ...clip, version: 1 }, 1))
+    mount({ listed: [{ ...clip, id: 'v2', version: 2, latest_version: 2 }] })
+    const card = await screen.findByTestId('artifact-card')
+    await waitFor(() => expect(card.querySelector('video')).toBeNull())
+    expect(within(card).queryByRole('button', { name: 'Open larger' })).toBeNull()
+    fireEvent.click(within(card).getByRole('button', { name: 'Open' }))
+    expect(await screen.findByRole('dialog', { name: /demo\.mp4/ })).toBeInTheDocument()
+  })
+
+  it('only the latest published video has a player', async () => {
+    seed(artifactEvent({ ...clip, version: 1, latest_version: 1 }, 1), artifactEvent({ ...clip, id: 'v2', version: 2, latest_version: 2 }, 2))
+    mount()
+    await screen.findAllByTestId('artifact-card')
+    expect(document.querySelectorAll('video')).toHaveLength(1)
   })
 
   it('draws an HTML page small in its card, sandboxed and out of reach, and opens the viewer on click', async () => {
@@ -483,6 +534,93 @@ describe('inline previews of text-like files', () => {
     mount({ listed: [{ ...report, id: 'u9', name: 'notes.md', origin: 'user' }] })
     const previews = await screen.findByTestId('message-attachment-previews')
     expect(await within(previews).findByRole('heading', { name: 'Report' })).toBeInTheDocument()
+  })
+})
+
+describe('a live file (BLG-470)', () => {
+  const liveV1: ArtifactInfo = { id: 'live1', name: 'chart.png', size: 10, content_type: 'image/png', view: 'image', version: 1, live: true, updated_at: '2026-07-26T00:00:00Z' }
+
+  it('shows exactly one card for several republish events of the same live id', async () => {
+    seed(
+      artifactEvent(liveV1, 1),
+      artifactEvent({ ...liveV1, size: 20, updated_at: '2026-07-26T00:05:00Z' }, 2),
+      artifactEvent({ ...liveV1, size: 30, updated_at: '2026-07-26T00:10:00Z' }, 3),
+    )
+    mount({ listed: [{ ...liveV1, size: 30, updated_at: '2026-07-26T00:10:00Z' }] })
+    await screen.findByTestId('artifact-card')
+    expect(screen.getAllByTestId('artifact-card')).toHaveLength(1)
+  })
+
+  it('refreshes the one card to the republished size, with no version badge', async () => {
+    seed(artifactEvent(liveV1, 1), artifactEvent({ ...liveV1, size: 999, updated_at: '2026-07-26T00:05:00Z' }, 2))
+    mount({ listed: [{ ...liveV1, size: 999, updated_at: '2026-07-26T00:05:00Z' }] })
+    const card = await screen.findByTestId('artifact-card')
+    expect(card).toHaveTextContent('999 B')
+    expect(card.querySelector('[data-testid="artifact-card-version"]')).toBeNull()
+    expect(card.querySelector('[data-testid="artifact-card-updated"]')).not.toHaveTextContent(/Updated/)
+  })
+
+  it('applies a republish pushed outside the transcript (onArtifactUpdated) without any new list read', async () => {
+    seed(artifactEvent(liveV1, 1))
+    const { files } = mount({ listed: [liveV1] })
+    const card = await screen.findByTestId('artifact-card')
+    expect(card).toHaveTextContent('10 B')
+    const listCallsBefore = files.listCalls
+
+    const refreshed = { ...liveV1, size: 777, updated_at: '2026-07-26T00:05:00Z' }
+    files.items = [refreshed]
+    act(() => pushLiveArtifact(refreshed))
+
+    await waitFor(() => expect(screen.getByTestId('artifact-card')).toHaveTextContent('777 B'))
+    expect(screen.getAllByTestId('artifact-card')).toHaveLength(1)
+    expect(files.listCalls).toBe(listCallsBefore)
+  })
+
+  it('a live push does not make unrelated consumers (an ArtifactCard) re-render on later streaming deltas', async () => {
+    // React's development profiler marks a fiber with the "performed work" flag only when it
+    // actually rendered this commit. If chatContext's identity churns on every streaming delta
+    // (because artifacts.items is a fresh array each time), every useChat() consumer downstream —
+    // including an unrelated ArtifactCard — re-renders on every delta, not just the one whose own
+    // state (the streaming text) actually changed.
+    interface Fiber { child: Fiber | null; sibling: Fiber | null; flags: number; actualStartTime: number; type?: { name?: string } }
+    const rendered: string[] = []
+    function onRender(_id: string, _phase: string, _duration: number, _base: number, started: number) {
+      const root = document.querySelector('[data-perf-root]')
+      if (!root) return
+      const key = Object.keys(root).find(k => k.startsWith('__reactContainer$'))
+      if (!key) return
+      const container = (root as unknown as Record<string, Fiber>)[key]
+      const visit = (f: Fiber | null) => {
+        if (!f) return
+        if (f.type?.name === 'ArtifactCard' && (f.flags & 1) && f.actualStartTime >= started) rendered.push('ArtifactCard')
+        visit(f.child)
+        visit(f.sibling)
+      }
+      visit((container as unknown as { stateNode?: { current: Fiber } }).stateNode?.current ?? container)
+    }
+
+    seed(artifactEvent(liveV1, 1))
+    const t = createFakeTransport({ files: { items: [liveV1] } })
+    const container = document.createElement('div')
+    container.dataset.perfRoot = ''
+    document.body.appendChild(container)
+    render(
+      <Profiler id="chat" onRender={onRender}>
+        <ChatView session={SESSION} transport={t.transport} meta={session} />
+      </Profiler>,
+      { container },
+    )
+    await screen.findByTestId('artifact-card')
+
+    const refreshed = { ...liveV1, size: 777, updated_at: '2026-07-26T00:05:00Z' }
+    act(() => pushLiveArtifact(refreshed))
+    await waitFor(() => expect(screen.getByTestId('artifact-card')).toHaveTextContent('777 B'))
+    rendered.length = 0 // only the deltas below count
+
+    for (let i = 0; i < 5; i++) {
+      act(() => { t.emit({ type: 'agent_event', session_id: SESSION, client_event_id: `d${i}`, seq: 0, ts: '2026-07-26T00:00:00Z', transient: true, kind: 'assistant_text', payload: { text: `chunk ${i} `, done: false } } as AgentEvent) })
+    }
+    expect(rendered).toEqual([])
   })
 })
 

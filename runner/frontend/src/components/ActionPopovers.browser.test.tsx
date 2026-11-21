@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { beforeEach, expect, it, vi } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import { page, userEvent } from 'vitest/browser'
@@ -35,7 +36,7 @@ async function contained(dialog: HTMLElement) {
   expect(bounds.right).toBeLessThanOrEqual(innerWidth + tolerance)
   expect(bounds.bottom).toBeLessThanOrEqual(innerHeight + tolerance)
 }
-it.each([390, 3840])('confirms and retries board deletion on the shared surface at %i', async width => {
+it.each(browserWidths([390, 3840]))('confirms and retries board deletion on the shared surface at %i', async width => {
   await page.viewport(width, 844)
   vi.mocked(boardApi.deleteBoard).mockRejectedValueOnce(new Error('Offline')).mockResolvedValueOnce(undefined)
   render(<MemoryRouter><BoardsList /></MemoryRouter>)
@@ -73,7 +74,7 @@ it('anchors column confirmation and failure to the surviving menu button', async
   await userEvent.click(within(error).getByRole('button', { name: 'Dismiss' }))
   expect(trigger).toHaveFocus()
 })
-it.each([390, 3840])('keeps a failed Reply anchored with its draft and retry at %i', async width => {
+it.each(browserWidths([390, 3840]))('keeps a failed Reply anchored with its draft and retry at %i', async width => {
   await page.viewport(width, 844)
   vi.mocked(apiFetch).mockResolvedValueOnce(new Response('{}', { status: 409 })).mockResolvedValueOnce(new Response('{}'))
   const message: MessageInfo = { id: 'message', session_id: 'session', kind: 'ask', body: 'Ship this release?', status: 'open', created_at: '2026-10-25T12:00:00Z' }

@@ -119,7 +119,9 @@ func handleUsageLimits(h *Hub, dc *DaemonConn, msg protocol.UsageLimits) {
 		return
 	}
 	dc.SetUsageLimits(clean)
+	h.datasets.invalidate("blerg.engine.usage", dc.ID)
 	h.checkUsageNotices(dc, "")
+	h.checkUsageSample(dc)
 	h.broadcastOwnedDesktop(dc, func() any {
 		return protocol.DaemonLimitsChanged{
 			OwnershipRevision: dc.ownershipRevision(), ConnectionGeneration: dc.DesktopGeneration,

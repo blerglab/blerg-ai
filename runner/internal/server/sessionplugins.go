@@ -378,5 +378,5 @@ func (h *Hub) dispatchSessionPlugin(ctx context.Context, pool *pgxpool.Pool, p *
 		command.Plugins = []pluginspec.Entry{args.Entry}
 	}
 	raw, _ := json.Marshal(command)
-	h.trySendToDaemon(dc, raw)
+	h.trySendToDaemonContext(ctx, dc, raw)
 }

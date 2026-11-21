@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -69,6 +70,8 @@ func NormalizePinPolicy(s string) string {
 // Credential is what core hands the gateway for one connection: where to call and the
 // header carrying the secret. HeaderName and Value are empty for a connection with no auth.
 type Credential struct {
+	session *SessionDispatchRequest // control-plane proof; never serialized
+
 	URL        string
 	HeaderName string
 	Value      string
@@ -81,6 +84,45 @@ type Credential struct {
 // Core answers all of these with one uniform 404, so they cannot be told apart here.
 var ErrConnectionGone = errors.New("connection no longer available")
 
+// ErrBoardOwnerMissing is a safe configuration cause, never authority revocation.
+var ErrBoardOwnerMissing = errors.New("the board has no recorded owner; ask the owner or an administrator to assign an owner")
+
+func AuthorityCause(err error) string {
+	if errors.Is(err, ErrBoardOwnerMissing) {
+		return "board_owner_missing"
+	}
+	return ""
+}
+
+var ErrStandingSuspended = fmt.Errorf("%w: standing authority suspended", ErrConnectionGone)
+
+// AuthorityState reports only safe effective state; outages never mean revoke.
+func AuthorityState(err error) string {
+	if err == nil {
+		return "active"
+	}
+	if errors.Is(err, ErrStandingSuspended) {
+		return "suspended"
+	}
+	if errors.Is(err, ErrConnectionGone) {
+		return "revoked"
+	}
+	return "unavailable"
+}
+func standingRefusal(resp *http.Response, standing bool) error {
+	if !standing {
+		return ErrConnectionGone
+	}
+	switch resp.Header.Get("X-Blerg-Standing-State") {
+	case "suspended":
+		return ErrStandingSuspended
+	case "revoked":
+		return ErrConnectionGone
+	default:
+		return errors.New("standing authority unavailable")
+	}
+}
+
 // CoreClient fetches a fresh credential for a connection from blerg-core.
 type CoreClient interface {
 	// Token returns the credential for connectionID. ErrConnectionGone when core
@@ -91,12 +133,20 @@ type CoreClient interface {
 // HTTPCoreClient implements CoreClient against core's
 // POST /internal/mcp/connections/token (spec 4.5), guarded by the internal key.
 type HTTPCoreClient struct {
+	directTransportOnce sync.Once
+	directTransport     http.RoundTripper
+
+	ClusterDeployment bool // operator configuration, never inferred from a hostname
+
+	scopedWait func(context.Context, time.Duration) error // deterministic refresh-contention scheduler in tests
+
 	BaseURL     string
 	InternalKey string
 	HTTP        *http.Client // nil: a client with a 10 second timeout
 }
 
 type coreTokenRequest struct {
+	Standing     bool   `json:"standing,omitempty"`
 	AccountID    string `json:"account_id"`
 	ConnectionID string `json:"connection_id"`
 	TokenID      string `json:"token_id,omitempty"`
@@ -120,7 +170,7 @@ func (c *HTTPCoreClient) Token(ctx context.Context, proof Proof, connectionID st
 		return Credential{}, errors.New("core is not configured")
 	}
 	raw, err := json.Marshal(coreTokenRequest{
-		AccountID: proof.AccountID, ConnectionID: connectionID, TokenID: proof.TokenID, SessionID: proof.SessionID,
+		AccountID: proof.AccountID, ConnectionID: connectionID, TokenID: proof.TokenID, SessionID: proof.SessionID, Standing: PersonBehind(proof),
 	})
 	if err != nil {
 		return Credential{}, err
@@ -158,10 +208,10 @@ func (c *HTTPCoreClient) Token(ctx context.Context, proof Proof, connectionID st
 	case http.StatusNotFound:
 		// Core's own uniform answer says "not found"; a router's 404 for a route an older core
 		// lacks says something else and is a plain failure, not a removed connection.
-		if !isCoreNotFound(resp) {
+		if !PersonBehind(proof) && !isCoreNotFound(resp) {
 			return Credential{}, errors.New("core has no MCP credential route: is it up to date?")
 		}
-		return Credential{}, ErrConnectionGone
+		return Credential{}, standingRefusal(resp, PersonBehind(proof))
 	default:
 		return Credential{}, fmt.Errorf("core returned %d", resp.StatusCode)
 	}
@@ -173,4 +223,23 @@ func (c *HTTPCoreClient) Token(ctx context.Context, proof Proof, connectionID st
 func isCoreNotFound(resp *http.Response) bool {
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 	return strings.TrimSpace(string(raw)) == "not found"
+}
+
+// proxyFreeTransport keeps pooled direct connections and never mutates caller configuration.
+// A custom nonstandard transport is a trusted injection seam; production uses *http.Transport.
+func (c *HTTPCoreClient) proxyFreeTransport() http.RoundTripper {
+	c.directTransportOnce.Do(func() {
+		base := http.DefaultTransport
+		if c.HTTP != nil && c.HTTP.Transport != nil {
+			base = c.HTTP.Transport
+		}
+		if standard, ok := base.(*http.Transport); ok {
+			clone := standard.Clone()
+			clone.Proxy = nil
+			c.directTransport = clone
+		} else {
+			c.directTransport = base
+		}
+	})
+	return c.directTransport
 }

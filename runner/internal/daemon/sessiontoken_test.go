@@ -24,6 +24,9 @@ func TestSessionTokenMessageWritesTheTokenFile(t *testing.T) {
 	noSandboxes(t)
 	client := NewWSClient(Config{})
 	NewManager(client, ManagerConfig{ReposRoot: t.TempDir(), GithubOrg: "org", Command: []string{"unused"}})
+	if client.repositoryCloneVersion != protocol.RepositoryCloneVersion || client.handlers["clone_repository"] == nil {
+		t.Fatal("clone handler and advertised capability disagree")
+	}
 	handle := client.handlers["session_token"]
 	if handle == nil {
 		t.Fatal("no session_token handler registered")

@@ -10,7 +10,12 @@ Nothing new is collected. Every number is derived from what the runner already r
 ## Insights page
 
 Open **Insights** in the sidebar (or the bottom bar on a phone). Pick a range: 24 hours, 7, 30 or
-90 days.
+90 days. In a workspace, every section covers only its Main, workers and channels.
+The header names that workspace once. With no workspace (`/insights`), every section
+covers the signed-in person’s own work, including for administrators. There is no
+Everyone/Mine control; an administrator panel is separate future work. Startup and
+session lifecycle summaries live in Overview; Flow contains the card and worker
+activity charts.
 
 | Section | What it shows |
 | --- | --- |
@@ -34,16 +39,17 @@ Busy time counts from a session's first status change in the range, so a session
 the whole range with no events adds nothing. Durations come from event timestamps, so they are accurate to the event, not to the millisecond. A
 "resume" is the second or later start of one session.
 
-### One session
+### One session API
 
-The **Insights** button in a session's header opens that session's figures: how long it has lived
+The header, sidebar action and workspace palette command all open the same workspace
+tab. The existing `GET /api/sessions/{id}/insights` API still returns one session’s figures: how long it has lived
 and how that time split between working, waiting for you and idle; its turns, tool calls (the top
 five tools), the messages you sent it, the files it published, its MCP calls by outcome and its
 proposals; its subagents by type and model; and its tokens and estimated cost by model, with the
 main agent and its subagents side by side. A subagent's own tool calls are counted under the
 subagents, not as the session's. The rules are the page's (busy time, token counting, prices); the
-dialog refreshes every 30 seconds while the session is live. A terminal session shows its lifetime
-and files only: it runs the engine's CLI, which reports no turns or tokens.
+workspace tab refreshes every 30 seconds while visible. A terminal session reports its lifetime
+and files only: its engine CLI reports no turns or tokens.
 
 Who sees it: anyone who can open the session (every session but a private one, which is its owner's
 alone) can open its insights, so a member sees figures for sessions other people started. Tokens and
@@ -53,12 +59,12 @@ session's owner and administrators." in their place.
 
 ### Who sees what
 
-- On this page, a **member** sees only the sessions they started. (A session's own Insights dialog,
-  above, follows the session page instead, except for its tokens and cost.)
-- An **admin** (anyone who can manage accounts) sees everyone's, and can switch back to **Mine**.
-- A **private** session (a cron, or one with an MCP connection) counts toward an admin's totals but is
-  never named to anyone but its owner: it cannot appear in "slowest starts" or "biggest sessions"
-  for another person.
+- The dashboard is owner-only. A supplied workspace ID must belong to the caller
+  and pass session visibility checks; foreign and unknown IDs return the same 404.
+- Usage, startup, Flow, Reviews, Live and gates use the same owned session tree.
+  Workspace usage includes Main, workers, channels and native subagent tokens.
+- Internal Prometheus aggregates retain their installation scope. Cluster-wide
+  capacity figures are omitted from the personal/workspace dashboard.
 
 ### Dollar estimates
 
@@ -168,12 +174,46 @@ blerg_runner_cluster_sessions_active / blerg_runner_cluster_sessions_max
 
 ## API
 
-`GET /api/insights?range=24h|7d|30d|90d[&scope=mine]` returns what the page shows (browser sign-in
+`GET /api/insights?range=24h|7d|30d|90d[&workspace=<session-id>]` returns what the page shows (browser sign-in
 required). `GET /api/sessions/{id}/insights` returns one session's figures (a signed-in
 person who can see the session; one they cannot see answers 404, like an unknown one). Its `tokens`
 is `null`, with `"tokens_hidden": true`, unless the caller started the session or is an admin.
 `GET /api/insights/prices` lists the prices (any signed-in person);
 `PUT /api/insights/prices` and `DELETE /api/insights/prices?model=...` change them (admin only).
+
+### Ticket flow and recorded evidence
+
+Flow and Reviews read `GET /api/insights/activity?range=24h|7d|30d|90d`.
+`workspace=<session-id>` limits the report to an owned conversation tree and also
+allows `range=all`. This report is always owner-only, including for administrators;
+each card is checked against the person's current Board access before its metadata
+or marks are returned. Omitted card links remain unknown, rather than becoming
+unlinked work. Structured review and failure marks retain their existing event
+timestamps and severity lists; review prose and command output are not returned.
+
+The additive `questions` array contains per-conversation `asked`, `reached_person`
+and authorized `cards` links. Counts select questions by creation date, including
+nonblocking questions and questions from conversations older than the selected
+range. Ask-shaped session failure alerts are excluded. Reached means routed to the
+person's inbox (direct questions, explicit person requirements, approvals or
+recorded escalations), not read or answered. Counts do not expose question text.
+Unreadable links set `card_attribution_unknown`; shared questions count once in
+the whole report and cannot be assigned to one risk or size.
+
+Timing rows include the owned conversation's `title` and `has_subagents`, based
+on recorded native subagent starts or launched workers; person-started channels
+are excluded from that flag. Missing historical events cannot establish that no
+subagent ever ran. Time uses disjoint event/status intervals, including `turn_work`, background tasks
+and process observations. **Active time per card by size** sums active time from
+its unambiguously linked workers and session-backed subagents; idle and waiting
+on a person are excluded. No Board column or in-progress-to-done duration is used.
+Cards without linked workers, complete telemetry or unambiguous attribution are
+counted as unknown. Native subagents without separate active telemetry also make
+card time unknown: their elapsed duration is not treated as active time.
+
+Click Flow or Reviews chart bars and numeric summaries to see their exact card or
+conversation records in place. “Show all” returns from a chart selection; close an
+expanded numeric summary to return. Usage and token totals stay plain numbers.
 
 ### Live child telemetry
 

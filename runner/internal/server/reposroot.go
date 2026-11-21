@@ -104,6 +104,32 @@ func (h *Hub) trySendToDaemon(dc *DaemonConn, data []byte) (sent bool) {
 			defer func() { finish(sent) }()
 		}
 	}
+	return h.enqueueToDaemon(dc, data)
+}
+
+func (h *Hub) prepareDaemonInput(ctx context.Context, dc *DaemonConn, data []byte) ([]byte, func(bool)) {
+	if h.planInputContext != nil {
+		return h.planInputContext(ctx, dc, data)
+	}
+	if h.planInput != nil {
+		return h.planInput(dc, data)
+	}
+	return data, nil
+}
+
+func (h *Hub) trySendToDaemonContext(ctx context.Context, dc *DaemonConn, data []byte) (sent bool) {
+	data, finish := h.prepareDaemonInput(ctx, dc, data)
+	if finish != nil {
+		defer func() { finish(sent) }()
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	return h.enqueueToDaemon(dc, data)
+}
+
+// enqueueToDaemon performs no preparation, SQL or network I/O.
+func (h *Hub) enqueueToDaemon(dc *DaemonConn, data []byte) (sent bool) {
 	// Check and enqueue atomically with connection replacement. The send is
 	// nonblocking; no database or network I/O runs under the hub lock.
 	h.mu.RLock()

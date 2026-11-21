@@ -13,9 +13,10 @@ package server
 // Either way the answer is recorded as user_message{text, source: "ask_answer", message_id,
 // client_id?}, and the CLI's poll returns it to the engine.
 //
-// The native loop is different: its ask/update/note tools record their own events (and the loop
-// takes an answer typed in the chat itself), and it posts with the daemon token. The server records
-// nothing for a message posted with the daemon token, nor for a session that is not an agent one.
+// The native loop is different: its ask/update/note tools record their own events, and it posts
+// with the daemon token. A typed answer takes the same path here, and the loop reads the committed
+// result from its poll. The server records nothing for a message posted with the daemon token, nor
+// for a session that is not an agent one.
 //
 // The events' client ids are derived from the message id (messageEventID), so recording one twice
 // stores it once.
@@ -25,7 +26,10 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"log/slog"
 	"time"
+
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
@@ -41,11 +45,16 @@ func messageEventID(messageID, role string) string {
 
 // messagingPayload is the payload of an ask/update/note event (agent.MessagingPayload).
 type messagingPayload struct {
-	OwnerOnly bool   `json:"owner_only,omitempty"`
-	NoWait    bool   `json:"no_wait,omitempty"`
-	Body      string `json:"body"`
-	MessageID string `json:"message_id"`
-	TurnID    string `json:"turn_id,omitempty"`
+	QuestionWithdrawn bool `json:"question_withdrawn,omitempty"`
+	Decision          bool `json:"decision,omitempty"`
+	// LiveBinding is server-only routing metadata, stripped on daemon ingestion.
+	LiveBinding bool   `json:"live_binding,omitempty"`
+	Bound       bool   `json:"bound,omitempty"`
+	OwnerOnly   bool   `json:"owner_only,omitempty"`
+	NoWait      bool   `json:"no_wait,omitempty"`
+	Body        string `json:"body"`
+	MessageID   string `json:"message_id"`
+	TurnID      string `json:"turn_id,omitempty"`
 }
 
 // askAnswerPayload is the user_message an ask's answer is recorded as (agent.UserMessagePayload).
@@ -132,7 +141,7 @@ func (a *API) createCodexQuestion(ctx context.Context, req postMessageRequest) (
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var id string
-	if err = tx.QueryRow(ctx, `INSERT INTO messages (session_id,kind,body,status) VALUES ($1,'ask',$2,'open') RETURNING id`, req.SessionID, req.Body).Scan(&id); err != nil {
+	if err = tx.QueryRow(ctx, `INSERT INTO messages (session_id,kind,body,status,person_required,host_generation,urgent) VALUES ($1,'ask',$2,'open',$3,$4,$5) RETURNING id`, req.SessionID, req.Body, req.PersonRequired, req.HostGeneration, req.Urgent).Scan(&id); err != nil {
 		return "", err
 	}
 	raw, err := json.Marshal(messagingPayload{Body: req.Body, MessageID: id, TurnID: req.TurnID})
@@ -164,39 +173,33 @@ func askTurnID(ctx context.Context, pool interface {
 	return turnID
 }
 
-// recordAskAnswer records the answer to an ask the transcript holds (one `blerg-runner ask` posted;
-// the native loop records its own answers).
-func recordAskAnswer(ctx context.Context, h *Hub, pool *pgxpool.Pool, row db.MessageRow, answer, clientID string) {
-	if pool == nil || row.Kind != "ask" {
+// recordAskAnswer records committed answers for every engine. Native-loop echoes
+// use the same event ID, so they cannot duplicate or invent the answer.
+func recordAskAnswer(ctx context.Context, h *Hub, pool *pgxpool.Pool, row db.MessageRow, answer, clientID string, source ...string) {
+	if pool == nil || row.Kind != "ask" || answer == "" {
 		return
 	}
-	recorded, err := db.HasAgentEvent(ctx, pool, row.SessionID, messageEventID(row.ID, "ask"))
-	if err != nil {
-		return
-	}
-	if !recorded {
-		// Repair questions created before native Codex routing markers were persisted.
-		sess, err := db.GetSession(ctx, pool, row.SessionID)
-		if err != nil || sess == nil || sess.Engine == nil || *sess.Engine != "codex" {
-			return
-		}
+	by := ""
+	if len(source) > 0 {
+		by = answeredBy(source[0])
 	}
 	recordServerAgentEvent(ctx, h, pool, row.SessionID, messageEventID(row.ID, "answer"), "user_message",
-		askAnswerPayload{Text: answer, Source: "ask_answer", MessageID: row.ID, ClientID: clientID, TurnID: askTurnID(ctx, pool, row.SessionID, row.ID)})
+		askAnswerPayload{Text: answer, Source: "ask_answer", AnsweredBy: by, MessageID: row.ID, ClientID: clientID, TurnID: askTurnID(ctx, pool, row.SessionID, row.ID)})
 }
 
 // answerAskFromChat answers an open ask with a message the person sent to the session, and reports
 // whether it did (the message then does not go to the engine). messageID names the ask (the card's
-// reply); without one, the newest open ask the transcript holds is answered, if any — an ask of the
-// native loop is left to the loop, which takes the message itself.
+// reply); without one, the message remains ordinary conversation. Native loops
+// receive only the committed result through their question poll.
 func answerAskFromChat(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, text, clientID, messageID string) bool {
 	return answerAskFromChatAs(ctx, h, pool, sessionID, text, clientID, messageID, "")
 }
 
 // answerAskFromChatAs is answerAskFromChat for a sender known to be signed in
 // as answerer ("" when the sender is not a signed-in person, or unknown). Only
-// the session's owner answers an owner-only ask (an engine's command approval);
-// anyone else's text is left to reach the session as an ordinary message.
+// the session's owner answers it, or, in a session with no owner (a runner key
+// started it), whoever writes there; a person-only question then needs a
+// signed-in person. Anyone else's text reaches the session as an ordinary message.
 func answerAskFromChatAs(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, text, clientID, messageID, answerer string) bool {
 	return answerAskFrom(ctx, h, pool, sessionID, text, clientID, messageID, answerer, "")
 }
@@ -213,67 +216,56 @@ func answeredBy(source string) string {
 // answerAskFrom is answerAskFromChatAs for a message sent with source: the parent's answer to its
 // child's ask is recorded as the parent's (askAnswerPayload.AnsweredBy).
 func answerAskFrom(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, text, clientID, messageID, answerer, source string) bool {
-	if pool == nil {
+	if pool == nil || messageID == "" {
 		return false
 	}
-	ownerKnown, isOwner := false, false
-	owner := func() bool {
-		if !ownerKnown {
-			ownerKnown = true
-			if answerer != "" {
-				row, err := db.GetSession(ctx, pool, sessionID)
-				isOwner = err == nil && ownsSession(answerer, row)
-			}
-		}
-		return isOwner
-	}
-	var target *db.MessageRow
+	// A generic newest-ask or older native path must never consume a bound ask.
+	var hasBound bool
+	var boundErr error
 	if messageID != "" {
-		row, err := db.GetMessage(ctx, pool, messageID)
-		if err != nil || row == nil || row.SessionID != sessionID || row.Kind != "ask" || row.Status != "open" {
-			return false
-		}
-		if row.OwnerOnly && !owner() {
-			return false
-		}
-		target = row
+		boundErr = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM bound_asks WHERE message_id::text=$1)`, messageID).Scan(&hasBound)
 	} else {
-		if harnessCommand(text) {
-			return false // `/model …`, `/effort …` are for the session, never an answer
-		}
-		rows, err := db.ListOpenAsks(ctx, pool, sessionID)
-		if err != nil {
-			log.Printf("answer ask from chat %s: %v", sessionID, err)
-			return false
-		}
-		for i := range rows { // newest first
-			r := rows[i]
-			// A question the agent did not wait on is answered only by name (its card, its Needs
-			// you entry): the agent reads a chat message itself (questions.go).
-			if r.NoWait || r.OwnerOnly && !owner() {
-				continue
-			}
-			if ok, err := db.HasAgentEvent(ctx, pool, sessionID, messageEventID(r.ID, "ask")); err == nil && ok {
-				target = &r
-				break
-			}
-		}
-		if target == nil {
-			return false
-		}
+		boundErr = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM bound_asks WHERE workspace_id=$1 AND status='open')`, sessionID).Scan(&hasBound)
 	}
-	recorded, lookupErr := db.HasAgentEvent(ctx, pool, sessionID, messageEventID(target.ID, "ask"))
-	if lookupErr != nil {
-		return true
+	if boundErr != nil {
+		failurelog.Default.Event("bound_ask_lookup", slog.LevelWarn, "component", "runner", "cause", failurelog.Cause(boundErr))
+		return messageID != ""
 	}
-	// The answer, its chat record, and the input receipt commit together. A daemon
-	// reconnect must never turn an already-answered question into another engine input.
+	if hasBound {
+		return messageID != ""
+	}
+	session, err := db.GetSession(ctx, pool, sessionID)
+	if err != nil || session == nil {
+		return false
+	}
+	// A session started with a runner key has no owner to reserve an answer for.
+	ownerless := derefOrEmpty(session.SpawningAccountID) == ""
+	person := ownsSession(answerer, session) || (ownerless && answerer != "")
+	if source != promptSourceSession && !person && !ownerless {
+		return false
+	}
+	target, err := db.GetMessage(ctx, pool, messageID)
+	if err != nil || target == nil || target.SessionID != sessionID || target.Kind != "ask" || target.Status != "open" {
+		return false
+	}
+	if (source != promptSourceSession && childQuestionPending(ctx, pool, *target)) || questionNeedsPerson(*target) && !person {
+		return false
+	}
+
+	// The answer, its chat record, and the input receipt commit together. After a
+	// failure the accepted input stays pending and the next replay delivers it.
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return true
-	} // accepted input remains pending for retry
+	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	tag, err := tx.Exec(ctx, `UPDATE messages SET answer=$2,status='answered',answered_at=now() WHERE id=$1 AND status='open'`, target.ID, text)
+	by := ""
+	if source == promptSourceSession {
+		by = "session:" + derefOrEmpty(session.ParentSessionID)
+	} else if answerer != "" {
+		by = "person:" + answerer
+	}
+	tag, err := tx.Exec(ctx, `UPDATE messages SET answer=$2,status='answered',answered_at=now(),answered_by=$3,child_parent_notified=false WHERE id=$1 AND status='open' AND (NOT $4 OR (NOT child_escalated AND NOT person_required))`, target.ID, text, by, source == promptSourceSession)
 	if err != nil {
 		return true
 	}
@@ -288,11 +280,9 @@ func answerAskFrom(ctx context.Context, h *Hub, pool *pgxpool.Pool, sessionID, t
 	eventID := messageEventID(target.ID, "answer")
 	var seq int64
 	var fresh bool
-	if recorded {
-		seq, fresh, err = db.AppendAgentEventTx(ctx, tx, sessionID, eventID, "user_message", string(protocol.StripNUL(payload)), at)
-		if err != nil {
-			return true
-		}
+	seq, fresh, err = db.AppendAgentEventTx(ctx, tx, sessionID, eventID, "user_message", string(protocol.StripNUL(payload)), at)
+	if err != nil {
+		return true
 	}
 	if clientID != "" {
 		if _, err := tx.Exec(ctx, `UPDATE session_inputs SET settled_at=COALESCE(settled_at,now()) WHERE session_id=$1 AND client_id=$2`, sessionID, clientID); err != nil {

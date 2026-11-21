@@ -15,7 +15,7 @@
 #
 # NOT included here, and NOT containerizable: the blerg-runner DAEMON. Agent
 # sessions are actually run by a daemon process that must run on the HOST,
-# using the human's own `claude` CLI install, its auth, and tmux. See
+# using the human's own engine CLI install and login. See
 # blerg-up.sh and DAEMON.md for how to start it against blerg-runner.
 #
 # Postgres: one postgres:16 instance with three logical databases
@@ -45,7 +45,7 @@ services:
       retries: 10
 
   blerg-core:
-    build:
+    build: &blerg-core-build
       context: ../..
       dockerfile: core/Dockerfile
       args:
@@ -57,7 +57,13 @@ services:
       # only if other machines must reach the stack — and then change the three
       # origin vars to that host too, or login will still only work on localhost.
       - "${BLERG_BIND_ADDR:-127.0.0.1}:${BLERG_PORT_CORE:-8081}:8080"
+    volumes:
+      - blerg-live-data-core:/live-data:ro
+      - blerg-live-data-issuer-state:/issuer-state
     environment:
+      BLERG_LIVE_DATA_AUTHORITY_DIR: /issuer-state
+      BLERG_LIVE_DATA_TLS_DIR: /live-data
+      BLERG_LIVE_DATA_DESKTOP: "true"
       DATABASE_URL: postgres://blerg:blerg@postgres:5432/blerg_core?sslmode=disable
       # Docker (Compose) copies the proxy settings of ~/.docker/config.json into every service
       # container. A corporate proxy cannot resolve the names below, so calls between the
@@ -114,8 +120,25 @@ services:
       BLERG_CORE_MCP_ALLOW_HTTP_HOSTS: ${BLERG_CORE_MCP_ALLOW_HTTP_HOSTS:-}
       BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS: ${BLERG_CORE_MCP_ALLOW_PRIVATE_HOSTS:-}
     depends_on:
+      blerg-live-data-pki:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
+
+  # Only this offline initializer sees the dedicated CA private key.
+  blerg-live-data-pki:
+    build: *blerg-core-build
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE]
+    command: [live-data-pki, --root, /pki, --uid, "65532", --gid, "65532", --issuer-state-dir, /issuer-state]
+    volumes:
+      - blerg-live-data-issuer-state:/issuer-state
+      - blerg-live-data-authority:/pki/authority
+      - blerg-live-data-core:/pki/core
+      - blerg-live-data-runner:/pki/runner
 
   blerg-board:
     build:
@@ -215,6 +238,8 @@ services:
       # origin vars to that host too, or login will still only work on localhost.
       - "${BLERG_BIND_ADDR:-127.0.0.1}:${BLERG_PORT_RUNNER:-8083}:8080"
     environment:
+      BLERG_LIVE_DATA_TLS_DIR: /live-data
+      BLERG_LIVE_DATA_DESKTOP: "true"
       BLERG_RUNNER_DATABASE_URL: postgres://blerg:blerg@postgres:5432/blerg_runner?sslmode=disable
       # Docker (Compose) copies the proxy settings of ~/.docker/config.json into every service
       # container. A corporate proxy cannot resolve the names below, so calls between the
@@ -284,8 +309,11 @@ services:
       BLERG_RUNNER_MCP_MAX_RESULT_BYTES: ${BLERG_RUNNER_MCP_MAX_RESULT_BYTES:-}
     volumes:
       - blerg-desktop-runner-data:/data
+      - blerg-live-data-runner:/live-data:ro
     networks: [default, sandbox]
     depends_on:
+      blerg-live-data-pki:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       blerg-core:
@@ -314,3 +342,7 @@ networks:
 volumes:
   blerg-desktop-postgres:
   blerg-desktop-runner-data:
+  blerg-live-data-authority:
+  blerg-live-data-core:
+  blerg-live-data-runner:
+  blerg-live-data-issuer-state:

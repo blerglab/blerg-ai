@@ -141,6 +141,7 @@ describe("Settings — agent tokens", () => {
   let captured: { post?: Record<string, unknown>; postHeaders?: Record<string, string> };
 
   beforeEach(() => {
+    history.replaceState(null, "", "/settings?section=account");
     store = { tokens: [] };
     captured = {};
     // refreshGuard keeps its "already redirected" flag in sessionStorage, which jsdom shares
@@ -175,7 +176,7 @@ describe("Settings — agent tokens", () => {
     const select = screen.getByLabelText("Preset") as HTMLSelectElement;
     const options = Array.from(select.options).map((o) => o.textContent);
     expect(options).toEqual([
-      "run-sessions — Start and drive agent sessions on the runner (REST and MCP)",
+      "run-sessions — Start and drive agent workspaces on the runner (REST and MCP)",
       "board — Read and write cards on the board (REST and MCP)",
       "platform — Read your identity and credential status on core",
     ]);
@@ -396,7 +397,7 @@ describe("Settings — agent tokens", () => {
 
     await waitFor(() =>
       expect(
-        screen.queryAllByText("Your session has expired. Reload the page to sign in again."),
+        screen.queryAllByText("Your sign-in has expired. Reload the page to sign in again."),
       ).not.toHaveLength(0),
     );
     expect(screen.queryByText("No agent tokens yet.")).not.toBeInTheDocument();
@@ -476,6 +477,7 @@ describe("Settings", () => {
   let captureBody: { value?: Record<string, unknown> };
 
   beforeEach(() => {
+    history.replaceState(null, "", "/settings?section=integrations");
     store = { engines: [] };
     captureBody = {};
     vi.stubGlobal("fetch", buildFetchMock(store, captureBody));
@@ -524,14 +526,14 @@ describe("Settings", () => {
     render(<Settings />);
     await screen.findByText("Claude");
     expect(
-      screen.getByText("Connect the accounts your sessions use to run agents and access repositories."),
+      screen.getByText("Connect the accounts your workspaces use to run agents and access repositories."),
     ).toBeInTheDocument();
   });
 
   it("keeps per-kind git credential instructions alongside the plain section description", async () => {
     render(<Settings />);
     await screen.findByText("Claude");
-    expect(screen.getByText("Connect the accounts your sessions use to run agents and access repositories.")).toBeInTheDocument();
+    expect(screen.getByText("Connect the accounts your workspaces use to run agents and access repositories.")).toBeInTheDocument();
     // The sandbox has no git credentials: never promise a push from it.
     expect(screen.queryByText(/clone and push as you/)).toBeNull();
     expect(screen.getAllByText(/can commit but not push/).length).toBe(2);
@@ -545,8 +547,9 @@ describe("Settings", () => {
     expect(screen.getByText("Claude")).toBeInTheDocument();
     expect(within(screen.getByRole("heading", { name: "Credentials" }).closest("section")!).getByText("Codex")).toBeInTheDocument();
     expect(screen.getByText("Hermes")).toBeInTheDocument();
-    expect(screen.getByText("GitHub")).toBeInTheDocument();
-    expect(screen.getByText("GitLab")).toBeInTheDocument();
+    const credentialsSection = screen.getByRole("heading", { name: "Credentials" }).closest("section")!;
+    expect(within(credentialsSection).getByText("GitHub")).toBeInTheDocument();
+    expect(within(credentialsSection).getByText("GitLab")).toBeInTheDocument();
     expect(screen.queryByText("OpenClaw")).not.toBeInTheDocument();
   });
 
@@ -569,10 +572,11 @@ describe("Settings", () => {
     render(<Settings />);
     await screen.findByText("Claude");
 
+    const credentialsSection = screen.getByRole("heading", { name: "Credentials" }).closest("section")!;
     expect(screen.getByText("Claude").closest("li")).toHaveTextContent("claude setup-token");
-    expect(within(screen.getByRole("heading", { name: "Credentials" }).closest("section")!).getByText("Codex").closest("li")).toHaveTextContent("~/.codex/auth.json");
+    expect(within(credentialsSection).getByText("Codex").closest("li")).toHaveTextContent("~/.codex/auth.json");
     expect(screen.getByText("Hermes").closest("li")).toHaveTextContent("~/.hermes/.env");
-    expect(screen.getByText("GitHub").closest("li")).toHaveTextContent(
+    expect(within(credentialsSection).getByText("GitHub").closest("li")).toHaveTextContent(
       "fine-grained personal access token",
     );
 
@@ -583,7 +587,7 @@ describe("Settings", () => {
     expect(githubLink).toHaveAttribute("target", "_blank");
     expect(githubLink).toHaveAttribute("rel", "noopener noreferrer");
 
-    const gitlabItem = screen.getByText("GitLab").closest("li")!;
+    const gitlabItem = within(credentialsSection).getByText("GitLab").closest("li")!;
     expect(gitlabItem).toHaveTextContent("read_api");
     expect(gitlabItem).toHaveTextContent("write_repository");
     const gitlabLink = screen.getByRole("link", {
@@ -605,8 +609,9 @@ describe("Settings", () => {
     store.engines = ["github"];
     const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
     render(<Settings />);
-    await screen.findByText("GitHub");
-    const githubItem = screen.getByText("GitHub").closest("li")!;
+    await screen.findByText("Credentials");
+    const credentialsSection = screen.getByRole("heading", { name: "Credentials" }).closest("section")!;
+    const githubItem = within(credentialsSection).getByText("GitHub").closest("li")!;
     expect(githubItem).toHaveTextContent("Configured");
 
     fireEvent.click(
@@ -614,7 +619,7 @@ describe("Settings", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("GitHub").closest("li")!).toHaveTextContent("Not configured");
+      expect(within(credentialsSection).getByText("GitHub").closest("li")!).toHaveTextContent("Not configured");
     });
     const del = fetchMock.mock.calls.find(
       (c: unknown[]) => (c[1] as RequestInit | undefined)?.method === "DELETE",
@@ -746,6 +751,7 @@ describe("Settings — account", () => {
   let captured: { post?: Record<string, unknown> };
 
   beforeEach(() => {
+    history.replaceState(null, "", "/settings?section=account");
     captured = {};
     vi.spyOn(authClient, "getAccessToken").mockReturnValue("test-access-token");
     vi.spyOn(authClient, "ensureFreshToken").mockResolvedValue(false);

@@ -10,7 +10,7 @@ runner_config_aliases() {
               WEBHOOK_ALLOW_PRIVATE:BLERG_RUNNER_WEBHOOK_ALLOW_PRIVATE \
               WORKSPACE_STORAGE_CLASS:BLERG_RUNNER_WORKSPACE_STORAGE_CLASS; do
     alias_name="${pair%%:*}"; key="${pair#*:}"
-    if [[ -v "$alias_name" && ! -v "$key" ]]; then
+    if [ "${!alias_name+x}" = x ] && [ "${!key+x}" != x ]; then
       value="${!alias_name}"
       if [ "$alias_name" = WEBHOOK_ALLOW_PRIVATE ]; then
         case "${value,,}" in 1|true|yes) value=true ;; *) value=false ;; esac
@@ -216,7 +216,7 @@ runner_data_claim_check() {
 # deploying on a guess would point every new workspace at the wrong storage.
 workspace_default_class() {
   local out
-  if [[ -v BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS ]]; then
+  if [ "${BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS+x}" = x ]; then
     runner_data_class_ok "$BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS" \
       || { echo "BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS is not a StorageClass name: $BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS" >&2; return 1; }
     printf '%s' "$BLERG_RUNNER_WORKSPACE_DEFAULT_CLASS"

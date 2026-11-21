@@ -112,7 +112,7 @@ export default function FilesList({ sessionId, files, items, status, onView, onC
   // One version: its glyph, name (the click opens it when the app can show it), size · version · time ·
   // "you", and Download / Delete (on hover or focus; always shown on touch).
   const details = (a: ArtifactInfo, g: ArtifactGroup, badge: boolean) => {
-    const versioned = g.earlier.length > 0 || (a.version ?? 1) > 1
+    const versioned = !a.live && (g.earlier.length > 0 || (a.version ?? 1) > 1)
     const gone = a.missing === true
     const viewable = !gone && isViewable(a.view)
     const kind = isViewable(a.view) ? ARTIFACT_VIEWS[a.view].label : 'Download only'
@@ -127,8 +127,10 @@ export default function FilesList({ sessionId, files, items, status, onView, onC
         <span className="artifact-row-name" data-testid="artifact-name">{a.name}</span>
         <span className="artifact-row-meta">
           {gone ? 'no longer available' : formatSize(a.size)}
-          {badge && <> · <span className="artifact-version" data-testid="artifact-version">v{a.version}</span></>}
-          {a.created_at && <> · <TimeLabel ts={a.created_at} /></>}
+          {badge && !a.live && <> · <span className="artifact-version" data-testid="artifact-version">v{a.version}</span></>}
+          {a.live
+            ? <> · <span className="artifact-updated" data-testid="artifact-updated">Updated <TimeLabel ts={a.updated_at} /></span></>
+            : a.created_at && <> · <TimeLabel ts={a.created_at} /></>}
           {a.origin === 'user' && <> · <span className="artifact-you" title="Attached by you">you</span></>}
         </span>
       </>
@@ -165,7 +167,7 @@ export default function FilesList({ sessionId, files, items, status, onView, onC
     const listId = `${listBase}-${g.key.replace(/\W/g, '_')}`
     return (
       <li key={g.key} className="artifact-row" data-testid="artifact-row">
-        {details(g.latest, g, g.earlier.length > 0 || (g.latest.version ?? 1) > 1)}
+        {details(g.latest, g, !g.latest.live && (g.earlier.length > 0 || (g.latest.version ?? 1) > 1))}
         {g.earlier.length > 0 && (
           <>
             <button

@@ -6,8 +6,19 @@ import { useEffect, type RefObject } from 'react'
 
 const open: Array<RefObject<HTMLElement | null>> = []
 
-const typing = (t: EventTarget | null) =>
+/** Whether a dialog using this hook is currently mounted (the chat pane's own Ctrl/Cmd+A, below
+ *  every dialog, stands aside while one is open: it covers or replaces the transcript). */
+export function anySelectAllDialogOpen(): boolean {
+  return open.length > 0
+}
+
+/** A text field or editor under the key: its own native select-all applies, ours stands aside. */
+export const typing = (t: EventTarget | null) =>
   t instanceof HTMLElement && (t.isContentEditable || t.matches('input, textarea, select'))
+
+/** Ctrl+A or Cmd+A alone (not Alt or Shift, which are the browser's own bindings). */
+export const isSelectAllCombo = (e: KeyboardEvent) =>
+  e.key.toLowerCase() === 'a' && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey
 
 /** useSelectAllIn: while mounted, Ctrl/Cmd+A selects the children of `dialog`'s `.artifact-body`
  *  (or the dialog itself when it has none). */
@@ -16,7 +27,7 @@ export function useSelectAllIn(dialog: RefObject<HTMLElement | null>) {
     open.push(dialog)
     const onKey = (e: KeyboardEvent) => {
       if (open[open.length - 1] !== dialog) return
-      if (e.key.toLowerCase() !== 'a' || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return
+      if (!isSelectAllCombo(e)) return
       if (typing(e.target)) return
       const root = dialog.current
       if (!root) return

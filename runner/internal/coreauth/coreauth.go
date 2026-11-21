@@ -9,11 +9,12 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"github.com/blerglab/blerg-ai/contracts/identity"
 )
 
@@ -73,7 +74,7 @@ func newClient(parent context.Context, baseURL string, jwksInterval, revocations
 	ctx, cancel := context.WithCancel(parent)
 	c := &Client{
 		baseURL: baseURL,
-		http:    &http.Client{Timeout: requestTimeout},
+		http:    &http.Client{Timeout: requestTimeout, Transport: failurelog.Default.Transport("runner", "core", nil)},
 		cancel:  cancel,
 		keys:    identity.KeySet{},
 		revoked: identity.RevocationSet{},
@@ -131,7 +132,7 @@ func (c *Client) refreshJWKS(ctx context.Context) {
 	var raw map[string]string
 	if err := c.getJSON(ctx, "/.well-known/jwks", &raw); err != nil {
 		if !c.jwksErrLogged {
-			log.Printf("coreauth: jwks fetch failed (will retry): %v", err)
+			failurelog.Default.Event("runner:core-jwks-fetch", slog.LevelError, "component", "runner", "upstream", "core", "stage", "JWKS fetch", "cause", failurelog.Cause(err))
 			c.jwksErrLogged = true
 		}
 		return
@@ -140,7 +141,7 @@ func (c *Client) refreshJWKS(ctx context.Context) {
 	for kid, b64 := range raw {
 		pub, err := base64.RawURLEncoding.DecodeString(b64)
 		if err != nil || len(pub) != ed25519.PublicKeySize {
-			log.Printf("coreauth: skipping malformed jwks entry kid=%s", kid)
+			failurelog.Default.Event("runner:core-jwks-key", slog.LevelError, "component", "runner", "upstream", "core", "stage", "JWKS invalid key", "cause", failurelog.Cause(err))
 			continue
 		}
 		keys[kid] = ed25519.PublicKey(pub)
@@ -156,7 +157,7 @@ func (c *Client) refreshRevocations(ctx context.Context) {
 	var entries []revocationEntry
 	if err := c.getJSON(ctx, "/revocations", &entries); err != nil {
 		if !c.revErrLogged {
-			log.Printf("coreauth: revocations fetch failed (will retry): %v", err)
+			failurelog.Default.Event("runner:core-revocations-fetch", slog.LevelError, "component", "runner", "upstream", "core", "stage", "revocations fetch", "cause", failurelog.Cause(err))
 			c.revErrLogged = true
 		}
 		return

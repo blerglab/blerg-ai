@@ -43,4 +43,16 @@ mkdir "$tmp/stale"
 echo '// see docs/super''powers/x' > "$tmp/stale/main.go"
 must_fail stale "a mention of a deleted path in source"
 
+mkdir "$tmp/gate-telemetry"
+printf '%s\n' "path = '.super""powers/gate-runs.jsonl'" > "$tmp/gate-telemetry/main.py"
+must_pass gate-telemetry "the explicitly supported local gate telemetry path"
+
+mkdir "$tmp/other-retired"
+printf '%s\n' "path = '.super""powers/other.jsonl'" > "$tmp/other-retired/main.py"
+must_fail other-retired "other paths in the retired directory"
+
+mkdir "$tmp/suffixed-retired"
+printf '%s\n' "path = '.super""powers/gate-runs.jsonl/retired'" > "$tmp/suffixed-retired/main.py"
+must_fail suffixed-retired "a telemetry prefix used for a retired subdirectory"
+
 echo "check_links_test: all cases passed"

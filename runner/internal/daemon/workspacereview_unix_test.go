@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/blerglab/blerg-ai/runner/internal/hostgit"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
@@ -373,5 +374,35 @@ func TestWorkspaceExplorerProtectedRootAlias(t *testing.T) {
 	if e, err := newLocalExplorer(folder, info, protocol.WorkspaceManifest{Runtime: "host", LaunchGeneration: "launch"}, 1, func() bool { return true }); err == nil {
 		_ = e.Close()
 		t.Fatal("ancestor alias exposed protected root")
+	}
+}
+
+func TestWorkspaceDescriptorWalkMetadataChange(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".git", "objects"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	f, err := workspaceWalkOpen(root, ".git/objects", func(i int) {
+		if i == 1 {
+			done := make(chan error, 1)
+			go func() {
+				stamp := time.Unix(1000000000, 0)
+				done <- os.Chtimes(filepath.Join(dir, ".git"), stamp, stamp)
+			}()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	if f != nil {
+		_ = f.Close()
+	}
+	if !errors.Is(err, errWorkspaceMetadataChanged) {
+		t.Fatalf("expected metadata change, got %v", err)
 	}
 }

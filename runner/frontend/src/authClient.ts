@@ -1,3 +1,4 @@
+import { bindThemeAccount } from '../../../packages/settings/theme';
 // authClient.ts — the in-memory access-token module shared by every blerg frontend (Task 18
 // copies this exact module into board's and runner's own web/ trees).
 //
@@ -16,7 +17,9 @@ function receiveAccessToken(token: string): void {
     try { const data = JSON.parse(atob((raw ?? '').split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))) as { sub?: string; sid?: string; kind?: string }; return { sub: data.sub ?? '', login: `${data.kind}:${data.sub}:${data.sid}` }; } catch { return { sub: '', login: '' }; }
   };
   const before = claims(accessToken), after = claims(token);
+  bindThemeAccount(token);
   accessToken = token;
+  window.dispatchEvent(new Event('blerg-auth-refreshed'));
   if (before.sub !== after.sub) window.dispatchEvent(new Event('blerg-identity-changed'));
   if (before.login !== after.login) window.dispatchEvent(new Event('blerg-login-changed'));
 }
@@ -191,29 +194,54 @@ function silentFrame(): { answered: Promise<SilentOutcome>; done: Promise<void> 
 }
 
 // withRefreshLock runs fn while holding this origin's refresh lock, so tabs refresh one after
-// another. Without Web Locks (an old browser, a test) fn just runs.
-function withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
+// another. Without Web Locks (an old browser, a test) fn just runs. A signal aborted before the
+// lock is granted drops the request from the browser's queue: fn is never called, so a caller that
+// gave up never goes on to start a frame nobody is waiting for.
+function withRefreshLock<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
   if (!locks || typeof locks.request !== "function") return fn();
+  if (signal) return locks.request(REFRESH_LOCK, { signal }, fn);
   return locks.request(REFRESH_LOCK, fn);
 }
 
-// silentRefresh: one frame, the lock held until the frame is gone, and the caller's answer no later
-// than SILENT_TIMEOUT_MS.
+// silentRefresh: one frame, the lock held until the frame is gone, and the caller's answer no
+// later than SILENT_TIMEOUT_MS total — covering however long the lock itself takes to grant, not
+// just the frame's own wait (BLG-487: a tab queued behind another tab's lingering, up to
+// SILENT_LINGER_MS, frame used to wait lock-wait + SILENT_TIMEOUT_MS before falling back). The
+// lock request's own AbortSignal is what bounds the lock wait; once the lock is granted, the
+// frame keeps its normal lifecycle (it is never torn down early) even if the caller has already
+// given up.
 function silentRefresh(): Promise<SilentOutcome> {
   return new Promise<SilentOutcome>((resolve) => {
     let resolved = false;
+    let frameStarted = false;
     const report = (o: SilentOutcome) => {
       if (resolved) return;
       resolved = true;
       resolve(o);
     };
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      console.warn("blerg-auth: silent refresh gave up waiting", {
+        cause: frameStarted ? "frame-no-answer" : "lock-wait",
+        afterMs: SILENT_TIMEOUT_MS,
+      });
+      report("no-answer");
+      controller.abort();
+    }, SILENT_TIMEOUT_MS);
     void withRefreshLock(async () => {
+      frameStarted = true;
       const { answered, done } = silentFrame();
-      const timer = setTimeout(() => report("no-answer"), SILENT_TIMEOUT_MS);
-      answered.then(report, () => report("no-answer")).finally(() => clearTimeout(timer));
+      answered.then(report, () => report("no-answer"));
       await done;
-    }).catch(() => report("no-answer"));
+    }, controller.signal)
+      .catch((e) => {
+        if (!(e instanceof DOMException && e.name === "AbortError")) {
+          console.warn("blerg-auth: refresh lock request failed", { error: String(e) });
+        }
+        report("no-answer");
+      })
+      .finally(() => clearTimeout(timer));
   });
 }
 

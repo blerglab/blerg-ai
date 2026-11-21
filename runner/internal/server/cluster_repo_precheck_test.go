@@ -45,6 +45,7 @@ func TestClusterLaunchDoesNotResolveDesktopFolderWithoutDaemonHint(t *testing.T)
 	hub := NewHub()
 	dc := &DaemonConn{ID: "desktop-a", Name: "Desktop", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	dc.SetRepoRemotes(map[string]string{"app": "example-org/app"})
 	hub.Register(dc)
 	f := &fakeK8s{}
@@ -89,6 +90,7 @@ func TestRunnerContractDoesNotResolveDesktopFolder(t *testing.T) {
 	api, _ := runnerTestAPI(t)
 	dc := &DaemonConn{ID: "desktop-a", Name: "Desktop", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	dc.SetRepoRemotes(map[string]string{"app": "example-org/app"})
 	api.hub.Register(dc)
 	f := &fakeK8s{}
@@ -108,6 +110,7 @@ func TestRunnerContractDefaultOrgWinsOverDesktopOrigins(t *testing.T) {
 	for i, origin := range []string{"someone/app", "org/app"} {
 		dc := &DaemonConn{ID: "desktop-" + string(rune('a'+i)), Name: "Desktop", send: make(chan []byte, 8)}
 		dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+		dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 		dc.SetRepoRemotes(map[string]string{"app": origin})
 		api.hub.Register(dc)
 	}

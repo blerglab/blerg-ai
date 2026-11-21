@@ -34,6 +34,7 @@ func (a *API) RegisterTopicRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/sessions/{id}/topics", a.HandlePostTopic)
 	mux.HandleFunc("GET /api/sessions/{id}/topics", a.HandleGetTopics)
 	a.RegisterMarkRoutes(mux)
+	a.RegisterCardTimeSummaryRoute(mux)
 }
 
 type topicRequest struct {
@@ -131,9 +132,9 @@ func (a *API) HandlePostTopic(w http.ResponseWriter, r *http.Request) {
 		writeDatabaseFailure(w, "record the topic", "topics TopicState "+sid, err)
 		return
 	}
-	// The cap refuses only a start: a done on an open topic is always allowed, so no topic stays open for good.
-	if req.Action == "start" && n >= topics.MaxEvents {
-		writeError(w, http.StatusConflict, fmt.Sprintf("this session already has %d topic events", topics.MaxEvents))
+	if req.Action == "start" && n >= topics.MaxEventsPerMinute {
+		w.Header().Set("Retry-After", "60")
+		writeError(w, http.StatusTooManyRequests, "Topics changed too often; wait a minute and try again.")
 		return
 	}
 	var prev []byte
@@ -191,7 +192,8 @@ type topicsReply struct {
 	// Strokes is the History feed (topics/strokes.go), newest first.
 	Strokes []topics.Stroke `json:"strokes"`
 	// StrokesTruncated is how many older strokes the feed left out (every waiting one is kept).
-	StrokesTruncated int `json:"strokes_truncated"`
+	StrokesTruncated int    `json:"strokes_truncated"`
+	NextCursor       string `json:"next_cursor,omitempty"`
 }
 
 // topicsBootTag names this process in the reel's ETag (see topicsETag).
@@ -312,6 +314,26 @@ func (a *API) snapshotHandleGetTopics(w http.ResponseWriter, r *http.Request) {
 		writeDatabaseFailure(w, "read the session's history", "topics MaxAgentEventSeq "+sid, err)
 		return
 	}
+	liveThrough := through
+	before := through + 1
+	cursor := r.URL.Query().Get("cursor")
+	if cursor != "" {
+		parts := strings.Split(cursor, ":")
+		var snapshot int64
+		var cursorErr error
+		if len(parts) == 2 {
+			snapshot, cursorErr = strconv.ParseInt(parts[0], 10, 64)
+			if cursorErr == nil {
+				before, cursorErr = strconv.ParseInt(parts[1], 10, 64)
+			}
+		}
+		if len(parts) != 2 || cursorErr != nil || snapshot <= 0 || snapshot > through || before <= 0 || before > snapshot {
+			writeError(w, http.StatusBadRequest, "Invalid History cursor.")
+			return
+		}
+		through = snapshot
+	}
+
 	files, newest, err := db.ArtifactStamp(ctx, a.dbPool, sid)
 	if err != nil {
 		writeDatabaseFailure(w, "read the session's history", "topics ArtifactStamp "+sid, err)
@@ -322,46 +344,68 @@ func (a *API) snapshotHandleGetTopics(w http.ResponseWriter, r *http.Request) {
 		writeDatabaseFailure(w, "read the session's history", "topics AskStates "+sid, err)
 		return
 	}
-	etag := topicsETag(through, files, newest, row.Status, row.EndedAt, repoKey, showTokens, fmt.Sprintf("%d.%d", askOpen, len(askClosed)))
+	etag := topicsETag(liveThrough, files, newest, row.Status, row.EndedAt, repoKey, showTokens, fmt.Sprintf("%d.%d.%s", askOpen, len(askClosed), cursor))
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "private, no-store")
 	if etagMatches(r.Header.Get("If-None-Match"), etag) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	rows, err := db.ListReelEvents(ctx, a.dbPool, sid, through)
+	rows, err := db.ListReelEvents(ctx, a.dbPool, sid, liveThrough)
 	if err != nil {
 		writeDatabaseFailure(w, "read the session's history", "topics ListReelEvents "+sid, err)
 		return
 	}
 	// The cards approved proposals created: their chips sit in the topic that was open (else unmarked).
-	cards, err := db.ListProposalDecidedEvents(ctx, a.dbPool, sid, through)
+	cards, err := db.ListProposalDecidedEvents(ctx, a.dbPool, sid, liveThrough)
 	if err != nil {
 		writeDatabaseFailure(w, "read the session's history", "topics ListProposalDecidedEvents "+sid, err)
 		return
 	}
 	rows = append(rows, cards...)
 	// The session's renames: rows in the topic that was open (else unmarked).
-	renames, err := db.ListSessionRenamedEvents(ctx, a.dbPool, sid, through)
+	renames, err := db.ListSessionRenamedEvents(ctx, a.dbPool, sid, liveThrough)
 	if err != nil {
 		writeDatabaseFailure(w, "read the session's history", "topics ListSessionRenamedEvents "+sid, err)
 		return
 	}
 	rows = append(rows, renames...)
 	// The History feed's marks, asks, approvals, proposals and reviews.
-	strokeRows, err := db.ListStrokeEvents(ctx, a.dbPool, sid, through)
+	strokeRows, err := db.ListStrokeEvents(ctx, a.dbPool, sid, through, before)
 	if err != nil {
 		writeDatabaseFailure(w, "read the session's history", "topics ListStrokeEvents "+sid, err)
 		return
 	}
+
+	nextCursor := ""
+	if len(strokeRows) > db.StrokePageSize {
+		strokeRows = strokeRows[:db.StrokePageSize]
+		nextCursor = fmt.Sprintf("%d:%d", through, strokeRows[len(strokeRows)-1].Seq)
+	}
+	minSeq := before
+	if len(strokeRows) > 0 {
+		minSeq = strokeRows[len(strokeRows)-1].Seq
+	}
+	contextRows, err := db.StrokeContext(ctx, a.dbPool, sid, liveThrough, strokeRows)
+	if err != nil {
+		writeDatabaseFailure(w, "read the session's history", "topics StrokeContext", err)
+		return
+	}
 	rows = append(rows, strokeRows...)
+	rows = append(rows, contextRows...)
+
 	arts, err := db.ListArtifacts(ctx, a.dbPool, sid)
 	if err != nil {
 		writeDatabaseFailure(w, "read the session's history", "topics ListArtifacts "+sid, err)
 		return
 	}
 	events := make([]topics.Event, 0, len(rows))
+	seenEvents := map[string]bool{}
 	for _, e := range rows {
+		if seenEvents[e.ClientEventID] {
+			continue
+		}
+		seenEvents[e.ClientEventID] = true
 		events = append(events, topics.Event{Seq: e.Seq, ID: e.ClientEventID, Kind: e.Kind, Payload: json.RawMessage(e.Payload), Ts: e.Ts})
 	}
 	var published []topics.Artifact
@@ -378,11 +422,12 @@ func (a *API) snapshotHandleGetTopics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	reel := topics.Build(events, published, topics.Options{
-		ThroughSeq: through, Live: !terminalSessionStatus(row.Status), EndedAt: row.EndedAt, ShowTokens: showTokens,
+		ThroughSeq: liveThrough, Live: !terminalSessionStatus(row.Status), EndedAt: row.EndedAt, ShowTokens: showTokens,
 		CommitURL: commitURL, AskClosed: askClosed, AskDismissed: askDismissed,
+		PageStrokes: true, StrokeMinSeq: minSeq, StrokeBeforeSeq: before,
 	})
 	writeJSON(w, http.StatusOK, topicsReply{
 		SessionID: sid, ThroughSeq: through, GeneratedAt: time.Now().UTC(), TokensHidden: reel.TokensHidden,
-		Unmarked: reel.Unmarked, Topics: reel.Topics, Strokes: reel.Strokes, StrokesTruncated: reel.StrokesTruncated,
+		Unmarked: reel.Unmarked, Topics: reel.Topics, Strokes: reel.Strokes, StrokesTruncated: reel.StrokesTruncated, NextCursor: nextCursor,
 	})
 }

@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 // Card #85 in a real browser: the meters, a placeholder row and a no-window row fit the sidebar on
 // a phone and on a 4K screen, and every row carries its tooltip.
 import { describe, expect, it } from 'vitest'
@@ -11,7 +12,7 @@ const NOW = new Date('2026-10-16T11:50:00Z')
 const at = (mins: number) => new Date(NOW.getTime() + mins * 60_000).toISOString()
 
 describe('usage meters', () => {
-  it.each([390, 3840])('fit the sidebar with a placeholder and a no-window row at %i px', async width => {
+  it.each(browserWidths([390, 3840]))('fit the sidebar with a placeholder and a no-window row at %i px', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 844)
     render(
       <div style={{ width: width < 600 ? width : 300, padding: '8px 16px', boxSizing: 'border-box' }}>
@@ -37,7 +38,7 @@ describe('usage meters', () => {
 // Both motion modes must fit at phone and desktop sizes. Real computed styles prove the
 // reduced-motion override disables animation and reveals the accessible warning marker.
 describe('critical usage meters', () => {
-  it.each([390, 3840])('uses a slow pulse and a solid reduced-motion warning at %i px', async width => {
+  it.each(browserWidths([390, 3840]))('uses a slow pulse and a solid reduced-motion warning at %i px', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 844)
     render(<div style={{ width: width < 600 ? width : 300 }}>
       <UsageMeters now={NOW} daemons={[makeDaemon({ usage_limits: [{ provider: 'codex', windows: [{ id: '7d', used_percent: 94.6, resets_at: at(60) }] }] })]} />
@@ -66,7 +67,7 @@ describe('critical usage meters', () => {
 
 // Refusals use the same critical motion and accessible reduced-motion treatment.
 describe('capped usage chip', () => {
-  it.each([390, 3840])('pulses and respects reduced motion at %i px', async width => {
+  it.each(browserWidths([390, 3840]))('pulses and respects reduced motion at %i px', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 844)
     render(<div style={{ width: width < 600 ? width : 300 }}>
       <UsageMeters now={NOW} daemons={[makeDaemon({ usage_limits: [{ provider: 'codex', windows: [{ id: '7d', used_percent: 50, resets_at: at(60) }, { id: 'capped', used_percent: 100, resets_at: at(60) }] }] })]} />

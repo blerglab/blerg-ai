@@ -74,7 +74,7 @@ func TestClaudeWeeklyRefusalSchedulesAndFiresResume(t *testing.T) {
 	d.emitTurnMessage(agent.UserMessagePayload{Text: "continue", Source: "chat"})
 	text := "You've hit your weekly limit · resets " + now.AddDate(0, 0, 3).Format("Jan 2, 2006, 3:04pm") + " (UTC)"
 	line := fmt.Sprintf(`{"type":"assistant","error":"rate_limit","message":{"model":"<synthetic>","content":[{"type":"text","text":%q}]}}`, text)
-	p := &ccProc{sawInit: true}
+	p := claudeTestProc(t, d, &ccProc{sawInit: true})
 	d.onLine(p, []byte(line))
 	result := fmt.Sprintf(`{"type":"result","subtype":"error_during_execution","is_error":true,"result":%q}`, text)
 	d.onLine(p, []byte(result))

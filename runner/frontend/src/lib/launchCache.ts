@@ -78,6 +78,8 @@ export interface DaemonApiInfo {
 }
 
 export interface ClusterStatusApi {
+  runtime_target_id?: string
+  runtime_target_name?: string
   workspace_capabilities?: WorkspaceCapabilities
   configured: boolean
   /** BLERG_RUNNER_SANDBOX_CLUSTER_CHILDREN: "once" (a sandboxed desktop session asks for each

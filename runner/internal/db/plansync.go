@@ -46,7 +46,7 @@ type PlanFact struct {
 // PendingPlanFacts are the recorded facts no nudge has carried yet, oldest first.
 func PendingPlanFacts(ctx context.Context, q Querier, sessionID string) ([]PlanFact, error) {
 	rows, err := q.Query(ctx, `SELECT key, pending FROM session_plan_nudges
-		WHERE session_id = $1 AND nudged_at IS NULL AND pending IS NOT NULL ORDER BY created_at, key LIMIT 20`, sessionID)
+		WHERE session_id = $1 AND nudged_at IS NULL AND pending IS NOT NULL ORDER BY (key LIKE 'telemetry:%'), created_at, key LIMIT 20`, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +171,7 @@ func PlanChildren(ctx context.Context, q Querier, parentID string) ([]PlanChild,
 			COALESCE((SELECT r.seq FROM child_result_reads r WHERE r.parent_session_id = $1 AND r.child_session_id = s.id), -1),
  EXISTS(SELECT 1 FROM messages m WHERE m.session_id=s.id AND m.kind='ask' AND m.status='open') OR EXISTS(SELECT 1 FROM review_requests r WHERE r.session_id=s.id AND r.state='pending')
 		FROM sessions s
-		WHERE s.parent_session_id = $1 AND s.archived_at IS NULL AND s.discard_requested_at IS NULL
+		WHERE s.parent_session_id = $1 AND s.delegation_via IS DISTINCT FROM 'person' AND s.archived_at IS NULL AND s.discard_requested_at IS NULL
 		ORDER BY s.started_at DESC LIMIT 100`, parentID)
 	if err != nil {
 		return nil, err

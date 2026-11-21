@@ -34,6 +34,9 @@ type liveToolLister interface {
 
 // RegisterMCPRoutes registers the human-only MCP connection routes on mux.
 func (a *API) RegisterMCPRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /internal/live-data/definition", a.handleLiveDefinition)
+	mux.HandleFunc("POST /internal/live-data/attempt", a.handleLiveAttempt)
+	mux.HandleFunc("POST /internal/live-data/posture", a.handleLivePosture)
 	mux.HandleFunc("GET /api/mcp/connections", a.HandleGetMCPConnections)
 	mux.HandleFunc("GET /api/mcp/connections/{id}/tools", a.HandleGetMCPConnectionTools)
 	mux.HandleFunc("PATCH /api/mcp/connections/{id}/defaults", a.HandlePatchMCPConnectionDefaults)

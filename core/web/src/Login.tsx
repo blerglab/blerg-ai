@@ -29,7 +29,7 @@ export function noticeFor(search: string): string | null {
       ? "Password changed — sign in again with your new username."
       : "Password changed — sign in again.";
   }
-  if (q.get("reason") === "expired") return "Your session expired or was signed out. Sign in again.";
+  if (q.get("reason") === "expired") return "Your sign-in expired or ended. Sign in again.";
   return null;
 }
 

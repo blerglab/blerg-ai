@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -163,50 +164,20 @@ func TestArtifactVersionsConcurrentPublishesAreDistinctAndConsecutive(t *testing
 	}
 }
 
-func TestArtifactVersionsTwentyFirstIsRefused(t *testing.T) {
-	fx := newArtFx(t)
-	const msg = "This file already has 20 versions; delete an old one first."
-	for i := 1; i <= db.MaxArtifactVersions; i++ {
-		if m := fx.pubVer(fx.sessTok, fx.sess, "big.txt", fmt.Sprint(i)); m.Version != i {
-			t.Fatalf("publish %d = v%d", i, m.Version)
+// Exercise the pre-body refusal at the real boundary without publishing hundreds of files.
+func TestArtifactVersionsCap(t *testing.T) {
+	if db.MaxArtifactVersions != 500 {
+		t.Fatalf("version cap = %d, want 500", db.MaxArtifactVersions)
+	}
+	for _, count := range []int{0, 20, 499, 500, 501} {
+		rec := httptest.NewRecorder()
+		refused := refuseArtifactVersion(rec, count)
+		if refused != (count >= 500) {
+			t.Errorf("count %d: refused = %v", count, refused)
 		}
-	}
-	rec := fx.upload(fx.sessTok, fx.sess, []byte("21"), upOpts{name: "big.txt"})
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), msg) {
-		t.Fatalf("21st version = %d %s, want 409 %q", rec.Code, rec.Body.String(), msg)
-	}
-	// Nothing was stored for it, and another name still goes in.
-	rows, _ := db.ListArtifacts(context.Background(), fx.api.dbPool, fx.sess)
-	if len(rows) != db.MaxArtifactVersions {
-		t.Errorf("%d rows after the refusal, want %d", len(rows), db.MaxArtifactVersions)
-	}
-	if m := fx.pubVer(fx.sessTok, fx.sess, "small.txt", "x"); m.Version != 1 {
-		t.Errorf("another name = v%d", m.Version)
-	}
-	// Deleting an old version makes room.
-	first := rows[len(rows)-1]
-	if first.Version != 1 {
-		t.Fatalf("oldest row is v%d", first.Version)
-	}
-	if rec := fx.get("DELETE", "/api/sessions/"+fx.sess+"/artifacts/"+first.ID, fx.human(artUser)); rec.Code != http.StatusNoContent {
-		t.Fatalf("delete = %d", rec.Code)
-	}
-	if m := fx.pubVer(fx.sessTok, fx.sess, "big.txt", "again"); m.Version != 21 {
-		t.Errorf("after a delete = v%d, want v21", m.Version)
-	}
-}
-
-func TestArtifactVersionsUserUploadsHaveTheSameCap(t *testing.T) {
-	fx := newArtFx(t)
-	old := maxUploadsPerSession
-	maxUploadsPerSession = 50 // so the 20-version cap, not the 20-uploads cap, is what is exercised
-	t.Cleanup(func() { maxUploadsPerSession = old })
-	for i := 1; i <= db.MaxArtifactVersions; i++ {
-		fx.attachVer(fx.sess, "in.txt", fmt.Sprint(i))
-	}
-	rec := fx.userUpload(fx.human(artUser), fx.sess, []byte("21"), "in.txt")
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "20 versions") {
-		t.Fatalf("21st upload = %d %s", rec.Code, rec.Body.String())
+		if refused && (rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "This file already has 500 versions; delete an old one first.")) {
+			t.Errorf("count %d: %d %s", count, rec.Code, rec.Body.String())
+		}
 	}
 }
 

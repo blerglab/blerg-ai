@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { useState } from 'react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -11,6 +12,7 @@ import { syncViewCacheSessions } from '../lib/sessionViewCache'
 import '../index.css'
 import '@blerglab/chat/blerg.css'
 const read = vi.hoisted(() => vi.fn())
+vi.mock('../ws', () => import('../test/wsMock'))
 vi.mock('../apiFetch', () => ({ apiFetch: read }))
 vi.mock('../lib/liveBoardCard', () => ({ signedInAccount: () => 'person-a' }))
 vi.mock('../lib/chatTransport', () => ({ blergTransport: () => ({ files: null }) }))
@@ -104,7 +106,7 @@ it('turns compaction off in Settings immediately while retaining expansion', asy
   fireEvent.click(setting)
   await screen.findByRole('treeitem', { name: 'dev/ll/api' })
 })
-it.each([390, 3840])('truncates the start with a full-path tooltip at %i px', async width => {
+it.each(browserWidths([390, 3840]))('truncates the start with a full-path tooltip at %i px', async width => {
   await page.viewport(width, 844)
   fixture('a-long-folder-'.repeat(20))
   const row = await loadedChain()

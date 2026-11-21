@@ -102,6 +102,12 @@ func TestBoardManifestOperations(t *testing.T) {
 		got[op.Name] = route{op.Method + " " + op.Path, op.Cap}
 	}
 	want := map[string]route{
+		"milestone_burn":                {"GET /api/boards/{id}/burn", "card.read"},
+		"list_releases":                 {"GET /api/boards/{id}/releases", "card.read"},
+		"get_release":                   {"GET /api/boards/{id}/releases/{release}", "card.read"},
+		"create_release":                {"POST /api/boards/{id}/releases", "card.write"},
+		"update_release":                {"PATCH /api/boards/{id}/releases/{release}", "card.write"},
+		"close_release":                 {"POST /api/boards/{id}/releases/{release}/close", "card.write"},
 		"discover_board_launch_options": {"GET /api/boards/{id}/launch-options", "card.write"},
 		"onboard":                       {"GET /onboard", ""},
 		"list_boards":                   {"GET /api/boards", "card.read"},
@@ -113,6 +119,7 @@ func TestBoardManifestOperations(t *testing.T) {
 		"create_column":                 {"POST /api/boards/{id}/columns", "column.write"},
 		"move_column":                   {"POST /api/columns/{id}/move", "column.write"},
 		"list_cards":                    {"GET /api/boards/{id}/cards", "card.read"},
+		"board_card_view":               {"GET /api/boards/{id}/cards/view", "card.read"},
 		"search_cards":                  {"GET /api/boards/{id}/cards/search", "card.read"},
 		"create_card":                   {"POST /api/boards/{id}/cards", "card.write"},
 		"get_card":                      {"GET /api/cards/{id}", "card.read"},

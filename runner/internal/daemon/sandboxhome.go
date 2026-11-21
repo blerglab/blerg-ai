@@ -39,7 +39,7 @@ import (
 // Nothing in a sandbox home is ever read back by the daemon or copied to the host. While the
 // session runs, the daemon re-copies the host's current login in every sandboxLoginInterval (a
 // login the host engine refreshed reaches the session that way). When the host's login has expired
-// and the host engine has not refreshed it, the session is told its sign-in needs refreshing on
+// and native host renewal is unavailable or fails, the session is told its sign-in needs refreshing on
 // this machine.
 //
 // The top level of a sandbox home (the sanitized copies, the placeholders) is never mounted
@@ -526,8 +526,7 @@ func clearSandboxHomeStarting(sessionID string) { sandboxHomesStarting.Delete(se
 
 // sweepOrphanSandboxHomes removes the homes a crash or a failed removal left behind: no registered
 // sandbox, no running container of that name, no start in progress, not touched within
-// sandboxHomeSweepGrace, and keep says the daemon has no use for it (a live session, or a sandboxed
-// terminal's recovery record whose transcript is in it).
+// sandboxHomeSweepGrace, and keep says the daemon has no live agent using it.
 func sweepOrphanSandboxHomes(keep func(sessionID string) bool) {
 	state := DaemonStateDir()
 	if state == "" {
@@ -564,26 +563,6 @@ func sweepOrphanSandboxHomes(keep func(sessionID string) bool) {
 	}
 }
 
-// sandboxTranscriptExists reports whether a sandboxed session's own home holds its Claude
-// transcript (a terminal sandbox brought back after a restart resumes from it). Only looked up,
-// never opened.
-func sandboxTranscriptExists(sessionID string) bool {
-	dir, ok := sandboxHomePath(sessionID)
-	if !ok {
-		return false
-	}
-	matches, err := filepath.Glob(filepath.Join(dir, "claude", "projects", "*", sessionID+".jsonl"))
-	if err != nil {
-		return false
-	}
-	for _, m := range matches {
-		if info, err := os.Lstat(m); err == nil && info.Mode().IsRegular() {
-			return true
-		}
-	}
-	return false
-}
-
 // ─── The login copies ──────────────────────────────────────────────────────────────────────────
 
 // sandboxLoginInterval is how often the host's current login is copied into every live sandbox.
@@ -594,6 +573,16 @@ var sandboxLoginOnce sync.Once
 // ensureSandboxLoginRefresh starts the daemon's login-copy loop, once.
 func ensureSandboxLoginRefresh() {
 	sandboxLoginOnce.Do(func() {
+		// Native refresh can take its full timeout. Give it a separate, serial loop
+		// so copying other logins never waits for a native authentication process.
+		go func() {
+			ticker := time.NewTicker(sandboxLoginInterval)
+			defer ticker.Stop()
+			for now := range ticker.C {
+				home := homeDir()
+				refreshNeededSandboxHostLogins(now, home, engineHome(home, "CODEX_HOME", ".codex"))
+			}
+		}()
 		go func() {
 			t := time.NewTicker(sandboxLoginInterval)
 			defer t.Stop()

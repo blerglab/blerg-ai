@@ -40,7 +40,7 @@ describe("BoardChat start failure", () => {
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce([{ ...session, lifecycle: "starting" }]);
     render(<BoardChat boardId="b1" onClosed={vi.fn()} />);
-    expect(await screen.findByRole("alert")).toHaveTextContent(`The board session could not start: ${reason}`);
+    expect(await screen.findByRole("alert")).toHaveTextContent(`The board channel could not start: ${reason}`);
     const opened = vi.fn();
     window.addEventListener("blerg-board:open-settings", opened);
     fireEvent.click(screen.getByRole("button", { name: "Open board settings" }));
@@ -57,7 +57,7 @@ describe("BoardChat runner refusal", () => {
     const reason = "the runner could not start this session: Desktop has no repository named blerg; open or clone it there, or choose another desktop";
     vi.mocked(api).mockResolvedValueOnce([]).mockRejectedValueOnce(new Error(reason));
     render(<BoardChat boardId="b1" onClosed={vi.fn()} />);
-    expect(await screen.findByRole("alert")).toHaveTextContent(`The board session could not start: ${reason}`);
+    expect(await screen.findByRole("alert")).toHaveTextContent(`The board channel could not start: ${reason}`);
     expect(screen.getByRole("button", { name: "Open board settings" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
   });

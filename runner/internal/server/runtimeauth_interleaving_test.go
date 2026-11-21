@@ -140,6 +140,7 @@ func TestRuntimeReplacedSocketDisconnectCannotMutateNewLaunch(t *testing.T) {
 	}
 	dc := &DaemonConn{ID: daemon, Name: "runner-" + sid, Mode: "runner", BoundSessionID: sid, RuntimeTokenID: token.ID, send: make(chan []byte, 16)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	hub.Register(dc)
 	hub.SetSessionOwner(sid, daemon)
 	current, _, err := db.MintRuntimeLaunch(ctx, pool, sid, "", time.Hour)

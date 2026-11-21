@@ -27,6 +27,102 @@ beforeEach(() => { vi.useFakeTimers() })
 afterEach(() => { resetRefStoresForTest(); vi.useRealTimers() })
 
 describe.each(cases)('$kind authority', ({ kind, key }) => {
+  it.each(['miss', 'error'] as const)('retries a stale %s without replacing the resolver or remounting', async outcome => {
+    const store = createRefStore()
+    const read = vi.fn().mockImplementationOnce(async () => {
+      if (outcome === 'error') throw new Error('temporary failure')
+      return false
+    }).mockResolvedValue(true)
+    store.subscribe(() => {})
+    store.setResolvers(resolvers(kind, read))
+    store.want(key)
+    await flush()
+    expect(read).toHaveBeenCalledOnce()
+    expect(store.get(key).state).toBe(outcome === 'miss' ? 'none' : 'pending')
+    await vi.advanceTimersByTimeAsync(5000 + DEBOUNCE_MS)
+    expect(read).toHaveBeenCalledTimes(2)
+    expect(store.get(key).state).toBe(kind === 'commit' ? 'commit' : 'card')
+    await vi.advanceTimersByTimeAsync(120000)
+    expect(read).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['miss', 'error'] as const)('caps repeated %s lookups until its resolver changes', async outcome => {
+    const store = refStoreFor('capped-session')
+    const read = vi.fn(async () => {
+      if (outcome === 'error') throw new Error('temporary failure')
+      return false
+    })
+    const readers = resolvers(kind, read)
+    const unsubscribe = store.subscribe(() => {})
+    store.setResolvers(readers)
+    store.want(key)
+    await flush()
+    for (const delay of [5000, 10000, 20000, 40000]) {
+      await vi.advanceTimersByTimeAsync(delay + DEBOUNCE_MS)
+    }
+    expect(read).toHaveBeenCalledTimes(5)
+    expect(store.get(key)).toEqual({ state: 'none' })
+    unsubscribe()
+    const remounted = refStoreFor('capped-session')
+    remounted.subscribe(() => {})
+    remounted.setResolvers(readers)
+    remounted.want(key)
+    await vi.advanceTimersByTimeAsync(600000)
+    expect(read).toHaveBeenCalledTimes(5)
+    const found = vi.fn(async () => true)
+    remounted.setResolvers(resolvers(kind, found))
+    await flush()
+    expect(found).toHaveBeenCalledOnce()
+    expect(store.get(key).state).toBe(kind === 'commit' ? 'commit' : 'card')
+  })
+
+  it('backs off repeated misses and stops reads after unsubscribe', async () => {
+    const store = createRefStore()
+    const read = vi.fn(async () => false)
+    const unsubscribe = store.subscribe(() => {})
+    store.setResolvers(resolvers(kind, read))
+    store.want(key)
+    await flush()
+    for (const delay of [5000, 10000]) {
+      const count = read.mock.calls.length
+      await vi.advanceTimersByTimeAsync(delay - 1)
+      expect(read).toHaveBeenCalledTimes(count)
+      await vi.advanceTimersByTimeAsync(1 + DEBOUNCE_MS)
+      expect(read).toHaveBeenCalledTimes(count + 1)
+    }
+    unsubscribe()
+    await vi.advanceTimersByTimeAsync(120000)
+    expect(read).toHaveBeenCalledTimes(3)
+    store.subscribe(() => {})
+    store.want(key)
+    await flush()
+    expect(read).toHaveBeenCalledTimes(4)
+    await vi.advanceTimersByTimeAsync(600000)
+    expect(read).toHaveBeenCalledTimes(5)
+    expect(store.get(key)).toEqual({ state: 'none' })
+  })
+
+  it('retires retry timers when its resolver or viewer changes', async () => {
+    const store = createRefStore()
+    store.subscribe(() => {})
+    const missing = vi.fn(async () => false)
+    store.setResolvers(resolvers(kind, missing))
+    store.want(key)
+    await flush()
+    const found = vi.fn(async () => true)
+    store.setResolvers(resolvers(kind, found))
+    await flush()
+    await vi.advanceTimersByTimeAsync(5000 + DEBOUNCE_MS)
+    expect(found).toHaveBeenCalledOnce()
+    expect(store.get(key).state).toBe(kind === 'commit' ? 'commit' : 'card')
+    store.setResolvers(resolvers(kind, missing))
+    await flush()
+    store.clear()
+    await vi.advanceTimersByTimeAsync(120000)
+    expect(missing).toHaveBeenCalledTimes(2)
+    expect(store.get(key).state).toBe('pending')
+  })
+
   it('rechecks a cached result when its resolver changes', async () => {
     const store = createRefStore()
     store.setResolvers(resolvers(kind, async () => true))
@@ -124,4 +220,17 @@ it.each(['BLG-205', '(BLG-205)', 'BLG-205/AD-6'])('parses board keys: %s', text 
 })
 it.each(['555-1234', '2026-10', '155-157', '1AB-2', 'A-2', 'ABCDEF-2', 'BLG-0', 'BLG-02', 'prefixBLG-2', 'https://example.com/BLG-2', 'BLG-2suffix'])('does not parse invalid key references: %s', text => {
   expect(splitRefs(text).filter(p => 'key' in p && p.key.startsWith('card:'))).toEqual([])
+})
+
+describe('repository-qualified issue parsing', () => {
+  it.each(['example-org/example-repo#19', 'example-org/example-repo issue #19', 'example-org/example-repo issues #19, #20 and #23'])('keeps %s out of board references', text => {
+    const pieces = splitRefs(text)
+    expect(pieces.filter(p => 'key' in p || 'cards' in p)).toEqual([])
+    expect(pieces.map(p => p.text).join('')).toBe(text)
+    expect(pieces.filter(p => 'href' in p)).toHaveLength([...text.matchAll(/#\d+/g)].length)
+  })
+
+  it('still parses a lone card number', () => {
+    expect(splitRefs('#19')).toEqual([{ text: '#19', key: 'card:19' }])
+  })
 })

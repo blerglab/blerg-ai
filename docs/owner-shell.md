@@ -4,6 +4,41 @@ The owner-shell implementation is separate from agent terminal input, output,
 History, tmux snapshots, and session resize. It never uses admin viewing
 permission as permission to execute as another person.
 
+## Persistent desktop shells (v2)
+
+On a supported personal desktop, a verified v2 connection separates permission to
+control a shell from permission for its process to remain alive. Sleeping or losing
+the network suspends input and output when the short access grant expires. The
+same runner and desktop daemon can reconnect, recheck the original login,
+identity, consent, and complete custody inventories, and authorize the same shell
+with a fresh key and access epoch. Desktop processes have a finite seven-day
+maximum lifetime, shortened by the original login or credential deadline. Sign-out,
+withdrawal, policy revocation, and confirmed identity changes end the affected
+shells when observed. Access never resumes on an old grant.
+
+Each host shell needs its own fresh **Allow this shell** acceptance. The v2
+acceptance explicitly names `version: 2`; an older cached browser must refresh
+before it can approve the longer offline lifetime. The terminal
+shows its lifetime and a **Withdraw consent** action. Consent can also be withdrawn
+while the desktop is offline, without restoring a terminal tab. Withdrawal denies
+access immediately; the UI reports cleanup as pending until there is physical
+cleanup proof. `GET /api/sessions/{id}/shell-consents` lists paginated denial
+metadata for the original owner and login; the existing consent endpoint accepts
+`withdraw` with a `consent_id`.
+
+Only allocated, unexpired custody keeps a disconnected workspace past the normal
+30-minute daemon-loss limit. The hold is bounded by the original absence and
+shell lifetime; reconnect attempts do not extend it. Closing custody supplies no
+hold. Output history is bounded and volatile, with explicit notices if old output
+was dropped. There is no disk transcript or daemon/runner restart guarantee.
+
+Selection requires a correlated personal-desktop welcome and positive installed
+helper, clock, and prepared-member probes. Unsupported guest clocks, including
+WSL and Docker Desktop guests, stay off. Cluster and mixed-version connections
+retain v1 behavior. See the [persistent shell design](design/persistent-shells.md)
+for the threat model, protocol, and release review requirements. The lease and
+termination details below describe that v1 baseline unless stated otherwise.
+
 ## Core policy
 
 Migration `core/internal/db/migrations/027_shell_policy.sql` adds the install-wide
@@ -37,7 +72,7 @@ instantly: grants last at most 30 seconds, renewed every 10 seconds.
 
 `GET /api/sessions/{id}/shells` lists only the exact live login’s handles for
 restoring tabs and explicit takeover; there is no cross-login or admin listing.
-`POST /api/sessions/{id}/shells` has an empty body. It returns opaque handle and
+`POST /api/sessions/{id}/shells` accepts an empty body or an optional `name` field. It returns opaque handle and
 shell IDs, runtime, and working-folder display metadata. Command, environment,
 and cwd input from the browser are refused. `DELETE /api/shells/{handle}` requests
 termination. Both require a verified human login and a valid Origin.
@@ -50,10 +85,10 @@ to an attachment. Each shell has one controller. An explicit `takeover=true`
 upgrade revokes the previous attachment. Reconnect requires fresh authentication
 and a fresh signed grant; there is no server output replay archive.
 
-Every operation and output delivery rechecks the persisted owner, session state,
+Every operation and output delivery rechecks the persisted owner, workspace state,
 manifest generation, runtime connection, consent binding, live human login, and
-policy revision. Children, cron sessions, unowned legacy sessions, ended or
-archived sessions, discard requests, paused/stopping/replacing runtimes, old
+policy revision. Children, cron workspaces, unowned legacy workspaces, ended or
+archived workspaces, discard requests, paused/stopping/replacing runtimes, old
 capabilities, agent tokens, and other people (including administrators) fail
 closed. Running, waiting, and idle agent states allow shells only while the
 runtime adapter also reports live admission.
@@ -70,7 +105,7 @@ and leases over 30 seconds. `RuntimeLease` supplies local per-operation checks,
 renewal, policy revocation, independent expiry ticks, and retained teardown errors.
 It never resurrects an expired or revoked shell.
 
-Four shells share a session limit of 16 KiB/s input and 64 KiB/s output. Frames
+Four shells share a workspace limit of 16 KiB/s input and 64 KiB/s output. Frames
 contain at most 16 KiB of decoded bytes. Each controlling attachment has a bounded
 output queue of at most 256 KiB (16 frames); slow consumers close. The browser
 also bounds pending terminal parsing and input queues. Attachment heartbeat is
@@ -80,9 +115,9 @@ Two inactivity limits end a shell: one with no browser attached (`detached`), an
 one with no human input (`idle`); output, resize, and heartbeat do not reset the
 idle limit. Each is set per runtime class, install-wide, by an administrator in
 **Settings → Shells** (`GET`/`PUT /api/shells/settings`, `account.manage`): the
-runtime default (`null`), "until the session ends" (`0`), or a duration from 10 minutes
+runtime default (`null`), "until the workspace ends" (`0`), or a duration from 10 minutes
 to 87,600 hours. Desktop
-shells (host and local sandbox) default to "until the session ends" for both;
+shells (host and local sandbox) default to "until the workspace ends" for both;
 cluster shells default to a five-minute reconnect grace and 30 minutes idle. A
 change applies to running shells. When one limit gets shorter, a running shell keeps
 at least 10 minutes from that change before it can end the shell, but never longer
@@ -90,7 +125,7 @@ than the deadline it already had; changing the other limit, or lengthening one,
 never moves a deadline. When a limit ends a shell, its tab says which
 one (the socket's `ended` frame, readable only by the same login for 24 hours) and
 keeps its last screen; a sign-out or sign-in change erases it like any other shell.
-Every other end is unchanged: the session ending, revocation, a fence, a policy
+Every other end is unchanged: the workspace ending, revocation, a fence, a policy
 change, or a lost runtime connection (a desktop that sleeps or drops its network
 still ends its shells).
 
@@ -105,8 +140,8 @@ errors have no audit fields and do not enter agent broadcast or persistence path
 WebSocket. Scrollback is local and bounded to 2,000 lines. Clipboard OSC commands
 are consumed locally rather than permitted to write the browser clipboard.
 
-The Shell button opens a permanent session tab, labeled Shell, Shell 2, and so on.
-Its tooltip identifies host, sandbox or pod and the working folder. The session
+The Shell button opens a permanent workspace tab, labeled Shell, Shell 2, and so on.
+Its tooltip identifies host, sandbox or pod and the working folder. The workspace
 supports four shells; the button and New shell command explain when the limit is
 reached. Ctrl/Command+backtick focuses an existing shell, or opens one when none
 exists. Inside terminal input, only Ctrl+K/P (Windows/Linux) or Command+K/P (macOS)

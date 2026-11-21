@@ -70,6 +70,12 @@ const (
 // and the runner/session-driving routes are board's own UI and control plane,
 // not the card-writing contract an agent is pointed at.
 var boardOperations = []agentsmanifest.Operation{
+	{Name: "milestone_burn", Method: "GET", Path: "/api/boards/{id}/burn", Cap: capCardRead, Idempotent: true, Summary: "Burn chart for a milestone tag (?milestone=tag)."},
+	{Name: "list_releases", Method: "GET", Path: "/api/boards/{id}/releases", Cap: capCardRead, Idempotent: true, Summary: "List board releases."},
+	{Name: "get_release", Method: "GET", Path: "/api/boards/{id}/releases/{release}", Cap: capCardRead, Idempotent: true, Summary: "Release progress and cards, including archived Done cards."},
+	{Name: "create_release", Method: "POST", Path: "/api/boards/{id}/releases", Cap: capCardWrite, Summary: "Create a release; requires a person behind board access."},
+	{Name: "update_release", Method: "PATCH", Path: "/api/boards/{id}/releases/{release}", Cap: capCardWrite, Summary: "Edit an active release; requires a person behind board access."},
+	{Name: "close_release", Method: "POST", Path: "/api/boards/{id}/releases/{release}/close", Cap: capCardWrite, Summary: "Archive Done cards and roll open cards to next_release_id; requires a person behind board access."},
 	{Name: "discover_board_launch_options", Method: "GET", Path: "/api/boards/{id}/launch-options", Cap: capCardWrite, Idempotent: true, Summary: "Discover available engines, models and efforts for this board under its stored automation identity."},
 	// /onboard is board's conventions document (what a good card looks like,
 	// how the admission gate answers). It is listed because an agent is
@@ -97,6 +103,8 @@ var boardOperations = []agentsmanifest.Operation{
 
 	{Name: "list_cards", Method: "GET", Path: "/api/boards/{id}/cards", Cap: capCardRead, Idempotent: true,
 		Summary: "List all matching cards; unpaged lists have no default limit. Supports the same filters as search, explicit limits and optional cursor paging."},
+	{Name: "board_card_view", Method: "GET", Path: "/api/boards/{id}/cards/view", Cap: capCardRead, Idempotent: true,
+		Summary: "Recent board cards and older done counts; repeat expand=column-id to include older cards. Activity within 14 days is recent."},
 	{Name: "search_cards", Method: "GET", Path: "/api/boards/{id}/cards/search", Cap: capCardRead, Idempotent: true,
 		Summary: "Search a board's cards by text and filters. Always search before filing: the admission gate denies duplicates."},
 	{Name: "create_card", Method: "POST", Path: "/api/boards/{id}/cards", Cap: capCardWrite,
@@ -104,7 +112,7 @@ var boardOperations = []agentsmanifest.Operation{
 	{Name: "get_card", Method: "GET", Path: "/api/cards/{id}", Cap: capCardRead, Idempotent: true,
 		Summary: "One card with repos, tags, links, dependencies and its version."},
 	{Name: "update_card", Method: "PATCH", Path: "/api/cards/{id}", Cap: capCardWrite,
-		Summary: "Update a card's content, fields, tags or repos; send If-Match with the version you read."},
+		Summary: "Update a card's content, fields, tags or repos; send If-Match with the version you read. When work lands, publish commit_summary (repository, session_id, branch, base, commits[{sha,message,author,date}], files[{path,adds,dels,binary?}]) before ending the workspace. Metadata becomes card-readable; no patches. [] clears it."},
 	// link_card shares update_card's route on purpose: attaching a link is a
 	// PATCH of the card's `links` array (blerg_card_link does exactly that), and
 	// an agent looking for "how do I attach a PR" should find it in the table

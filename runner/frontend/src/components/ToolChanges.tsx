@@ -1,3 +1,4 @@
+import { IconButton } from '@blerglab/chat'
 // Tool changes: an MCP server changed a tool a session pinned, offers one the launch never saw,
 // or stopped offering one (docs/design/mcp-tool-changes.md §6.1). The gateway turned the tool off
 // and recorded what it saw; here the person reads the OLD and NEW definitions (the exact text that
@@ -66,13 +67,13 @@ function leadSentence(c: ToolChangeInfo, hasOld: boolean): ReactNode {
   switch (c.state) {
     case 'pending':
       if (c.kind === 'new') {
-        return <>{conn} now offers {tool}, which the session did not have when it started. It is off until you decide: Grant authorizes it in the mode you choose; Keep off leaves it off.</>
+        return <>{conn} now offers {tool}, which the workspace did not have when it started. It is off until you decide: Grant authorizes it in the mode you choose; Keep off leaves it off.</>
       }
-      return <>{conn} changed what {tool} does after this session pinned it. Calls are blocked until you decide: Accept updates this session's grant to {hasOld ? 'the new definition below' : 'the definition below (the previous text was not kept)'}; Keep off leaves it blocked.</>
+      return <>{conn} changed what {tool} does after this workspace pinned it. Calls are blocked until you decide: Accept updates this workspace's grant to {hasOld ? 'the new definition below' : 'the definition below (the previous text was not kept)'}; Keep off leaves it blocked.</>
     case 'accepted':
-      return <>You {c.kind === 'new' ? 'granted' : 'accepted'} this{when}; this session's grant now authorizes the current definition.</>
+      return <>You {c.kind === 'new' ? 'granted' : 'accepted'} this{when}; this workspace's grant now authorizes the current definition.</>
     case 'declined':
-      return <>You kept this off{when}. Later changes to this tool in this session are listed without a badge.</>
+      return <>You kept this off{when}. Later changes to this tool in this workspace are listed without a badge.</>
     case 'expired':
       return <>Nobody decided within 7 days; the tool stays off.</>
     case 'superseded':
@@ -119,7 +120,7 @@ function ToolChangeCard({ c, busy, error, onAccept, onDecline }: CardProps) {
         {hidden && <span data-testid="hidden-chars-badge" style={{ ...badge, color: 'var(--danger)' }}>contains hidden characters (shown as ⟨U+…⟩)</span>}
         <span style={{ marginLeft: 'auto', ...badge }}>{c.state}</span>
       </div>
-      {c.kind === 'removed' && <div style={muted}>The server no longer offers this tool. Nothing to accept; it is off in this session.</div>}
+      {c.kind === 'removed' && <div style={muted}>The server no longer offers this tool. Nothing to accept; it is off in this workspace.</div>}
       {c.kind !== 'removed' && <div data-testid="tool-change-lead" style={leadStyle}>{lead}</div>}
       {(c.state === 'pending' || c.state === 'accepted') && c.kind !== 'removed' && <ToolSchemaGuidance policy={c.tool_schema_refresh} />}
       {c.kind !== 'removed' && (
@@ -135,7 +136,7 @@ function ToolChangeCard({ c, busy, error, onAccept, onDecline }: CardProps) {
         </>
       )}
       <div style={{ ...muted, fontSize: 12, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-        <Link to={`/sessions/${c.session_id}`} style={{ color: 'var(--amber)' }}>Open session</Link>
+        <Link to={`/sessions/${c.session_id}`} style={{ color: 'var(--amber)' }}>Open workspace</Link>
         <span>Recorded <TimeLabel ts={c.created_at} /></span>
         {c.state === 'pending' && <span>Expires <TimeLabel ts={c.expires_at} /></span>}
         {c.decided_at && <span>Decided <TimeLabel ts={c.decided_at} /></span>}
@@ -304,12 +305,12 @@ export default function ToolChanges({ focusId, connectionId, sessionId }: Props)
       {open === null && !error && <div style={muted}>Loading…</div>}
       {open !== null && !error && visible.length === 0 && (
         <div data-testid="tool-changes-empty" style={muted}>
-          No tool changes waiting. When an MCP server changes a tool a session uses, or adds one, the tool is turned off and the change is listed here for you to accept or keep off.
+          No tool changes waiting. When an MCP server changes a tool a workspace uses, or adds one, the tool is turned off and the change is listed here for you to accept or keep off.
         </div>
       )}
       {[...groups.entries()].map(([k, cs]) => (
         <section key={k} data-testid="tool-change-group" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <div style={{ ...muted, fontWeight: 600 }}>{cs[0].connection_name} · <Link to={`/sessions/${cs[0].session_id}`} style={{ color: 'var(--amber)' }}>session</Link> · {cs.length} {cs.length === 1 ? 'tool' : 'tools'}</div>
+          <div style={{ ...muted, fontWeight: 600 }}>{cs[0].connection_name} · <Link to={`/sessions/${cs[0].session_id}`} style={{ color: 'var(--amber)' }}>workspace</Link> · {cs.length} {cs.length === 1 ? 'tool' : 'tools'}</div>
           {cs.map(c => <LoadedCard key={c.id} summary={c} busy={busy === c.id} error={errors[c.id]} onAccept={mode => void act(c.id, 'accept', { mode })} onDecline={() => void act(c.id, 'decline')} />)}
         </section>
       ))}
@@ -369,7 +370,7 @@ function LoadedCard(props: { summary: ToolChangeInfo; busy: boolean; error: stri
         </div>
         <div role="alert" style={{ color: 'var(--danger)', fontSize: 13 }}>Could not load this definition: {loadError}</div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button type="button" style={button} onClick={() => { setLoadError(null); setAttempt(n => n + 1) }}>Retry</button>
+          <IconButton label="Retry" labeled onClick={() => { setLoadError(null); setAttempt(n => n + 1) }} />
           {s.state === 'pending' && s.kind !== 'removed' && <button type="button" style={button} disabled={props.busy} onClick={props.onDecline}>Keep off</button>}
         </div>
         {props.error && <div role="alert" data-testid={`tool-change-error-${s.id}`} style={{ color: 'var(--danger)', fontSize: 13 }}>{props.error}</div>}

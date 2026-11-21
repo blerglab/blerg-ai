@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen } from '@testing-library/react'
 import ChatView from './ChatView'
 import { useTranscriptStore } from '../hooks/useTranscriptStore'
@@ -47,6 +47,7 @@ function mount(t: FakeTransport = createFakeTransport()) {
 }
 
 describe('ChatView loads a long transcript from its end', () => {
+  afterEach(() => vi.unstubAllGlobals())
   beforeEach(() => {
     resetChatState()
     Element.prototype.scrollIntoView = vi.fn()
@@ -110,7 +111,8 @@ describe('ChatView loads a long transcript from its end', () => {
     expect(timeline()?.classList.contains('backfilling')).toBe(false)
   })
 
-  it('on a reconnect, asks again for the page the drop cut off', async () => {
+  it('on a reconnect, catches up before the reader retries the interrupted older page', async () => {
+    installIntersectionObserver()
     const { t } = mount()
     deliverTail(t)
     expect(t.older).toHaveLength(1)
@@ -123,9 +125,10 @@ describe('ChatView loads a long transcript from its end', () => {
     })
     expect(t.older).toHaveLength(1)
     expect(screen.queryByTestId('older-loading')).toBeNull()
-    // ...and the link coming back asks for the same page again (the transport resubscribes
-    // forward from the last seq by itself).
-    act(() => t.setConnected(true))
+    // The link catches up first; older history waits for the reader at the top.
+    act(() => { t.setConnected(true); t.replayDone({ lastSeq: 300, hasMore: false }) })
+    expect(t.older).toHaveLength(1)
+    act(() => intersect())
     expect(t.older).toHaveLength(2)
     expect(t.older[1]).toEqual({ sessionId: SESSION, beforeSeq: 101, limit: 200 })
     expect(inFlight()).toBe(true)
@@ -134,7 +137,7 @@ describe('ChatView loads a long transcript from its end', () => {
     expect(useTranscriptStore.getState().sessions.s1.events).toHaveLength(300)
   })
 
-  it('on a later visit, picks the older pages up again where they were left', async () => {
+  it('on a later visit, catches up without starting older history', async () => {
     const t = createFakeTransport()
     const { unmount } = mount(t)
     deliverTail(t)
@@ -142,9 +145,11 @@ describe('ChatView loads a long transcript from its end', () => {
     unmount()
     mount(t)
     expect(t.subscriptions[1]).toEqual({ sessionId: SESSION, afterSeq: 300, tail: false })
-    expect(t.older).toHaveLength(2)
-    expect(t.older[1]).toMatchObject({ beforeSeq: 101, limit: 200 })
-    expect(inFlight()).toBe(true)
+    expect(t.older).toHaveLength(1)
+    expect(inFlight()).toBe(false)
+    act(() => t.replayDone({ lastSeq: 300, hasMore: false }))
+    expect(t.older).toHaveLength(1)
+    expect(inFlight()).toBe(false)
   })
 
   it('a transcript shorter than the tail has no older pages to fetch', () => {

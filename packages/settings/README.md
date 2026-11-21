@@ -35,3 +35,16 @@ with known values. Unresolvable spreads, classes and values fail closed. Each ap
 `SettingsPrimitives.test.ts` (and `packages/chat/src/ButtonGuard.test.ts`) runs it; a reviewed
 exception is `// button-guard-ignore: <reason>` (or the `{/* … */}` JSX form) alone on the line
 above. See `CONTRIBUTING.md`.
+
+Core Settings opens Account by default. Link directly with `/settings?section=account`,
+`/settings?section=integrations`, or `/settings?section=install` (administrators only).
+Browser Back and Forward follow section navigation. Unknown or unauthorized sections open Account.
+
+`IconButton.tsx` and `IconButton.css` own the shared refresh/retry control.
+Core imports it here; chat exposes the same implementation through a TypeScript re-export and CSS import
+and keeps exporting `IconButton` from `@blerglab/chat`. The library build bundles
+it and its CSS, so published chat packages need no sibling settings directory.
+
+Chat emits declarations after bundling, under `dist/types`, including the shared
+control's declaration. Its package export points to the emitted entry, so the
+published package resolves both the JavaScript and types without sibling sources.

@@ -14,11 +14,13 @@ func (a *API) RegisterArtifactRoutes(mux *http.ServeMux) {
 
 func (a *API) registerArtifactRoutes(mux *http.ServeMux) {
 	h := &artifactsHandler{api: a}
+	mux.HandleFunc("POST /api/sessions/{id}/reveal", a.requestReveal)
 	mux.HandleFunc("POST /api/sessions/{id}/artifacts", h.upload)
 	mux.HandleFunc("GET /api/sessions/{id}/artifacts", h.list)
 	mux.HandleFunc("GET /api/sessions/{id}/artifacts/{aid}/download", h.download)
 	mux.HandleFunc("GET /api/sessions/{id}/artifacts/{aid}/raw", h.raw)
 	mux.HandleFunc("DELETE /api/sessions/{id}/artifacts/{aid}", h.remove)
+	mux.HandleFunc("POST /api/sessions/{id}/artifacts/{aid}/snapshot", h.snapshot)
 	mux.HandleFunc("POST /api/sessions/{id}/uploads", h.userUpload)
 	mux.HandleFunc("POST /api/sessions/{id}/storage", h.increaseStorage)
 	mux.HandleFunc("GET /api/sessions/{id}/attachments", h.attachments)
@@ -26,6 +28,7 @@ func (a *API) registerArtifactRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/sessions/{id}/files", h.files)
 	mux.HandleFunc("DELETE /api/sessions/{id}/files/{aid}", h.unpublish)
 	a.registerReviewRequestRoutes(mux)
+	a.registerAnswerRoutes(mux)
 	// A commit chip's hovercard and its diff, read from the session's workspace (commitlookup.go).
 	a.RegisterCommitRoutes(mux)
 	a.RegisterPluginBrowseRoutes(mux)

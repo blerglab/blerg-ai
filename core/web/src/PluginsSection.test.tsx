@@ -67,7 +67,7 @@ describe("Always-on plugins", () => {
     setup();
     render(<PluginsSection engines={PLUGIN_ENGINES.filter(e => e.engine === "claude")} />);
     await screen.findByText("No always-on plugins yet.");
-    expect(screen.getByText("Choose trusted plugins to run code in your sessions.")).toBeInTheDocument();
+    expect(screen.getByText("Choose trusted plugins to run code in your workspaces.")).toBeInTheDocument();
   });
 
   it("lists the plugins in order with remove buttons that PUT the rest", async () => {
@@ -189,6 +189,7 @@ describe("Always-on plugins", () => {
   });
 
   it("is part of the Settings page", async () => {
+    history.replaceState(null, "", "/settings?section=integrations");
     setup();
     render(<Settings />);
     const heading = await screen.findByRole("heading", { name: "Always-on plugins" });

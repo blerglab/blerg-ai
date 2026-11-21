@@ -1,3 +1,4 @@
+import { IconButton } from '@blerglab/chat'
 // Settings → Shells (administrators): how long an owner shell may have no browser attached, and
 // how long it may go without typing, for desktop and cluster shells, install-wide. Each limit is
 // the runtime default, "until the session ends", or a duration from 10 minutes to 87,600 hours. Hidden for everyone else.
@@ -49,7 +50,7 @@ function valueOf(d: Draft): number | null | undefined {
   const n = Number(d.amount.trim())
   return n > 0 ? n * (d.unit === 'hours' ? 3600 : 60) : undefined
 }
-const describe = (seconds: number) => seconds === 0 ? 'until the session ends' : shellLimitText(seconds)
+const describe = (seconds: number) => seconds === 0 ? 'until the workspace ends' : shellLimitText(seconds)
 
 export default function ShellLimitsSection() {
   const headingId = useId()
@@ -112,8 +113,8 @@ export default function ShellLimitsSection() {
 
   return <section className="settings-section st-section" aria-labelledby={headingId} data-testid="shell-limits">
     <h3 id={headingId} className="settings-heading st-heading">Shells</h3>
-    <p className="settings-description">Install-wide limits for shells in sessions. Only administrators see and change these.</p>
-    {error && <p role="alert" className="st-note">{error} {!reply && <button type="button" className="settings-action btn small" onClick={() => setReload(n => n + 1)}>Retry</button>}</p>}
+    <p className="settings-description">Install-wide limits for shells in workspaces. Only administrators see and change these.</p>
+    {error && <p role="alert" className="st-note">{error} {!reply && <IconButton label="Retry" onClick={() => setReload(n => n + 1)} />}</p>}
     {!reply && !error && <p className="st-note">Loading shell limits…</p>}
     {reply && <>
       <div className="st-limits">
@@ -128,7 +129,7 @@ export default function ShellLimitsSection() {
               <span className="st-limit-runtime">{rt.label}</span>
               <select className="settings-field select" aria-label={name} value={d.mode} onChange={e => set(rt.id, l.id, { mode: e.target.value as Draft['mode'] })}>
                 <option value="default">Default ({describe(fallback)})</option>
-                <option value="session">Until the session ends</option>
+                <option value="session">Until the workspace ends</option>
                 <option value="after">After a set time</option>
               </select>
               {d.mode === 'after' && <span className="st-limit-amount">
@@ -143,7 +144,7 @@ export default function ShellLimitsSection() {
           })}
         </fieldset>)}
       </div>
-      <p className="st-hint st-limit-hint">Desktop covers shells on a desktop, sandboxed or not; cluster covers shells in cluster session pods. A change applies to running shells too, and a shell whose limit gets shorter keeps at least {shellLimitText(reply.min_seconds)}. For now, a desktop shell still ends when the computer sleeps or loses its network connection.</p>
+      <p className="st-hint st-limit-hint">Desktop covers shells on a desktop, sandboxed or not; cluster covers shells in cluster workspace pods. A change applies to running shells too, and a shell whose limit gets shorter keeps at least {shellLimitText(reply.min_seconds)}. For now, a desktop shell still ends when the computer sleeps or loses its network connection.</p>
       <div className="st-limit-actions">
         {saved && <span className="st-note" role="status">{saved}</span>}
         <button type="button" className="settings-action btn primary" disabled={!dirty || invalid || busy} onClick={() => void save()}>{busy ? 'Saving…' : 'Save shell limits'}</button>

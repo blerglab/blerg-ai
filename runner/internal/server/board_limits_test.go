@@ -121,12 +121,14 @@ func TestBoardLimitsFollowCoresSettings(t *testing.T) {
 func TestBoardLimitsAreReadFromCoreWithTheInternalKey(t *testing.T) {
 	var mu sync.Mutex
 	hits := 0
+	refused := make(chan struct{}, 1)
 	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		hits++
 		mu.Unlock()
 		if r.Method != http.MethodPost || r.URL.Path != "/internal/board-limits" || r.Header.Get("X-Internal-Key") != "fixture-internal-key" {
 			http.Error(w, "no", http.StatusUnauthorized)
+			refused <- struct{}{}
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]int{"calls_per_minute": 900, "calls_in_flight": 12, "unrevoked_per_account": 30, "live_exchange_tokens": 200})
@@ -158,12 +160,18 @@ func TestBoardLimitsAreReadFromCoreWithTheInternalKey(t *testing.T) {
 		a.boardCallLimits(context.Background())
 	}
 	mu.Lock()
-	defer mu.Unlock()
-	if hits != n {
-		t.Fatalf("core asked again within the TTL: %d -> %d", n, hits)
+	after := hits
+	mu.Unlock() // The next request's handler also needs this counter lock.
+	if after != n {
+		t.Fatalf("core asked again within the TTL: %d -> %d", n, after)
 	}
 	a.coreInternalKey = "wrong"
 	if _, err := a.fetchCoreBoardLimits(context.Background()); err == nil {
 		t.Fatal("a refused read was taken")
+	}
+	select {
+	case <-refused:
+	default:
+		t.Fatal("core never handled the refused request")
 	}
 }

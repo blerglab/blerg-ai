@@ -4,7 +4,11 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#0d1117" />
+    <!-- Browser chrome tint: --basalt, dark default then the light OS preference (no JS reads a
+         pin before paint, so an explicit data-theme pin isn't reflected here — brand/tokens.css's
+         --basalt dark/light values, review finding 9). -->
+    <meta name="theme-color" content="#0d1117" /> <!-- themecheck:allow BLG-473: an HTML meta content attribute cannot use a CSS var() -->
+    <meta name="theme-color" content="#eef1f6" media="(prefers-color-scheme: light)" /> <!-- themecheck:allow BLG-473: same HTML limitation as above -->
     <title>Blerg Board</title>
     <script>
       // Apply a pinned theme before first paint to avoid a flash. Dark is the
@@ -12,7 +16,7 @@
       (function () {
         try {
           var t = localStorage.getItem('blerg-theme');
-          if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+          if (['dark', 'light', 'colorblind-dark', 'colorblind-light', 'high-contrast', 'catppuccin-mocha', 'catppuccin-latte', 'dracula', 'nord', 'tokyo-night'].includes(t || '')) document.documentElement.setAttribute('data-theme', t); // themecheck:allow BLG-473: the theme vocabulary (packages/settings/theme.ts), necessarily duplicated here so this bootstrap script can run before any module loads
         } catch (e) {}
       })();
     </script>

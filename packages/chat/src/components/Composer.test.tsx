@@ -10,7 +10,7 @@ const props = (over: Partial<ComposerProps> = {}): ComposerProps => ({
   draft: '', onDraft: () => {}, placeholder: 'Message', locked: false, onSubmit: () => {}, attachments, ...over,
 })
 
-afterEach(() => { vi.unstubAllGlobals() })
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('Composer focus', () => {
   it('puts the cursor in the box when it appears', () => {
@@ -159,5 +159,61 @@ describe('pasted image names', () => {
     const names = (addFiles.mock.calls[0][0] as File[]).map(f => f.name)
     expect(names[0]).toBe('q3-revenue-chart.png')
     expect(names[1]).toMatch(/^screenshot-.*\.jpg$/)
+  })
+})
+
+
+describe('Composer height', () => {
+  const setup = (over: Partial<ComposerProps> = {}) => {
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(1000)
+    const ui = render(<div className="agent-chat"><Composer {...props(over)} /></div>)
+    const pane = ui.container.firstElementChild as HTMLElement
+    let paneHeight = 1000
+    Object.defineProperty(pane, 'clientHeight', { get: () => paneHeight })
+    const box = ui.container.querySelector('textarea')!
+    Object.defineProperty(box, 'scrollHeight', { configurable: true, value: 2000 })
+    return { ...ui, box, setPaneHeight: (height: number) => { paneHeight = height },
+      update: (next: Partial<ComposerProps>) => ui.rerender(<div className="agent-chat"><Composer {...props({ ...over, ...next })} /></div>) }
+  }
+  it('caps a long paste at 420px or half the chat pane, then shrinks after clearing', () => {
+    const ui = setup()
+    ui.update({ draft: '60 lines' })
+    expect(ui.box.style.height).toBe('420px')
+    ui.setPaneHeight(500)
+    ui.update({ draft: '60 lines edited' })
+    expect(ui.box.style.height).toBe('250px')
+    ui.update({ draft: '' })
+    expect(ui.box.style.height).toBe('40px')
+  })
+
+  it('exposes a keyboard separator and clamps manual sizing to 85% of the pane', () => {
+    const ui = setup()
+    const handle = ui.getByRole('separator', { name: 'Resize message box' })
+    expect(handle).toHaveAttribute('aria-orientation', 'horizontal')
+    fireEvent.keyDown(handle, { key: 'ArrowUp' })
+    expect(ui.box.style.height).toBe('64px')
+    expect(handle).toHaveAttribute('aria-valuenow', '64')
+    fireEvent.keyDown(handle, { key: 'ArrowDown' })
+    expect(ui.box.style.height).toBe('40px')
+    for (let i=0;i<50;i++) fireEvent.keyDown(handle, { key: 'ArrowUp' })
+    expect(ui.box.style.height).toBe('850px')
+    fireEvent.keyDown(handle, { key: 'Home' })
+    expect(ui.box.style.height).toBe('40px')
+  })
+
+  it('restores the device height across remounts, isolates accounts, and double-click resets it', () => {
+    const first = setup({ heightScope: 'height-account-a' })
+    fireEvent.keyDown(first.getByRole('separator'), { key: 'ArrowUp' })
+    first.unmount()
+    const restored = setup({ heightScope: 'height-account-a' })
+    expect(restored.box.style.height).toBe('64px')
+    restored.update({ heightScope: 'height-account-b' })
+    expect(restored.box.style.height).toBe('40px')
+    restored.update({ heightScope: 'height-account-a' })
+    expect(restored.box.style.height).toBe('64px')
+    fireEvent.doubleClick(restored.getByRole('separator'))
+    restored.unmount()
+    const reset = setup({ heightScope: 'height-account-a' })
+    expect(reset.box.style.height).toBe('40px')
   })
 })

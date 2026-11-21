@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/blerglab/blerg-ai/runner/internal/commandsteps"
 	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/models"
 	"github.com/jackc/pgx/v5"
@@ -30,6 +31,7 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 // NewCron is a request to create a cron. The token is minted by the caller
 // (core's /internal/tokens/mint) before this is called.
 type NewCron struct {
+	CommandSteps      *commandsteps.Definition
 	Owner             string
 	Name              string
 	Enabled           bool
@@ -39,6 +41,7 @@ type NewCron struct {
 	Engine            string
 	Model             *string
 	Effort            *string
+	RuntimeTargetID   *string
 	Runtime           string // auto (default), cluster or docker
 	DaemonID          *string
 	BoardID           *string
@@ -53,6 +56,7 @@ type NewCron struct {
 // text fields (Model, Effort, DaemonID, BoardID) a pointer to "" clears the
 // value. Resume clears paused_reason and the failure count.
 type CronPatch struct {
+	CommandSteps      **commandsteps.Definition
 	Name              *string
 	Enabled           *bool
 	Schedule          *string
@@ -61,6 +65,7 @@ type CronPatch struct {
 	Engine            *string
 	Model             *string
 	Effort            *string
+	RuntimeTargetID   *string
 	Runtime           *string
 	DaemonID          *string
 	BoardID           *string
@@ -92,8 +97,8 @@ func (s *Scheduler) CreateCron(ctx context.Context, in NewCron) (*db.Cron, error
 	now := s.clock.Now()
 	c := db.Cron{
 		OwnerAccountID: in.Owner, Name: in.Name, Enabled: in.Enabled, Schedule: in.Schedule, Timezone: in.Timezone,
-		Prompt: in.Prompt, Engine: in.Engine, Model: emptyToNil(in.Model), Effort: emptyToNil(in.Effort), Runtime: in.Runtime,
-		DaemonID: emptyToNil(in.DaemonID), BoardID: emptyToNil(in.BoardID), MCP: in.MCP,
+		Prompt: in.Prompt, Engine: in.Engine, Model: emptyToNil(in.Model), Effort: emptyToNil(in.Effort), Runtime: in.Runtime, RuntimeTargetID: in.RuntimeTargetID,
+		DaemonID: emptyToNil(in.DaemonID), BoardID: emptyToNil(in.BoardID), MCP: in.MCP, CommandSteps: in.CommandSteps,
 		TokenID: in.TokenID, TokenExpiresAt: in.TokenExpiresAt,
 		GraceSeconds: DefaultGraceSeconds, MaxRuntimeSeconds: in.MaxRuntimeSeconds,
 	}
@@ -162,6 +167,9 @@ func (s *Scheduler) UpdateCron(ctx context.Context, owner, id string, p CronPatc
 			}
 			c.Engine = *p.Engine
 		}
+		if p.RuntimeTargetID != nil {
+			c.RuntimeTargetID = p.RuntimeTargetID
+		}
 		if p.Runtime != nil {
 			c.Runtime = *p.Runtime
 		}
@@ -176,6 +184,9 @@ func (s *Scheduler) UpdateCron(ctx context.Context, owner, id string, p CronPatc
 		}
 		if p.BoardID != nil {
 			c.BoardID = emptyToNil(p.BoardID)
+		}
+		if p.CommandSteps != nil {
+			c.CommandSteps = *p.CommandSteps
 		}
 		if p.MCP != nil {
 			c.MCP = *p.MCP
@@ -273,6 +284,18 @@ func validateFields(c *db.Cron, now time.Time) error {
 	}
 	if n := utf8.RuneCountInString(c.Prompt); n == 0 || n > maxPromptLen {
 		return invalid("prompt must be 1-%d characters", maxPromptLen)
+	}
+	if err := c.CommandSteps.Validate(); err != nil {
+		return invalid("%s", err)
+	}
+	if c.CommandSteps != nil {
+		budget := 0
+		for _, step := range c.CommandSteps.Steps {
+			budget += step.TimeoutSeconds + 3
+		}
+		if budget > c.MaxRuntimeSeconds {
+			return invalid("fixed command step budget exceeds maximum run time")
+		}
 	}
 	switch c.Runtime {
 	case "auto", "cluster", "docker":

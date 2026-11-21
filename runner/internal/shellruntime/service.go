@@ -20,6 +20,22 @@ import (
 // RPC travels only over the already authenticated daemon/pod connection. It has
 // no path, shell executable, argv, env, container or user supplied by a browser.
 type RPC struct {
+	ShellHello        *protocol.ShellLinkHello     `json:"shell_hello,omitempty"`
+	deadline          time.Time                    // local dispatch budget; never accepted from wire JSON
+	AllocationRefused bool                         `json:"allocation_refused,omitempty"`
+	Actor             ownershell.Actor             `json:"actor,omitzero"`
+	PersistentConsent *protocol.ShellConsentV2     `json:"persistent_consent,omitempty"`
+	Custody           *protocol.ShellCustody       `json:"custody,omitempty"`
+	CustodyCleanup    *protocol.CustodyCleanup     `json:"custody_cleanup,omitempty"`
+	Inventory         *ownershell.CustodyInventory `json:"inventory,omitempty"`
+	Grants            []ownershell.SignedGrant     `json:"grants,omitempty"`
+	Transaction       string                       `json:"transaction,omitempty"`
+	Epoch             uint64                       `json:"epoch,omitempty"`
+	Offset            uint64                       `json:"offset,omitempty"`
+	End               uint64                       `json:"end,omitempty"`
+	Gap               bool                         `json:"gap,omitempty"`
+	Ended             bool                         `json:"ended,omitempty"`
+
 	StartCause  string                      `json:"start_cause,omitempty"`
 	ErrorCode   string                      `json:"error_code,omitempty"`
 	Launch      protocol.SupervisorLaunch   `json:"launch,omitzero"`
@@ -53,6 +69,15 @@ type RPC struct {
 const maxServerWindow = 1 << 20
 
 type registered struct {
+	retainedPins                            protocol.ShellLinkWelcome
+	retainedServerCaps, retainedRuntimeCaps protocol.WorkspaceCapabilities
+	persistentPreparing                     bool
+	consentMu                               sync.Mutex
+	consents                                map[string]*retainedConsent
+	retained                                *retainedCoordinator
+	retainedHistory                         []*retainedCoordinator
+	persistentIdentity                      *Identity
+
 	containmentHistory []*Coordinator
 	atomicStart        func(context.Context, func() error) error
 	opMu               sync.Mutex // serialized commands and retirement, never P2
@@ -62,6 +87,7 @@ type registered struct {
 	closedShells       map[string]bool
 	highestRevision    uint64
 	phase              protocol.SupervisorPhase
+	hostPhaseDirty     bool
 	retiring           bool
 	binding            ownershell.Binding
 	command            Command
@@ -81,6 +107,33 @@ type negotiatedCapabilities struct {
 }
 
 type Service struct {
+	hostBridge              HostBridge
+	hostRetiring            map[*registered]struct{} // keeper cleanup, independent of active agent launches
+	hostRetirementRunning   bool
+	hostRetirementWake      chan struct{}
+	retirementTimer         func(time.Duration) (<-chan time.Time, func())
+	hostLife                context.Context
+	hostCancel              context.CancelFunc
+	hostRetirementDir       string
+	hostIntents             map[string]string
+	hostUnpersisted         map[string]bool
+	hostJobs                map[string]uint64
+	hostRevision            uint64
+	hostObserved            map[string]hostObservation
+	hostObservationRevision uint64
+	hostChanged             chan struct{}
+	keeperDraining          bool // link guards admission and joins in-flight execution
+	now                     func() time.Time
+	probePersistent         func(context.Context, Command) (Identity, error)
+	persistentDaemon        string
+	persistentHello         protocol.ShellLinkHello
+	persistentLink          *protocol.ShellLinkWelcome
+	hostRefreshHello        protocol.ShellLinkHello
+	hostRefreshDone         chan struct{}
+	hostHello               protocol.ShellLinkHello
+	keeperPersistence       atomic.Bool
+	custody                 *ownershell.CustodyRegistry
+
 	capabilities    atomic.Pointer[negotiatedCapabilities]
 	resolveIdentity func(string) (Identity, error)
 	link            sync.RWMutex
@@ -151,13 +204,22 @@ func (s *Service) finishShellOutput(ctx context.Context, session, shell string) 
 }
 
 func NewService(send func(RPC) error) *Service {
-	return &Service{resolveIdentity: ResolveIdentity, local: map[string]chan RPC{}, done: make(chan struct{}), launches: map[string]*registered{}, queues: map[string]*sessionQueue{}, send: send, credits: map[string]*outputCredit{}, senders: map[string]*shellSender{}}
+	daemon, _ := newHelperID()
+	life, cancel := context.WithCancel(context.Background())
+	return &Service{hostLife: life, hostCancel: cancel, hostChanged: make(chan struct{}), hostIntents: map[string]string{}, hostJobs: map[string]uint64{}, hostObserved: map[string]hostObservation{}, now: time.Now, probePersistent: ProbePersistentCommand, persistentDaemon: daemon, custody: ownershell.NewCustodyRegistry(), resolveIdentity: ResolveIdentity, local: map[string]chan RPC{}, done: make(chan struct{}), launches: map[string]*registered{}, queues: map[string]*sessionQueue{}, send: send, credits: map[string]*outputCredit{}, senders: map[string]*shellSender{}}
 }
 
 // SetCapabilities is a local transport hook, never decoded from shell RPC.
 // Lifecycle cleanup remains available after capability loss; shell admission does not.
 func (s *Service) SetCapabilities(server, runtime protocol.WorkspaceCapabilities) {
 	s.capabilities.Store(&negotiatedCapabilities{server, runtime})
+	if s.bridge() != nil {
+		if managed, ok := s.bridge().(*ReconnectingHostBridge); ok {
+			managed.RequestCapabilities()
+			return
+		}
+		_ = s.bridgeBackground("capabilities", hostCapabilities{server, runtime}, nil)
+	}
 }
 func (s *Service) negotiatedBinding(b ownershell.Binding) ownershell.Binding {
 	if caps := s.capabilities.Load(); caps != nil {
@@ -194,13 +256,32 @@ func servicePlatformSupported(runtime, platform string) bool {
 }
 
 func (s *Service) register(ctx context.Context, mu *sync.Mutex, b ownershell.Binding, command Command, reconcile func(context.Context) error, start func(context.Context, func() error) error) error {
+	if b.Runtime == "host" && s.bridge() != nil {
+		return s.registerBridged(ctx, mu, b, command, reconcile, start)
+	}
+	b.Container = command.Container
 	s.link.RLock()
 	defer s.link.RUnlock()
+	if s.keeperDraining {
+		return bridgeFailure("draining_registration", ErrClosed)
+	}
 	if ProbeCommand(ctx, command) != nil {
 		return ErrClosed
 	}
 	if !servicePlatformSupported(b.Runtime, runtime.GOOS) || mu == nil || reconcile == nil || ownershell.SupervisorIdentity(b, ownershell.SignedGrant{}).Launch.Validate() != nil {
 		return ErrClosed
+	}
+	var persistentIdentity *Identity
+	probeCommand := command
+	probeCommand.Root = b.Root
+	s.mu.Lock()
+	personal := s.persistentLink != nil && s.persistentLink.Desktop.OwnerID == b.Owner
+	s.mu.Unlock()
+	caps := s.capabilities.Load()
+	if personal && caps != nil && caps.server.SupportsPersistence(b.Runtime) && caps.runtime.SupportsPersistence(b.Runtime) {
+		if actual, err := s.probePersistent(ctx, probeCommand); err == nil {
+			persistentIdentity = &actual
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -213,7 +294,7 @@ func (s *Service) register(ctx context.Context, mu *sync.Mutex, b ownershell.Bin
 		b.Connection = s.connection
 		b.Audience = ownershell.RuntimeAudience(s.connection, b.RuntimeGeneration)
 	}
-	s.launches[b.Session] = &registered{atomicStart: start, closedShells: map[string]bool{}, phase: "running", binding: b, command: command, mu: mu, reconcile: reconcile}
+	s.launches[b.Session] = &registered{persistentIdentity: persistentIdentity, atomicStart: start, closedShells: map[string]bool{}, phase: "running", binding: b, command: command, mu: mu, reconcile: reconcile}
 	return nil
 }
 
@@ -225,13 +306,18 @@ func (s *Service) HandleContext(parent context.Context, raw []byte) {
 		return
 	}
 	var r RPC
-	if json.Unmarshal(raw, &r) != nil || r.Type != "owner_shell_request" || r.Version != 1 || r.SessionID == "" || len(r.Data) > 16384 {
+	if json.Unmarshal(raw, &r) != nil || r.Type != "owner_shell_request" || (r.Version != 1 && r.Version != 2) || r.SessionID == "" || len(r.Data) > 16384 {
 		return
 	}
+	r.deadline = time.Now().Add(2 * time.Second)
+	if until, ok := parent.Deadline(); ok && until.Before(r.deadline) {
+		r.deadline = until
+	}
+	s.retainedRemoteBarrier(r)
 	// Credit only lets this daemon send the server more of a shell's output.
 	// It carries no authority and gets no reply, so it is applied here, off
 	// the session's command queue, and can never wait behind a slow command.
-	if r.Op == "credit" {
+	if r.Op == "credit" && r.Version == 1 && !s.bridged(r.SessionID) {
 		s.mu.Lock()
 		credit := s.credits[creditKey(r.SessionID, r.Shell)]
 		s.mu.Unlock()
@@ -266,7 +352,7 @@ func (s *Service) HandleContext(parent context.Context, raw []byte) {
 	select {
 	case lane <- r:
 	default:
-		s.deliver(RPC{Version: 1, Type: "owner_shell_result", SessionID: r.SessionID, RequestID: r.RequestID, Op: r.Op})
+		s.deliver(RPC{Version: r.Version, Type: "owner_shell_result", SessionID: r.SessionID, RequestID: r.RequestID, Op: r.Op})
 	}
 }
 func (s *Service) worker(parent context.Context, queue *sessionQueue) {
@@ -309,7 +395,20 @@ func (s *Service) worker(parent context.Context, queue *sessionQueue) {
 				return
 			}
 		}
-		ctx, cancel := context.WithTimeout(parent, 2*time.Second)
+		if r.deadline.IsZero() {
+			r.deadline = time.Now().Add(2 * time.Second)
+		}
+		ctx, cancel := context.WithDeadline(parent, r.deadline)
+		if ctx.Err() != nil {
+			s.deliver(RPC{Version: r.Version, Type: "owner_shell_result", SessionID: r.SessionID, RequestID: r.RequestID, Op: r.Op, ErrorCode: string(ownershell.ReasonRuntimeFenced)})
+			cancel()
+			continue
+		}
+		if s.bridged(r.SessionID) {
+			s.deliver(s.executeBridged(ctx, r))
+			cancel()
+			continue
+		}
 		s.link.RLock()
 		reply := s.execute(ctx, r)
 		s.link.RUnlock()
@@ -318,7 +417,16 @@ func (s *Service) worker(parent context.Context, queue *sessionQueue) {
 	}
 }
 func (s *Service) execute(ctx context.Context, r RPC) (result RPC) {
-	result = RPC{Version: 1, Type: "owner_shell_result", SessionID: r.SessionID, RequestID: r.RequestID, Op: r.Op, ErrorCode: string(ownershell.ReasonOpenRuntime)}
+	version := 1
+	if r.Version == 2 {
+		version = 2
+	}
+	result = RPC{Version: version, Type: "owner_shell_result", SessionID: r.SessionID, RequestID: r.RequestID, Op: r.Op, ErrorCode: string(ownershell.ReasonOpenRuntime)}
+	if s.keeperDraining {
+		result.ErrorCode = string(ownershell.ReasonRuntimeFenced)
+		_ = bridgeFailure("draining_operation", ErrClosed)
+		return result
+	}
 	defer func() {
 		if result.OK {
 			result.ErrorCode = ""
@@ -348,10 +456,69 @@ func (s *Service) execute(ctx context.Context, r RPC) (result RPC) {
 		result.ErrorCode = string(ownershell.ReasonRuntimeBinding)
 		return result
 	}
-	if launch.command.SourceLive != nil && sourceChecked(r.Op) && !launch.command.SourceLive() {
+	if r.Op == "describe" || r.Version == 2 && (r.Op == "configure" || r.Op == "consent_challenge") {
+		s.resetRetainedIdentity(ctx, launch)
+		s.ensurePersistentIdentity(ctx, launch)
+	}
+
+	if launch.retained != nil {
+		if r.Op == "close" || r.Op == "close_shell" {
+			for _, old := range launch.containmentHistory {
+				id := r.Shell
+				if r.Op == "close" {
+					g, b := r.Grant.Grant, old.binding
+					if g.SessionID != b.Session || g.OwnerID != b.Owner || g.Runtime != b.Runtime || g.LaunchGeneration != b.Launch || g.ConnectionID != b.Connection || g.Audience != b.Audience || g.ConsentID != b.Consent {
+						continue
+					}
+					id = g.ShellGeneration
+				} else if r.Launch != old.launch() {
+					continue
+				}
+				old.sessionMu.Lock()
+				proof, ok := old.closed[id]
+				old.sessionMu.Unlock()
+				if ok && proof.ValidateFor(old.launch(), id) == nil {
+					// A cached proof is still a proof: the shell's output sender must be
+					// stopped and joined first (an earlier attempt may have run out of
+					// time for that join). Per shell; refused if this deadline passes too.
+					if s.finishShellOutput(ctx, r.SessionID, id) != nil {
+						return result
+					}
+					result.Cleanup, result.OK = &proof, true
+					return result
+				}
+			}
+		}
+	}
+	if launch.retained != nil && (r.Op == "configure" || r.Op == "open" || r.Op == "close") && r.Version != 2 {
+		return result
+	}
+	if (launch.retained != nil || r.Version == 2) && (sourceChecked(r.Op) || r.Op == "prepare" || r.Op == "commit" || r.Op == "receipt" || r.Op == "credit") {
+		if err := s.checkRetainedSource(ctx, launch); err != nil {
+			result.Version = r.Version
+			result.ErrorCode = string(ownershell.RefusalReason(err))
+			return result
+		}
+	}
+	if launch.retained != nil && r.Op == "describe" {
+		return s.describeRetained(ctx, launch, r)
+	}
+	if r.Version == 2 {
+		return s.executeRetained(ctx, launch, r)
+	}
+	if launch.retained != nil && (r.Op == "phase" || r.Op == "freeze" || r.Op == "close_shell" || r.Op == "close_launch" || r.Op == "recover" || r.Op == "admit") {
+		return s.executeRetainedLifecycle(ctx, launch, r)
+	}
+	if launch.retained == nil && launch.command.SourceLive != nil && sourceChecked(r.Op) && !launch.command.SourceLive() {
 		// The attached source changed under a running launch. Refuse, and make the
 		// next host describe rotate the connection, so restoring the source cannot
 		// restore the old shell's authority.
+		if launch.command.SourceState != nil {
+			same, known := launch.command.SourceState()
+			if known && !same {
+				invalidateRetainedConsents(launch)
+			}
+		}
 		launch.consentDirty.Store(true)
 		result.ErrorCode = string(ownershell.ReasonRuntimeIdentity)
 		return result
@@ -375,13 +542,18 @@ func (s *Service) execute(ctx context.Context, r RPC) (result RPC) {
 			c.sessionMu.Unlock()
 		}
 		result.Binding = s.negotiatedBinding(result.Binding)
+		result.Binding = s.persistentBinding(launch, result.Binding)
 		result.Identity = launch.command.Identity
+		if result.Binding.ShellLink.Version == 2 && launch.persistentIdentity != nil {
+			result.Identity = *launch.persistentIdentity
+		}
 		result.OK = true
 		return result
 	}
 	// Identity rotation retires the old coordinator before replacing its nonce.
 	// The owner transport still needs that exact completed receipt to retire its
 	// old handle. A tombstone grants no admission, input, or renewed lease.
+
 	if r.Op == "close" || r.Op == "close_shell" {
 		for _, old := range launch.containmentHistory {
 			id := r.Shell
@@ -527,7 +699,9 @@ func (s *Service) execute(ctx context.Context, r RPC) (result RPC) {
 		command.diagnostic = func(shell string, err error) {
 			diagnostic, cause := startDiagnostic(err)
 			log.Printf("owner shell control failed: error=%q", diagnostic)
-			_ = s.send(RPC{Version: 1, Type: "owner_shell_output", SessionID: r.SessionID, Shell: shell, StartCause: cause})
+			notice, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+			defer cancel()
+			_ = s.outputSender()(notice, RPC{Version: 1, Type: "owner_shell_output", SessionID: r.SessionID, Shell: shell, StartCause: cause})
 		}
 		if bindingRuntime := launch.binding.Runtime; bindingRuntime == "host" {
 			command.identityInvalidated = func() { launch.consentDirty.Store(true) }
@@ -831,6 +1005,13 @@ func (s *Service) refreshHostIdentity(ctx context.Context, launch *registered) e
 // Lifecycle returns P0b's actual supervisor to P2/P3 for synchronous phase and
 // storage settlement calls, avoiding an unrelated mutex or a browser receipt.
 func (s *Service) Lifecycle(session string) protocol.RuntimeSupervisor {
+	if s.bridged(session) {
+		b, err := s.Binding(session)
+		if err != nil {
+			return nil
+		}
+		return nativeSupervisor{service: s, launch: ownershell.SupervisorIdentity(b, ownershell.SignedGrant{}).Launch}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if entry := s.launches[session]; entry != nil {
@@ -850,12 +1031,17 @@ func (s *Service) deliver(reply RPC) {
 	}
 }
 func (s *Service) localCall(ctx context.Context, request RPC) (RPC, error) {
+	if err := ctx.Err(); err != nil {
+		return RPC{}, err
+	}
 	var nonce [32]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return RPC{}, ErrClosed
 	}
 	request.Type = "owner_shell_request"
-	request.Version = 1
+	if request.Version == 0 {
+		request.Version = 1
+	}
 	request.RequestID = hex.EncodeToString(nonce[:])
 	reply := make(chan RPC, 1)
 	s.mu.Lock()
@@ -870,7 +1056,7 @@ func (s *Service) localCall(ctx context.Context, request RPC) (RPC, error) {
 	if err != nil {
 		return RPC{}, ErrClosed
 	}
-	s.HandleContext(context.WithoutCancel(ctx), raw)
+	s.HandleContext(ctx, raw)
 	select {
 	case response := <-reply:
 		if !response.OK {
@@ -900,6 +1086,7 @@ func (n nativeSupervisor) Notify(ctx context.Context, l protocol.SupervisorLaunc
 	if l != n.launch || !p.Valid() {
 		return ErrClosed
 	}
+	n.service.retainedBarrier(l, p, "")
 	_, err := n.service.localCall(ctx, RPC{SessionID: l.SessionID, Op: "phase", Launch: l, Phase: p})
 	return err
 }
@@ -911,6 +1098,7 @@ func (n nativeSupervisor) Freeze(ctx context.Context, l protocol.SupervisorLaunc
 	if l != n.launch {
 		return time.Time{}, ErrClosed
 	}
+	n.service.retainedBarrier(l, "syncing", "")
 	r, err := n.service.localCall(ctx, RPC{SessionID: l.SessionID, Op: "freeze", Launch: l})
 	if err != nil || r.FrozenUntil == 0 {
 		return time.Time{}, ErrClosed
@@ -921,6 +1109,7 @@ func (n nativeSupervisor) CloseShell(ctx context.Context, s protocol.SupervisorS
 	if s.Launch != n.launch {
 		return protocol.SupervisorCleanup{}, ErrClosed
 	}
+	n.service.retainedBarrier(s.Launch, "", s.ShellGeneration)
 	r, err := n.service.localCall(ctx, RPC{SessionID: s.SessionID, Op: "close_shell", Launch: s.Launch, Shell: s.ShellGeneration})
 	if err != nil || r.Cleanup == nil {
 		return protocol.SupervisorCleanup{}, ErrClosed
@@ -928,6 +1117,7 @@ func (n nativeSupervisor) CloseShell(ctx context.Context, s protocol.SupervisorS
 	return *r.Cleanup, r.Cleanup.ValidateFor(s.Launch, s.ShellGeneration)
 }
 func (n nativeSupervisor) CloseLaunch(ctx context.Context, l protocol.SupervisorLaunch, _ string) (protocol.SupervisorCleanup, error) {
+	n.service.retainedBarrier(l, "closed", "")
 	return n.proof(ctx, l, "close_launch")
 }
 func (n nativeSupervisor) RecoverLaunch(ctx context.Context, l protocol.SupervisorLaunch) (protocol.SupervisorCleanup, error) {
@@ -948,20 +1138,41 @@ func (n nativeSupervisor) proof(ctx context.Context, l protocol.SupervisorLaunch
 // launch. Expiry/reaping lives in helpers even if the caller stops waiting.
 func (s *Service) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
-	s.shutdown.Do(func() { close(s.done) })
+	s.shutdown.Do(func() { close(s.done); s.hostCancel() })
 	s.mu.Unlock()
 	complete := make(chan error, 1)
 	go func() {
 		s.workers.Wait()
 		s.mu.Lock()
 		var coordinators []*Coordinator
-		for _, launch := range s.launches {
+		var retained []*retainedCoordinator
+		entries := make([]*registered, 0, len(s.launches)+len(s.hostRetiring))
+		for _, e := range s.launches {
+			entries = append(entries, e)
+		}
+		for e := range s.hostRetiring {
+			entries = append(entries, e)
+		}
+		for _, launch := range entries {
+			retained = append(retained, launch.retainedHistory...)
+			coordinators = append(coordinators, launch.containmentHistory...)
+			if launch.retained != nil {
+				retained = append(retained, launch.retained)
+			}
 			if launch.coordinator != nil {
 				coordinators = append(coordinators, launch.coordinator)
 			}
 		}
 		s.mu.Unlock()
 		var failure error
+		for _, c := range retained {
+			call, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+			err := c.CloseAll(call, "runtime-shutdown")
+			cancel()
+			if err != nil && failure == nil {
+				failure = err
+			}
+		}
 		for _, c := range coordinators {
 			call, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 			_, err := c.CloseLaunch(call, c.launch(), "runtime_shutdown")
@@ -983,6 +1194,17 @@ func (s *Service) Shutdown(ctx context.Context) error {
 // Retire is called before P2/P3 replaces or deletes an incarnation. It obtains
 // P0b's all-shell proof before removing registration; failure retains it.
 func (s *Service) Retire(ctx context.Context, l protocol.SupervisorLaunch) (protocol.SupervisorCleanup, error) {
+	if s.bridged(l.SessionID) {
+		var proof protocol.SupervisorCleanup
+		err := s.bridgeCall(ctx, "retire", l, &proof)
+		if err == nil {
+			s.mu.Lock()
+			delete(s.launches, l.SessionID)
+			s.mu.Unlock()
+		}
+		return proof, err
+	}
+	s.retainedBarrier(l, "replacing", "")
 	s.link.RLock()
 	defer s.link.RUnlock()
 	s.mu.Lock()
@@ -998,11 +1220,16 @@ func (s *Service) Retire(ctx context.Context, l protocol.SupervisorLaunch) (prot
 	entry.retiring = true
 	coordinator := entry.coordinator
 	s.mu.Unlock()
-	if coordinator == nil {
+	switch {
+	case entry.retained != nil:
+		if err := entry.retained.CloseAll(ctx, "runtime-retired"); err != nil {
+			return protocol.SupervisorCleanup{}, err
+		}
+	case coordinator == nil:
 		if entry.reconcile(ctx) != nil {
 			return protocol.SupervisorCleanup{}, ErrClosed
 		}
-	} else {
+	default:
 		if err := coordinator.Notify(ctx, l, "replacing"); err != nil {
 			return protocol.SupervisorCleanup{}, err
 		}
@@ -1028,9 +1255,16 @@ func (s *Service) Retire(ctx context.Context, l protocol.SupervisorLaunch) (prot
 }
 
 // Rebind is invoked locally before each new authenticated socket hello. It
-// destroys old helpers before assigning a fresh connection nonce; no old grant,
-// consent, key or controlling attachment transfers to the new connection.
+// ends v1 helpers and suspends retained custody before assigning a fresh connection
+// nonce. Old grants and attachments never transfer; v2 access requires fresh rekey.
 func (s *Service) Rebind(ctx context.Context) error {
+	if s.bridge() != nil {
+		if managed, ok := s.bridge().(*ReconnectingHostBridge); ok {
+			managed.RequestRecovery()
+		} else if err := s.bridgeCall(ctx, "rebind", nil, nil); err != nil {
+			return err
+		}
+	}
 	s.link.Lock()
 	defer s.link.Unlock()
 	var nonce [32]byte
@@ -1047,6 +1281,12 @@ func (s *Service) Rebind(ctx context.Context) error {
 	var wg sync.WaitGroup
 	failures := make(chan error, len(entries))
 	for _, entry := range entries {
+		if entry.retained != nil {
+			if err := entry.retained.Suspend(ctx); err != nil {
+				failures <- err
+			}
+			continue
+		}
 		if entry.coordinator == nil {
 			continue
 		}
@@ -1070,6 +1310,8 @@ func (s *Service) Rebind(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.connection = hex.EncodeToString(nonce[:])
+	s.persistentHello = protocol.ShellLinkHello{}
+	s.persistentLink = nil
 	for _, entry := range entries {
 		if entry.coordinator != nil {
 			entry.coordinator.sessionMu.Lock()
@@ -1090,13 +1332,21 @@ func (s *Service) Rebind(ctx context.Context) error {
 	return nil
 }
 func (s *Service) Binding(session string) (ownershell.Binding, error) {
+	if s.bridged(session) {
+		if err := s.flushHostControl(s.hostLife, session); err != nil {
+			return ownershell.Binding{}, err
+		}
+		var b ownershell.Binding
+		err := s.bridgeBackground("binding", session, &b)
+		return b, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry := s.launches[session]
 	if entry == nil {
 		return ownershell.Binding{}, ErrClosed
 	}
-	return s.negotiatedBinding(entry.binding), nil
+	return s.persistentBindingLocked(entry, s.negotiatedBinding(entry.binding)), nil
 }
 
 func joinShellOutput(ctx context.Context, entry *registered) error {

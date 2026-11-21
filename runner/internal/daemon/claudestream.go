@@ -32,6 +32,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
@@ -41,9 +42,9 @@ import (
 var (
 	// ccIdleShutdown closes the process of a session that has been idle this long (it restarts with --resume).
 	ccIdleShutdown = 10 * time.Minute
-	// ccIdleMaxDeferrals is how many times in a row the idle shutdown waits another ccIdleShutdown because
-	// background tasks are running (6: an hour), so a task that never reports its end cannot keep a process.
-	ccIdleMaxDeferrals = 6
+	// ccBgStallAfter is how long a running background task's output may stay unchanged before an idle
+	// session is woken to look at it.
+	ccBgStallAfter = 30 * time.Minute
 	// ccInterruptKillAfter is how long an interrupt may go unacknowledged before the process is killed.
 	ccInterruptKillAfter = 5 * time.Second
 	// ccInterruptResultAfter is how long an ACKNOWLEDGED interrupt may take to end the turn (cutting a tool
@@ -58,6 +59,10 @@ var (
 	ccLegacyProbeWindow = 10 * time.Second
 	// ccCloseGrace is how long a process may take to exit after its stdin was closed before it is killed.
 	ccCloseGrace = 10 * time.Second
+	// ccWakeFallbackAfter is how long closeBackgroundTask's own wake-up waits, once a last task ends
+	// while the session is idle, for the CLI to resume the turn on its own before sending it
+	// (BLG-447 code review): long enough that an ordinary self-wake preempts it every time.
+	ccWakeFallbackAfter = 5 * time.Second
 )
 
 const (
@@ -84,6 +89,7 @@ type awaitMsg struct {
 
 // ccProc is one streaming `claude` process.
 type ccProc struct {
+	stopMu  sync.Mutex // serializes cleanup outcome with process exit accounting
 	gen     int
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
@@ -97,20 +103,28 @@ type ccProc struct {
 	started   time.Time
 
 	// guarded by the driver's sm
-	sawInit, sawResult  bool
-	inTurn              bool // a turn has begun (init) and not yet ended (result)
-	stdinClosed         bool
-	intentionalClose    bool
-	killedByDriver      bool
-	dying               bool // being killed: no new message may be written to it
-	lastNoise           string
-	rootUsage           claudeRootUsage
-	mcpInit             mcpProbe
-	mcpWait             map[string]chan ccMCPReply
-	interruptID         string
-	interrupts          map[string]time.Time // pending ACK deadlines, bounded by ccMaxPending
-	interruptPending    bool                 // Stop of a written turn awaiting init, including fallback-only
-	interruptAckPending bool                 // acknowledged cancellation of a written turn awaiting init
+	sawInit, sawResult      bool
+	inTurn                  bool // a turn has begun (init) and not yet ended (result)
+	stdinClosed             bool
+	intentionalClose        bool
+	killedByDriver          bool
+	interruptRefused        bool // keep admission closed until Stop is retried or the turn ends
+	stopAfterTurnEnd        bool
+	commandUUID             string
+	turnEndWork             bool // turn-end emission can block on sync or pending event capacity
+	dying                   bool // being killed: no new message may be written to it
+	lastNoise               string
+	rootUsage               claudeRootUsage
+	mcpInit                 mcpProbe
+	mcpWait                 map[string]chan ccMCPReply
+	interruptID             string
+	interrupts              map[string]time.Time // pending ACK deadlines, bounded by ccMaxPending
+	interruptPending        bool                 // Stop of a written turn awaiting init, including fallback-only
+	interruptAckPending     bool                 // acknowledged cancellation of a written turn awaiting init
+	interruptBackgroundWait bool                 // unconsumed input held behind background work
+	interruptQueueWait      bool                 // original turn ended; the next init must run queued input
+	interruptDeadline       time.Time            // repeated Stop/ACKs keep the same deadline
+	interruptAcknowledged   bool
 }
 
 type steerState struct {
@@ -140,11 +154,15 @@ type steerState struct {
 	idleTimer      *time.Timer
 	// idleEpoch fences callbacks that Stop cannot retract once they have begun.
 	idleEpoch uint64
-	// idleDeferrals counts the idle shutdowns put off in a row for background tasks (reset when the
-	// timer is armed afresh); deferLogged says the deferral was logged once for this session.
-	idleDeferrals int
-	deferLogged   bool
-	wake          chan struct{}
+	// deferLogged says an idle shutdown put off for background tasks was logged once for this session.
+	deferLogged bool
+	wake        chan struct{}
+	// wakeTimer and wakePending are closeBackgroundTask's own fallback wake-up for a task that
+	// ended while the session was idle (BLG-447): armed for ccWakeFallbackAfter, canceled by any
+	// sign the CLI is resuming on its own (markRunning) or that another input is already headed to
+	// it (EnqueueInput), so the two can never both start a turn for the same task's end.
+	wakeTimer   *time.Timer
+	wakePending *agent.BackgroundTaskDonePayload
 }
 
 func (d *claudeCodeDriver) steering() bool {
@@ -187,14 +205,29 @@ func (d *claudeCodeDriver) Enqueue(text, source string) {
 
 // EnqueueInput accepts a message (agent.Input). It never blocks.
 func (d *claudeCodeDriver) EnqueueInput(in agent.Input) {
+	d.enqueueInputGuarded(in, nil)
+}
+
+// enqueueInputGuarded is EnqueueInput with an optional guard checked under the same sm lock as the
+// actual append — not merely before it. A caller that decided "idle, so wake it" outside that lock
+// (wakeFallbackFired) cannot otherwise rule out the CLI self-resuming in the gap between its own
+// check and the enqueue, which would start a second, redundant turn (BLG-447 review). A false
+// guard silently drops the input: the caller's premise no longer holds, so nothing should be
+// queued at all. A nil guard always proceeds, exactly like EnqueueInput.
+func (d *claudeCodeDriver) enqueueInputGuarded(in agent.Input, guard func() bool) {
+	in = d.WithPersonTime(in)
 	if in.Source == "" {
 		in.Source = "chat"
 	}
 	background := d.backgroundRunning()
 	d.mu.Lock()
-	legacyBusy := d.cmd != nil
+	legacyBusy := d.legacyTurn != nil
 	d.mu.Unlock()
 	d.sm.Lock()
+	if guard != nil && !guard() {
+		d.sm.Unlock()
+		return
+	}
 	if in.ExpectedTurnID != "" && (in.ExpectedTurnID != d.usageTurnID || legacyBusy || d.steer.running || len(d.steer.sq) > 0 || len(d.steer.awaiting) > 0 || len(d.queue) > 0 || background > 0) {
 		d.sm.Unlock()
 		d.emit("error", staleLimitResumeError())
@@ -214,6 +247,9 @@ func (d *claudeCodeDriver) EnqueueInput(in agent.Input) {
 		return
 	}
 	d.steer.sq = append(d.steer.sq, steerQueued{Input: in})
+	// Any input about to be delivered makes a pending background-task wake-up moot: it would
+	// otherwise risk a second, redundant turn once the fallback fires too (BLG-447).
+	d.cancelWakeFallbackLocked()
 	d.sm.Unlock()
 	d.signal()
 }
@@ -251,6 +287,9 @@ func (d *claudeCodeDriver) runSteering(ctx context.Context) {
 				return
 			}
 			pending := len(d.steer.sq) > 0
+			if p := d.steer.proc; p != nil && (p.turnEndWork || p.interruptRefused || (!p.interruptDeadline.IsZero() && !p.interruptQueueWait)) {
+				pending = false
+			}
 			d.sm.Unlock()
 			if !pending {
 				break
@@ -300,7 +339,7 @@ func (d *claudeCodeDriver) deliverOne(ctx context.Context) {
 		}
 		d.sm.Unlock()
 		if ok {
-			d.failMessage(m, "claude-code start: "+err.Error())
+			d.emit("error", agent.ErrorPayload{Message: "The worker could not start: " + d.safeClaudeStopError(err) + ". This message was not delivered; try again.", Retryable: true, ClientID: m.ClientID})
 		}
 		return
 	}
@@ -321,7 +360,7 @@ func (d *claudeCodeDriver) deliverOne(ctx context.Context) {
 	uuid := ccUUID()
 	background := d.backgroundRunning()
 	d.sm.Lock()
-	if d.steer.proc != p || p.dying || p.stdinClosed || len(d.steer.sq) == 0 {
+	if d.steer.proc != p || p.dying || p.stdinClosed || p.turnEndWork || p.interruptRefused || (!p.interruptDeadline.IsZero() && !p.interruptQueueWait) || len(d.steer.sq) == 0 {
 		d.sm.Unlock()
 		return // the world changed under us: look again
 	}
@@ -356,8 +395,17 @@ func (d *claudeCodeDriver) deliverOne(ctx context.Context) {
 	}
 	d.steer.sq = d.steer.sq[1:]
 	d.steer.awaiting = append(d.steer.awaiting, awaitMsg{uuid: uuid, steerQueued: m})
+	if !p.inTurn && strings.HasPrefix(strings.TrimSpace(m.Text), "/") {
+		p.commandUUID = uuid
+	}
 	d.steer.running = true
 	d.stopIdleTimerLocked()
+	if p.interruptQueueWait && !p.turnEndWork {
+		if len(d.steer.awaiting) == 1 {
+			p.interruptDeadline = time.Time{}
+		}
+		d.armInterruptKillLocked(p)
+	}
 	d.sm.Unlock()
 	// Busy from the write, not from the replay (which comes a second or so later).
 	d.syncStatus("turn")
@@ -366,7 +414,7 @@ func (d *claudeCodeDriver) deliverOne(ctx context.Context) {
 // failMessage makes sure a message that could not be delivered still shows in the transcript, then says why.
 func (d *claudeCodeDriver) failMessage(m steerQueued, why string) {
 	d.emitTurnMessage(m.Payload())
-	d.emit("error", agent.ErrorPayload{Message: why, Retryable: true})
+	d.emit("error", agent.ErrorPayload{Message: why, Retryable: true, ClientID: m.ClientID})
 }
 
 // ensureProc returns a live process, starting one when there is none. The run loop and
@@ -408,7 +456,7 @@ func (d *claudeCodeDriver) startProc(ctx context.Context) (*ccProc, error) {
 	} else {
 		opts = append(opts, withSessionGuide(), withInteraction(d.interaction))
 	}
-	opts = append(opts, withMarkerNonce(d.markerNonce), withPromptFile(d.promptFile))
+	opts = append(opts, func(o *ccOptions) { o.SkillPolicy = d.skillPolicy; o.WorkspaceGuide = d.workspaceGuide }, withMarkerNonce(d.markerNonce), withPromptFile(d.promptFile))
 	if d.mcpFile != nil {
 		path, err := d.mcpFile.Ensure()
 		if err != nil {
@@ -437,8 +485,18 @@ func (d *claudeCodeDriver) startProc(ctx context.Context) (*ccProc, error) {
 	pidFile := fmt.Sprintf("%s.%s.%d", sandboxTurnPIDFile, tag, gen)
 	opts = append(opts, withPluginDirs(d.pluginDirs), withClaudeSandboxSettings(d.sandboxSettings))
 	opts = append(opts, withCLIFlags(d.cliFlags(ctx))...)
-	cmd := d.prefix.commandPID(ctx, d.workDir, "claude", pidFile, ccSessionArgs(model, effort, resume, opts...)...)
+	cmd := d.prefix.commandGroupPID(ctx, d.workDir, "claude", pidFile, ccSessionArgs(model, effort, resume, opts...)...)
 	cmd.Env = d.env
+	if !d.prefix.enabled() && d.startCommand == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			if err == syscall.ESRCH {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -477,7 +535,7 @@ func (d *claudeCodeDriver) writer(p *ccProc) {
 		select {
 		case l := <-p.writeCh:
 			if _, err := p.stdin.Write(l); err != nil {
-				d.killProc(p) // a pipe that no longer takes writes belongs to a process that is gone or wedged
+				d.cleanupProc(p) // a pipe that no longer takes writes belongs to a process that is gone or wedged
 				return
 			}
 		case <-p.closeReq:
@@ -521,7 +579,7 @@ func (d *claudeCodeDriver) reader(ctx context.Context, p *ccProc, stdout io.Read
 	}
 	if rerr != io.EOF {
 		// The pipe broke while the process may still be alive: an undrained pipe would wedge it.
-		d.killProc(p)
+		d.cleanupProc(p)
 	}
 	werr := p.cmd.Wait()
 	d.procExited(ctx, p, werr)
@@ -529,12 +587,23 @@ func (d *claudeCodeDriver) reader(ctx context.Context, p *ccProc, stdout io.Read
 
 // killProc ends the process for good: SIGKILL inside the container (SIGTERM could be ignored by a wedged
 // engine, and a process that never exits would block every later message), and the host-side child.
-func (d *claudeCodeDriver) killProc(p *ccProc) {
+func (d *claudeCodeDriver) killProc(p *ccProc) error {
 	if d.prefix.enabled() {
-		_ = d.prefix.killPID(p.pidFile)
+		if err := d.prefix.killGroupPID(p.pidFile); err != nil {
+			return err
+		}
 	}
 	if p.cmd.Process != nil {
-		_ = cancelEngineCommand(p.cmd, d.startCommand != nil)
+		return cancelEngineCommand(p.cmd, d.startCommand != nil || !d.prefix.enabled())
+	}
+	return nil
+}
+
+// Teardown outside an explicit Stop has no waiting request to answer. Retain a
+// sanitized diagnostic if its cancellation boundary refuses cleanup.
+func (d *claudeCodeDriver) cleanupProc(p *ccProc) {
+	if err := d.killProc(p); err != nil {
+		log.Printf("claude-code: engine cleanup failed: %s", d.safeClaudeStopError(err))
 	}
 }
 
@@ -548,7 +617,37 @@ func (d *claudeCodeDriver) onLine(p *ccProc, line []byte) {
 	gone := p.dying || p.killedByDriver
 	d.sm.Unlock()
 	if gone {
-		return // output of a process that is being killed has already been accounted for
+		var ev ccLine
+		if json.Unmarshal(line, &ev) == nil && ev.Type == "user" && ev.IsReplay && !ev.IsSynthetic && ev.ParentToolUseID == "" {
+			d.sm.Lock()
+			var consumed *awaitMsg
+			for i, a := range d.steer.awaiting {
+				if a.uuid == ev.UUID {
+					receipt := a
+					consumed = &receipt
+					d.steer.awaiting = append(d.steer.awaiting[:i], d.steer.awaiting[i+1:]...)
+					break
+				}
+			}
+			d.sm.Unlock()
+			if consumed != nil {
+				receipt := consumed.Payload()
+				receipt.StoppedTurn = true
+				d.emitTurnMessage(receipt)
+			}
+		} else {
+			// A refused cleanup leaves a live reader. Process its ordinary output
+			// once the cleanup outcome is known, rather than discarding a result.
+			p.stopMu.Lock()
+			d.sm.Lock()
+			live := !p.dying && !p.killedByDriver
+			d.sm.Unlock()
+			p.stopMu.Unlock()
+			if live {
+				d.onLine(p, line)
+			}
+		}
+		return
 	}
 	var ev ccLine
 	if json.Unmarshal(line, &ev) != nil {
@@ -601,6 +700,9 @@ func (d *claudeCodeDriver) markRunning(reason string) {
 	if !was {
 		d.stopIdleTimerLocked()
 	}
+	// The CLI is resuming this turn by itself (or the driver already started one some other way):
+	// either way, a pending fallback wake-up for the same idle gap is now moot (BLG-447).
+	d.cancelWakeFallbackLocked()
 	d.sm.Unlock()
 	if !was {
 		d.syncStatus(reason)
@@ -611,13 +713,29 @@ func (d *claudeCodeDriver) onInit(p *ccProc, ev *ccLine, line []byte) {
 	d.observeMCPInit(p, line)
 	d.sm.Lock()
 	p.sawInit, p.inTurn = true, true
+	if len(d.steer.awaiting) > 0 && strings.HasPrefix(strings.TrimSpace(d.steer.awaiting[0].Text), "/") {
+		p.commandUUID = d.steer.awaiting[0].uuid
+	}
 	d.steer.turnSeq++ // a turn is starting: timers armed for an earlier one are stale
-	if p.interruptAckPending {
+	switch {
+	case p.interruptQueueWait:
+		// The stopped turn already ended. Initialization proves its queued input
+		// can proceed; its recovery deadline must never cut this new turn.
+		d.stopTimerLocked(&d.steer.killTimer)
+		p.interruptDeadline = time.Time{}
+		p.interruptAcknowledged = false
+		d.steer.interruptUntil = time.Time{}
+	case p.interruptAckPending:
+		p.interruptDeadline = time.Time{}
+		p.interruptAcknowledged = false
 		d.armInterruptResultLocked(p)
-	} else if p.interruptPending {
+	case p.interruptPending:
+		// Initialization starts this turn's deadline, even in a warm process.
+		p.interruptDeadline = time.Time{}
 		d.armInterruptKillLocked(p)
 	}
 	p.interruptPending, p.interruptAckPending = false, false
+	p.interruptBackgroundWait, p.interruptQueueWait = false, false
 	d.apiErr = ""
 	d.stopTimerLocked(&d.steer.settleTimer)
 	d.sm.Unlock()
@@ -737,37 +855,64 @@ func harnessInjected(text string) bool {
 }
 
 func (d *claudeCodeDriver) onResult(p *ccProc, ev *ccLine) {
+	background := d.backgroundRunning()
 	d.sm.Lock()
+	var command *awaitMsg
+	if p.commandUUID != "" && (!ev.IsError || p.sawInit) {
+		for i, a := range d.steer.awaiting {
+			if a.uuid == p.commandUUID {
+				command = &a
+				d.steer.awaiting = append(d.steer.awaiting[:i], d.steer.awaiting[i+1:]...)
+				break
+			}
+		}
+		p.commandUUID = ""
+	}
 	if ev.IsError && !p.sawInit {
 		// The process failed before it began a turn (a --resume that does not exist): not a turn outcome.
 		// Its exit follows and is reported once, by procExited.
 		d.sm.Unlock()
 		return
 	}
-	interrupted := !d.steer.interruptUntil.IsZero() && time.Now().Before(d.steer.interruptUntil) &&
-		p.sawInit && ev.Subtype == "error_during_execution"
+	stopRequested := !d.steer.interruptUntil.IsZero() && time.Now().Before(d.steer.interruptUntil)
+	interrupted := stopRequested && p.sawInit && ev.Subtype == "error_during_execution"
 	d.steer.interruptUntil = time.Time{}
 	d.stopTimerLocked(&d.steer.killTimer)
 	d.steer.turnSeq++
 	turn, gen := d.steer.turnSeq, p.gen
-	p.sawResult, p.inTurn = true, false
+	p.sawResult, p.inTurn, p.turnEndWork = true, false, true
+	p.interruptRefused = false
 	p.interruptPending, p.interruptAckPending = false, false
+	p.interruptBackgroundWait, p.interruptQueueWait, p.interruptAcknowledged = false, false, false
+	p.interruptDeadline = time.Time{}
 	noise := p.lastNoise
 	partition := p.rootUsage.partition(ev.ccUsage())
 	turnContext := p.rootUsage.contextUsage(ev)
 	p.rootUsage = claudeRootUsage{}
 	settle := len(d.steer.awaiting) > 0
+	recoverQueue := stopRequested && background > 0 && (settle || len(d.steer.sq) > 0)
+	settle = settle || recoverQueue
 	closeNow := false
 	if settle {
-		// A message was written but not echoed yet: the CLI starts another turn for it.
 		d.stopTimerLocked(&d.steer.settleTimer)
-		d.steer.settleTimer = time.AfterFunc(ccSettleAfter, func() { d.settleFired(gen, turn) })
+		if recoverQueue {
+			// A completed Stop cannot leave pending input behind a background wait,
+			// nor can slash-command settlement pretend that input was consumed.
+			p.interruptBackgroundWait, p.interruptQueueWait = true, true
+			// Arm after turn-end callbacks have released the output reader.
+		} else {
+			// A message was written but not echoed yet: the CLI starts another turn for it.
+			d.steer.settleTimer = time.AfterFunc(ccSettleAfter, func() { d.settleFired(gen, turn) })
+		}
 	} else {
 		d.steer.running = false
 		closeNow = d.idleLocked(p)
 	}
 	d.sm.Unlock()
 
+	if command != nil {
+		d.emitTurnMessage(command.Payload())
+	}
 	d.setCCSessionID(ev.SessionID)
 	stop := "end_turn"
 	switch {
@@ -786,12 +931,29 @@ func (d *claudeCodeDriver) onResult(p *ccProc, ev *ccLine) {
 		d.takeAPIError()
 	}
 	d.emit("turn_done", agent.TurnDonePayload{StopReason: stop, Model: p.model, Usage: ev.ccUsage(), UsageByModel: partition, Context: turnContext})
+	d.sm.Lock()
+	p.turnEndWork = false
+	deferredStop := p.stopAfterTurnEnd
+	p.stopAfterTurnEnd = false
+	d.sm.Unlock()
+	if deferredStop {
+		d.Interrupt()
+	}
+	if recoverQueue {
+		d.sm.Lock()
+		if d.steer.proc == p && d.steer.turnSeq == turn && p.interruptQueueWait && len(d.steer.awaiting) > 0 {
+			p.interruptDeadline = time.Time{}
+			d.armInterruptKillLocked(p)
+		}
+		d.sm.Unlock()
+	}
 	if !settle {
 		d.syncStatus("turn_done")
 	}
 	if closeNow {
-		d.closeStdin(p)
+		d.closeIdle(p)
 	}
+	d.signal()
 }
 
 // onControlResponse: the interrupt was acknowledged. The turn is being cut, which can take a while (a slow
@@ -819,14 +981,21 @@ func (d *claudeCodeDriver) onControlResponse(p *ccProc, line []byte) {
 	}
 	// A preceding result may have cleared the request's optimistic flag and timer before
 	// this ACK arrived. The matching ACK identifies the turn the CLI is actually cutting.
-	d.stopTimerLocked(&d.steer.killTimer)
 	if !p.inTurn {
+		d.stopTimerLocked(&d.steer.killTimer)
 		// deliverOne has already marked a written message running, but init has not
-		// arrived. Its turn sequence (and acknowledged-result timer) starts at init.
+		// arrived. A background wait needs a deadline even if init never comes;
+		// other written input retains the ordinary init-bound timer.
 		p.interruptAckPending = len(d.steer.awaiting) > 0
-		if !p.interruptAckPending {
-			p.interruptPending = false
-			d.steer.interruptUntil = time.Time{}
+		if p.interruptAckPending && p.interruptBackgroundWait {
+			d.armInterruptResultLocked(p)
+		} else {
+			p.interruptDeadline = time.Time{}
+			p.interruptAcknowledged = false
+			if !p.interruptAckPending {
+				p.interruptPending = false
+				d.steer.interruptUntil = time.Time{}
+			}
 		}
 		return
 	}
@@ -834,16 +1003,25 @@ func (d *claudeCodeDriver) onControlResponse(p *ccProc, line []byte) {
 }
 
 func (d *claudeCodeDriver) armInterruptResultLocked(p *ccProc) {
+	if !p.interruptAcknowledged {
+		p.interruptAcknowledged = true
+		p.interruptDeadline = time.Now().Add(ccInterruptResultAfter)
+	}
 	d.stopTimerLocked(&d.steer.killTimer)
-	d.steer.interruptUntil = time.Now().Add(ccInterruptResultAfter)
-	turn, gen := d.steer.turnSeq, p.gen
-	d.steer.killTimer = time.AfterFunc(ccInterruptResultAfter, func() { d.interruptTimeout(gen, turn) })
+	d.steer.interruptUntil = p.interruptDeadline
+	turn, gen, deadline := d.steer.turnSeq, p.gen, p.interruptDeadline
+	d.steer.killTimer = time.AfterFunc(time.Until(deadline), func() { d.interruptTimeoutFor(gen, turn, deadline) })
 }
 
 // settleFired: the turn that was expected after a result never announced itself, so the messages still
 // waiting for an echo were consumed without one (a slash command). Show them and go idle.
 func (d *claudeCodeDriver) settleFired(gen, turn int) {
+	background := d.backgroundRunning()
 	d.sm.Lock()
+	if background > 0 {
+		d.sm.Unlock()
+		return
+	}
 	p := d.steer.proc
 	if d.steer.closed || p == nil || p.gen != gen || p.inTurn || d.steer.turnSeq != turn || len(d.steer.awaiting) == 0 {
 		d.sm.Unlock()
@@ -859,6 +1037,8 @@ func (d *claudeCodeDriver) settleFired(gen, turn int) {
 	}
 	d.steer.running = false
 	p.interruptPending, p.interruptAckPending = false, false
+	p.interruptBackgroundWait, p.interruptQueueWait, p.interruptAcknowledged = false, false, false
+	p.interruptDeadline = time.Time{}
 	d.steer.interruptUntil = time.Time{}
 	closeNow := d.idleLocked(p)
 	d.sm.Unlock()
@@ -867,7 +1047,7 @@ func (d *claudeCodeDriver) settleFired(gen, turn int) {
 	}
 	d.syncStatus("turn_done")
 	if closeNow {
-		d.closeStdin(p)
+		d.closeIdle(p)
 	}
 }
 
@@ -877,6 +1057,7 @@ func (d *claudeCodeDriver) settleFired(gen, turn int) {
 // messages are kept and run next, as with the per-turn engine. The control request goes through the same
 // ordered channel as the messages, so it always follows any message already accepted.
 func (d *claudeCodeDriver) Interrupt() {
+	background := d.backgroundRunning()
 	d.sm.Lock()
 	if d.steer.legacy {
 		d.sm.Unlock()
@@ -884,10 +1065,34 @@ func (d *claudeCodeDriver) Interrupt() {
 		return
 	}
 	p := d.steer.proc
+	if !d.steer.closed && !d.steer.running && len(d.steer.awaiting) == 0 && background > 0 && (p == nil || !p.turnEndWork) {
+		d.sm.Unlock()
+		d.emit("background_wait_stopped", map[string]string{"message": "Stopped waiting; background work may still be running."})
+		return
+	}
+	if p != nil && p.turnEndWork {
+		p.stopAfterTurnEnd = true
+		d.sm.Unlock()
+		return
+	}
 	if d.steer.closed || p == nil || p.dying || p.stdinClosed || (!d.steer.running && len(d.steer.awaiting) == 0) {
 		d.sm.Unlock()
 		return
 	}
+	if p.interruptQueueWait {
+		// The earlier Stop finished. This press applies to the held input now,
+		// rather than granting it permission to run when init finally arrives.
+		p.interruptQueueWait = false
+		p.interruptDeadline = time.Time{}
+		p.interruptAcknowledged = false
+		d.stopTimerLocked(&d.steer.killTimer)
+	}
+	if !p.inTurn && len(d.steer.awaiting) > 0 && background > 0 {
+		p.interruptBackgroundWait = true
+		// Settlement is for slash commands, not input the engine has not consumed.
+		d.stopTimerLocked(&d.steer.settleTimer)
+	}
+	p.interruptRefused = false
 	now := time.Now()
 	for id, deadline := range p.interrupts {
 		if !now.Before(deadline) {
@@ -922,30 +1127,62 @@ func (d *claudeCodeDriver) Interrupt() {
 }
 
 func (d *claudeCodeDriver) armInterruptKillLocked(p *ccProc) {
-	d.steer.interruptUntil = time.Now().Add(ccInterruptFlagTTL)
-	turn, gen := d.steer.turnSeq, p.gen
+	if p.turnEndWork || (!p.inTurn && !p.interruptBackgroundWait) {
+		p.interruptDeadline = time.Time{}
+		return
+	}
+	if p.interruptDeadline.IsZero() {
+		p.interruptDeadline = time.Now().Add(ccInterruptKillAfter)
+	}
+	if !p.interruptAcknowledged {
+		d.steer.interruptUntil = time.Now().Add(ccInterruptFlagTTL)
+	}
+	turn, gen, deadline := d.steer.turnSeq, p.gen, p.interruptDeadline
 	d.stopTimerLocked(&d.steer.killTimer)
-	d.steer.killTimer = time.AfterFunc(ccInterruptKillAfter, func() { d.interruptTimeout(gen, turn) })
+	d.steer.killTimer = time.AfterFunc(time.Until(deadline), func() { d.interruptTimeoutFor(gen, turn, deadline) })
 }
 
 // interruptTimeout: the interrupt did not end the turn in time. Kill the process; the next message starts a
 // new one with --resume. Messages it never consumed go back to the front of the queue. Nothing happens
-// unless a turn is really running in that process (an interrupt that found nothing to cut leaves the
-// process alone).
+// unless a turn is running or unconsumed input is held behind background work.
+// An interrupt that found nothing to cut leaves the process alone.
 func (d *claudeCodeDriver) interruptTimeout(gen, turn int) {
+	d.interruptTimeoutFor(gen, turn, time.Time{})
+}
+
+func (d *claudeCodeDriver) interruptTimeoutFor(gen, turn int, deadline time.Time) {
+	d.sm.Lock()
+	candidate := d.steer.proc
+	d.sm.Unlock()
+	if candidate == nil {
+		return
+	}
+	candidate.stopMu.Lock()
+	defer candidate.stopMu.Unlock()
 	d.sm.Lock()
 	p := d.steer.proc
-	if d.steer.closed || p == nil || p.gen != gen || d.steer.turnSeq != turn || !p.inTurn {
+	if d.steer.closed || p == nil || p.gen != gen || d.steer.turnSeq != turn ||
+		p.turnEndWork || (!deadline.IsZero() && !p.interruptDeadline.Equal(deadline)) ||
+		(!p.inTurn && (!p.interruptBackgroundWait || len(d.steer.awaiting) == 0)) {
 		d.sm.Unlock()
 		return
 	}
-	p.killedByDriver, p.dying = true, true
-	back := make([]steerQueued, 0, len(d.steer.awaiting)+len(d.steer.sq))
-	for _, a := range d.steer.awaiting {
-		back = append(back, a.steerQueued)
+	p.dying = true
+	d.sm.Unlock()
+	if err := d.killProc(p); err != nil {
+		d.sm.Lock()
+		p.dying = false
+		p.interruptRefused = true
+		p.interruptDeadline = time.Time{}
+		p.interruptAcknowledged = false
+		d.sm.Unlock()
+		d.emit("error", agent.ErrorPayload{Message: "The worker could not stop safely: " + d.safeClaudeStopError(err) + ". Queued messages are still waiting; try Stop again.", Retryable: true, Code: agent.ErrorCodeStopFailed})
+		return
 	}
-	d.steer.sq = append(back, d.steer.sq...)
-	d.steer.awaiting = nil
+	d.sm.Lock()
+	p.killedByDriver = true
+	// Keep unconfirmed inputs with this reader until EOF. A replay already in
+	// stdout may be behind a blocked Emit; only EOF proves no receipt remains.
 	wasInTurn := p.inTurn
 	d.steer.running = false
 	p.inTurn = false
@@ -956,9 +1193,11 @@ func (d *claudeCodeDriver) interruptTimeout(gen, turn int) {
 	p.rootUsage = claudeRootUsage{}
 	d.sm.Unlock()
 
-	d.killProc(p)
 	if wasInTurn {
 		d.emit("turn_done", agent.TurnDonePayload{StopReason: "interrupted", Model: p.model, Context: compacted})
+	}
+	if !wasInTurn {
+		d.emit("background_wait_stopped", map[string]string{"message": "Stopped waiting; background work may still be running."})
 	}
 	d.syncStatus("turn_done")
 	d.signal()
@@ -980,7 +1219,7 @@ func (d *claudeCodeDriver) markStale() {
 	closeNow := d.idleLocked(p)
 	d.sm.Unlock()
 	if closeNow {
-		d.closeStdin(p)
+		d.closeIdle(p)
 	}
 }
 
@@ -998,7 +1237,6 @@ func (d *claudeCodeDriver) idleLocked(p *ccProc) bool {
 	if d.steer.stale {
 		return true
 	}
-	d.steer.idleDeferrals = 0
 	d.armIdleTimerLocked(p.gen)
 	return false
 }
@@ -1011,9 +1249,11 @@ func (d *claudeCodeDriver) armIdleTimerLocked(gen int) {
 }
 
 // idleFired closes an idle process, unless it is running background tasks: closing it would end them, so
-// the shutdown waits another ccIdleShutdown, at most ccIdleMaxDeferrals times in a row. Past that the
-// process is closed as usual and its tasks are reported stopped (procExited).
+// the shutdown waits another ccIdleShutdown, for as long as the engine reports them running. There is no
+// limit: a command that runs for hours is live work, a session's Stop still ends it, and the CLI itself
+// bounds a background command with its timeout. Each wait also looks for a task that has gone quiet.
 func (d *claudeCodeDriver) idleFired(gen int, epoch uint64) {
+	d.closeUnlistedTasks()
 	// All combined acquisitions use subMu -> sm. Holding both through the close
 	// decision prevents task start/end or an idle reset from slipping past it.
 	d.subMu.Lock()
@@ -1025,8 +1265,7 @@ func (d *claudeCodeDriver) idleFired(gen int, epoch uint64) {
 		d.subMu.Unlock()
 		return
 	}
-	if running > 0 && d.steer.idleDeferrals < ccIdleMaxDeferrals {
-		d.steer.idleDeferrals++
+	if running > 0 {
 		logIt := !d.steer.deferLogged
 		d.steer.deferLogged = true
 		d.armIdleTimerLocked(gen)
@@ -1035,6 +1274,7 @@ func (d *claudeCodeDriver) idleFired(gen int, epoch uint64) {
 		if logIt {
 			log.Printf("claude-code: idle shutdown deferred: %d background tasks running", running)
 		}
+		d.wakeForStalledTasks()
 		return
 	}
 	// Validation and the irreversible state transition belong to one critical
@@ -1050,21 +1290,104 @@ func (d *claudeCodeDriver) idleFired(gen int, epoch uint64) {
 }
 
 // backgroundIdleLocked rearms an idle session as part of the last-task removal,
-// before subMu is released or callbacks/events can delay it. The caller holds
-// subMu; this is the same subMu -> sm order used by idleFired. A returned process
-// has its close committed already; finishStdinClose runs outside both locks.
-func (d *claudeCodeDriver) backgroundIdleLocked() *ccProc {
+// before subMu is released or callbacks/events can delay it. It never closes the
+// process, even a stale one: closeBackgroundTask wakes it itself for the task that
+// just ended (wakeForFinishedTask, BLG-447), so closing now would lose nothing,
+// but the ordinary idle shutdown still needs its own full window after that. The
+// caller holds subMu; this is the same subMu -> sm order used by idleFired.
+func (d *claudeCodeDriver) backgroundIdleLocked() {
 	d.sm.Lock()
 	defer d.sm.Unlock()
 	p := d.steer.proc
-	if d.steer.legacy || d.steer.closed || p == nil {
-		return nil
+	if d.steer.legacy || d.steer.closed || p == nil || !d.isIdleLocked(p) {
+		return
 	}
-	if d.idleLocked(p) && d.markStdinClosedLocked(p) {
-		d.stopIdleTimerLocked()
-		return p
+	d.armIdleTimerLocked(p.gen)
+}
+
+// idleNowLocked reports whether the process is idle right now (no turn running, nothing
+// queued or awaiting): closeBackgroundTask's cue that a fallback wake-up may be worth arming,
+// since Claude Code resuming itself (BLG-447 found it does not always do so promptly, if at all)
+// is otherwise the only thing that would start a turn for the task that just ended. The caller
+// holds subMu; this is the same subMu -> sm order used by idleFired and backgroundIdleLocked.
+func (d *claudeCodeDriver) idleNowLocked() bool {
+	d.sm.Lock()
+	defer d.sm.Unlock()
+	p := d.steer.proc
+	return !d.steer.legacy && p != nil && d.isIdleLocked(p)
+}
+
+// armWakeFallback arms (replacing any earlier one) closeBackgroundTask's own fallback wake-up for
+// a task that ended while the session was idle, rechecking eligibility itself (idleNowLocked's
+// caller may have released sm since): a message, Stop, or the CLI resuming meanwhile makes this a
+// no-op. Canceled by markRunning (the CLI resumed, or anything else started a turn) or by any
+// input reaching the queue (EnqueueInput) before ccWakeFallbackAfter elapses — never both.
+func (d *claudeCodeDriver) armWakeFallback(p agent.BackgroundTaskDonePayload) {
+	d.sm.Lock()
+	defer d.sm.Unlock()
+	proc := d.steer.proc
+	if d.steer.legacy || proc == nil || !d.isIdleLocked(proc) {
+		return
 	}
-	return nil
+	d.stopTimerLocked(&d.steer.wakeTimer)
+	cp := p
+	d.steer.wakePending = &cp
+	gen := proc.gen
+	d.steer.wakeTimer = time.AfterFunc(ccWakeFallbackAfter, func() { d.wakeFallbackFired(gen) })
+}
+
+// cancelWakeFallbackLocked drops a pending fallback wake-up, if there is one. The caller holds sm.
+func (d *claudeCodeDriver) cancelWakeFallbackLocked() {
+	d.stopTimerLocked(&d.steer.wakeTimer)
+	d.steer.wakePending = nil
+}
+
+// wakeFallbackFired delivers a still-pending wake-up once ccWakeFallbackAfter has passed with no
+// sign the CLI resumed on its own: rechecked under sm so a stale timer (an older process
+// generation, or one already canceled or delivered) does nothing.
+func (d *claudeCodeDriver) wakeFallbackFired(gen int) {
+	d.sm.Lock()
+	proc := d.steer.proc
+	pending := d.steer.wakePending
+	if pending == nil || proc == nil || proc.gen != gen || d.steer.legacy || !d.isIdleLocked(proc) {
+		d.sm.Unlock()
+		return
+	}
+	d.steer.wakeTimer, d.steer.wakePending = nil, nil
+	p := *pending
+	d.sm.Unlock()
+	if d.afterWakeFallbackUnlock != nil {
+		d.afterWakeFallbackUnlock()
+	}
+	// The idle finding above is already stale the instant sm is released: the CLI could
+	// self-resume in the gap before the guard below re-acquires it. Re-check isIdleLocked under
+	// that same lock, right before the append, instead of trusting this snapshot (BLG-447 review).
+	d.wakeForFinishedTask(p, func() bool {
+		return d.steer.proc == proc && proc.gen == gen && !d.steer.legacy && d.isIdleLocked(proc)
+	})
+}
+
+// closeIdle closes a process that wants closing at an idle point (a stale one), unless background work
+// still runs on it: then the idle timer decides again, after the work has ended.
+func (d *claudeCodeDriver) closeIdle(p *ccProc) {
+	d.subMu.Lock()
+	d.sm.Lock()
+	if !d.isIdleLocked(p) {
+		d.sm.Unlock()
+		d.subMu.Unlock()
+		return
+	}
+	closeNow := false
+	if d.backgroundRunningLocked() > 0 {
+		d.armIdleTimerLocked(p.gen)
+	} else {
+		closeNow = d.markStdinClosedLocked(p)
+	}
+	d.sm.Unlock()
+	d.subMu.Unlock()
+	if closeNow {
+		d.finishStdinClose(p)
+	}
 }
 
 // closeStdin shuts an idle process down cleanly; that exit is not a crash. A process that does not leave
@@ -1094,7 +1417,7 @@ func (d *claudeCodeDriver) finishStdinClose(p *ccProc) {
 		select {
 		case <-p.done:
 		default:
-			d.killProc(p)
+			d.cleanupProc(p)
 		}
 	})
 }
@@ -1114,14 +1437,29 @@ func (d *claudeCodeDriver) stopIdleTimerLocked() {
 // ── exit handling ────────────────────────────────────────────────────────────
 
 func (d *claudeCodeDriver) procExited(ctx context.Context, p *ccProc, werr error) {
+	p.stopMu.Lock()
+	defer p.stopMu.Unlock()
+	defer func() {
+		d.sm.Lock()
+		if d.steer.proc == p {
+			d.steer.proc = nil
+		}
+		d.sm.Unlock()
+		close(p.done)
+		d.signal()
+	}()
 	d.sm.Lock()
 	if d.steer.proc == p {
-		d.steer.proc = nil
+		p.dying = true
 		d.progress.clear()
 	}
 	d.stopTimerLocked(&d.steer.killTimer)
 	d.stopTimerLocked(&d.steer.settleTimer)
 	d.stopIdleTimerLocked()
+	// This process (and, if a restart or a fallback to the per-turn engine follows, its own
+	// background-task bookkeeping) is gone: a pending wake-up tagged to its generation would never
+	// fire for the right process anyway, but dropping it here is explicit (BLG-447).
+	d.cancelWakeFallbackLocked()
 	d.steer.interruptUntil = time.Time{}
 	wasInTurn := p.inTurn
 	left := d.steer.awaiting
@@ -1148,7 +1486,9 @@ func (d *claudeCodeDriver) procExited(ctx context.Context, p *ccProc, werr error
 	// ones that get another go back BEFORE announcing the exit, so nothing newer can overtake them.
 	var retry, fail []awaitMsg
 	switch {
-	case shuttingDown || killed || probe:
+	case shuttingDown || probe:
+	case killed:
+		retry = left
 	case badResume && d.requireNativeResume:
 		fail = left
 	case intentional: // closed with something still unconsumed (nothing was lost): deliver it again
@@ -1181,7 +1521,6 @@ func (d *claudeCodeDriver) procExited(ctx context.Context, p *ccProc, werr error
 		pid = p.cmd.Process.Pid
 	}
 	log.Printf("claude-code: process exited: generation=%d pid=%d status=%v intentional=%t driver_kill=%t shutdown=%t", p.gen, pid, werr, intentional, killed, shuttingDown)
-	close(p.done)
 
 	if p.cmd != nil && p.cmd.Process != nil && !d.prefix.enabled() {
 		d.reportEngine(p.cmd.Process.Pid, false)
@@ -1189,12 +1528,15 @@ func (d *claudeCodeDriver) procExited(ctx context.Context, p *ccProc, werr error
 	if badResume && !d.requireNativeResume {
 		d.clearCCSessionID() // that conversation is gone: the retry starts a fresh one
 	}
-	if !shuttingDown {
-		// The tasks it left running in the background ended with it (the session ending says so itself).
-		d.endBackgroundTasks()
-	}
+	lost := d.liveBackgroundWork()
+	// Bash processes may outlive the engine; its subagents, Monitors, and
+	// pending native calls cannot. Retain only the uncertain shell inventory.
+	d.endBackgroundTasks(true)
 	if shuttingDown || killed {
 		d.prefix.clearPID(p.pidFile)
+		if killed && !shuttingDown {
+			d.signal()
+		}
 		return // a driver-initiated end: whoever ended it has said what there was to say
 	}
 	switch {
@@ -1235,6 +1577,9 @@ func (d *claudeCodeDriver) procExited(ctx context.Context, p *ccProc, werr error
 	}
 	d.syncStatus("turn_done")
 	d.prefix.clearPID(p.pidFile)
+	if !probe {
+		d.tellBackgroundLost(lost)
+	}
 	d.signal()
 }
 
@@ -1249,8 +1594,26 @@ func (d *claudeCodeDriver) shutdown() {
 	d.stopTimerLocked(&d.steer.killTimer)
 	d.stopTimerLocked(&d.steer.settleTimer)
 	d.stopIdleTimerLocked()
+	d.cancelWakeFallbackLocked()
 	d.sm.Unlock()
 	if p != nil {
-		d.killProc(p)
+		d.cleanupProc(p)
 	}
+}
+
+func (d *claudeCodeDriver) safeClaudeStopError(err error) string {
+	return safeEngineCommandError(err, d.env)
+}
+
+func (d *claudeCodeDriver) HasInterruptibleWork() bool {
+	d.sm.Lock()
+	legacy := d.steer.legacy
+	work := d.steer.running || len(d.steer.awaiting) > 0 || (d.steer.proc != nil && d.steer.proc.turnEndWork)
+	d.sm.Unlock()
+	if legacy {
+		d.mu.Lock()
+		work = work || d.legacyTurn != nil
+		d.mu.Unlock()
+	}
+	return work
 }

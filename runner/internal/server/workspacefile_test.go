@@ -20,6 +20,7 @@ func TestWorkspaceBrokerBindsConnectionSessionAndConsumesOnce(t *testing.T) {
 	h := NewHub()
 	dc := &DaemonConn{ID: "daemon", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	h.Register(dc)
 	h.SetSessionOwner("session", dc.ID)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -33,6 +34,7 @@ func TestWorkspaceBrokerBindsConnectionSessionAndConsumesOnce(t *testing.T) {
 	reply := protocol.WorkspaceFileResult{Type: "workspace_file_result", RequestID: req.RequestID, SessionID: "session", OK: true, Path: "README.md", Size: 2, ContentB64: base64.StdEncoding.EncodeToString([]byte("hi")), View: "text", ContentType: "text/plain", Mtime: time.Now().UTC().Format(time.RFC3339Nano)}
 	other := &DaemonConn{ID: "other"}
 	other.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	other.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	h.deliverWorkspaceFileResult(other, reply)
 	wrong := reply
 	wrong.SessionID = "foreign"
@@ -59,6 +61,7 @@ func TestWorkspaceFileOwnerOnlyAndOldDaemonTimeout(t *testing.T) {
 	fx.api.RegisterWorkspaceFileRoutes(fx.mux)
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	fx.api.hub.Register(dc)
 	fx.api.hub.SetSessionOwner(fx.sess, dc.ID)
 	get := func(sid, tok string) *httptest.ResponseRecorder {
@@ -85,11 +88,28 @@ func TestWorkspaceFileOwnerOnlyAndOldDaemonTimeout(t *testing.T) {
 	fx.api.hub.SetSessionOwner(fx.sess, dc.ID)
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions/"+fx.sess+"/workspace-file?path=README.md", nil)
 	req.Header.Set("Authorization", "Bearer "+fx.token(topicOwner, "human"))
-	ctx, cancel := context.WithTimeout(req.Context(), 10*time.Millisecond)
+	// The old daemon never replies: the request's deadline expires after dispatch.
+	// An expired deadline (not a client cancel) is what reports daemon_timeout.
+	expiring := newExpiringContext(req.Context())
+	cancel := expiring.expire
 	defer cancel()
-	req = req.WithContext(ctx)
+	req = req.WithContext(expiring)
 	rec := httptest.NewRecorder()
-	fx.mux.ServeHTTP(rec, req)
+	done := make(chan struct{})
+	go func() { defer close(done); fx.mux.ServeHTTP(rec, req) }()
+	// Expire only after authorization and dispatch. A wall-clock sleep can
+	// instead exhaust the database ownership check on a busy race-test run.
+	select {
+	case <-dc.send:
+		cancel()
+	case <-done:
+		t.Fatalf("request ended before daemon dispatch: %d %s", rec.Code, rec.Body)
+	case <-time.After(5 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("workspace request did not reach the daemon")
+	}
+	<-done
 	if rec.Code != http.StatusConflict || workspaceProblemCode(t, rec.Body.Bytes()) != workspaceCodeDaemonTimeout {
 		t.Fatalf("old daemon=%d %s", rec.Code, rec.Body)
 	}
@@ -113,6 +133,7 @@ func TestWorkspaceFileReplyValidationAndAccess(t *testing.T) {
 	fx.api.RegisterWorkspaceFileRoutes(fx.mux)
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	fx.api.hub.Register(dc)
 	fx.api.hub.SetSessionOwner(fx.sess, dc.ID)
 	fx.api.hub.SetSessionOwner(fx.privSess, dc.ID)
@@ -293,6 +314,7 @@ func TestWorkspaceBrokerLimitsDisconnectAndReplacement(t *testing.T) {
 	h := NewHub()
 	dc := &DaemonConn{ID: "daemon", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	h.Register(dc)
 	h.SetSessionOwner("session", dc.ID)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -334,6 +356,7 @@ func TestWorkspaceBrokerLimitsDisconnectAndReplacement(t *testing.T) {
 	}
 	replacement := &DaemonConn{ID: dc.ID, send: make(chan []byte, 8)}
 	replacement.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	replacement.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	h.Register(replacement)
 	reply := protocol.WorkspaceFileResult{RequestID: req.RequestID, SessionID: "session", OK: true}
 	h.deliverWorkspaceFileResult(dc, reply)
@@ -373,6 +396,7 @@ func TestWorkspaceReadLeaseHeldUntilHTTPResponseCompletes(t *testing.T) {
 	fx.api.RegisterWorkspaceFileRoutes(fx.mux)
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	fx.api.hub.Register(dc)
 	fx.api.hub.SetSessionOwner(fx.sess, dc.ID)
 	gate := make(chan struct{})
@@ -514,6 +538,7 @@ func TestWorkspaceFileTimeoutReturnsJSONOverRealHTTP(t *testing.T) {
 	fx.api.RegisterWorkspaceFileRoutes(fx.mux)
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	fx.api.hub.Register(dc)
 	fx.api.hub.SetSessionOwner(fx.sess, dc.ID)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -545,5 +570,28 @@ func TestWorkspaceAbsolutePathSyntax(t *testing.T) {
 		if !workspacePathAllowed(name) {
 			t.Fatalf("absolute reference not dispatched: %q", name)
 		}
+	}
+}
+
+// expiringContext reports context.DeadlineExceeded once expire is called, so a
+// test can expire a request's deadline at an exact point without a wall clock.
+type expiringContext struct {
+	context.Context
+	done chan struct{}
+	once sync.Once
+}
+
+func newExpiringContext(parent context.Context) *expiringContext {
+	return &expiringContext{Context: parent, done: make(chan struct{})}
+}
+
+func (c *expiringContext) expire()               { c.once.Do(func() { close(c.done) }) }
+func (c *expiringContext) Done() <-chan struct{} { return c.done }
+func (c *expiringContext) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
 	}
 }

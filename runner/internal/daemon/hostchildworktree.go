@@ -4,30 +4,60 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"github.com/blerglab/blerg-ai/runner/internal/discovery"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
 
 // Allocations live in the signed workspace journal, including an intent written
-// before Git creates anything. An interrupted creation is retained, never guessed.
+// before Git creates anything. Interrupted creations are retained; synchronous
+// failures roll back only resources whose ownership this attempt established.
 type hostChildAllocation struct {
-	MemberID    string                 `json:"member_id"`
-	Source      WorkspaceSource        `json:"source"`
-	Path        string                 `json:"path"`
-	Root        protocol.WorkspaceRoot `json:"root"`
-	GitPath     string                 `json:"git_path"`
-	GitIdentity protocol.WorkspaceRoot `json:"git_identity"`
-	Base        string                 `json:"base"`
-	Released    bool                   `json:"released"`
+	MemberID      string                 `json:"member_id"`
+	Source        WorkspaceSource        `json:"source"`
+	Path          string                 `json:"path"`
+	Root          protocol.WorkspaceRoot `json:"root"`
+	GitPath       string                 `json:"git_path"`
+	GitIdentity   protocol.WorkspaceRoot `json:"git_identity"`
+	Base          string                 `json:"base"`
+	BranchCreated bool                   `json:"branch_created,omitempty"`
+	Released      bool                   `json:"released"`
 }
 
-func hostChildGit(ctx context.Context, path string, root protocol.WorkspaceRoot, args ...string) (string, error) {
+type hostChildGitFailure struct {
+	reason string
+	cause  error
+}
+
+func (e *hostChildGitFailure) Error() string { return e.reason + ": " + failurelog.Cause(e.cause) }
+func (e *hostChildGitFailure) Unwrap() error { return e.cause }
+
+func hostChildGit(ctx context.Context, path string, root protocol.WorkspaceRoot, args ...string) (output string, resultErr error) {
+	stderr := &cappedOutput{max: 4096}
+	defer func() {
+		if resultErr != nil {
+			reason := hostChildGitReason(stderr.buf.String())
+			if stderr.buf.Len() == 0 && hostChildExitOne(resultErr) {
+				reason = "Git found no matching value or reference"
+			}
+			operation := "other"
+			for _, allowed := range []string{"rev-parse", "config", "worktree", "update-ref", "symbolic-ref", "status"} {
+				if len(args) > 0 && args[0] == allowed {
+					operation = allowed
+					break
+				}
+			}
+			failurelog.Default.Event("host_child_git:"+operation+":"+reason, slog.LevelError, "component", "daemon", "operation", operation, "cause", failurelog.Cause(resultErr), "git_stderr", reason)
+			resultErr = &hostChildGitFailure{reason: reason, cause: resultErr}
+		}
+	}()
 	ctx, cancel := context.WithTimeout(ctx, sandboxGitTimeout)
 	defer cancel()
 	identity, err := workspaceDirectoryIdentity(path)
@@ -43,6 +73,7 @@ func hostChildGit(ctx context.Context, path string, root protocol.WorkspaceRoot,
 		return "", errors.New("host child directory unavailable")
 	}
 	defer p.close()
+	p.stderr = stderr
 	if !p.vet(ctx, true) {
 		return "", errors.New("host child repository unavailable")
 	}
@@ -86,7 +117,12 @@ func (s *LocalWorkspaceService) hostChildParent(ctx context.Context, msg protoco
 	return &parent, nil
 }
 
-func (w *LocalWorkspace) allocateHostChild(ctx context.Context, parent workspacePrivateManifest) (*discovery.BoundPins, error) {
+func (w *LocalWorkspace) allocateHostChild(ctx context.Context, parent workspacePrivateManifest) (result *discovery.BoundPins, resultErr error) {
+	defer func() {
+		if resultErr != nil {
+			logDaemonFailure("host child allocation", resultErr)
+		}
+	}()
 	root := filepath.Join(DaemonStateDir(), "host-children", w.state.Session)
 	if len(w.state.Launch.Members) == 0 {
 		return nil, errors.New("host child requires at least one Git repository")
@@ -105,13 +141,29 @@ func (w *LocalWorkspace) allocateHostChild(ctx context.Context, parent workspace
 	if err := os.Mkdir(root, 0700); err != nil {
 		return nil, err
 	}
+	// This attempt owns only the newly created namespace. Interrupted journals
+	// still use conservative recovery; synchronous failures roll back here.
+	namespace := root
+	namespaceIdentity, identityErr := workspaceDirectoryIdentity(namespace)
+	if identityErr != nil {
+		logDaemonFailure("host child namespace identity", identityErr)
+		return nil, identityErr
+	}
+	first := len(w.state.HostChildren)
+	defer func() {
+		if resultErr != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sandboxGitTimeout)
+			defer cancel()
+			if err := w.rollbackHostChild(cleanupCtx, namespace, namespaceIdentity, first); err != nil {
+				logDaemonFailure("host child allocation rollback", err)
+				resultErr = fmt.Errorf("%w; host child cleanup incomplete: %w", resultErr, err)
+			}
+		}
+	}()
 	w.state.HostChild = true
 	w.state.Root = root
-	identity, err := workspaceDirectoryIdentity(root)
-	if err != nil {
-		return nil, err
-	}
-	w.state.RootIdentity, w.state.RuntimeRoot = identity, identity
+	w.state.RootIdentity, w.state.RuntimeRoot = namespaceIdentity, namespaceIdentity
+	var err error
 	w.state.Sources = nil
 	if err := w.save(); err != nil {
 		return nil, err
@@ -127,6 +179,10 @@ func (w *LocalWorkspace) allocateHostChild(ctx context.Context, parent workspace
 	if err != nil {
 		return nil, err
 	}
+	// A child's root member needs Git to create its own folder, so the allocation
+	// stays the namespace and the repository takes a leaf. Reserved members nest
+	// inside it, exactly as they do for the parent.
+	root = hostChildRoot(root, w.state.Launch.Members)
 	for _, member := range w.state.Launch.Members {
 		var source *WorkspaceSource
 		for i := range parent.Sources {
@@ -144,44 +200,64 @@ func (w *LocalWorkspace) allocateHostChild(ctx context.Context, parent workspace
 		}
 		base, e := hostChildGit(ctx, source.Path, source.RootIdentity, "rev-parse", "--verify", "HEAD^{commit}")
 		if e != nil || !protocol.ValidSessionOriginCommit(base) {
+			if e != nil {
+				return nil, fmt.Errorf("host child member %s requires a Git commit: %w", member.ID, e)
+			}
 			return nil, fmt.Errorf("host child member %s requires a Git repository with a commit", member.ID)
 		}
 		filters, filterErr := hostChildGit(ctx, source.Path, source.RootIdentity, "config", "--get-regexp", `^filter\.`)
 		if filters != "" || filterErr != nil && !hostChildExitOne(filterErr) {
+			if filterErr != nil && !hostChildExitOne(filterErr) {
+				return nil, fmt.Errorf("host child filter check: %w", filterErr)
+			}
 			return nil, errors.New("host child worktree checkout with configured Git filters is unsupported")
 		}
 		actual, e := hostChildGit(ctx, source.Path, source.RootIdentity, "rev-parse", "--path-format=absolute", "--git-common-dir")
 		if e != nil || actual != source.CommonPath {
+			if e != nil {
+				return nil, fmt.Errorf("parent repository common directory check: %w", e)
+			}
 			return nil, errors.New("parent repository common directory changed")
 		}
-		branch, branchErr := hostChildGit(ctx, source.Path, source.RootIdentity, "rev-parse", "--verify", "--quiet", "refs/heads/"+sandboxBranch(w.state.Session))
+		branch, branchErr := hostChildGit(ctx, source.Path, source.RootIdentity, "rev-parse", "--verify", "--quiet", "refs/heads/"+w.branch())
 		if branchErr == nil || branch != "" {
-			return nil, fmt.Errorf("host child branch %s already exists for member %s; refusing to reuse it", sandboxBranch(w.state.Session), member.ID)
+			return nil, fmt.Errorf("host child branch %s already exists for member %s; refusing to reuse it", w.branch(), member.ID)
 		}
 		if !hostChildExitOne(branchErr) {
-			return nil, errors.New("host child branch availability could not be verified")
+			return nil, fmt.Errorf("host child branch availability could not be verified: %w", branchErr)
 		}
 
 		target := root
 		if member.Path != "." {
 			target = filepath.Join(root, filepath.FromSlash(member.Path))
 		}
-		// A single '.' member needs Git to create the root itself. Retain the
-		// allocation directory as the namespace and use a separate repository leaf.
-		if target == root {
-			target = filepath.Join(root, "repo")
-		}
 		if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
 			return nil, err
 		}
-		allocation := hostChildAllocation{MemberID: member.ID, Source: *source, Path: target, Base: base}
+		if err := os.Mkdir(target, 0700); err != nil {
+			return nil, err
+		}
+		targetIdentity, err := workspaceDirectoryIdentity(target)
+		if err != nil {
+			return nil, err
+		}
+		allocation := hostChildAllocation{MemberID: member.ID, Source: *source, Path: target, Root: targetIdentity, Base: base}
 		w.state.HostChildren = append(w.state.HostChildren, allocation)
 		if err := w.save(); err != nil {
 			return nil, err
 		}
-		if _, err := hostChildGit(ctx, source.Path, source.RootIdentity, "worktree", "add", "-b", sandboxBranch(w.state.Session), "--", target, base); err != nil {
+		// Create the ref atomically before checkout, so rollback knows it owns it.
+		if _, err := hostChildGit(ctx, source.Path, source.RootIdentity, "update-ref", "refs/heads/"+w.branch(), base, ""); err != nil {
+			return nil, fmt.Errorf("create host child member %s branch: %w", member.ID, err)
+		}
+		w.state.HostChildren[len(w.state.HostChildren)-1].BranchCreated = true
+		if err := w.save(); err != nil {
+			return nil, err
+		}
+		if _, err := hostChildGit(ctx, source.Path, source.RootIdentity, "worktree", "add", "--", target, w.branch()); err != nil {
 			return nil, fmt.Errorf("create host child member %s worktree: %w", member.ID, err)
 		}
+		allocation.BranchCreated = true
 		allocation.Root, err = workspaceDirectoryIdentity(target)
 		if err != nil {
 			return nil, err
@@ -215,7 +291,7 @@ func (w *LocalWorkspace) allocateHostChild(ctx context.Context, parent workspace
 		return nil, errors.New("host child requires at least one Git repository")
 	}
 	// Keep the repo layout physically accurate for file readers.
-	if len(pins.Sources) == 1 && pins.Sources[0].Member.Path == "." {
+	if pins.Sources[0].Member.Path == "." {
 		_ = pins.Anchor.Close()
 		pins.AnchorPath = pins.Sources[0].CanonicalPath
 		pins.Anchor, err = os.Open(pins.AnchorPath)
@@ -229,6 +305,15 @@ func (w *LocalWorkspace) allocateHostChild(ctx context.Context, parent workspace
 	}
 	success = true
 	return pins, nil
+}
+
+func hostChildRoot(root string, members []protocol.WorkspaceMember) string {
+	for _, member := range members {
+		if member.Path == "." {
+			return filepath.Join(root, "repo")
+		}
+	}
+	return root
 }
 
 func (a hostChildAllocation) validate(ctx context.Context) error {
@@ -263,7 +348,7 @@ func (w *LocalWorkspace) releaseHostChildren(ctx context.Context) error {
 		reason := a.validate(ctx)
 		if reason == nil {
 			branch, err := hostChildGit(ctx, a.Path, a.Root, "symbolic-ref", "--quiet", "--short", "HEAD")
-			if err != nil || branch != sandboxBranch(w.state.Session) {
+			if err != nil || branch != w.branch() {
 				reason = errors.New("worktree branch changed")
 			}
 		}
@@ -310,7 +395,7 @@ func (w *LocalWorkspace) collectHostChildren(ctx context.Context) {
 				break
 			}
 			branch, err := hostChildGit(ctx, a.Path, a.Root, "symbolic-ref", "--quiet", "--short", "HEAD")
-			if err != nil || branch != sandboxBranch(w.state.Session) {
+			if err != nil || branch != w.branch() {
 				result.SyncError = "host child worktree branch changed"
 				break
 			}
@@ -320,6 +405,12 @@ func (w *LocalWorkspace) collectHostChildren(ctx context.Context) {
 				break
 			}
 			result.Branch, result.Head = branch, head
+			if pin, ok := pinGitDir(a.Path, nil); ok {
+				if workspaceRootIdentity(pin.info) == a.Root && pin.vet(ctx, true) {
+					result.Summary = deliveredSummary(ctx, pin, result.Base, head)
+				}
+				pin.close()
+			}
 			result.Pending, result.SyncError, result.RecoveryLocation = false, "", ""
 			break
 		}
@@ -377,4 +468,115 @@ func (w *LocalWorkspace) bindHostChildExplorer(ctx context.Context, reader Works
 func hostChildExitOne(err error) bool {
 	var exit *exec.ExitError
 	return errors.As(err, &exit) && exit.ExitCode() == 1
+}
+
+// Treat stderr as untrusted data: retain only known Git explanations. Quoted
+// refs, paths, URLs, configuration values and arbitrary hook output never leave
+// this boundary, even when they contain credentials or control characters.
+func hostChildGitReason(stderr string) string {
+	for _, item := range []struct{ match, reason string }{
+		{"No space left", "Git disk space exhausted"},
+		{"Permission denied", "Git permission denied"},
+		{"File exists", "Git lock file already exists"},
+		{"Unable to create", "Git could not create a lock or file"},
+		{"cannot lock ref", "Git could not lock the branch ref"},
+		{"already exists", "Git target or branch already exists"},
+		{"already checked out", "Git branch is already checked out"},
+		{"not empty", "Git target directory is not empty"},
+		{"Cannot allocate memory", "Git memory allocation failed"},
+		{"not a git repository", "Git repository unavailable"},
+		{"unable to read config", "Git configuration unreadable"},
+		{"invalid config", "Git configuration invalid"},
+		{"unable to checkout", "Git checkout failed"},
+		{"not a valid", "Git reference invalid"},
+	} {
+		if strings.Contains(stderr, item.match) {
+			return item.reason
+		}
+	}
+	if stderr != "" {
+		return "Git failed (unrecognized diagnostic redacted)"
+	}
+	return "Git failed without stderr"
+}
+
+func (w *LocalWorkspace) rollbackHostChild(ctx context.Context, namespace string, expected protocol.WorkspaceRoot, first int) error {
+	identity, err := workspaceDirectoryIdentity(namespace)
+	if err != nil || identity != expected {
+		return errors.New("rollback namespace identity changed")
+	}
+	for i := len(w.state.HostChildren) - 1; i >= first; i-- {
+		a := w.state.HostChildren[i]
+		identity, err := workspaceDirectoryIdentity(a.Path)
+		if err == nil {
+			if identity != a.Root {
+				return errors.New("rollback target identity changed")
+			}
+			if _, err := os.Lstat(filepath.Join(a.Path, ".git")); err == nil {
+				// A synchronous checkout may have succeeded before Git returned an
+				// error. Establish its registered metadata before deleting anything.
+				a.GitPath, err = hostChildGit(ctx, a.Path, a.Root, "rev-parse", "--absolute-git-dir")
+				if err != nil {
+					return err
+				}
+				a.GitIdentity, err = workspaceDirectoryIdentity(a.GitPath)
+				if err != nil {
+					return err
+				}
+				if err := a.validate(ctx); err != nil {
+					return err
+				}
+				branch, err := hostChildGit(ctx, a.Path, a.Root, "symbolic-ref", "--quiet", "--short", "HEAD")
+				if err != nil || branch != w.branch() {
+					return errors.New("rollback target branch changed")
+				}
+				head, err := hostChildGit(ctx, a.Path, a.Root, "rev-parse", "HEAD")
+				if err != nil || head != a.Base {
+					return errors.New("rollback target commit changed")
+				}
+				status, err := hostChildGit(ctx, a.Path, a.Root, "status", "--porcelain=v1", "--untracked-files=all")
+				if err != nil || status != "" {
+					return errors.New("rollback target has changes")
+				}
+				if _, err := hostChildGit(ctx, a.Source.Path, a.Source.RootIdentity, "worktree", "remove", "--", a.Path); err != nil {
+					return err
+				}
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			} else if err := os.Remove(a.Path); err != nil {
+				return errors.New("rollback target is not empty or unavailable")
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if a.BranchCreated {
+			if _, err := hostChildGit(ctx, a.Source.Path, a.Source.RootIdentity, "update-ref", "-d", "refs/heads/"+w.branch(), a.Base); err != nil {
+				return err
+			}
+		}
+		w.state.HostChildren = w.state.HostChildren[:i]
+	}
+	// Remove empty namespace directories only, never recursively erase content.
+	var directories []string
+	if err := filepath.WalkDir(namespace, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			return errors.New("rollback namespace contains unexpected content")
+		}
+		directories = append(directories, path)
+		return nil
+	}); err != nil {
+		return err
+	}
+	for i := len(directories) - 1; i >= 0; i-- {
+		if err := os.Remove(directories[i]); err != nil {
+			return err
+		}
+	}
+	w.state.Sources = nil
+	w.state.Root = ""
+	w.state.RootIdentity, w.state.RuntimeRoot = protocol.WorkspaceRoot{}, protocol.WorkspaceRoot{}
+	return w.save()
 }

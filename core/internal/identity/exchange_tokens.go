@@ -89,8 +89,38 @@ func (s *Service) CreateExchangeToken(ctx context.Context, accountID, target, pr
 	if err != nil {
 		return AgentTokenRecord{}, "", err
 	}
+
+	var id string
+	if err := s.st.Pool().QueryRow(ctx, `SELECT gen_random_uuid()::text`).Scan(&id); err != nil {
+		return AgentTokenRecord{}, "", err
+	}
+	expiresAt := time.Now().Add(ExchangeTokenTTL)
+	raw, err := s.mintLiveAgentToken(ctx, AgentTokenInput{
+		PersonBehind: target == "board" && proofCaps == nil,
+		Sub:          id,
+		Aud:          p.Aud,
+		Project:      project,
+		Caps:         caps,
+		OnBehalfOf:   accountID,
+		Lineage:      accountID,
+		ExpiresAt:    expiresAt,
+	})
+	if err != nil {
+		return AgentTokenRecord{}, "", err
+	}
+	// Serialize count-and-insert across core replicas for this account. Use a
+	// separate statement after locking so READ COMMITTED sees the prior issuer's
+	// committed row. Mint before taking the lock: minting also uses the pool.
+	tx, err := s.st.Pool().BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return AgentTokenRecord{}, "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT id FROM accounts WHERE id = $1 FOR NO KEY UPDATE`, accountID); err != nil {
+		return AgentTokenRecord{}, "", err
+	}
 	var live int
-	if err := s.st.Pool().QueryRow(ctx,
+	if err := tx.QueryRow(ctx,
 		`SELECT count(*) FROM agent_tokens
 		  WHERE account_id = $1 AND kind = $2 AND revoked_at IS NULL AND expires_at > now()`,
 		accountID, AgentTokenKindExchange).Scan(&live); err != nil {
@@ -100,30 +130,16 @@ func (s *Service) CreateExchangeToken(ctx context.Context, accountID, target, pr
 		return AgentTokenRecord{}, "", ErrTooManyTokens
 	}
 
-	var id string
-	if err := s.st.Pool().QueryRow(ctx, `SELECT gen_random_uuid()::text`).Scan(&id); err != nil {
-		return AgentTokenRecord{}, "", err
-	}
-	expiresAt := time.Now().Add(ExchangeTokenTTL)
-	raw, err := s.mintLiveAgentToken(ctx, AgentTokenInput{
-		Sub:        id,
-		Aud:        p.Aud,
-		Project:    project,
-		Caps:       caps,
-		OnBehalfOf: accountID,
-		Lineage:    accountID,
-		ExpiresAt:  expiresAt,
-	})
-	if err != nil {
-		return AgentTokenRecord{}, "", err
-	}
 	rec := AgentTokenRecord{ID: id, AccountID: accountID, Name: "exchange: " + target, Aud: p.Aud, Caps: caps}
-	if err := s.st.Pool().QueryRow(ctx,
+	if err := tx.QueryRow(ctx,
 		`INSERT INTO agent_tokens (id, account_id, name, aud, caps, token_hash, expires_at, kind)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 		 RETURNING created_at, expires_at`,
 		id, accountID, rec.Name, p.Aud, caps, agentTokenHash(raw), expiresAt, AgentTokenKindExchange,
 	).Scan(&rec.CreatedAt, &rec.ExpiresAt); err != nil {
+		return AgentTokenRecord{}, "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return AgentTokenRecord{}, "", err
 	}
 	return rec, raw, nil

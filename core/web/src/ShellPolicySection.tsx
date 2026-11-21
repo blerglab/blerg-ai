@@ -27,7 +27,7 @@ export default function ShellPolicySection() {
   }
   return <section className="settings-section section" aria-label="Owner shells">
     <h2 className="settings-heading">Owner shells</h2>
-    <p className="settings-description">Let session owners open a shell to work on their sessions.</p>
+    <p className="settings-description">Let workspace owners open a shell to work on their workspaces.</p>
     <div className="settings-toggle"><span id="owner-shells-label">Allow owner shells</span>
       <button className="settings-toggle-control" type="button" role="switch" aria-labelledby="owner-shells-label" aria-checked={policy?.enabled ?? false} disabled={!policy || busy} onClick={() => { void toggle(); }} />
     </div>

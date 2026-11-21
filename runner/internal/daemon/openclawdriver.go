@@ -38,6 +38,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	agent "github.com/blerglab/blerg-ai/runner/internal/agent"
@@ -68,7 +69,23 @@ type openclawTurn struct {
 	text string
 }
 
+// A Stop belongs to this turn, including its startup window. The cancellation
+// function is published only after Cmd.Start has finished initializing Process.
+type openclawTurnStop struct {
+	requested, finished bool
+	cancel              func() error
+	attempt             *openclawStopAttempt
+	notices             sync.WaitGroup
+}
+type openclawStopAttempt struct {
+	done chan struct{}
+	err  error
+}
+
 type openclawDriver struct {
+	agent.InputClockSource
+	skillGuide        string
+	turnStop          *openclawTurnStop // guarded by mu
 	startCommand      func(*exec.Cmd) error
 	recoveryInputGate func(context.Context) // guarded by mu; worker admission only
 	workDir           string
@@ -80,7 +97,6 @@ type openclawDriver struct {
 
 	mu      sync.Mutex
 	history []openclawTurn
-	cmd     *exec.Cmd // in-flight turn, for Interrupt
 }
 
 // newOpenclawDriver: env is the environment for every `openclaw` subprocess;
@@ -110,6 +126,7 @@ func (d *openclawDriver) Enqueue(text, source string) {
 }
 
 func (d *openclawDriver) EnqueueInput(in agent.Input) {
+	in = d.WithPersonTime(in)
 	if in.Source == "" {
 		in.Source = "chat"
 	}
@@ -134,11 +151,63 @@ func (d *openclawDriver) SetModel(model, effort, _ string) {
 
 func (d *openclawDriver) Interrupt() {
 	d.mu.Lock()
-	cmd := d.cmd
-	d.mu.Unlock()
-	if cmd != nil && cmd.Process != nil {
-		_ = cancelEngineCommand(cmd, d.startCommand != nil)
+	turn := d.turnStop
+	if turn == nil || turn.finished {
+		d.mu.Unlock()
+		return
 	}
+	turn.requested = true
+	d.mu.Unlock()
+	d.stopTurn(turn)
+}
+
+func (d *openclawDriver) stopTurn(turn *openclawTurnStop) {
+	d.mu.Lock()
+	if d.turnStop != turn || turn.finished || !turn.requested || turn.cancel == nil {
+		d.mu.Unlock()
+		return
+	}
+	if previous := turn.attempt; previous != nil {
+		select {
+		case <-previous.done:
+			if previous.err == nil {
+				d.mu.Unlock()
+				return
+			}
+		default:
+			d.mu.Unlock()
+			return
+		}
+	}
+	attempt := &openclawStopAttempt{done: make(chan struct{})}
+	turn.attempt = attempt
+	turn.notices.Add(1)
+	cancel := turn.cancel
+	d.mu.Unlock()
+	defer turn.notices.Done()
+	err := cancel()
+	d.mu.Lock()
+	attempt.err = err
+	close(attempt.done)
+	current := d.turnStop == turn
+	d.mu.Unlock()
+	if err != nil && current {
+		d.emit("error", agent.ErrorPayload{Message: "The worker could not stop safely: " + safeEngineCommandError(err, d.env) + ". Try Stop again.", Retryable: true, Code: agent.ErrorCodeStopFailed})
+	}
+}
+
+// Finish closes admission to late Stop calls and drains any refusal notice
+// before another turn can begin. Failed attempts remain retryable while live.
+func (d *openclawDriver) finishTurn(turn *openclawTurnStop) bool {
+	if turn == nil {
+		return false
+	}
+	d.mu.Lock()
+	turn.finished = true
+	attempt := turn.attempt
+	d.mu.Unlock()
+	turn.notices.Wait()
+	return attempt != nil && attempt.err == nil
 }
 
 func (d *openclawDriver) RestoreContext(events []agent.RestoredEvent) {
@@ -180,9 +249,18 @@ func (d *openclawDriver) Run(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
+			turn := &openclawTurnStop{}
+			d.mu.Lock()
+			d.turnStop = turn
+			d.mu.Unlock()
 			d.emit("user_message", msg.Payload())
 			d.emit("status_changed", agent.StatusPayload{Status: "running", Reason: "turn"})
-			d.runTurn(ctx, msg.Text)
+			d.runTurn(ctx, msg.PlainText())
+			d.mu.Lock()
+			if d.turnStop == turn {
+				d.turnStop = nil
+			}
+			d.mu.Unlock()
 			d.emit("status_changed", agent.StatusPayload{Status: "idle", Reason: "turn_done"})
 		}
 	}
@@ -193,14 +271,18 @@ func (d *openclawDriver) Run(ctx context.Context) {
 // same tradeoff as any fixed context budget. Must be called with d.mu held.
 func (d *openclawDriver) buildPrompt(newText string) string {
 	var b strings.Builder
-	budget := d.contextChars - len(newText)
+	if d.skillGuide != "" {
+		b.WriteString(d.skillGuide)
+		b.WriteString("\n\n")
+	}
+	budget := d.contextChars - len(newText) - b.Len() - len("User: ")
 	// Walk history newest-first, keep whatever fits, then re-emit oldest-first.
 	var kept []openclawTurn
 	used := 0
 	for i := len(d.history) - 1; i >= 0; i-- {
 		t := d.history[i]
-		cost := len(t.role) + len(t.text) + 4 // ~formatting overhead
-		if used+cost > budget && len(kept) > 0 {
+		cost := len(t.text) + len("Assistant: \n\n")
+		if used+cost > budget {
 			break
 		}
 		kept = append(kept, t)
@@ -221,6 +303,9 @@ func (d *openclawDriver) buildPrompt(newText string) string {
 		b.WriteString(newText)
 		return b.String()
 	}
+	if d.skillGuide != "" {
+		return d.skillGuide + "\n\n" + newText
+	}
 	return newText
 }
 
@@ -237,6 +322,15 @@ type openclawExecEnvelope struct {
 
 func (d *openclawDriver) runTurn(ctx context.Context, text string) {
 	d.mu.Lock()
+	turn, model := d.turnStop, d.model
+	if turn != nil && turn.requested {
+		turn.finished = true
+		d.mu.Unlock()
+		if ctx.Err() == nil {
+			d.emit("turn_done", agent.TurnDonePayload{StopReason: "interrupted", Model: model})
+		}
+		return
+	}
 	openclawPath := resolveEngineBinary("openclaw", false) // agent-kind never runs sandboxed today
 	prompt := d.buildPrompt(text)
 	args := []string{"agent", "exec", prompt, "--json", "--cwd", d.workDir}
@@ -244,35 +338,57 @@ func (d *openclawDriver) runTurn(ctx context.Context, text string) {
 	cmd := exec.CommandContext(ctx, openclawPath, args...) //nolint:gosec // openclawPath is resolveEngineBinary of a fixed engine name; the prompt is one argv element, no shell
 	cmd.Dir = d.workDir
 	cmd.Env = d.env
-	d.cmd = cmd
+	if d.startCommand == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			if err == syscall.ESRCH {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+	}
 	d.mu.Unlock()
-
-	defer func() {
-		d.mu.Lock()
-		d.cmd = nil
-		d.mu.Unlock()
-	}()
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		d.finishTurn(turn)
 		d.emit("error", agent.ErrorPayload{Message: "openclaw pipe: " + err.Error()})
-		d.emit("turn_done", agent.TurnDonePayload{StopReason: "error", Model: d.model})
+		d.emit("turn_done", agent.TurnDonePayload{StopReason: "error", Model: model})
 		return
 	}
 	var stderrBuf strings.Builder
 	cmd.Stderr = &stderrBuf
 	if err := startEngineCommand(cmd, d.startCommand); err != nil {
+		d.finishTurn(turn)
+		if ctx.Err() != nil {
+			return
+		}
 		d.emit("error", agent.ErrorPayload{Message: "openclaw start: " + err.Error()})
-		d.emit("turn_done", agent.TurnDonePayload{StopReason: "error", Model: d.model})
+		d.emit("turn_done", agent.TurnDonePayload{StopReason: "error", Model: model})
 		return
 	}
 
+	d.mu.Lock()
+	if turn != nil {
+		turn.cancel = func() error { return cancelEngineCommand(cmd, true) }
+	}
+	requested := turn != nil && turn.requested
+	d.mu.Unlock()
+	if requested {
+		d.stopTurn(turn)
+	}
 	out := readAllLimited(stdout, 1<<20)
 	waitErr := cmd.Wait()
+	stopped := d.finishTurn(turn)
 	if ctx.Err() != nil {
 		return // interrupted/cancelled — no event, matches the other drivers
 	}
 
+	if stopped {
+		d.emit("turn_done", agent.TurnDonePayload{StopReason: "interrupted", Model: model})
+		return
+	}
 	var env openclawExecEnvelope
 	parseErr := json.Unmarshal([]byte(strings.TrimSpace(out)), &env)
 
@@ -309,7 +425,7 @@ func (d *openclawDriver) runTurn(ctx context.Context, text string) {
 	if stderr := strings.TrimSpace(stderrBuf.String()); stderr != "" {
 		log.Printf("openclaw driver: session stderr: %s", stderr)
 	}
-	d.emit("turn_done", agent.TurnDonePayload{StopReason: stop, Model: d.model})
+	d.emit("turn_done", agent.TurnDonePayload{StopReason: stop, Model: model})
 }
 
 func (d *openclawDriver) useCommandBoundary(f func(*exec.Cmd) error) { d.startCommand = f }

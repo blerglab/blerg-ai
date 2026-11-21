@@ -1,0 +1,22 @@
+.context-fill-chart svg{max-height:420px}
+.context-fill-series{cursor:pointer}
+.context-fill-series:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.context-fill-hit{stroke:transparent;stroke-width:12px;pointer-events:stroke}
+.context-fill-line{pointer-events:none}
+.context-fill-series-main .context-fill-line{stroke:var(--accent);stroke-width:2.5}
+.context-fill-series-main .context-fill-dot{fill:var(--accent)}
+.context-fill-series-other .context-fill-line{stroke:var(--fog-dim);stroke-width:1.5;opacity:.55}
+.context-fill-series-other .context-fill-dot{fill:var(--fog-dim);opacity:.55}
+.context-fill-series-other.context-fill-series-hovered .context-fill-line,
+.context-fill-series-other.context-fill-series-hovered .context-fill-dot{opacity:1;stroke-width:2}
+.context-fill-compacted circle{fill:var(--amber)}
+.context-fill-compacted text{fill:var(--amber);font-size:11px}
+.context-fill-hover{margin:4px 0 0}
+.context-fill-legend{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;margin:8px 0 0;padding:0;list-style:none}
+.context-fill-legend li{display:inline-flex;align-items:center;gap:4px;min-width:0}
+.context-fill-swatch{width:9px;height:9px;border-radius:2px;flex:none}
+.context-fill-swatch-main{background:var(--accent)}
+.context-fill-swatch-other{background:var(--fog-dim)}
+.context-fill-legend a{color:var(--fog);text-decoration:none;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.context-fill-legend a:hover,.context-fill-legend a:focus-visible{color:var(--blaze)}
+.context-fill-legend-main a{color:var(--text);font-weight:600}

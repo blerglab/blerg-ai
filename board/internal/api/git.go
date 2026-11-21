@@ -1,11 +1,10 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
-	"os"
+	"net/url"
 	"strings"
 	"time"
 
@@ -13,162 +12,137 @@ import (
 	"github.com/blerglab/blerg-ai/board/internal/db"
 )
 
-// handleCardGit assembles the card's git picture for the UI's Git panel:
-// branch name, PR, and recent commit history — proxied from GitHub with the
-// operator-synced token so private repos work.
+type workspaceGitReader interface {
+	ReadGit(context.Context, string, url.Values, bool) ([]byte, int, error)
+}
+
 func (a *API) handleCardGit(w http.ResponseWriter, r *http.Request, p auth.Principal) {
+	a.cardLocalGit(w, r, p, false)
+}
+
+// Board access alone never authorizes local repository bytes. The Runner checks
+// the current human's ownership and the live workspace binding for every read.
+func (a *API) cardLocalGit(w http.ResponseWriter, r *http.Request, p auth.Principal, patch bool) {
+	w.Header().Set("Cache-Control", "private, no-store")
 	card, err := db.GetCard(r.Context(), a.Pool, r.PathValue("id"))
 	if err != nil {
 		writeDBError(w, err)
 		return
 	}
 	if err := p.RequireBoard(card.BoardID, "card.read"); err != nil {
-		writeError(w, http.StatusForbidden, err.Error())
+		writeError(w, 403, err.Error())
+		return
+	}
+	if !p.IsHuman() {
+		writeError(w, 403, "Sign in to read workspace Git.")
+		return
+	}
+	if a.runner == nil {
+		writeError(w, 409, "Open a workspace for this card to read local Git.")
+		return
+	}
+	reader, ok := a.runner.Driver.(workspaceGitReader)
+	if !ok {
+		writeError(w, 409, "Local Git is unavailable on this runner.")
 		return
 	}
 
-	out := map[string]any{}
-	var owner, repo, branch, commitsURL string
-	for _, l := range card.Links {
-		if l.Kind == "pr" {
-			if m := prURLRE.FindStringSubmatch(l.URL); m != nil {
-				owner, repo = m[1], m[2]
-				out["pr_url"] = l.URL
-				commitsURL = fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%s/commits?per_page=30", m[1], m[2], m[3])
-			}
-		}
-	}
-	for _, l := range card.Links {
-		if m := branchURLRE.FindStringSubmatch(l.URL); m != nil {
-			owner, repo, branch = m[1], m[2], m[3]
-			out["branch"] = branch
-			out["branch_url"] = l.URL
-			if commitsURL == "" {
-				commitsURL = fmt.Sprintf("https://api.github.com/repos/%s/%s/commits?sha=%s&per_page=30", owner, repo, branch)
-			}
-		}
-	}
-	// no branch or PR — a card can still carry commit links (work done
-	// outside a runner session, e.g. an operator session fixing it inline)
-	if commitsURL == "" {
-		commits := commitsFromLinks(r, card.Links)
-		if len(commits) > 0 {
-			out["commits"] = commits
-		}
-		writeJSON(w, http.StatusOK, out)
+	// Offer only sessions associated with this card. A session link may point at
+	// a workspace opened outside the Board; the Runner still checks its owner.
+	rows, err := a.Pool.Query(r.Context(), `SELECT external_session_id, role FROM runner_sessions WHERE card_id=$1 ORDER BY (role='worker') DESC, created_at DESC`, card.ID)
+	if err != nil {
+		writeDBError(w, err)
 		return
 	}
-	out["repo"] = owner + "/" + repo
+	sessions := []map[string]string{}
+	seen := map[string]bool{}
+	for rows.Next() {
+		var id, role string
+		if err := rows.Scan(&id, &role); err != nil {
+			rows.Close()
+			writeDBError(w, err)
+			return
+		}
+		sessions = append(sessions, map[string]string{"id": id, "name": role})
+		seen[id] = true
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		writeDBError(w, err)
+		return
+	}
+	for _, link := range card.Links {
+		prefix := strings.TrimRight(a.runner.UIBase, "/") + "/"
+		if a.runner.UIBase != "" && link.Kind == "session" && strings.HasPrefix(link.URL, prefix) {
+			id := strings.TrimPrefix(link.URL, prefix)
+			if validGitSessionID(id) && !seen[id] {
+				sessions = append(sessions, map[string]string{"id": id, "name": "Workspace"})
+				seen[id] = true
+			}
+		}
+	}
+	if len(sessions) == 0 {
+		writeError(w, 409, "Open a workspace for this card and add its session link to read local Git.")
+		return
+	}
+	sid := r.URL.Query().Get("session_id")
+	if sid == "" {
+		sid = sessions[0]["id"]
+	}
+	if !seen[sid] {
+		writeError(w, 404, "Workspace not linked to this card.")
+		return
+	}
+	q := url.Values{}
+	for _, key := range []string{"member_id", "generation", "launch_generation", "branch", "base"} {
+		if value := r.URL.Query().Get(key); value != "" {
+			q.Set(key, value)
+		}
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	body, status, err := reader.ReadGit(ctx, sid, q, patch)
+	if err != nil {
+		if !patch && status != http.StatusUnauthorized {
+			writeJSON(w, 200, map[string]any{"sessions": sessions, "session_id": sid, "commits_error": err.Error()})
+			return
+		}
+		writeError(w, status, err.Error())
+		return
+	}
 
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, commitsURL, nil)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "request build failed")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if patch {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Security-Policy", "sandbox")
+		w.WriteHeader(200)
+		_, _ = w.Write(body) //nolint:gosec // G705: the diff is text/plain with nosniff and sandbox, never rendered as HTML
 		return
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
-		req.Header.Set("Authorization", "Bearer "+tok)
-	}
-	client := &http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "github unreachable: "+err.Error())
+	var info map[string]any
+	if json.Unmarshal(body, &info) != nil || info == nil {
+		writeError(w, 502, "Invalid workspace Git response.")
 		return
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
-		out["commits_error"] = fmt.Sprintf("github: HTTP %d: %.150s", resp.StatusCode, body)
-		writeJSON(w, http.StatusOK, out)
-		return
-	}
-	var raw []struct {
-		SHA    string `json:"sha"`
-		Commit struct {
-			Message string `json:"message"`
-			Author  struct {
-				Name string `json:"name"`
-				Date string `json:"date"`
-			} `json:"author"`
-		} `json:"commit"`
-		HTMLURL string `json:"html_url"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		writeError(w, http.StatusBadGateway, "github decode failed")
-		return
-	}
-	commits := make([]map[string]string, 0, len(raw))
-	for _, c := range raw {
-		first := c.Commit.Message
-		if i := len(first); i > 0 {
-			for j, ch := range first {
-				if ch == '\n' {
-					first = first[:j]
-					break
-				}
-			}
-		}
-		commits = append(commits, map[string]string{
-			"sha": c.SHA[:7], "message": first,
-			"author": c.Commit.Author.Name, "date": c.Commit.Author.Date,
-			"url": c.HTMLURL,
-		})
-	}
-	out["commits"] = commits
-	writeJSON(w, http.StatusOK, out)
+	info["sessions"] = sessions
+	info["session_id"] = sid
+	writeJSON(w, 200, info)
+
 }
 
-// commitsFromLinks resolves commit-URL links (kind-agnostic) against the
-// GitHub commits API so inline-worked cards still get a commit history.
-func commitsFromLinks(r *http.Request, links []db.Link) []map[string]string {
-	client := &http.Client{Timeout: 15 * time.Second}
-	var commits []map[string]string
-	for _, l := range links {
-		m := commitURLRE.FindStringSubmatch(l.URL)
-		if m == nil {
-			continue
-		}
-		api := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s", m[1], m[2], m[3])
-		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, api, nil)
-		if err != nil {
-			continue
-		}
-		req.Header.Set("Accept", "application/vnd.github+json")
-		if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
-			req.Header.Set("Authorization", "Bearer "+tok)
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		var c struct {
-			SHA    string `json:"sha"`
-			Commit struct {
-				Message string `json:"message"`
-				Author  struct {
-					Name string `json:"name"`
-					Date string `json:"date"`
-				} `json:"author"`
-			} `json:"commit"`
-			HTMLURL string `json:"html_url"`
-		}
-		err = json.NewDecoder(resp.Body).Decode(&c)
-		_ = resp.Body.Close()
-		if err != nil || resp.StatusCode != http.StatusOK || c.SHA == "" {
-			continue
-		}
-		msg := c.Commit.Message
-		if i := strings.IndexByte(msg, '\n'); i >= 0 {
-			msg = msg[:i]
-		}
-		commits = append(commits, map[string]string{
-			"sha": c.SHA[:7], "message": msg,
-			"author": c.Commit.Author.Name, "date": c.Commit.Author.Date,
-			"url": c.HTMLURL,
-		})
-		if len(commits) >= 10 {
-			break
+func validGitSessionID(id string) bool {
+	if len(id) != 36 {
+		return false
+	}
+	for i, c := range id {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+		} else if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
 		}
 	}
-	return commits
+	return true
 }

@@ -114,12 +114,13 @@ export default function BoardCreateSheet({ open, onClose, onCreated }: BoardCrea
   }
 
   return (
+    // button-guard-ignore: useBackdropClose supplies pointer handlers only; this overlay is not a button
     <div
       style={{
         position: 'fixed',
         inset: 0,
         zIndex: 100,
-        background: 'rgba(5,4,3,0.75)',
+        background: 'var(--permissions-backdrop)',
         display: open ? 'flex' : 'none',
         alignItems: 'flex-end',
       }}

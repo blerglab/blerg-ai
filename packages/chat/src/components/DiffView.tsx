@@ -3,6 +3,10 @@
 // hunk headers, both sides' line numbers, long unchanged context folded, and each file's code
 // coloured by its extension with the person's code colours. The patch is untrusted text: it is
 // parsed (model/patch.ts) and drawn by React as text and token spans, never as markup.
+import { TicketModal } from './TicketView'
+import CommitFileViewer from './CommitFileViewer'
+import { useViewerHost } from './ViewerHost'
+import type { TransportFiles, WorkspaceGitRef } from '../transport/types'
 import { ReferenceText } from './RefLinks'
 import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { langFromName, type CodeLang } from '../model/codeLang'
@@ -11,7 +15,7 @@ import { foldContext, parsePatch, splitRows, patchSummaryText, type PatchFile, t
 import { createDiffAnchor, diffAnchorContains, type DiffPoint } from '../model/diffSelection'
 import type { Anchor, ReviewRequest } from '../model/review'
 import { useLineWrap, wrapKindOf } from '../model/lineWrap'
-import { WrapToggle } from './ViewerToolbar'
+import { ViewerAction, ViewerControls, WrapToggle } from './ViewerToolbar'
 import './diff.css'
 
 /** Lines of one file drawn before "Show more" (and how many more each click adds). */
@@ -111,7 +115,8 @@ interface SelectionPaint {
   renderDraft?: (anchor: Anchor) => ReactNode
 }
 
-const FileBlock = memo(function FileBlock({ file, index, mode, ready, startOpen, lineLimit = DIFF_FILE_LINES, fullFile = false, bare = false, selected, requests = [], focusedId, onPick, onComment, renderThread, draftAnchor, renderDraft }: {
+const FileBlock = memo(function FileBlock({ file, index, mode, ready, startOpen, lineLimit = DIFF_FILE_LINES, fullFile = false, bare = false, fileActions, selected, requests = [], focusedId, onPick, onComment, renderThread, draftAnchor, renderDraft }: {
+  fileActions?: ReactNode
   file: PatchFile; index: number; mode: Mode; ready: boolean; startOpen: boolean; lineLimit?: number; fullFile?: boolean; bare?: boolean
 } & SelectionPaint) {
   const [open, setOpen] = useState(startOpen)
@@ -308,6 +313,7 @@ const FileBlock = memo(function FileBlock({ file, index, mode, ready, startOpen,
         <span className={`diff-status diff-status-${file.status}`} title={STATUS_WORD[file.status]}>{STATUS_LABEL[file.status]}</span>
         <span className="diff-file-path">{fileTitle(file)}</span>
         <span className="diff-file-counts"><span className="diff-plus">+{file.adds}</span> <span className="diff-minus">−{file.dels}</span></span>
+        {fileActions}
       </header>}
       {revealed && (
         <div className="diff-file-body">
@@ -359,8 +365,9 @@ export function InlineDiff({ file }: { file: PatchFile }) {
 }
 
 /** `commit`: a sha (or the start of one) to open at: its section is scrolled to and marked. */
-export default function DiffView({ text, commit, selection, onSelection, requests = NO_REQUESTS, focusedId, onComment, renderThread, renderDraft, draftAnchor, collapseLarge = false }: {
+export default function DiffView({ text, commit, selection, onSelection, requests = NO_REQUESTS, focusedId, onComment, renderThread, renderDraft, draftAnchor, collapseLarge = false, fileContext }: {
   /** Commit previews start large patches closed and cap each opened body. */
+  fileContext?: { sessionId: string; files: TransportFiles; member?: WorkspaceGitRef }
   collapseLarge?: boolean
   text: string; commit?: string | null
   selection?: Anchor | null
@@ -372,7 +379,21 @@ export default function DiffView({ text, commit, selection, onSelection, request
   renderDraft?: (anchor: Anchor) => ReactNode
   draftAnchor?: Anchor | null
 }) {
+  const host = useViewerHost()
   const patch = useMemo(() => parsePatch(text), [text])
+  const [repositories, setRepositories] = useState<{ name: string; ref: WorkspaceGitRef }[]>([])
+  const [repository, setRepository] = useState('')
+  const repositoryFiles = fileContext?.files
+  const repositorySession = fileContext?.sessionId
+  const canOpenFiles = !!repositoryFiles?.commitFile && patch.files.some(f => f.commit !== undefined && patch.commits[f.commit]?.sha)
+  const hasMember = !!fileContext?.member
+  useEffect(() => {
+    let live = true
+    if (canOpenFiles && !hasMember && repositorySession) void repositoryFiles?.commitRepositories?.(repositorySession).then(list => { if (live) setRepositories(list) }).catch(() => {})
+    return () => { live = false }
+  }, [repositoryFiles, repositorySession, hasMember, canOpenFiles])
+  const chosenMember = fileContext?.member ?? repositories.find(r => r.ref.member_id === repository)?.ref
+  const [openedFile, setOpenedFile] = useState<{ sha: string; path: string; side: 'original' | 'changed'; member?: WorkspaceGitRef } | null>(null)
   const startPoint = useRef<DiffPoint | null>(null)
   const priorPatch = useRef(patch)
   const [rangeMode, setRangeMode] = useState(false)
@@ -511,15 +532,17 @@ export default function DiffView({ text, commit, selection, onSelection, request
 
   return (
     <div className={`diff-view ${wrapped ? 'is-wrapped' : 'is-unwrapped'}`} data-testid="diff-view">
-      <div className="diff-toolbar">
+      {openedFile && fileContext?.files.commitFile && <TicketModal ticket={{ source: 'git', key: openedFile.sha.slice(0, 7), title: `${openedFile.side}: ${openedFile.path}` }} onClose={() => setOpenedFile(null)} body={<CommitFileViewer version={openedFile} sessionId={fileContext.sessionId} path={openedFile.path} files={fileContext.files} onClose={() => setOpenedFile(null)} />} />}
+      <ViewerControls>
+        {repositories.length > 0 && <select aria-label="File repository" value={repository} onChange={e => setRepository(e.target.value)}><option value="">Choose repository</option>{repositories.map(r => <option key={r.ref.member_id} value={r.ref.member_id}>{r.name}</option>)}</select>}
         <span className="diff-summary" data-testid="diff-summary">
           {patchSummaryText({ files: paths.size, adds: patch.adds, dels: patch.dels })}
           {patch.commits.length > 0 && ` · ${patch.commits.length} ${patch.commits.length === 1 ? 'commit' : 'commits'}`}
         </span>
         {wide && (
           <span className="diff-modes" role="group" aria-label="Layout">
-            <button type="button" className="artifact-btn" aria-pressed={effective === 'unified'} onClick={() => setMode('unified')}>Unified</button>
-            <button type="button" className="artifact-btn" aria-pressed={effective === 'split'} onClick={() => setMode('split')}>Side by side</button>
+            <ViewerAction icon="unified" label="Unified" pressed={effective === 'unified'} onClick={() => setMode('unified')} />
+            <ViewerAction icon="split" label="Side by side" pressed={effective === 'split'} onClick={() => setMode('split')} />
           </span>
         )}
         {!reviewing && <WrapToggle kind={wrapKind} text />}
@@ -529,17 +552,13 @@ export default function DiffView({ text, commit, selection, onSelection, request
           </select>
         )}
         {canCopy && (
-          <button
-            type="button"
-            className="artifact-btn"
+          <ViewerAction icon="copy" label={copied ? 'Copied' : 'Copy patch'}
             onClick={() => {
               void navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200) }, () => {})
             }}
-          >
-            {copied ? 'Copied' : 'Copy patch'}
-          </button>
+          />
         )}
-      </div>
+      </ViewerControls>
       {onSelection && <div className="diff-selection-toolbar">
         <button type="button" className="artifact-btn" aria-pressed={rangeMode} onClick={() => {
           setRangeMode(value => !value); startPoint.current = null; setNotice('')
@@ -570,7 +589,11 @@ export default function DiffView({ text, commit, selection, onSelection, request
             return (
               <Fragment key={i}>
                 {startsCommit && <CommitHead commit={patch.commits[f.commit as number]} index={f.commit as number} target={f.commit === target} />}
-                <FileBlock file={f} index={i} mode={effective} ready={ready} startOpen={opens[i]} lineLimit={collapseLarge ? COMMIT_FILE_LINES : DIFF_FILE_LINES} fullFile={collapseLarge}
+                <FileBlock fileActions={fileContext?.files.commitFile && f.commit !== undefined && patch.commits[f.commit]?.sha && <span className="diff-file-actions">{(['changed', 'original'] as const).map(side => {
+                  const sha = f.commit !== undefined ? patch.commits[f.commit]?.sha : undefined
+                  const missing = side === 'original' ? f.status === 'added' : f.status === 'deleted'
+                  return <button type="button" className="artifact-btn" key={side} disabled={missing || !sha || repositories.length > 0 && !chosenMember} title={missing ? `No ${side} version: file ${f.status}` : !sha ? 'This diff does not name a commit.' : `Open ${side} file at ${sha}`} onClick={() => { if (sha && fileContext) { const path = (side === 'original' ? f.oldPath : f.newPath) || f.path; const version = { sha, side, member: chosenMember, sessionId: fileContext.sessionId }; if (host) host.open({ kind: 'workspace', path, commit: version }, true); else setOpenedFile({ ...version, path }) } }}>{missing ? `No ${side} (file ${f.status})` : `Open ${side}`}</button>
+                })}</span>} file={f} index={i} mode={effective} ready={ready} startOpen={opens[i]} lineLimit={collapseLarge ? COMMIT_FILE_LINES : DIFF_FILE_LINES} fullFile={collapseLarge}
                   selected={selected} requests={requestRanges} focusedId={focusedId} onPick={onSelection ? pick : undefined}
                   onComment={onComment ? comment : undefined} renderThread={renderThread} renderDraft={renderDraft} draftAnchor={validDraft} />
               </Fragment>

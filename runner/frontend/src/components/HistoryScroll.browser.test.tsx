@@ -315,7 +315,7 @@ describe('scrolling up into older history', () => {
     for (let i = 0; i < 100 && timeline.scrollTop > 0; i++) await scrollUp(timeline, step)
     await frames(3)
     const start = timeline.querySelector('[data-testid="history-start"]')
-    expect(start?.textContent).toContain('Beginning of the session')
+    expect(start?.textContent).toContain('Beginning of the workspace')
     expect(inView(timeline, start)).toBe(true)
     expect(timeline.querySelector('[data-testid="older-loading"]')).toBeNull()
     // Exactly the session's messages, in order: no page boundary drew one twice or lost one.
@@ -435,11 +435,13 @@ describe('scrolling up into older history', () => {
     await sized(timeline)
     const asked = o.requests.length
     expect(timeline.scrollTop).toBeGreaterThan(1.5 * timeline.clientHeight)
-    // Up by the scrollbar: scroll events, no wheel, key or touch.
+    // Up by the scrollbar: pointer input and scroll events, no wheel, key or touch.
+    timeline.dispatchEvent(new PointerEvent('pointerdown', { button: 0 }))
     for (let i = 0; i < 200 && o.requests.length === asked; i++) {
       timeline.scrollTop = Math.max(0, timeline.scrollTop - 200)
       await frames(2)
     }
+    window.dispatchEvent(new PointerEvent('pointerup'))
     expect(o.requests.length).toBe(asked + 1)
   }, 120_000)
 
@@ -570,7 +572,7 @@ describe('scrolling up into older history', () => {
 
   // The wheel hold is timed on the transcript's input clock, driven here by hand: every event below
   // is sent at a set time, so a busy machine (a full parallel run) cannot stretch the gaps.
-  it('holds back a wheel stream still coming in when the page lands, until it pauses', async () => {
+  it('holds large pixel momentum but lets a line-mode notch through', async () => {
     const o = await open(1280, 800)
     const { timeline } = o
     for (let i = 0; i < 50 && o.waiting.length === 0; i++) await home(timeline)
@@ -590,6 +592,14 @@ describe('scrolling up into older history', () => {
       expect(wheel()).toBe(true)
       clock.t += 40
       expect(wheel()).toBe(true)
+      // Pixel momentum can grow beyond the fine-wheel threshold during a fling.
+      const momentum = new WheelEvent('wheel', { deltaY: -100, deltaMode: 0, bubbles: true, cancelable: true })
+      timeline.dispatchEvent(momentum)
+      expect(momentum.defaultPrevented).toBe(true)
+      // A line-mode notch is distinct from pixel momentum.
+      const notch = new WheelEvent('wheel', { deltaY: -3, deltaMode: 1, bubbles: true, cancelable: true })
+      timeline.dispatchEvent(notch)
+      expect(notch.defaultPrevented).toBe(false)
       // It paused (250 ms): the next wheel is the reader scrolling again, and so is the one after.
       clock.t += 250
       expect(wheel()).toBe(false)

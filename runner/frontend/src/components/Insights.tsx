@@ -1,320 +1,117 @@
-import { modelDisplayNames } from '@blerglab/chat'
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { signedInAccount } from '../lib/liveBoardCard'
+import { QUESTIONS, type QuestionView } from '../lib/insightsQuestions'
+import { createPortal } from 'react-dom'
+import { cachedInsights, clearInsightsCache, insightsCacheKey, rememberInsights } from '../lib/insightsCache'
+import InsightsTable from './InsightsTable'
+import { useInsightsPreference } from '../hooks/useInsightsPreferences'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useLocation, useSearchParams } from 'react-router-dom'
+import ActivityInsights from './ActivityInsights'
+import InsightsDetails from './InsightsDetails'
 import { apiFetch } from '../apiFetch'
-import { useMediaQuery } from '../hooks/useMediaQuery'
+import { mark } from '../lib/releasePerfMarks'
 import {
-  RANGES, formatDuration, formatPercent, formatTokens, formatUSD, outcomeLabel, shortDay, stepLabel,
+  RANGES,
   type InsightsResponse, type ModelPrice, type RangeLabel,
 } from '../lib/insights'
-import StartSteps from './StartSteps'
 import './Insights.css'
+import {openTestPerformance} from '../lib/testPerformance'
 
-type Scope = 'all' | 'mine'
 
 // At this width and under, the wide tables become one stacked entry per row (Insights.css uses the same width).
 export const NARROW_QUERY = '(max-width: 640px)'
 
-export default function Insights() {
-  const [range, setRange] = useState<RangeLabel>('7d')
-  const [scope, setScope] = useState<Scope>('all')
-  const [data, setData] = useState<InsightsResponse | null>(null)
-  const [prices, setPrices] = useState<ModelPrice[]>([])
+export type InsightsSection = 'overview' | 'flow' | 'reviews' | 'usage' | 'live'
+
+const subscribeVisibility = (notify: () => void) => { document.addEventListener('visibilitychange', notify); return () => document.removeEventListener('visibilitychange', notify) }
+
+export function InsightsDashboard({ active = true, workspaceId }: { active?: boolean; workspaceId?: string }) {
+  const pageVisible = useSyncExternalStore(subscribeVisibility, () => document.visibilityState !== 'hidden')
+  const location = useLocation()
+  const [search] = useSearchParams()
+  const workspace = workspaceId ?? (location.pathname.startsWith('/insights') ? search.get('workspace') : null)
+  const candidate = location.pathname.split('/')[2] || 'health'
+  const [section, setSection] = useState<QuestionView>(candidate === 'flow' ? 'cost' : candidate === 'usage' ? 'spending' : candidate === 'skills' || candidate === 'time' || candidate === 'cost' || candidate === 'spending' ? candidate : 'health')
+  const [identity, setIdentity] = useState(0)
+  useEffect(() => { const changed = () => setIdentity(n => n + 1); window.addEventListener('blerg-identity-changed', changed); return () => window.removeEventListener('blerg-identity-changed', changed) }, [])
+  const contentRef = useRef<HTMLDivElement>(null)
+  const [toolbar, setToolbar] = useState<HTMLDivElement | null>(null)
+  useEffect(() => { if (contentRef.current) contentRef.current.scrollTop = 0 }, [section, workspace])
+  return <div className="insights-shell insights-tab" ref={contentRef}>
+    <div className="insights-toolbar"><select className="insights-select insights-mobile-view" aria-label="Insights view" value={section} onChange={e=>setSection(e.target.value as QuestionView)}>{QUESTIONS.map(q=><option key={q.id} value={q.id}>{q.label}</option>)}</select><div className="insights-section-tabs seg" role="group" aria-label="Insights sections">
+      {QUESTIONS.map(({id, label, question}) => <button type="button" key={id} title={question} className={section === id ? 'on' : ''} aria-pressed={section === id} onClick={() => setSection(id)}>{label}</button>)}
+    </div>
+    <button className="btn small" title="Open test performance in its own tab" onClick={()=>openTestPerformance(workspace || undefined)}>Test performance</button><div className="insights-controls" ref={setToolbar} /></div>
+    <GlobalInsights enabled={active && pageVisible} toolbar={toolbar} key={`${identity}|${workspace || 'own'}`} workspace={workspace || undefined} section={section} />
+  </div>
+}
+
+function GlobalInsights({ section, workspace, enabled, toolbar }: { enabled: boolean; toolbar: HTMLElement | null; workspace?: string; section: QuestionView }) {
+  const [range, setRange] = useInsightsPreference<RangeLabel>('range', '7d')
+  const cacheKey = insightsCacheKey(signedInAccount(), `summary|${workspace || ''}|${range}`)
+  const [response, setResponse] = useState<{key:string;data:InsightsResponse|null}>(() => ({key:cacheKey,data:cachedInsights(cacheKey)}))
+  const data=response.key===cacheKey?response.data:cachedInsights<InsightsResponse>(cacheKey)
+  // BLG-453: a no-op everywhere except the release-perf harness (see
+  // src/lib/releasePerfMarks.ts) — the readiness signal the 7-day Insights
+  // scenario times against.
+  useEffect(() => { if (data) mark('insights-rendered') }, [data])
+  const [filterTarget, setFilterTarget] = useState<HTMLDivElement | null>(null)
+  const [prices,setPrices]=useState<ModelPrice[]>([])
+  const [pricesOpen,setPricesOpen]=useState(false)
   // what the last answer was for: loading is "no answer yet for the request now wanted"
   const [answered, setAnswered] = useState<{ key: string; failed: boolean } | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
   const reload = useCallback(() => setReloadKey((k) => k + 1), [])
-  const key = `${range}|${scope}|${reloadKey}`
+  const effectiveScope = 'mine'
+  const key = `${range}|${effectiveScope}|${reloadKey}`
   const loading = answered?.key !== key
   const error = !loading && answered?.failed === true
 
   useEffect(() => {
+    if (!enabled) return
     let cancelled = false
-    const qs = `range=${range}${scope === 'mine' ? '&scope=mine' : ''}`
+    const qs = `range=${range}&scope=mine${workspace ? `&workspace=${encodeURIComponent(workspace)}` : ''}`
     apiFetch(`/api/insights?${qs}`)
-      .then((r) => (r.ok ? (r.json() as Promise<InsightsResponse>) : Promise.reject(new Error(String(r.status)))))
-      .then((d) => { if (!cancelled) { setData(d); setAnswered({ key, failed: false }) } })
-      .catch(() => { if (!cancelled) setAnswered({ key, failed: true }) })
+      .then((r) => (r.ok ? (r.json() as Promise<InsightsResponse>) : Promise.reject({status:r.status})))
+      .then((d) => { if (!cancelled) { rememberInsights(cacheKey, d); setResponse({key:cacheKey,data:d}); setAnswered({ key, failed: false }) } })
+      .catch((e: {status?:number}) => { if (!cancelled) { if(e.status && [401,403,404].includes(e.status)){ clearInsightsCache(); setResponse({key:cacheKey,data:null}) }; setAnswered({ key, failed: true }) } })
     return () => { cancelled = true }
-  }, [range, scope, key])
+  }, [range, effectiveScope, key, workspace, enabled, cacheKey])
 
-  const isAdmin = data?.is_admin === true
   useEffect(() => {
-    if (!isAdmin) return
-    let cancelled = false
-    apiFetch('/api/insights/prices')
-      .then((r) => (r.ok ? (r.json() as Promise<ModelPrice[]>) : []))
-      .then((p) => { if (!cancelled) setPrices(Array.isArray(p) ? p : []) })
-      .catch(() => { /* the editor just shows no stored prices */ })
-    return () => { cancelled = true }
-  }, [isAdmin, reloadKey])
+    if (!enabled) return
+    const timer = setInterval(() => { if (document.visibilityState === 'visible') reload() }, 30_000)
+    return () => clearInterval(timer)
+  }, [section, reload, enabled])
+
+  useEffect(()=>{
+    if(!enabled||!pricesOpen||section!=='spending'||!data?.is_admin)return
+    let cancelled=false
+    apiFetch('/api/insights/prices').then(r=>r.ok?r.json():[]).then((rows:ModelPrice[])=>{if(!cancelled)setPrices(rows)}).catch(()=>{if(!cancelled)setPrices([])})
+    return()=>{cancelled=true}
+  },[enabled,pricesOpen,section,data?.is_admin,reloadKey])
 
   return (
     <div className="insights">
-      <header className="insights-head">
-        <div>
-          <h1>Insights</h1>
-          <p className="insights-sub">
-            {data
-              ? data.scope === 'all'
-                ? 'Every session on this install.'
-                : 'Showing your own sessions.'
-              : 'Pod startup, sessions, tokens and estimated cost.'}
-          </p>
+      {toolbar && createPortal(<>
+        <select className="insights-select insights-mobile-range" aria-label="Time range" value={range} onChange={e=>setRange(e.target.value as RangeLabel)}>{RANGES.map(r=><option key={r}>{r}</option>)}</select><div className="seg insights-range-buttons" role="group" aria-label="Time range">
+          {RANGES.map(r => <button key={r} type="button" aria-pressed={range === r} className={range === r ? 'on' : ''} onClick={() => setRange(r)}>{r}</button>)}
         </div>
-        <div className="insights-controls">
-          <div className="seg" role="group" aria-label="Time range">
-            {RANGES.map((r) => (
-              <button key={r} type="button" aria-pressed={range === r} className={range === r ? 'on' : ''} onClick={() => setRange(r)}>{r}</button>
-            ))}
-          </div>
-          {isAdmin && (
-            <div className="seg" role="group" aria-label="Whose sessions">
-              <button type="button" aria-pressed={scope === 'all'} className={scope === 'all' ? 'on' : ''} onClick={() => setScope('all')}>Everyone</button>
-              <button type="button" aria-pressed={scope === 'mine'} className={scope === 'mine' ? 'on' : ''} onClick={() => setScope('mine')}>Mine</button>
-            </div>
-          )}
-        </div>
-      </header>
+        <div className="insights-controls" ref={setFilterTarget} />
+        {data && <span className="insights-updated" title={workspace ? undefined : 'Showing your own workspaces.'}>Updated {new Date(data.generated_at).toLocaleTimeString()}</span>}
+      </>, toolbar)}
 
-      {loading && !data && <div role="status" className="insights-note">Loading insights…</div>}
-      {error && (
+      {error && !data && (
         <div role="alert" className="insights-note insights-error">
           Could not load insights.{' '}
           <button type="button" className="btn small" onClick={reload}>Try again</button>
         </div>
       )}
-      {data && !error && (
-        <div aria-busy={loading} style={{ opacity: loading ? 0.55 : 1, transition: 'opacity 120ms' }}>
-          {loading && <div role="status" className="insights-note">Updating…</div>}
-          <Report d={data} prices={prices} onPriceChange={reload} />
-        </div>
-      )}
+      {(!error||data)&&<ActivityInsights questionView={section} summary={data??undefined} workspace={workspace} filterTarget={filterTarget} enabled={enabled} section={section==='health'?'reviews':'flow'} range={range} detailsContent={data&&(section==='health'||section==='spending'||section==='time')?<InsightsDetails d={data} section={section==='spending'?'usage':section==='time'?'live':'overview'} workspace={workspace}/>:undefined} />}
+      {data && <div>
+          {section==='spending'&&data.is_admin&&<details className="insights-details" onToggle={e=>setPricesOpen(e.currentTarget.open)}><summary>Model prices</summary>{pricesOpen&&<PriceEditor stored={prices} unpriced={data.tokens.unpriced_models} onChange={reload}/>}</details>}
+        </div>}
     </div>
-  )
-}
-
-function Report({ d, prices, onPriceChange }: { d: InsightsResponse; prices: ModelPrice[]; onPriceChange: () => void }) {
-  const narrow = useMediaQuery(NARROW_QUERY)
-  const modelNames = modelDisplayNames(d.tokens.by_model.map(m => ({ id: m.model })))
-  const empty = d.sessions.started === 0 && d.tokens.totals.turns === 0
-  // the headline startup figure: the runtime that started the most sessions
-  const headline = useMemo(() => {
-    const ok = d.startup.groups.filter((g) => g.kind === 'start' && g.seconds.count > 0)
-    return ok.sort((a, b) => b.attempts - a.attempts)[0] ?? d.startup.groups.find((g) => g.seconds.count > 0)
-  }, [d])
-  const stepRuntime = headline?.runtime
-  const steps = d.startup.steps.filter((s) => s.runtime === stepRuntime)
-
-  return (
-    <>
-      <div className="cards">
-        <Card id="started" label="Sessions started" value={String(d.sessions.started)} hint={`${d.sessions.alive} alive now`} />
-        <Card id="startup" label={headline ? `Median startup (${headline.runtime})` : 'Median startup'} value={headline ? formatDuration(headline.seconds.p50) : '—'}
-          hint={headline ? `90% under ${formatDuration(headline.seconds.p90)}` : 'no completed starts'} />
-        <Card id="tokens" label="Output tokens" value={formatTokens(d.tokens.totals.output)} hint={`${formatTokens(d.tokens.totals.input)} input · ${d.tokens.totals.turns} turns`} />
-        <Card id="cost" label="Estimated cost" value={formatUSD(d.tokens.totals.cost_usd)}
-          hint={d.tokens.unpriced_models.length > 0 ? `no price for ${d.tokens.unpriced_models.join(', ')}` : 'at the prices set below'} />
-        <Card id="cache" label="Cache hit rate" value={d.tokens.totals.turns ? formatPercent(d.tokens.cache_hit_rate) : '—'} hint={`${formatTokens(d.tokens.totals.cache_read)} read from cache`} />
-      </div>
-
-      {empty && <div className="insights-note">No sessions in this range.</div>}
-
-      <section>
-        <h2>Pod startup</h2>
-        {d.startup.groups.length === 0 ? <p className="insights-note">No starts recorded in this range.</p> : (
-          <>
-            {narrow ? (
-              <ul className="stack" data-testid="startup-stack">
-                {d.startup.groups.map((g) => (
-                  <li key={g.runtime + g.kind}>
-                    <div className="stack-head">
-                      <span className="stack-name">{g.runtime} · {g.kind}</span>
-                      <span className="muted">{g.attempts} {g.attempts === 1 ? 'attempt' : 'attempts'}, {g.failed} failed</span>
-                    </div>
-                    <dl className="stack-figs three">
-                      <Fig k="Median" v={g.seconds.count ? formatDuration(g.seconds.p50) : '—'} />
-                      <Fig k="90th" v={g.seconds.count ? formatDuration(g.seconds.p90) : '—'} />
-                      <Fig k="Slowest" v={g.seconds.count ? formatDuration(g.seconds.max) : '—'} />
-                    </dl>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-            <table className="grid">
-              <thead><tr><th>Runtime</th><th>Kind</th><th className="n">Attempts</th><th className="n">Failed</th><th className="n">Median</th><th className="n">90th</th><th className="n">Slowest</th></tr></thead>
-              <tbody>
-                {d.startup.groups.map((g) => (
-                  <tr key={g.runtime + g.kind}>
-                    <td>{g.runtime}</td><td>{g.kind}</td><td className="n">{g.attempts}</td><td className="n">{g.failed}</td>
-                    <td className="n">{g.seconds.count ? formatDuration(g.seconds.p50) : '—'}</td>
-                    <td className="n">{g.seconds.count ? formatDuration(g.seconds.p90) : '—'}</td>
-                    <td className="n">{g.seconds.count ? formatDuration(g.seconds.max) : '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            )}
-            {steps.length > 0 && stepRuntime && <StartSteps runtime={stepRuntime} steps={steps} />}
-            {d.startup.failures.length > 0 && (
-              <p className="insights-note">Failed starts by stage: {d.startup.failures.map((f) => `${stepLabel(f.key)} ${f.count}`).join(' · ')}</p>
-            )}
-            {d.startup.slowest.length > 0 && (
-              <>
-                <h3>Slowest starts</h3>
-                <ul className="plain">
-                  {d.startup.slowest.map((s) => (
-                    <li key={s.session_id + s.at}>
-                      <Link to={`/sessions/${s.session_id}`}>{s.title || s.session_id.slice(0, 8)}</Link>
-                      <span className="muted"> · {s.runtime} · {formatDuration(s.seconds)}</span>
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
-          </>
-        )}
-      </section>
-
-      <section>
-        <h2>Tokens and cost</h2>
-        {d.tokens.by_model.length === 0 ? <p className="insights-note">No turns completed in this range.</p> : (
-          <>
-            {narrow ? (
-              <ul className="stack" data-testid="tokens-stack">
-                {d.tokens.by_model.map((m) => (
-                  <li key={m.model}>
-                    <div className="stack-head"><span className="stack-name" title={m.model}>{modelNames.get(m.model)}</span></div>
-                    <dl className="stack-figs">
-                      <Fig k="Turns" v={String(m.turns)} />
-                      <Fig k="Input" v={formatTokens(m.input)} />
-                      <Fig k="Output" v={formatTokens(m.output)} />
-                      <Fig k="Cache read" v={formatTokens(m.cache_read)} />
-                      <Fig k="Cache write" v={formatTokens(m.cache_write)} />
-                      <Fig k="Est. cost" v={m.priced ? formatUSD(m.cost_usd) : <span className="muted" title="No price set for this model">no price</span>} />
-                    </dl>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-            <table className="grid">
-              <thead><tr><th>Model</th><th className="n">Turns</th><th className="n">Input</th><th className="n">Output</th><th className="n">Cache read</th><th className="n">Cache write</th><th className="n">Est. cost</th></tr></thead>
-              <tbody>
-                {d.tokens.by_model.map((m) => (
-                  <tr key={m.model}>
-                    <td title={m.model}>{modelNames.get(m.model)}</td><td className="n">{m.turns}</td><td className="n">{formatTokens(m.input)}</td><td className="n">{formatTokens(m.output)}</td>
-                    <td className="n">{formatTokens(m.cache_read)}</td><td className="n">{formatTokens(m.cache_write)}</td>
-                    <td className="n">{m.priced ? formatUSD(m.cost_usd) : <span className="muted" title="No price set for this model">no price</span>}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            )}
-            <DailyChart days={d.tokens.daily} narrow={narrow} />
-            {d.tokens.top_sessions.length > 0 && (
-              <>
-                <h3>Biggest sessions</h3>
-                <ul className="plain">
-                  {d.tokens.top_sessions.map((s) => (
-                    <li key={s.session_id}>
-                      <Link to={`/sessions/${s.session_id}`}>{s.title || s.session_id.slice(0, 8)}</Link>
-                      <span className="muted"> · {s.runtime} · {formatTokens(s.output)} out / {formatTokens(s.input + s.cache_write)} in{s.cost_usd !== null ? ` · ${formatUSD(s.cost_usd)}` : ''}</span>
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
-          </>
-        )}
-      </section>
-
-      <section>
-        <h2>Sessions</h2>
-        <div className="two">
-          <div>
-            <h3>By runtime</h3>
-            <ul className="plain">{d.sessions.by_runtime.map((r) => <li key={r.key}>{r.key} <span className="muted">· {r.count}</span></li>)}{d.sessions.by_runtime.length === 0 && <li className="muted">none</li>}</ul>
-          </div>
-          <div>
-            <h3>How they ended</h3>
-            <ul className="plain">{d.sessions.by_outcome.map((r) => <li key={r.key}>{outcomeLabel(r.key)} <span className="muted">· {r.count}</span></li>)}{d.sessions.by_outcome.length === 0 && <li className="muted">none ended</li>}</ul>
-          </div>
-        </div>
-        {d.sessions.lifetime_seconds.count > 0 && (
-          <p className="insights-note">Lifetime of ended sessions: median {formatDuration(d.sessions.lifetime_seconds.p50)}, 90th {formatDuration(d.sessions.lifetime_seconds.p90)}, longest {formatDuration(d.sessions.lifetime_seconds.max)}.</p>
-        )}
-        {d.sessions.running_seconds + d.sessions.idle_seconds + d.sessions.waiting_seconds > 0 && (
-          <p className="insights-note">
-            Time working {formatDuration(d.sessions.running_seconds)} · waiting on a person {formatDuration(d.sessions.waiting_seconds)} · idle {formatDuration(d.sessions.idle_seconds)}{' '}
-            ({formatPercent(d.sessions.busy_fraction)} busy).
-          </p>
-        )}
-      </section>
-
-      {d.cluster && (
-        <section>
-          <h2>Cluster</h2>
-          <p className="insights-note">{d.cluster.active} of {d.cluster.max} session pods in use now; at most {d.cluster.peak_concurrent} at once in this range.</p>
-        </section>
-      )}
-
-      {d.crons.runs > 0 && (
-        <section>
-          <h2>Crons</h2>
-          <p className="insights-note">
-            {d.crons.runs} runs ({d.crons.by_status.map((s) => `${s.key} ${s.count}`).join(', ')}){d.crons.late ? `, ${d.crons.late} late` : ''}
-            {d.crons.seconds.count > 0 ? `. A run lasts ${formatDuration(d.crons.seconds.p50)} typically, ${formatDuration(d.crons.seconds.p90)} at the 90th percentile.` : '.'}
-          </p>
-        </section>
-      )}
-
-      {d.is_admin && <PriceEditor stored={prices} unpriced={d.tokens.unpriced_models} onChange={onPriceChange} />}
-      {!d.is_admin && <p className="insights-note">Dollar figures are estimates from per-model prices an administrator sets.</p>}
-    </>
-  )
-}
-
-function Card({ id, label, value, hint }: { id: string; label: string; value: string; hint?: string }) {
-  return (
-    <div className="card" data-testid={`card-${id}`}>
-      <div className="card-label">{label}</div>
-      <div className="card-value">{value}</div>
-      {hint && <div className="card-hint">{hint}</div>}
-    </div>
-  )
-}
-
-// Fig is one figure of a stacked entry: its name over its value.
-function Fig({ k, v }: { k: string; v: React.ReactNode }) {
-  return <div><dt>{k}</dt><dd>{v}</dd></div>
-}
-
-// DailyChart draws output + input tokens per day as bars (cache reads are far larger and would flatten them; they are in the table).
-// On a phone the drawing is narrower, so its day labels stay readable once it is scaled to the screen.
-function DailyChart({ days, narrow }: { days: InsightsResponse['tokens']['daily']; narrow: boolean }) {
-  if (days.length === 0) return null
-  const W = narrow ? 340 : 640, H = 140, pad = narrow ? 12 : 24
-  const every = Math.ceil(days.length / (narrow ? 5 : 8))
-  const vals = days.map((x) => x.output + x.input + x.cache_write)
-  const max = Math.max(1, ...vals)
-  const bw = Math.max(narrow ? 3 : 6, (W - pad * 2) / days.length - (narrow ? 3 : 6))
-  return (
-    <figure className="chart" data-testid="daily-chart">
-      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`Tokens per day, ${days.length} days`} preserveAspectRatio="xMidYMid meet">
-        {days.map((day, i) => {
-          const h = Math.max(2, (vals[i] / max) * (H - pad * 2))
-          const slot = (W - pad * 2) / days.length
-          const x = pad + i * slot + (slot - bw) / 2
-          return (
-            <g key={day.day}>
-              <rect x={x} y={H - pad - h} width={bw} height={h} rx={2} className="bar"><title>{`${shortDay(day.day)}: ${formatTokens(vals[i])} tokens (${formatTokens(day.output)} output)`}</title></rect>
-              {((!narrow && days.length <= 10) || i % every === 0) && <text x={x + bw / 2} y={H - 6} textAnchor="middle" className="axis">{shortDay(day.day)}</text>}
-            </g>
-          )
-        })}
-      </svg>
-      <figcaption>Tokens per day: output, input and cache writes (cache reads are in the table).</figcaption>
-    </figure>
   )
 }
 
@@ -383,7 +180,7 @@ function PriceEditor({ stored, unpriced, onChange }: { stored: ModelPrice[]; unp
       {error && <div role="alert" className="insights-error">{error}</div>}
       {models.length === 0 ? <p className="insights-note">Every model in this range has a price.</p> : (
         <div className="scroll-x" data-testid="prices-scroll">
-        <table className="grid prices">
+        <InsightsTable className="grid prices">
           <thead><tr><th>Model</th><th className="n">Input</th><th className="n">Output</th><th className="n">Cache read</th><th className="n">Cache write</th><th /></tr></thead>
           <tbody>
             {models.map((m) => {
@@ -410,7 +207,7 @@ function PriceEditor({ stored, unpriced, onChange }: { stored: ModelPrice[]; unp
               )
             })}
           </tbody>
-        </table>
+        </InsightsTable>
         </div>
       )}
     </section>

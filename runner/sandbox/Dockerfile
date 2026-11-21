@@ -24,12 +24,13 @@ COPY contracts/ /src/contracts/
 COPY runner/ /src/runner/
 WORKDIR /src/runner
 RUN GOWORK=off CGO_ENABLED=0 go build -o /out/blerg-shell-supervisor ./cmd/shell-supervisor \
-    && GOWORK=off CGO_ENABLED=0 go build -o /out/blerg-workspace-explorer ./cmd/workspace-explorer
+    && GOWORK=off CGO_ENABLED=0 go build -o /out/blerg-workspace-explorer ./cmd/workspace-explorer \
+    && GOWORK=off CGO_ENABLED=0 go build -o /out/blerg-workspace-metrics ./cmd/workspace-metrics
 
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates git curl bash tmux ripgrep jq unzip build-essential \
+    ca-certificates git curl bash ripgrep jq unzip build-essential util-linux coreutils \
     python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
@@ -78,8 +79,10 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 COPY --from=shell-builder /out/blerg-shell-supervisor /usr/local/bin/blerg-shell-supervisor
 COPY --from=shell-builder /out/blerg-workspace-explorer /usr/local/bin/blerg-workspace-explorer
 
+COPY --from=shell-builder /out/blerg-workspace-metrics /usr/local/bin/blerg-workspace-metrics
+
 WORKDIR /workspace
 
 # The daemon starts this detached (`docker run -d ... sleep infinity`), then
-# creates a tmux session inside it via `docker exec` — see createDockerSandbox.
+# runs the agent engine inside it via `docker exec`.
 CMD ["sleep", "infinity"]

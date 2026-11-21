@@ -4,7 +4,7 @@ import { settingsScreens, unstyledSettings } from '../../../packages/settings/gu
 import { buttonStyles, DESIGN_SYSTEM_BUTTONS, unstyledButtons } from '../../../packages/settings/buttons'
 import { readCss } from '../../../packages/settings/readCss'
 
-const all = import.meta.glob<string>(['./**/*.{ts,tsx}', '!./**/*.test.{ts,tsx}'], { query: '?raw', import: 'default', eager: true })
+const all = import.meta.glob<string>(['./**/*.{ts,tsx}', '!./**/*.test.{ts,tsx}', '../../../packages/board/*.tsx'], { query: '?raw', import: 'default', eager: true })
 const sources = settingsScreens(ts, all, ['./BoardSettings.tsx', './Tokens.tsx'], [])
 
 describe('shared settings primitives guard', () => {
@@ -29,7 +29,7 @@ describe('shared settings primitives guard', () => {
 })
 
 // The button guard (#229): every button in the app is styled. CSS is what this app loads, read from disk.
-const css = readCss('src', '../../packages/chat/src', '../../packages/settings')
+const css = readCss('src', '../../packages/chat/src', '../../packages/settings', '../../packages/board')
 const styles = buttonStyles(css)
 
 describe('button guard', () => {

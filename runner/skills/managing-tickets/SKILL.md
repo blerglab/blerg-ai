@@ -1,161 +1,28 @@
 ---
 name: managing-tickets
-description: >
-  Use when organizing or managing a blerg-runner ticket board — creating, refining,
-  splitting, tagging, prioritizing, ordering, and moving cards — typically inside
-  a board-scoped Assist session (BLERG_RUNNER_BOARD_ID is set).
+description: File, estimate, start and review Blerg tickets from any workspace using the session CLI or board tools.
 ---
 
-# managing-tickets
+# Manage tickets consistently
 
-Guides an Assist session through organizing a blerg-runner ticket board via the
-`blerg-runner` CLI. The daemon injects `BLERG_RUNNER_BOARD_ID` and `BLERG_RUNNER_BOARD_TOKEN`
-into every Assist session, and the CLI picks them up automatically — you rarely
-need to pass `<board>` explicitly.
+These rules apply to every workspace, channel, engine and worker.
 
-## Five rules to work by
+Workers reach Main with `blerg-runner ask` for decisions and `blerg-runner note` for information. Plain chat replies mid-turn do not notify Main. Main reads notes with `blerg-runner session result <child>`; use `publish` for long content.
 
-### 1. Read first
+1. Read the board and search before filing. Prefer board MCP tools when connected; inside a session use `blerg-runner ticket get/list/create/update/move`. Check `blerg-runner board access` after a refusal: permissions can change while you work.
+2. Before filing or starting, estimate: size S/M/L/XL, risk low/medium/high, and complexity low/medium/high. Use `ticket create/update --size M --risk medium --complexity low`, or the same top-level MCP fields. Do this before moving into progress or starting a worker. Read existing estimates; explain revisions. Fill missing estimates before starting. The service records first-set times; never backdate them.
+3. One idea per card, with a specific title, intent, acceptance criteria and workspace repos. Search first, use a stable intent-based dedup key when available, and update an existing match. A dedup refresh preserves estimates and placement: use update to change them.
+4. Custom fields are separate: read the board schema before writing `fields`. Size, risk and complexity need no schema or board setup. Pass the version you read as `if_match` on a read-modify-write.
+5. Record dependencies instead of relying on card order. Pin the card you work on and name its #N in worker titles using the correct board context. Move completed work to a terminal column. Do not archive, split, or remove another person's work without authorization.
+6. Record every completed review, including from a worker: `blerg-runner mark review "<summary>" --card N --verdict approved|changes|rejected --by <engine> --target <sha> --round N`. Add `--findings high,medium,low` with one entry per finding, preserving repeated severities; omit it for no findings. Use the actual reviewed commit and engine, and increment the round for another review of that work. Set the board context; card numbers alone are ambiguous across boards. Record the review even if it approves with no findings. Historical reviews may be imported with `mark --import` and their actual `at` time.
+7. Record a failure when a test, gate, flaky rerun, review, session, engine, deploy or merge fails: `blerg-runner mark failure "<summary>" --card N --type test|gate|flake|review|session|engine|deploy|merge --severity high|medium|low --suite "<name>"`. Record the failed attempt immediately; after a successful rerun record another failure mark for the same suite with `--rerun-passed`. Do not erase the failed attempt or call a failure a flake without rerun evidence. Review finding severities stay on review records. Server-recorded session failure alerts link automatically through pins and #N titles; do not duplicate those alerts. Use real times for historical imports.
+8. Reconcile the board after every merge and deploy, not from memory: list open cards (in progress, ready) and check each against first-parent merges on main and the deployed SHA. Move merged work to done, add `to-test` once deployed, and return stalled in-progress cards with no worker to ready. Workers send questions, decisions and work for review to Main with `blerg-runner ask`, never `--person`, `review request` or `--request-review`. Main reviews and asks the person only for their decisions, in plain words. Merge a card's branch with `git merge --no-ff` and a subject that starts `Merge BLG-N:`, so the board follows the merge by itself; a fast-forward leaves the card where it was. After a successful deploy, mark `blerg-runner mark milestone "Deployed: <environment>" --commit <full deployed SHA>` with exactly one commit; that prefix is the deploy evidence that adds `to-test`.
+9. Respond to admission feedback: search and update the match on duplicate denial; revise vague submissions; track held proposals. Do not rephrase and resubmit a denied duplicate. Keep progress comments short and factual.
 
-Before touching anything, load the board's real state:
+## Admission and mirrored cards
 
-```bash
-blerg-runner board show          # columns, ticket counts, summary
-blerg-runner ticket list backlog # scan a column in detail
-blerg-runner ticket get abc123   # full detail on one card
-```
-
-Never guess at what exists. If the user describes a card, look it up by name
-or id before modifying it.
-
-### 2. One idea per card
-
-Convert loose thoughts into well-scoped tickets: one idea per card, a clear
-specific title, and a body that captures intent and acceptance criteria.
-Set `--repos`, `--tag`, `--priority`, and `--size` when you know them — a
-fully-filled card costs the user nothing and saves triage time later.
-
-### 3. Collaborate and confirm
-
-Ask **one question at a time** — don't front-load a list of questions.
-Before any destructive operation (split, archive, removing a dependency,
-removing or renaming a column) **propose what you're about to do and wait
-for the user's explicit go-ahead**.
-
-### 4. Encode ordering as dependencies
-
-When the user says "X must happen before Y", record that with `ticket dep add`
-rather than relying on column position. Then run `board order` to surface a
-ready-first execution plan — tickets whose dependencies are all in a terminal
-column float to the top.
-
-### 5. Keep the board tidy
-
-As work finishes, move cards to a terminal ("done") column with `ticket move`.
-Periodically sweep column order and tags for consistency. Never delete a
-non-empty column — rename or merge it instead.
-
----
-
-## CLI reference
-
-Columns and tickets can be addressed by **id or unambiguous name** within the
-board. `<board>` defaults to `$BLERG_RUNNER_BOARD_ID` for verbs that allow omitting
-it. Valid `priority`: `low` | `medium` | `high` | `urgent`. Valid `size`:
-`XS` | `S` | `M` | `L` | `XL`.
-
-### Board
-
-```bash
-# Show board state — columns, ticket counts, ready/blocked breakdown
-blerg-runner board show
-
-# Print a dependency-aware ready-first ordering of all open tickets
-blerg-runner board order
-```
-
-### Columns
-
-```bash
-# Add a new "Review" column after the existing "In Progress" column
-blerg-runner column add --name "Review" --after "In Progress"
-
-# Rename a column
-blerg-runner column rename "Review" --name "In Review"
-
-# Move a column to a different position
-blerg-runner column move "In Review" --after "In Progress"
-
-# Mark (or unmark) a column as terminal — tickets there count as "done"
-blerg-runner column set "Shipped" --terminal
-blerg-runner column set "Canceled" --no-terminal
-
-# Remove an empty column
-blerg-runner column rm "Old Backlog"
-```
-
-### Tickets
-
-```bash
-# List tickets in a column, filtered and paginated
-blerg-runner ticket list --column backlog --priority high --ready --limit 20
-
-# Show full detail for one ticket
-blerg-runner ticket get abc123
-
-# Create a new ticket (body, repos, tags, priority, size all optional)
-blerg-runner ticket create \
-  --title "Add rate-limiting to the API gateway" \
-  --body "Implement token-bucket rate limiting; 100 req/min per client." \
-  --repos blerg-runner \
-  --tag infra --tag security \
-  --priority high --size M
-
-# Update fields on an existing ticket
-blerg-runner ticket update abc123 --priority urgent --add-tag performance
-
-# Move a ticket to a column (optionally position it relative to another card)
-blerg-runner ticket move abc123 --column "In Progress" --after def456
-
-# Split one ticket into two (originals are archived; children inherit deps)
-blerg-runner ticket split abc123 --into "Add rate-limit middleware" --into "Wire rate-limit config into deploy"
-
-# Record that ticket abc123 must be done before ghi789 can start
-blerg-runner ticket dep add ghi789 --on abc123
-
-# Remove a dependency
-blerg-runner ticket dep rm ghi789 --on abc123
-
-# Archive a completed or canceled ticket
-blerg-runner ticket archive abc123
-```
-
-### Tags
-
-```bash
-# List all tags used on the board (useful before applying or cleaning up tags)
-blerg-runner tag list
-```
-
----
-
-## Typical flow
-
-```bash
-# 1. Orient yourself
-blerg-runner board show
-
-# 2. Triage a rough idea the user just described
-blerg-runner ticket create --title "Cache board-order results in Redis" \
-  --body "board order is slow on large boards; cache with a 30 s TTL." \
-  --tag performance --priority medium --size S
-
-# 3. User says "that depends on the Redis connection pool work"
-blerg-runner ticket dep add <new-id> --on <redis-pool-ticket-id>
-
-# 4. See what's unblocked now
-blerg-runner board order
-
-# 5. Finish a card — move it to the terminal column
-blerg-runner ticket move <id> --column "Done"
-```
+- A 409 duplicate denial names `duplicate_of: #N`: fetch it and update the match if you have new evidence. A 422 revise response names the missing specifics. A 202 held response has a `review_id`; check it later instead of assuming the write succeeded.
+- A disputed denial may be resubmitted once with `dispute_of` and a factual `rebuttal`; never dispute the same review twice or rephrase the same denied filing.
+- Custom field keys and enum values must match the board schema exactly. Unknown keys and wrong types are rejected.
+- Incident cards (`type: incident` or `INC-…` external IDs) may be read-only mirrors owned by another service. Do not move those cards.
+- Do not delete a nonempty column; move its work deliberately or rename it. Keep a version guard on read-modify-write updates so another worker's change is not lost.

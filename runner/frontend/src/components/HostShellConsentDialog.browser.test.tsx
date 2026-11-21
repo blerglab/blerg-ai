@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import '../index.css'
 import { render, screen, waitFor } from '@testing-library/react'
 import { expect, it, vi } from 'vitest'
@@ -49,4 +50,17 @@ it('shows where focus is when opened by a mouse click', async () => {
   expect(style.outlineStyle).not.toBe('none')
   expect(parseFloat(style.outlineWidth)).toBeGreaterThan(0)
   opener.remove()
+})
+
+it.each(browserWidths([390, 3840]))('explains one-shell persistence and withdrawal at %i px', async width => {
+  const { page } = await import('vitest/browser')
+  await page.viewport(width, 900)
+  const view = render(<HostShellConsentDialog challenge={{ ...challenge, version: 2 }} busy={false} onAllow={() => {}} onCancel={() => {}} />)
+  expect(screen.getByRole('button', { name: 'Allow this shell' })).toBeVisible()
+  expect(screen.getByText(/keeps running while disconnected/)).toBeVisible()
+  expect(screen.getByText(/withdraw consent/)).toBeVisible()
+  const bounds = screen.getByRole('dialog').getBoundingClientRect()
+  expect(bounds.left).toBeGreaterThanOrEqual(0)
+  expect(bounds.right).toBeLessThanOrEqual(width)
+  view.unmount()
 })

@@ -6,10 +6,10 @@ import { useTranscriptStore } from '@blerglab/chat'
 import CommandPaletteProvider, { PaletteButton } from './CommandPalette'
 import RunnerCommands from './RunnerCommands'
 import SessionDetail from './SessionDetail'
-import TerminalDOMView from './TerminalDOMView'
 import { useSessionStore } from '../hooks/useSessionStore'
 import { makeDaemon, makeSession } from '../test/fixtures'
 import * as wsMock from '../test/wsMock'
+import { resetSessionBoardLinksForTest } from '../lib/sessionBoardLinks'
 import { apiFetch } from '../apiFetch'
 import '../index.css'
 import '@blerglab/chat/blerg.css'
@@ -22,8 +22,11 @@ vi.mock('../lib/engineModels', async original => ({
   ...await original<typeof import('../lib/engineModels')>(),
   useEngineModels: () => ({ models: [{ id: 'model-next', name: 'Next', efforts: ['low', 'high'], default_effort: 'low' }], loading: false, fallback: false, source: 'live', engineEfforts: ['low', 'high'] }),
 }))
+let granted = false
 const shotDir = (import.meta.env as Record<string, string | undefined>).VITE_PALETTE_SHOT_DIR
 beforeEach(() => {
+  resetSessionBoardLinksForTest()
+  granted = false
   document.documentElement.setAttribute('data-theme', 'dark')
   wsMock.resetWsMock()
   localStorage.clear()
@@ -32,7 +35,7 @@ beforeEach(() => {
     makeSession({ kind: 'agent', status: 'idle', model: 'model-next', effort: 'high' }),
     makeSession({ id: 'other', title: 'Review the interface' }),
   ] })
-  vi.mocked(apiFetch).mockReset().mockImplementation(async url => new Response(JSON.stringify(String(url) === '/api/session-boards' ? { boards: [{ id: 'design', name: 'Design' }] } : {})))
+  vi.mocked(apiFetch).mockReset().mockImplementation(async url => new Response(JSON.stringify(String(url) === '/api/session-boards' ? { boards: [{ id: 'design', name: 'Design' }] } : String(url).endsWith('/permissions') ? { can_grant: true, reason: '', grants: [], mcp_tools: [], boards: granted ? [{ board_id: 'design', board_name: 'Design', level: 'read' }] : [] } : {})))
   vi.stubGlobal('fetch', vi.fn(async () => new Response('{}')))
 })
 afterEach(() => { vi.unstubAllGlobals(); document.documentElement.removeAttribute('data-theme') })
@@ -42,32 +45,8 @@ function mountSession() {
     <div style={{ height: '100vh' }}><Routes><Route path="/sessions/:id" element={<SessionDetail />} /></Routes></div>
   </CommandPaletteProvider></MemoryRouter>)
 }
-function sentInput() {
-  return wsMock.send.mock.calls.flatMap(([message]) => message.type === 'send_input' ? [atob(message.data)] : []).join('')
-}
 for (const [width, height] of [[390, 844], [3840, 2160]]) describe(`palette shortcut ownership at ${width}px`, () => {
   beforeEach(async () => { await page.viewport(width, height) })
-  it('delivers Ctrl+K and Ctrl+P to the real terminal and preserves typing and composition', async () => {
-    const { container } = render(<MemoryRouter initialEntries={['/sessions/sess-a']}><CommandPaletteProvider>
-      <PaletteButton /><div style={{ height: 400 }}><TerminalDOMView sessionId="sess-a" /></div>
-    </CommandPaletteProvider></MemoryRouter>)
-    const terminal = container.querySelector('textarea')!
-    terminal.focus()
-    await userEvent.keyboard('x{Control>}k{/Control}{Control>}p{/Control}y')
-    expect(sentInput()).toBe('x\x0b\x10y')
-    await userEvent.keyboard('{Meta>}k{/Meta}{Meta>}p{/Meta}')
-    expect(document.activeElement).toBe(terminal)
-    expect(screen.queryByRole('dialog')).toBeNull()
-    // Composition events are synthetic: Chromium's keyboard API cannot drive an OS IME.
-    fireEvent.compositionStart(terminal)
-    fireEvent.keyDown(terminal, { key: 'k', ctrlKey: true, isComposing: true })
-    fireEvent.input(terminal, { target: { value: 'ka' }, data: 'ka', inputType: 'insertCompositionText', isComposing: true })
-    fireEvent.compositionEnd(terminal)
-    expect(sentInput()).toBe('x\x0b\x10yka')
-    expect(screen.queryByRole('dialog')).toBeNull()
-    await userEvent.click(screen.getByRole('button', { name: 'Search commands and files' }))
-    expect(document.activeElement).toBe(screen.getByRole('combobox'))
-  })
   it('opens from the real composer and ordinary fields, cancels browser defaults, and restores drafts and focus', async () => {
     mountSession()
     const composer = document.querySelector<HTMLTextAreaElement>('.agent-composer textarea')!
@@ -160,17 +139,17 @@ for (const [width, height] of [[390, 844], [3840, 2160]]) describe(`palette shor
   })
   it('keeps the real End confirmation focused through palette shortcuts and dismisses it with Esc', async () => {
     mountSession()
-    const end = screen.getByRole('button', { name: width === 390 ? 'Search commands and files' : 'End session' })
+    // The ✕ is a real header control at every width now (card BLG-450); no palette detour on a phone.
+    const end = screen.getByRole('button', { name: 'End workspace' })
     await userEvent.click(end)
-    if (width === 390) { await userEvent.fill(screen.getByRole('combobox', { name: /^Search commands/ }), '>End session'); await userEvent.keyboard('{ArrowDown}{Enter}') }
-    const dialog = screen.getByRole('alertdialog', { name: 'End this session?' })
+    const dialog = screen.getByRole('alertdialog', { name: 'End this workspace?' })
     const cancel = within(dialog).getByRole('button', { name: 'Cancel' })
     await waitFor(() => expect(document.activeElement).toBe(cancel))
     await userEvent.keyboard('{Control>}k{/Control}{Control>}p{/Control}{Meta>}k{/Meta}{Meta>}p{/Meta}')
     expect(screen.queryByRole('dialog', { name: /Command palette|Quick open/ })).toBeNull()
     expect(document.activeElement).toBe(cancel)
     await userEvent.keyboard('{Tab}')
-    expect(document.activeElement).toBe(within(dialog).getByRole('button', { name: 'End session' }))
+    expect(document.activeElement).toBe(within(dialog).getByRole('button', { name: 'End workspace' }))
     await userEvent.keyboard('{Shift>}{Tab}{/Shift}{Escape}')
     expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(screen.queryByRole('dialog', { name: /Command palette|Quick open/ })).toBeNull()
@@ -181,16 +160,18 @@ for (const [width, height] of [[390, 844], [3840, 2160]]) describe(`palette shor
   })
   it('shows the actual session commands with real shortcuts and only other sessions', async () => {
     mountSession()
-    const entry = screen.getByRole('button', { name: 'Search commands and files' })
+    // On a phone (review round 2 of card BLG-450), Search joins Star inside the collapsed Open menu.
+    if (width === 390) await userEvent.click(screen.getByTestId('open-tab-menu'))
+    const entry = screen.getByRole(width === 390 ? 'menuitem' : 'button', { name: 'Search commands and files' })
     if (shotDir && width === 390) await page.screenshot({ path: `${shotDir}/phone-search-entry-390x844.png` })
     entry.focus()
     await userEvent.keyboard('{Control>}k{/Control}')
     const dialog = screen.getByRole('dialog', { name: 'Command palette' })
     // The empty palette leads with this session's actions; only quick open has a shortcut there.
-    expect(within(within(dialog).getByRole('group', { name: 'This session' })).getByRole('option', { name: 'Open board' })).toBeTruthy()
+    expect(within(within(dialog).getByRole('group', { name: 'This workspace' })).getByRole('option', { name: 'Open board' })).toBeTruthy()
     expect(within(dialog).queryByRole('option', { name: /Build the widget/ })).toBeNull()
     expect(within(dialog).getByRole('option', { name: /Review the interface/ })).toBeTruthy()
-    expect([...dialog.querySelectorAll('kbd')].map(key => key.textContent)).toEqual(['Ctrl/⌘+P'])
+    expect([...dialog.querySelectorAll('kbd')].map(key => key.textContent)).toEqual(['Ctrl+P'])
     const box = dialog.getBoundingClientRect()
     expect(box.width).toBeGreaterThan(width === 390 ? 380 : 1900)
     expect(box.right).toBeLessThanOrEqual(width)
@@ -200,28 +181,37 @@ for (const [width, height] of [[390, 844], [3840, 2160]]) describe(`palette shor
     // The label carries a count that can grow while commands load, so click by pattern, not by
     // the element's name at one moment.
     await page.getByRole('dialog', { name: 'Command palette' }).getByRole('option', { name: /More commands/ }).click()
-    expect([...dialog.querySelectorAll('kbd')].map(key => key.textContent)).toEqual(expect.arrayContaining(['Ctrl/⌘+P', 'Esc / Alt+1', 'Alt+]', 'Alt+[']))
+    expect([...dialog.querySelectorAll('kbd')].map(key => key.textContent)).toEqual(expect.arrayContaining(['Ctrl+P', 'Esc / Alt+1', 'Alt+]', 'Alt+[']))
     await userEvent.keyboard('{Escape}{Control>}p{/Control}')
-    const input = screen.getByRole('combobox', { name: 'Search session files' })
+    const input = screen.getByRole('combobox', { name: 'Search workspace files' })
     await userEvent.keyboard('>Open board: Design')
     expect(input.getAttribute('aria-label')).toBe('Search commands')
     await waitFor(() => expect(within(screen.getByRole('dialog', { name: 'Command palette' })).getByRole('option', { name: /Open board: Design/ })).toBeTruthy())
     if (shotDir && width === 390) await page.screenshot({ path: `${shotDir}/quick-open-commands-390x844.png` })
   })
-  it('opens Board commands in a new tab and keeps the runner conversation in place', async () => {
+  it.each([true, false])('routes Board commands with workspace grant %s', async allowed => {
+    granted = allowed
     mountSession()
     const open = vi.spyOn(window, 'open').mockReturnValue(null)
     const before = window.location.href
     const composer = document.querySelector('.agent-composer textarea')
     try {
-      for (const [query, title, url] of [
-        ['Open board: Design', 'Open board: Design', 'https://board.example.com/boards/design'],
+      for (const [query, title] of [
+        ['Open board: Design', 'Open board: Design'],
       ]) {
-        screen.getByRole('button', { name: 'Search commands and files' }).focus()
+        // On a phone (review round 2 of card BLG-450), Search joins Star inside the collapsed Open menu.
+        if (width === 390) await userEvent.click(screen.getByTestId('open-tab-menu'))
+        screen.getByRole(width === 390 ? 'menuitem' : 'button', { name: 'Search commands and files' }).focus()
         await userEvent.keyboard('{Control>}k{/Control}')
         fireEvent.change(screen.getByRole('combobox', { name: /^Search commands/ }), { target: { value: `>${query}` } })
         await userEvent.click(await screen.findByRole('option', { name: title }))
-        expect(open).toHaveBeenLastCalledWith(url, '_blank', 'noopener')
+        if (allowed) {
+          expect(open).not.toHaveBeenCalled()
+          await waitFor(() => expect(document.querySelector('[data-view-id^="board:design:"]')).toBeTruthy())
+        } else {
+          expect(open).toHaveBeenCalled()
+          expect(document.querySelector('[data-view-id^="board:design:"]')).toBeNull()
+        }
         expect(window.location.href).toBe(before)
         expect(document.querySelector('.agent-composer textarea')).toBe(composer)
         expect(screen.queryByRole('dialog', { name: 'Command palette' })).toBeNull()

@@ -22,6 +22,7 @@ interface Entry extends SourceRef { name: string; kind: 'directory' | 'repositor
 interface Page { root_identity: string; root: Entry; entries: Entry[]; next_cursor?: string; truncated: boolean }
 interface Props {
   daemon: DaemonApiInfo | null
+  initialPick?: { selection: WorkspaceSelection; names: string[] }
   runtime: string
   repos: RepoInfo[]
   actions?: ReactNode
@@ -46,7 +47,7 @@ function rememberedLayout(key: string): boolean {
 
 // One tree for host and sandbox. Pages are lazy and never imply selection;
 // folder checkboxes resolve a complete bounded membership snapshot separately.
-export default function WorkspacePicker({ daemon, runtime, repos, onChange, actions, hideTree = false, recentRepos = [] }: Props) {
+export default function WorkspacePicker({ daemon, runtime, repos, onChange, initialPick, actions, hideTree = false, recentRepos = [] }: Props) {
   // Like the launch sheet's engine/model defaults, this is a guarded browser
   // preference. Account scoping prevents one person's choice carrying to another.
   const layoutKey = `blerg.launch.workspace-layout.${encodeURIComponent(currentAccount())}`
@@ -54,19 +55,19 @@ export default function WorkspacePicker({ daemon, runtime, repos, onChange, acti
   if (layoutPreference.key !== layoutKey) setLayoutPreference({ key: layoutKey, keep: rememberedLayout(layoutKey) })
   const keepStructure = layoutPreference.key === layoutKey ? layoutPreference.keep : rememberedLayout(layoutKey)
   const [memberPaths, setMemberPaths] = useState<string[]>([])
-  const [needsRecheck, setNeedsRecheck] = useState(false)
+  const [needsRecheck, setNeedsRecheck] = useState(!!initialPick)
   const [structureFallback, setStructureFallback] = useState(false)
   const [pages, setPages] = useState<Record<string, Page>>({})
   const [expanded, setExpanded] = useState<Set<string>>(new Set(['.']))
   const [searchExpanded, setSearchExpanded] = useState<Record<string, boolean>>({})
   const [focusedPath, setFocusedPath] = useState('.')
-  const [selection, setSelection] = useState<WorkspaceSelection | null>(null)
-  const [names, setNames] = useState<string[]>([])
+  const [selection, setSelection] = useState<WorkspaceSelection | null>(initialPick?.selection ?? null)
+  const [names, setNames] = useState<string[]>(initialPick?.names ?? [])
   const [search, setSearch] = useState('')
   const [error, setError] = useState('')
-  const [folderSelections, setFolderSelections] = useState<Record<string, SourceRef[]>>({})
+  const [folderSelections, setFolderSelections] = useState<Record<string, SourceRef[]>>(initialPick?.selection.folder ? { [initialPick.selection.folder.path]: initialPick.selection.members } : {})
   const [subsetFolder, setSubsetFolder] = useState<SourceRef | null>(null)
-  const [busy, setBusy] = useState(false)
+  const [busy, setBusy] = useState(!!initialPick)
   const controller = useRef<AbortController | null>(null)
   const sequence = useRef(0)
   const change = useRef(onChange)
@@ -84,7 +85,7 @@ export default function WorkspacePicker({ daemon, runtime, repos, onChange, acti
     return { ...value, layout: !value.folder && value.members.length > 1 ? keep ? 'structure' : 'names' : undefined }
   }
   function restore() { change.current(needsRecheck ? null : selection, needsRecheck ? [] : names) }
-  async function recheck(value: WorkspaceSelection | null, keep = keepStructure) {
+  async function recheck(value: WorkspaceSelection | null, keep = keepStructure, runtimeChange = false) {
     if (!value) { publish(null, []); return }
     const candidate = withLayout(value, keep)
     const labels = candidate.members.map(member => {
@@ -95,15 +96,46 @@ export default function WorkspacePicker({ daemon, runtime, repos, onChange, acti
     setSelection(candidate); setNames(labels); setMemberPaths([]); setNeedsRecheck(true)
     const operation = ++sequence.current
     let failureMessage = recheckMessage
-    setBusy(true); setError(''); change.current(null, [])
+    setBusy(true); setError('')
+    // The parent has revoked runtime approval while keeping this candidate,
+    // so another runtime change can carry it even before this check finishes.
+    if (!runtimeChange) change.current(null, [])
     try {
-      const res = await apiFetch('/api/workspace/preview', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.current?.signal,
-        body: JSON.stringify({ runtime: runtime === 'docker' ? 'sandbox' : 'host', selection: candidate, expand: false }),
-      })
-      const body = preview(await res.json() as Preview | null)
+      const check = async (selection: WorkspaceSelection) => {
+        const res = await apiFetch('/api/workspace/preview', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.current?.signal,
+          body: JSON.stringify({ runtime: runtime === 'docker' ? 'sandbox' : 'host', selection, expand: false }),
+        })
+        const body = preview(await res.json() as Preview | null)
+        return { ...body, ok: res.ok && body.ok }
+      }
+      const body = await check(candidate)
       if (operation !== sequence.current || controller.current?.signal.aborted) return
-      if (!res.ok || !body.ok) {
+      if (!body.ok) {
+        if (runtimeChange && body.code === 'invalid_selection') {
+          // A runtime may reject only one member. Keep independently checked
+          // members, then validate the combined selection before allowing launch.
+          const compatible: SourceRef[] = []
+          for (const member of candidate.members) {
+            const single = await check({ ...candidate, members: [member], folder: undefined, membership_snapshot: undefined, layout: undefined })
+            if (operation !== sequence.current || controller.current?.signal.aborted) return
+            if (single.ok) compatible.push(...single.selection.members)
+            else if (single.code !== 'invalid_selection') throw new Error('preview unavailable')
+          }
+          if (compatible.length) {
+            const checked = await check(withLayout({ ...candidate, members: compatible, folder: undefined, membership_snapshot: undefined }))
+            if (operation !== sequence.current || controller.current?.signal.aborted) return
+            if (!checked.ok) throw new Error('preview unavailable')
+            publish(checked.selection, checked.members.map(m => m.name), false, checked.structure_fallback, checked.member_paths)
+            setError(compatible.length < candidate.members.length
+              ? 'Some selected repositories were cleared because they are incompatible with this runtime.'
+              : 'The folder selection changed for this runtime. Compatible repositories were kept.')
+          } else {
+            publish(null, [])
+            setError('The selected repositories were cleared because they are incompatible with this runtime. Select repositories again.')
+          }
+          return
+        }
         if (body.code === 'desktop_update_required') failureMessage = desktopUpdateMessage
         throw new Error('preview unavailable')
       }
@@ -132,6 +164,9 @@ export default function WorkspacePicker({ daemon, runtime, repos, onChange, acti
   }
   useEffect(() => {
     const abort = new AbortController(); controller.current = abort
+    if (initialPick) void Promise.resolve().then(() => {
+      if (!abort.signal.aborted) return recheck(initialPick.selection, keepStructure, true)
+    })
     if (!cluster && daemon?.discovery_version === 1) {
       void Promise.resolve().then(() => load('.', '', abort.signal)).catch(() => {
         if (!abort.signal.aborted) setError('The folder is unavailable. Reopen the picker to refresh it.')

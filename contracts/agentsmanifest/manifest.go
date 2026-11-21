@@ -54,6 +54,7 @@ type ComponentEntry struct {
 	Name            string   `json:"name"`
 	BaseURL         string   `json:"base_url"`
 	Version         string   `json:"version"`
+	Commit          string   `json:"commit,omitempty"`
 	ContractVersion string   `json:"contract_version"`
 	Capabilities    []string `json:"capabilities"`
 	LastSeen        int64    `json:"last_seen"`

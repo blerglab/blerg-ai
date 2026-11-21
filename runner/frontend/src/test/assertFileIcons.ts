@@ -18,7 +18,8 @@ export function expectOnlyFileIcons(container: HTMLElement) {
     expect(icon.getAttribute('aria-hidden')).toBe('true')
     expect(icon.getAttribute('focusable')).toBe('false')
     expect([...icon.attributes].every(attr => allowed.has(attr.name))).toBe(true)
-    if (icon.hasAttribute('style')) expect(icon.getAttribute('style')).toMatch(/^--chat-file-icon-color: #[a-f\d]{6};$/i)
+    // Only a theme token may color an icon (BLG-473): nothing else can enter the inline style.
+    if (icon.hasAttribute('style')) expect(icon.getAttribute('style')).toMatch(/^--chat-file-icon-color: var\(--chat-icon-[a-z-]+\);$/)
     expect(icon.children).toHaveLength(1)
     const path = icon.firstElementChild!
     expect(path.tagName).toBe('path')

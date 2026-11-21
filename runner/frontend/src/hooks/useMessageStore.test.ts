@@ -215,3 +215,37 @@ describe('message_created toast', () => {
     expect(useToastStore.getState().toasts).toHaveLength(0)
   })
 })
+
+it('escalation upserts a pending question and alerts once', () => {
+ useMessageStore.setState({ messages: [makeMessage({ answerable: false })] })
+ useToastStore.setState({ toasts: [] })
+ const message = makeMessage({ answerable: true, body: 'Child worker, parent coordinator: Which branch?' })
+ wsMock.emit({ type: 'message_created', message })
+ expect(get().messages).toEqual([message])
+ expect(useToastStore.getState().toasts).toHaveLength(1)
+ wsMock.emit({ type: 'message_created', message })
+ expect(useToastStore.getState().toasts).toHaveLength(1)
+})
+
+it('does not reopen a withdrawn question when an older escalation arrives late', () => {
+  useToastStore.setState({ toasts: [] })
+  useMessageStore.setState({ messages: [makeMessage({ answerable: false })] })
+  wsMock.emit({ type: 'message_answered', message: makeMessage({ status: 'withdrawn' }) })
+  wsMock.emit({ type: 'message_created', message: makeMessage({ answerable: true }) })
+  expect(get().messages[0].status).toBe('withdrawn')
+  expect(useToastStore.getState().toasts).toHaveLength(0)
+})
+
+it('keeps escalated answerability when a late quiet creation arrives', () => {
+  useMessageStore.setState({ messages: [makeMessage({ answerable: true, body: 'Escalated question' })] })
+  wsMock.emit({ type: 'message_created', quiet: true, message: makeMessage({ answerable: false }) })
+  expect(get().messages[0].answerable).toBe(true)
+  expect(get().messages[0].body).toBe('Escalated question')
+})
+
+// Owner 2026-11-05: a 93-change question grew the toast down the screen.
+import { toastBody } from './useMessageStore'
+it('a toast carries only the first paragraph of a message, bounded', () => {
+  expect(toastBody('Plan changes · 93 add\n\nMilestone: 0.6.0\n\n- Add: BLG-104 …')).toBe('Plan changes · 93 add')
+  expect(toastBody('x'.repeat(500)).length).toBe(240)
+})

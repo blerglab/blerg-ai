@@ -118,6 +118,7 @@ export function SessionChat({ session, placeholder, readOnly }: {
 }) {
   const refs = useMemo<ChatRefs>(() => ({
     ...cardReaders(session.board_id),
+    boardUrl: boardId => `/boards/${encodeURIComponent(boardId)}`,
     openCard: (t: CardTarget) => window.location.assign(`/boards/${t.boardId}/cards/${t.key.replace(/^(?:#|[A-Z][A-Z0-9]{1,4}-|board:[A-Za-z0-9_-]{1,64}#)/, '')}`),
   }), [session.board_id]);
   const { created_at, model, effort, engine, steering_supported, session_url, id: sessionId } = session;

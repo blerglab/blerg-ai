@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { expect, it } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { page } from 'vitest/browser'
@@ -7,7 +8,7 @@ import { SESSION, ev, meta, resetChatState, seed } from '../../../../packages/ch
 import '@blerglab/chat/blerg.css'
 import '../index.css'
 
-for (const width of [390, 3840]) {
+for (const width of browserWidths([390, 3840])) {
   it.each([
     ['Updated to abc123456789 · continued', 'Updated to abc123456789 · continued'],
     ['Host restarted · paused — check the interrupted command', 'Paused after a restart'],
@@ -38,7 +39,7 @@ for (const width of [390, 3840]) {
   })
 }
 
-for (const width of [390, 3840]) {
+for (const width of browserWidths([390, 3840])) {
   it(`discloses every interrupted call and background item at ${width}px`, async () => {
     await page.viewport(width, width === 390 ? 844 : 2160)
     resetChatState()
@@ -86,7 +87,7 @@ for (const width of [390, 3840]) {
   })
 }
 
-for (const width of [390, 3840]) {
+for (const width of browserWidths([390, 3840])) {
   it(`resumes a paused session from its restart row at ${width}px`, async () => {
     await page.viewport(width, width === 390 ? 844 : 2160)
     resetChatState()

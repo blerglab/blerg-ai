@@ -11,6 +11,23 @@ describe('shared settings primitives guard', () => {
   it.each(Object.entries(sources))('%s has no bare settings controls', (screen, source) => {
     expect(unstyledSettings(ts, source, screen)).toEqual([])
   })
+  it.each(Object.entries(sources))('%s uses shared fields for every text control', (path, source) => {
+    const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+    const failures: string[] = []
+    function visit(node: ts.Node) {
+      if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+        const tag = node.tagName.getText(file)
+        if (tag === 'input' || tag === 'textarea') {
+          const className = node.attributes.properties.find(attr => ts.isJsxAttribute(attr) && attr.name.getText(file) === 'className')
+          const value = className && ts.isJsxAttribute(className) ? className.initializer : undefined
+          if (!value || !ts.isStringLiteral(value) || !/\bsettings-(field|toggle-control)\b/.test(value.text)) failures.push(node.getText(file))
+        }
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(file)
+    expect(failures).toEqual([])
+  })
   it('rejects a bare button, checkbox, radio and select with a useful message', () => {
     const failures = unstyledSettings(ts, '<><button>Save</button><input type="checkbox"/><input type="radio"/><select/></>', 'Settings.tsx')
     expect(failures).toHaveLength(4)

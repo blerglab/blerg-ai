@@ -62,7 +62,7 @@ describe("managed engine connections", () => {
     fireEvent.click(screen.getByRole("button", { name: "Connect Codex" })); await settle();
     fetchMock.mockResolvedValueOnce({ ok: true, status: 204 } as Response);
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Cancel connection" })); await vi.advanceTimersByTimeAsync(0); });
-    expect(screen.getByText("Codex: Connected")).toBeTruthy();
+    expect(screen.getByText("Connected")).toBeTruthy();
     expect(screen.queryByText("ABCD-EFGH")).toBeNull();
     const deletes = fetchMock.mock.calls.filter(([, init]) => init?.method === "DELETE");
     expect(deletes.map(([url]) => url)).toEqual(["/api/credentials/codex/managed/login/attempt-1"]);
@@ -79,7 +79,7 @@ describe("managed engine connections", () => {
     expect(done).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: state === "connected" ? "Reconnect Codex" : "Connect Codex" }).hasAttribute("disabled")).toBe(false);
     expect(screen.getByRole("alert").textContent).toContain("status could not be refreshed");
-    if (state === "connected") expect(screen.getByText("Codex: Connected")).toBeTruthy();
+    if (state === "connected") expect(screen.getByText("Connected")).toBeTruthy();
   });
   it("rejects a poll for another attempt and hides raw provider errors", async () => {
     await mount(); fetchMock.mockResolvedValueOnce(response(pending()));
@@ -97,8 +97,23 @@ describe("managed engine connections", () => {
   it("uses current summaries after an opaque replacement", async () => {
     const view = await mount();
     view.rerender(<ManagedCredentials summaries={[{ engine: "codex", updated_at: "", kind: "codex_oauth", state: "usable" }]} labels={{ codex: "Codex" }} onConnected={vi.fn()} />);
-    expect(screen.getByText("Codex: Connected")).toBeTruthy();
+    expect(screen.getByText("Connected")).toBeTruthy();
     view.rerender(<ManagedCredentials summaries={[{ engine: "codex", updated_at: "", kind: "opaque", state: "configured" }]} labels={{ codex: "Codex" }} onConnected={vi.fn()} />);
-    expect(screen.getByText("Codex: Not connected")).toBeTruthy();
+    expect(screen.getByText("Not connected")).toBeTruthy();
   });
+});
+
+it("explains the device code prerequisite before connecting", async () => {
+  await mount();
+  const help = screen.getByText("First turn on device code sign-in for Codex in ChatGPT → Settings → Security.");
+  expect(help.compareDocumentPosition(screen.getByRole("button", { name: "Connect Codex" })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+it("shows the connected engine card and explains credential routing", async () => {
+  fetchMock.mockResolvedValueOnce(response([cap]));
+  render(<ManagedCredentials summaries={[{ engine: "codex", kind: "codex_oauth", state: "usable", updated_at: "" }]} labels={{ codex: "Codex" }} onConnected={vi.fn()} />);
+  await settle();
+  const title = screen.getByRole("heading", { name: "Codex" });
+  expect(title.closest(".card-head")?.querySelector(".chip.up")?.textContent).toBe("Connected");
+  expect(screen.getByText(/Cluster workspaces use this managed connection/).textContent).toContain("desktop workspaces use the Codex login on your workstation");
+  expect(screen.getByText(/pasted credential below/)).toBeTruthy();
 });

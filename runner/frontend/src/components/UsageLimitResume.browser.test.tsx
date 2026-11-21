@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { afterEach, expect, it, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import { page } from 'vitest/browser'
@@ -7,7 +8,7 @@ import UsageLimitResume from './UsageLimitResume'
 vi.mock('../apiFetch', () => ({ apiFetch: vi.fn() }))
 afterEach(() => vi.resetAllMocks())
 
-for (const width of [390, 3840]) {
+for (const width of browserWidths([390, 3840])) {
   it(`shows the meter wait at ${width}px`, async () => {
     await page.viewport(width, 900)
     vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({

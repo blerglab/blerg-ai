@@ -12,7 +12,7 @@ export function repoShortName(repo: string | null | undefined): string {
 /** The name a new session gets by default: the repository's name, else "Session"; numbered past
  *  the names running sessions already have. */
 export function defaultSessionName(repo: string | null | undefined, running: Iterable<string>): string {
-  const base = repoShortName(repo) || 'Session'
+  const base = repoShortName(repo) || 'Workspace'
   const taken = new Set(Array.from(running, t => t.trim().toLowerCase()))
   if (!taken.has(base.toLowerCase())) return base
   for (let n = 2; ; n++) {

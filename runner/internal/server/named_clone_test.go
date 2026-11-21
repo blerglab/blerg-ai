@@ -281,6 +281,7 @@ func TestCloneFolderFor(t *testing.T) {
 	for _, c := range cases {
 		d := &DaemonConn{Name: "desk"}
 		d.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+		d.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 		d.SetCheckedOutRepos(c.folders)
 		d.SetRepoOrigins(c.origins, nil)
 		got, present, problem := cloneFolderFor(d, ref)
@@ -347,6 +348,7 @@ func TestNamedCloneTokenIsNeverLogged(t *testing.T) {
 	// A full send buffer: the spawn fails, and still nothing is logged.
 	full := &DaemonConn{ID: newUUID(), Name: "full", send: make(chan []byte)}
 	full.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	full.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	full.SetCloneFrom(true)
 	fixtureOwnDesktop(t, api.dbPool, full, "user-1")
 	api.hub.Register(full)

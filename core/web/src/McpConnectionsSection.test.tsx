@@ -119,7 +119,7 @@ describe("MCP connections", () => {
     setup();
     render(<McpConnectionsSection site={{ version: "x", board_url: "", runner_url: "https://runner.test" }} />);
     await screen.findByText(/No MCP connections yet/);
-    expect(screen.getByText("Connect external tools that you can choose for your sessions.")).toBeInTheDocument();
+    expect(screen.getByText("Connect external tools that you can choose for your workspaces.")).toBeInTheDocument();
     expect(screen.getByText("0 of 20 connections used.")).toBeInTheDocument();
   });
 
@@ -297,7 +297,7 @@ describe("MCP connections", () => {
     render(<McpConnectionsSection />);
     await screen.findByText("docs");
     fireEvent.click(screen.getByRole("button", { name: "Remove docs" }));
-    expect(screen.getByText(/Remove docs\? Sessions and crons that use it lose access/)).toBeInTheDocument();
+    expect(screen.getByText(/Remove docs\? Workspaces and crons that use it lose access/)).toBeInTheDocument();
     expect(core.state.calls.some((c) => c.method === "DELETE")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.getByRole("button", { name: "Remove docs" })).toBeInTheDocument();
@@ -454,7 +454,7 @@ describe("MCP connections", () => {
       await screen.findByText("cal");
       expect(
         screen.getByText(
-          "Sign-in expired or was revoked — sessions and crons that use this connection cannot run until you reconnect",
+          "Sign-in expired or was revoked — workspaces and crons that use this connection cannot run until you reconnect",
         ),
       ).toBeInTheDocument();
       const btn = screen.getByRole("button", { name: "Reconnect cal" });

@@ -433,6 +433,14 @@ describe('MessageBubble reply bubble', () => {
     expect(screen.queryByTestId('message-reply')).not.toBeInTheDocument()
   })
 
+  it('labels a withdrawn question without inventing a reply', () => {
+    useMessageStore.setState({ messages: [makeMessage({ kind: 'ask', status: 'withdrawn', body: 'Which release?', answer: null })] })
+    renderThread()
+    expect(screen.getByText('Withdrawn · workspace discarded without an answer')).toBeInTheDocument()
+    expect(screen.queryByPlaceholderText('Type your reply…')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('message-reply')).not.toBeInTheDocument()
+  })
+
   it('closed/expired message (answer empty string) renders NO reply bubble', () => {
     useMessageStore.setState({
       messages: [
@@ -507,4 +515,13 @@ it('retries a network failure with the saved reply and clears it after success',
   expect(fetchMock).toHaveBeenCalledTimes(2)
   expect(fetchMock).toHaveBeenLastCalledWith('/api/messages/msg-1/reply', expect.objectContaining({ body: JSON.stringify({ answer: 'Keep this answer' }) }))
   vi.unstubAllGlobals()
+})
+
+it('keeps legacy Terminal questions readable without a reply form', () => {
+  useSessionStore.setState({ sessions: [makeSession({ id: 'legacy', kind: 'tmux', status: 'running' })] })
+  useMessageStore.setState({ messages: [makeMessage({ id: 'legacy-question', session_id: 'legacy', kind: 'ask', status: 'open', body: 'Saved Terminal question' })] })
+  renderThread()
+  expect(screen.getByText('Saved Terminal question')).toBeInTheDocument()
+  expect(screen.queryByRole('textbox')).toBeNull()
+  expect(screen.queryByRole('button', { name: /Send/ })).toBeNull()
 })

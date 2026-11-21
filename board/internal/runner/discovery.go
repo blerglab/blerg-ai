@@ -48,9 +48,10 @@ type LaunchOptions struct {
 // LaunchTarget is one execution target the runner offers: a daemon (by id)
 // or, without one, the cluster.
 type LaunchTarget struct {
-	DaemonID string   `json:"daemon_id,omitempty"`
-	Name     string   `json:"name"`
-	Runtimes []string `json:"runtimes"`
+	RuntimeTargetID string   `json:"runtime_target_id,omitempty"`
+	DaemonID        string   `json:"daemon_id,omitempty"`
+	Name            string   `json:"name"`
+	Runtimes        []string `json:"runtimes"`
 	// HasRepo (a desktop, when discovery named a repo): whether it has a folder for that repo.
 	// nil when the runner did not say (no repo asked, or an older runner).
 	HasRepo *bool `json:"has_repo,omitempty"`

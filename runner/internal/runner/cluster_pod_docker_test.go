@@ -7,16 +7,24 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/clusterworkspace"
+	"github.com/blerglab/blerg-ai/runner/internal/daemon"
 	"github.com/blerglab/blerg-ai/runner/internal/ownershell"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/blerglab/blerg-ai/runner/internal/server"
@@ -130,6 +138,7 @@ func TestPodIsolatedImageEntry(t *testing.T) {
 	if err := os.Remove("/workspace/.blerg/forged"); err != nil {
 		t.Fatal(err)
 	}
+	testClusterWorkspaceFailureRecovery(t)
 	testPodShellService(ctx, t, &cfg)
 
 	// Kernel state, not an environment path, is the admission boundary.
@@ -244,7 +253,7 @@ func TestPodUIDStorageBoundaryDocker(t *testing.T) {
 	dir := t.TempDir()
 	image := fmt.Sprintf("blerg-p6cluster-fixture:%d", time.Now().UnixNano())
 	name := fmt.Sprintf("blerg-p6cluster-%d", time.Now().UnixNano())
-	dockerfile := "FROM postgres:16\nRUN groupadd -g 1000 agent && useradd -u 1000 -g 1000 -d /workspace agent && useradd -u 1001 -d /run/blerg-workspace-private supervisor\nENTRYPOINT []\n"
+	dockerfile := "FROM postgres:16\nRUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*\nRUN groupadd -g 1000 agent && useradd -u 1000 -g 1000 -d /workspace agent && useradd -u 1001 -d /run/blerg-workspace-private supervisor\nENTRYPOINT []\n"
 	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -263,12 +272,18 @@ func TestPodUIDStorageBoundaryDocker(t *testing.T) {
 		defer cancel()
 		_ = exec.CommandContext(cleanup, "docker", "image", "rm", image).Run()
 	})
+	t.Cleanup(func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = exec.CommandContext(cleanup, "docker", "rm", "-f", name).Run()
+	})
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := run("run", "--rm", "--name", name, "--label", "blerg-test-run="+name, "--user", "0:0", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "DAC_OVERRIDE", "--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "KILL", "--cap-add", "SYS_PTRACE", "--security-opt", "no-new-privileges", "--read-only", "--network", "none", "--tmpfs", "/workspace:uid=1000,gid=1000,mode=0770,size=64m,nr_inodes=10000", "--tmpfs", "/run/blerg-workspace-private:uid=1001,gid=1001,mode=0700,size=64m,nr_inodes=10000", "--tmpfs", "/tmp:mode=1777,size=64m,nr_inodes=10000", "--mount", "type=bind,src="+executable+",dst=/fixture/runner.test,readonly", "--env", "P6_POD_IMAGE_ENTRY=1", image, "/usr/bin/setpriv", "--reuid=1001", "--regid=1000", "--clear-groups", "--inh-caps=+chown,+dac_override,+setuid,+setgid,+kill,+sys_ptrace", "--ambient-caps=+chown,+dac_override,+setuid,+setgid,+kill,+sys_ptrace", "/fixture/runner.test", "-test.run=^TestPodIsolatedImageEntry$", "-test.v")
 	t.Log(strings.TrimSpace(string(out)))
+	t.Run("OOMKilled without restarts", func(t *testing.T) { testClusterPodOOM(ctx, t, image, executable, name+"-oom") })
 }
 
 // This runs as the real supervisor UID/PID 1, with the protected mount and all
@@ -357,5 +372,215 @@ func testPodProductionCapabilityNegotiation(t *testing.T, cfg Config) {
 			t.Fatal("pod did not register")
 		case <-time.After(5 * time.Millisecond):
 		}
+	}
+}
+
+// Launched by server.TestClusterWorkerToolsFromJobPodSpec using the actual Job
+// environment, init script and writable mounts. Only Git and the engine are fakes.
+func TestClusterWorkerToolsPodEntry(t *testing.T) {
+	if os.Getenv("BLG555_POD_ENTRY") != "1" {
+		t.Skip("owned Job pod fixture only")
+	}
+	cfg := ConfigFromEnv()
+	cfg.Home = "/workspace"
+	p := clusterworkspace.Plan{SessionID: cfg.SessionID, Manifest: protocol.WorkspaceManifest{Version: 2, Layout: protocol.WorkspaceLayoutNames, Kind: "repo", OwnerID: "owner", Runtime: "cluster", LaunchGeneration: "launch", Digest: "digest", Members: []protocol.WorkspaceMember{{ID: "one", Name: "one", Path: "one", SourceIdentity: "source", CommonDirectoryIdentity: "common", Provider: "github", Destination: "org/one"}}}, Runtime: protocol.WorkspaceRuntimeRef{LaunchGeneration: "launch", Generation: 1}, Members: []clusterworkspace.Member{{ID: "one", Provider: "github", CloneURL: "https://github.com/org/one.git", PushURL: "https://github.com/org/one.git", CredentialHost: "github.com", DestinationIdentity: "org/one"}}}
+	cfg.Workspace = &p
+	if err := ConfigureClusterRuntime(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	rt, err := clusterworkspace.New(p, requestGit{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = rt.Prepare(t.Context(), false); err != nil {
+		t.Fatal(err)
+	}
+	cwd := "/workspace/projects/one"
+	if err = os.MkdirAll(cwd, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chown(cwd, 1000, 1000); err != nil {
+		t.Fatal(err)
+	}
+	// A private credential sibling must stay private when skills become readable.
+	if err = os.MkdirAll("/workspace/.blerg-runner-daemon", 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile("/workspace/.blerg-runner-daemon/fixture-token", []byte("private-fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(clusterPrivateRoot+"/snapshot", []byte("private-fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The same generated Job launches this real clone. Main starts with only its base.
+	git := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "safe.directory=" + dir}, args...)...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("fixture git: %v: %s", err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git(cwd, "init", "-q", "-b", "main")
+	git(cwd, "commit", "--allow-empty", "-qm", "default base")
+	git(cwd, "checkout", "-qb", "alpha/0.6.0")
+	git(cwd, "commit", "--allow-empty", "-qm", "current remote base")
+	base := git(cwd, "rev-parse", "HEAD")
+	mainDir := "/tmp/main-repo"
+	origin := "/tmp/origin.git"
+	git("/tmp", "clone", "-q", "--bare", cwd, origin)
+	git(origin, "symbolic-ref", "HEAD", "refs/heads/main")
+	git("/tmp", "clone", "-q", origin, mainDir)
+	git(cwd, "update-ref", "refs/blerg/result-base", base)
+	git(cwd, "checkout", "-qb", cfg.WorkBranch)
+	if err := filepath.Walk(cwd, func(path string, _ os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chown(path, 1000, 1000)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var artifactMu sync.Mutex
+	var artifact map[string]any
+	var bundle []byte
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		artifactMu.Lock()
+		defer artifactMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/artifacts"):
+			var err error
+			bundle, err = io.ReadAll(r.Body)
+			if err != nil {
+				t.Error(err)
+				w.WriteHeader(500)
+				return
+			}
+			artifact = map[string]any{"id": "result-1", "name": "result.bundle", "version": 1, "size": len(bundle), "sha256": fmt.Sprintf("%x", sha256.Sum256(bundle)), "content_type": "application/x-git-bundle"}
+			_ = json.NewEncoder(w).Encode(artifact)
+		case strings.HasSuffix(r.URL.Path, "/download"):
+			_, _ = w.Write(bundle)
+		case strings.HasSuffix(r.URL.Path, "/imports"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"next_n": 1, "outstanding": []any{artifact}})
+		case strings.HasSuffix(r.URL.Path, "/artifacts"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"artifacts": []any{artifact}})
+		case strings.HasSuffix(r.URL.Path, "/files"):
+			_, _ = w.Write([]byte(`{"files":[]}`))
+		default:
+			t.Errorf("unexpected fixture request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(404)
+		}
+	}))
+	defer endpoint.Close()
+	t.Setenv("BLERG_RUNNER_SERVER_HTTP", endpoint.URL)
+	t.Setenv("BLERG_RUNNER_SESSION_TOKEN", "fixture-message-token")
+	t.Setenv("PATH", "/fixture:"+os.Getenv("PATH"))
+	result := make(chan error, 1)
+	capture := func(engine *exec.Cmd) error {
+		// Keep the driver's pipes/process: a real result event must reach turn_done.
+		engine.Path = "/usr/bin/python3"
+		engine.Args = append([]string{"python3", "/fixture/probe.py"}, engine.Args[1:]...)
+		engine.Args = append(engine.Args, daemon.PodSkillStateDir(cfg.Home))
+		return cfg.StartCommand(engine)
+	}
+	onTurnDone := func(string) {
+		artifactMu.Lock()
+		published := len(bundle) > 0
+		artifactMu.Unlock()
+		if !published {
+			result <- errors.New("turn_done did not publish a bundle")
+			return
+		}
+		cmd := exec.Command("python3", "/fixture/blerg-runner", "session", "import", cfg.SessionID, "result.bundle", "--into", "alpha/0.6.0")
+		cmd.Dir = mainDir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			result <- fmt.Errorf("session import: %w: %s", err, out)
+			return
+		}
+		head := git(cwd, "rev-parse", "HEAD")
+		landed := git(mainDir, "rev-parse", "refs/heads/wip/"+cfg.SessionID+"/import-1")
+		if landed != head || head == base {
+			result <- fmt.Errorf("imported %s, want new worker commit %s", landed, head)
+			return
+		}
+		if content := git(mainDir, "show", landed+":worker.txt"); content != "cluster worker" {
+			result <- errors.New("imported worker content is missing")
+			return
+		}
+		t.Log("launched, committed with pod identity, published bundle, and session import landed the worker commit")
+		result <- nil
+	}
+	sender := launchSender{started: make(chan protocol.SessionStarted, 1)}
+	host := newPodAgentHost(sender, cfg, rt, func() ClusterServices { return &launchExplorer{} }, daemon.AgentHostConfig{HomeDir: cfg.Home, ReposRoot: "/workspace/projects", ServerHTTP: cfg.ServerHTTP, DaemonToken: cfg.DaemonToken, ClaudeCode: true, StartCommand: capture, OnTurnDone: onTurnDone})
+	defer host.Kill(cfg.SessionID)
+	msg := podSpawn(cfg, cwd)
+	host.Spawn(msg)
+	select {
+	case <-sender.started:
+	default:
+		t.Fatal("pod host did not start")
+	}
+	host.UserMessage(cfg.SessionID, "run the engine probe", "session")
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("engine probe did not run")
+	}
+}
+
+// Allocate and touch real cgroup memory; a synthetic exit 137 is not OOM proof.
+func TestClusterOOMPodEntry(t *testing.T) {
+	if os.Getenv("BLERG_TEST_OOM_ENTRY") != "1" {
+		t.Skip("owned OOM container entry only")
+	}
+	var held [][]byte
+	for {
+		block := make([]byte, 1<<20)
+		for i := 0; i < len(block); i += 4096 {
+			block[i] = 1
+		}
+		held = append(held, block)
+		runtime.KeepAlive(held)
+	}
+}
+
+func testClusterPodOOM(parent context.Context, t *testing.T, image, binary, name string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
+	defer cancel()
+	t.Cleanup(func() {
+		cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
+		defer done()
+		if err := exec.CommandContext(cleanup, "docker", "rm", "-f", name).Run(); err != nil {
+			t.Error("OOM fixture cleanup failed")
+		}
+	})
+	cmd := exec.CommandContext(ctx, "docker", "run", "--pull=never", "--name", name, "--label", "blerg-test-run="+name, "--network=none", "--read-only", "--user", "1001:1000", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=48m", "--memory-swap=48m", "--restart=no", "--mount", "type=bind,src="+binary+",dst=/fixture/runner.test,readonly", "--env", "BLERG_TEST_OOM_ENTRY=1", image, "/fixture/runner.test", "-test.run=^TestClusterOOMPodEntry$")
+	err := cmd.Run()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 137 {
+		t.Fatalf("expected kernel OOM exit 137: %v", err)
+	}
+	out, err := exec.CommandContext(ctx, "docker", "inspect", name).Output()
+	if err != nil {
+		t.Fatal("OOM fixture inspect failed")
+	}
+	var state []struct {
+		State struct {
+			OOMKilled bool
+			ExitCode  int
+		}
+		RestartCount int
+	}
+	if json.Unmarshal(out, &state) != nil || len(state) != 1 || !state[0].State.OOMKilled || state[0].State.ExitCode != 137 || state[0].RestartCount != 0 {
+		t.Fatal("OOM cause or zero-restart proof missing")
 	}
 }

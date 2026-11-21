@@ -101,7 +101,7 @@ func TestCardWritesThroughAPIPingOpenBoards(t *testing.T) {
 		map[string]any{"column_id": cols[1].ID}), "REST move", nil)
 	expectPing(t, conn, "REST move", "card_changed")
 
-	okJSON(t, request(t, srv, "POST", "/api/cards/"+card.ID+"/archive", agent, nil, nil),
+	okJSON(t, request(t, srv, "POST", "/api/cards/"+card.ID+"/archive", human, nil, nil),
 		"REST archive", nil)
 	expectPing(t, conn, "REST archive", "card_changed")
 

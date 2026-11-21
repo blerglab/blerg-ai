@@ -496,8 +496,8 @@ func testWorkspaceExplorerProductionHostDispatch(t *testing.T, platform string) 
 				t.Fatal("production host did not register P5", err)
 			}
 			guide := workspaceGuideForRuntime(&manifest, local)
-			if strings.Contains(guide, "/workspace/") {
-				t.Fatal("host guide used container aliases")
+			if !strings.Contains(guide, "report every commit ID") || !strings.Contains(guide, "Newly discovered repositories are not launch members") || strings.Contains(guide, "/workspace/") {
+				t.Fatal("host guide omitted launch policy or used container aliases")
 			}
 			for _, source := range local.state.Sources {
 				if !strings.Contains(guide, source.Path) {

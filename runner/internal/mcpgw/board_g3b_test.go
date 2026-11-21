@@ -271,7 +271,7 @@ func TestHTTPBoardExchangerCoreGuards(t *testing.T) {
 
 	for _, m := range []string{"router404", "empty404"} {
 		mode = m
-		if _, err := ex.Exchange(ctx, proof, boardTestID, ""); err == nil || errors.Is(err, ErrConnectionGone) {
+		if _, err := ex.Exchange(ctx, proof, boardTestID, "", true); err == nil || errors.Is(err, ErrConnectionGone) {
 			t.Errorf("%s exchange = %v, want a plain error", m, err)
 		}
 		if err := ex.Revoke(ctx, "acct-1", "sub"); err == nil {
@@ -279,7 +279,7 @@ func TestHTTPBoardExchangerCoreGuards(t *testing.T) {
 		}
 	}
 	mode = "redirect"
-	if _, err := ex.Exchange(ctx, proof, boardTestID, ""); err == nil || errors.Is(err, ErrConnectionGone) {
+	if _, err := ex.Exchange(ctx, proof, boardTestID, "", true); err == nil || errors.Is(err, ErrConnectionGone) {
 		t.Errorf("redirect exchange = %v", err)
 	}
 	if err := ex.Revoke(ctx, "acct-1", "sub"); err == nil {
@@ -289,7 +289,7 @@ func TestHTTPBoardExchangerCoreGuards(t *testing.T) {
 		t.Errorf("a redirect was followed %d times (it carries the internal key)", hits.Load())
 	}
 	mode = "core404"
-	if _, err := ex.Exchange(ctx, proof, boardTestID, ""); !errors.Is(err, ErrConnectionGone) {
+	if _, err := ex.Exchange(ctx, proof, boardTestID, "", true); !errors.Is(err, ErrConnectionGone) {
 		t.Errorf("core's own 404 = %v, want ErrConnectionGone", err)
 	}
 	if err := ex.Revoke(ctx, "acct-1", "sub"); err != nil {

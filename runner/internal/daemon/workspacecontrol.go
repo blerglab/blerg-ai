@@ -19,9 +19,30 @@ type workspaceControlWait struct {
 
 // WorkspaceRefusedError is the server's definitive answer that a launch has no authority any more.
 // Every other authority failure may be transient.
-type WorkspaceRefusedError struct{ Reason string }
+type WorkspaceRefusedError struct {
+	Reason string
+	Cause  protocol.WorkspaceControlCause
+}
 
-func (e *WorkspaceRefusedError) Error() string { return "workspace authority refused: " + e.Reason }
+func (e *WorkspaceRefusedError) Error() string {
+	if e.Cause != "" {
+		return "workspace authority refused: " + string(e.Cause) + ": " + e.Reason
+	}
+	return "workspace authority refused: " + e.Reason
+}
+
+// WorkspaceUnavailableError is retryable; unlike WorkspaceRefusedError it must
+// never cause a retained journal to be retired.
+type WorkspaceUnavailableError struct {
+	Cause protocol.WorkspaceControlCause
+}
+
+func (e *WorkspaceUnavailableError) Error() string {
+	if e.Cause == "" {
+		return "workspace authority unavailable"
+	}
+	return "workspace authority unavailable: " + string(e.Cause)
+}
 
 // WorkspaceAuthority is the concrete authenticated outbound adapter. A receipt
 // comes only from the correlated server response, never successful submission.
@@ -55,14 +76,24 @@ func NewWorkspaceAuthority(client *WSClient) *WorkspaceAuthority {
 	})
 	return a
 }
-func (a *WorkspaceAuthority) call(ctx context.Context, req protocol.LocalWorkspaceControl) (protocol.LocalWorkspaceControlResult, error) {
+func (a *WorkspaceAuthority) call(ctx context.Context, req protocol.LocalWorkspaceControl) (result protocol.LocalWorkspaceControlResult, callErr error) {
+	defer func() {
+		if callErr != nil {
+			cause := callErr
+			var transport *workspaceTransportError
+			if errors.As(callErr, &transport) {
+				cause = transport.cause
+			}
+			logDaemonFailure("workspace authority call", cause)
+		}
+	}()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req.Type = "local_workspace_control"
 	req.RequestID = ccUUID()
 	conn := a.client.currentConn()
 	if conn == nil {
-		return protocol.LocalWorkspaceControlResult{}, errors.New("workspace authority disconnected")
+		return protocol.LocalWorkspaceControlResult{}, &workspaceTransportError{cause: errors.New("disconnected")}
 	}
 	wait := workspaceControlWait{connection: conn, session: req.SessionID, reply: make(chan protocol.LocalWorkspaceControlResult, 1)}
 	a.mu.Lock()
@@ -74,7 +105,7 @@ func (a *WorkspaceAuthority) call(ctx context.Context, req protocol.LocalWorkspa
 	a.mu.Unlock()
 	defer func() { a.mu.Lock(); delete(a.pending, req.RequestID); a.mu.Unlock() }()
 	if err := a.client.sendBoundedReplyContext(ctx, conn, req, time.Second, time.Second, time.Time{}); err != nil {
-		return a.abandon(req.RequestID, wait, err)
+		return a.abandon(req.RequestID, wait, &workspaceTransportError{cause: err})
 	}
 	workspaceReplySelecting()
 	select {
@@ -84,13 +115,13 @@ func (a *WorkspaceAuthority) call(ctx context.Context, req protocol.LocalWorkspa
 		// was delivered; a later replacement can't make it less true, so it wins. Anything else on
 		// a replaced connection is no verdict.
 		if !reply.OK && reply.Refused != "" {
-			return reply, &WorkspaceRefusedError{Reason: reply.Refused}
+			return reply, &WorkspaceRefusedError{Reason: reply.Refused, Cause: reply.Cause}
 		}
 		if a.client.currentConn() != conn {
-			return reply, errors.New("workspace authority connection replaced")
+			return reply, &workspaceTransportError{cause: errors.New("connection replaced")}
 		}
 		if !reply.OK {
-			return reply, errors.New("workspace authority refused")
+			return reply, &WorkspaceUnavailableError{Cause: reply.Cause}
 		}
 		return reply, nil
 	case <-ctx.Done():
@@ -109,7 +140,7 @@ func (a *WorkspaceAuthority) abandon(id string, wait workspaceControlWait, cause
 	select {
 	case reply := <-wait.reply:
 		if !reply.OK && reply.Refused != "" {
-			return reply, &WorkspaceRefusedError{Reason: reply.Refused}
+			return reply, &WorkspaceRefusedError{Reason: reply.Refused, Cause: reply.Cause}
 		}
 	default:
 	}
@@ -134,9 +165,63 @@ func (a *WorkspaceAuthority) Bind(ctx context.Context, l protocol.SupervisorLaun
 	_, e := a.call(ctx, protocol.LocalWorkspaceControl{SessionID: l.SessionID, Operation: "bind", Launch: l, Binding: b})
 	return e
 }
+
+// workspaceSyncKey enables transport-only retries during the turn-end sync.
+// Ordinary reads and admission keep their original request bounds.
+type workspaceSyncKey struct{}
+
+type workspaceTransportError struct{ cause error }
+
+func (e *workspaceTransportError) Error() string {
+	return "workspace authority transport unavailable: " + e.cause.Error()
+}
+func (e *workspaceTransportError) Unwrap() error { return e.cause }
+
 func (a *WorkspaceAuthority) Current(ctx context.Context, l protocol.SupervisorLaunch, b protocol.WorkspaceRuntimeBinding) error {
-	_, e := a.call(ctx, protocol.LocalWorkspaceControl{SessionID: l.SessionID, Operation: "current", Launch: l, Binding: b})
-	return e
+	if sync, _ := ctx.Value(workspaceSyncKey{}).(bool); sync {
+		window, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		for {
+			err := a.currentOnce(window, l, b)
+			if err == nil {
+				return nil
+			}
+			var transport *workspaceTransportError
+			if !errors.As(err, &transport) && !errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			if !a.client.sleep(window, 100*time.Millisecond) {
+				logDaemonFailure("turn sync reconnect window", window.Err())
+				return window.Err()
+			}
+		}
+	}
+	return a.currentOnce(ctx, l, b)
+}
+
+func (a *WorkspaceAuthority) currentOnce(ctx context.Context, l protocol.SupervisorLaunch, b protocol.WorkspaceRuntimeBinding) error {
+	// A turn can finish while reconnect recovery is waiting for its lifecycle
+	// lock. Recover here, under that same lock, only when the authenticated
+	// server explicitly asks for a new connection to this exact incarnation.
+	a.mu.Lock()
+	if current := a.launches[l.SessionID]; sameWorkspaceIncarnation(current, l) {
+		l = current
+	}
+	a.mu.Unlock()
+	reply, err := a.call(ctx, protocol.LocalWorkspaceControl{SessionID: l.SessionID, Operation: "current", Launch: l, Binding: b})
+	var unavailable *WorkspaceUnavailableError
+	if errors.As(err, &unavailable) && reply.Cause == protocol.WorkspaceControlConnectionRecovery {
+		l, err = a.Recover(ctx, l, b)
+		if err == nil {
+			_, err = a.call(ctx, protocol.LocalWorkspaceControl{SessionID: l.SessionID, Operation: "current", Launch: l, Binding: b})
+		}
+	}
+	return err
+}
+
+func sameWorkspaceIncarnation(a, b protocol.SupervisorLaunch) bool {
+	a.ConnectionID = b.ConnectionID
+	return a == b
 }
 func (a *WorkspaceAuthority) Abort(ctx context.Context, id string, m protocol.WorkspaceManifest, token string, l protocol.SupervisorLaunch) error {
 	_, e := a.call(ctx, protocol.LocalWorkspaceControl{SessionID: id, Operation: "abort", Manifest: &m, Token: token, Launch: l})
@@ -175,6 +260,29 @@ func (a *WorkspaceAuthority) CommitFinal(ctx context.Context, l protocol.Supervi
 		e = errors.New("workspace completion receipt mismatch")
 	}
 	return r.Receipt, e
+}
+
+func (a *WorkspaceAuthority) MembershipStatus(ctx context.Context, id, operation string) (string, protocol.WorkspaceManifest, error) {
+	r, e := a.call(ctx, protocol.LocalWorkspaceControl{SessionID: id, Operation: "membership_status", Membership: &protocol.WorkspaceMembershipReport{OperationID: operation}})
+	if e != nil || r.Manifest == nil {
+		return r.MembershipPhase, protocol.WorkspaceManifest{}, e
+	}
+	return r.MembershipPhase, *r.Manifest, nil
+}
+func (a *WorkspaceAuthority) MembershipCommit(ctx context.Context, l protocol.SupervisorLaunch, b protocol.WorkspaceRuntimeBinding, operation, receipt string) (protocol.WorkspaceRuntimeBinding, error) {
+	r, e := a.call(ctx, protocol.LocalWorkspaceControl{SessionID: l.SessionID, Operation: "membership_commit", Launch: l, Binding: b, Membership: &protocol.WorkspaceMembershipReport{OperationID: operation, Receipt: receipt}})
+	if e == nil && (r.Binding.WorkspaceRuntimeRef != b.WorkspaceRuntimeRef || r.Binding.Root != b.Root || r.Binding.ManifestDigest == "") {
+		e = errors.New("workspace membership commit changed the runtime")
+	}
+	return r.Binding, e
+}
+func (a *WorkspaceAuthority) MembershipInstalled(ctx context.Context, id, operation string) error {
+	_, e := a.call(ctx, protocol.LocalWorkspaceControl{SessionID: id, Operation: "membership_installed", Membership: &protocol.WorkspaceMembershipReport{OperationID: operation}})
+	return e
+}
+func (a *WorkspaceAuthority) MembershipReport(ctx context.Context, id string, report protocol.WorkspaceMembershipReport) error {
+	_, e := a.call(ctx, protocol.LocalWorkspaceControl{SessionID: id, Operation: "membership_report", Membership: &report})
+	return e
 }
 
 // Cleanup methods cannot admit readers, shells or fresh runtimes on the server.
@@ -236,8 +344,13 @@ func (s *LocalWorkspaceService) currentWorkspace(ctx context.Context, w *LocalWo
 	if !cleanup || !ok {
 		return s.Authority.Current(ctx, l, b)
 	}
-	if err := a.CleanupCurrent(ctx, l, b); err == nil {
+	currentErr := a.CleanupCurrent(ctx, l, b)
+	if currentErr == nil {
 		return nil
+	}
+	var refused *WorkspaceRefusedError
+	if errors.As(currentErr, &refused) {
+		return currentErr
 	}
 	resumed, err := a.CleanupRecover(ctx, l, b)
 	if err != nil {

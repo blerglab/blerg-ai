@@ -28,7 +28,8 @@ function dropEdge(event: { clientX: number; clientY: number }, element: HTMLElem
   return nearest === x ? 'left' : nearest === 1 - x ? 'right' : nearest === y ? 'top' : 'bottom'
 }
 const zoneOf = (edge: DropEdge, width: number): DropZone => width < EXPLORER_CHAT_MIN * 2 + 6 && (edge === 'left' || edge === 'right') ? edge === 'left' ? 'top' : 'bottom' : edge
-function TabMounts({ tabs, group }: { tabs: SessionTabs; group: TabGroup }) {
+export type GroupTabs = { dragDisabled?: boolean; tabs: { id: string }[] } & Pick<SessionTabs, 'scope' | 'phone' | 'groups' | 'focusGroup' | 'drop' | 'move' | 'tabFocused' | 'layout' | 'active' | 'focused' | 'resize' | 'targetFor'>
+function TabMounts({ tabs, group }: { tabs: GroupTabs; group: TabGroup }) {
   const ref = useRef<HTMLDivElement>(null)
   const { targetFor } = tabs
   useLayoutEffect(() => {
@@ -39,7 +40,7 @@ function TabMounts({ tabs, group }: { tabs: SessionTabs; group: TabGroup }) {
       target.hidden = id !== group.active
       moveSessionView(parent, target)
       target.setAttribute('role', 'tabpanel')
-      target.setAttribute('aria-labelledby', id === 'chat' ? 'session-tab-chat' : `session-tab-${encodeURIComponent(id)}`)
+      target.setAttribute('aria-labelledby', `session-tab-${encodeURIComponent(id)}`)
       target.id = id === 'chat' ? 'session-view-chat' : `session-view-${encodeURIComponent(id)}`
     }
     for (const target of [...parent.children]) if (!group.tabs.includes((target as HTMLElement).dataset.viewId!)) {
@@ -56,7 +57,7 @@ function TabMounts({ tabs, group }: { tabs: SessionTabs; group: TabGroup }) {
 /** The drop overlay's region in a group: the half a split would give the tab, or the whole group for a move. */
 export type DropZone = DropEdge
 export type StripEnds = { start: boolean; end: boolean }
-export default function SessionGroups({ tabs, bar }: { tabs: SessionTabs; bar(group: TabGroup, ends: StripEnds): ReactNode }) {
+export default function SessionGroups({ tabs, bar, alwaysShowBar = false, testId = 'session-groups' }: { tabs: GroupTabs; alwaysShowBar?: boolean; testId?: string; bar(group: TabGroup, ends: StripEnds): ReactNode }) {
   const root = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ width: 0, height: 0 })
   const [dragging, setDragging] = useState('')
@@ -74,15 +75,15 @@ export default function SessionGroups({ tabs, bar }: { tabs: SessionTabs; bar(gr
     const start = (event: DragEvent) => {
       try {
         const data = JSON.parse(event.dataTransfer?.getData(sessionTabDragType) ?? '')
-        if (data.scope === dragScope) setDragging(data.id)
-      } catch { /* File and external drags are not tab drags. */ }
+        setDragging(!tabs.dragDisabled && data.scope === dragScope ? data.id : '')
+      } catch { setDragging('') /* File and external drags are not tab drags. */ }
     }
     const clear = () => { setDragging(''); setOver(null) }
     const escape = (event: KeyboardEvent) => { if (event.key === 'Escape' && root.current?.hasAttribute('data-tab-dragging')) { event.preventDefault(); event.stopPropagation(); clear() } }
     document.addEventListener('dragstart', start); document.addEventListener('dragend', clear); document.addEventListener('drop', clear)
     document.addEventListener('keydown', escape); window.addEventListener('blur', clear)
     return () => { document.removeEventListener('dragstart', start); document.removeEventListener('dragend', clear); document.removeEventListener('drop', clear); document.removeEventListener('keydown', escape); window.removeEventListener('blur', clear) }
-  }, [dragScope])
+  }, [dragScope, tabs.dragDisabled])
   // Portal events follow their React owner. Native listeners follow the actual group in the DOM.
   useEffect(() => {
     const element = root.current!
@@ -107,7 +108,7 @@ export default function SessionGroups({ tabs, bar }: { tabs: SessionTabs; bar(gr
       const strip = event.target instanceof Element ? event.target.closest('.session-tabbar')?.querySelector('[role=tablist]') : null
       const before = strip ? stripInsertion(event.clientX, strip).before : undefined
       const targetGroup = tabGroups.find(g => g.id === group.dataset.groupId)!
-      if (strip && targetGroup.tabs.includes(dragging)) { if (dragging !== 'chat') reorder(dragging, before!) }
+      if (strip && targetGroup.tabs.includes(dragging)) { reorder(dragging, before!) }
       else moveTabToGroup(dragging, targetGroup.id, strip ? 'center' : dropEdge(event, group), strip ? before || undefined : undefined)
       setDragging(''); setOver(null)
     }
@@ -116,7 +117,7 @@ export default function SessionGroups({ tabs, bar }: { tabs: SessionTabs; bar(gr
     return () => { element.removeEventListener('focusin', focus); element.removeEventListener('pointerdown', focus); element.removeEventListener('dragover', dragOver); element.removeEventListener('drop', drop) }
   }, [phone, tabGroups, focusGroup, moveTabToGroup, reorder, dragging, tabs.tabFocused])
   const leaves: { group: TabGroup; box: Box }[] = [], dividers: Divider[] = []
-  const tree: TabLayout = tabs.phone ? { type: 'group', id: 'phone', tabs: ['chat', ...tabs.tabs.map(t => t.id)], active: tabs.active } : tabs.layout
+  const tree: TabLayout = tabs.phone ? { type: 'group', id: 'phone', tabs: tabs.groups.flatMap(g => g.tabs), active: tabs.active } : tabs.layout
   geometry(tree, { left: 0, top: 0, ...size }, leaves, dividers)
   const multiple = !tabs.phone && groups(tree).length > 1
   // The workspace toggles ride on the top row: the explorer at the left end of the top-left strip,
@@ -129,14 +130,15 @@ export default function SessionGroups({ tabs, bar }: { tabs: SessionTabs; bar(gr
     const index = leaves.findIndex(({ group }) => group.id === tabs.focused), count = leaves[index]?.group.tabs.length ?? 0
     setAnnouncement({ focused: tabs.focused, groups: leaves.length, text: `Focused tab group ${Math.max(0, index) + 1} of ${leaves.length}${multiple ? `, ${count} ${count === 1 ? 'tab' : 'tabs'}` : ''}` })
   }
-  return <div ref={root} className="session-groups" data-testid="session-groups" data-tab-dragging={dragging || undefined} onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setOver(null) }}>
+  return <div ref={root} className="session-groups" data-testid={testId} data-tab-dragging={dragging || undefined} onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setOver(null) }}>
     {leaves.map(({ group, box }, index) => <section key={group.id} className={`session-group${tabs.focused === group.id ? ' focused' : ''}`} id={`session-group-${encodeURIComponent(group.id)}`} data-group-id={group.id} aria-label={`Tab group ${index + 1}`} hidden={!tabs.phone && tabs.tabFocused && group.id !== tabs.focused} style={(tabs.tabFocused && group.id === tabs.focused ? { left: 0, top: 0, ...size } : box) as CSSProperties}
       >
-      {multiple && bar(group, { start: tabs.tabFocused ? group.id === tabs.focused : index === 0, end: tabs.tabFocused ? group.id === tabs.focused : group.id === topRight.group.id })}
+      {(multiple || alwaysShowBar) && bar(group, { start: tabs.tabFocused ? group.id === tabs.focused : index === 0, end: tabs.tabFocused ? group.id === tabs.focused : group.id === topRight.group.id })}
       <TabMounts tabs={tabs} group={group} />
+      {!group.tabs.length && <div className="session-empty-panel">Open a channel from the sidebar, or a file from the explorer.</div>}
       {/* As VS Code: one translucent rectangle where the tab will land, nothing else. A group too
           narrow to split side by side stacks, so its left/right halves are drawn as top/bottom. */}
-      {dragging && over?.group === group.id && <div data-testid="drop-overlay" data-zone={zoneOf(over.edge, box.width)} className={`session-drop-overlay${multiple ? ' with-tabbar' : ''}`} aria-hidden="true" />}
+      {dragging && over?.group === group.id && <div data-testid="drop-overlay" data-zone={zoneOf(over.edge, box.width)} className={`session-drop-overlay${multiple || alwaysShowBar ? ' with-tabbar' : ''}`} aria-hidden="true" />}
     </section>)}
     <span className="session-groups-announce" role="status" aria-live="polite" data-testid="group-announce">{announcement.text}</span>
     {!tabs.tabFocused && dividers.map(({ node, box, parent, stacked }, index) => {

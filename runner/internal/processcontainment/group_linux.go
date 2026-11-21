@@ -13,11 +13,13 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/blerglab/blerg-ai/runner/internal/processtelemetry"
 	"golang.org/x/sys/unix"
 )
 
@@ -26,13 +28,12 @@ import (
 const controlTimeout = 30 * time.Second
 
 // WriterTaskLimit bounds the tasks (threads count) one traced command may hold. Real parallel builds
-// (a Go toolchain uses about one thread per core) stay well under it; a runaway fork is still stopped.
+// (a Go toolchain uses about one thread per core) stay well under it; past it a new task is refused.
 const WriterTaskLimit = 4096
 
-// TaskLimitMessage is the plain line shown when a traced tree is ended for passing its task limit.
-// scope names what was stopped ("session", "shell").
-func TaskLimitMessage(limit int, scope string) string {
-	return fmt.Sprintf("blerg: process limit reached: more than %d processes and threads in this %s, so it was stopped. Retry with less parallelism (for example GOMAXPROCS=4, go -p 1, make -j4, fewer test workers).", limit, scope)
+// TaskLimitMessage is the plain line shown to the agent and the person when a new task is refused.
+func TaskLimitMessage(limit int) string {
+	return fmt.Sprintf("blerg: process limit reached (%d tasks); retry with less parallelism (GOMAXPROCS, go -p, make -j, test workers).", limit)
 }
 
 // Group is generation-local. Wrapping creation and freezing serialize on this
@@ -45,6 +46,7 @@ type Group struct {
 	executable     string
 	uid, gid       uint32
 	frozen, closed bool
+	limit          atomic.Pointer[func(string)]
 }
 
 // Census is diagnostic task accounting, never a containment proof.
@@ -55,6 +57,7 @@ type Group struct {
 type Census struct {
 	Tracked, Live           int64
 	Untracked, Exited, Lost int64
+	Reserved                int64
 	Mismatch                string `json:",omitempty"` // the tasks the two disagree on, with their kernel state
 }
 
@@ -66,18 +69,23 @@ type frame struct {
 	Detail string `json:",omitempty"`
 }
 type peer struct {
-	mu            sync.Mutex
-	parent, child *os.File
-	replies       chan frame
-	ended         chan struct{}
-	settled       chan struct{} // closed once a lost helper's tree is proven gone (empty is then true)
-	empty         atomic.Bool
-	pid           atomic.Int64
-	census        Census // last serialized diagnostic reply
-	failure       string // published by closing ended
-	label         string
-	helper        atomic.Int64 // pidfd of the helper process; -1 when unavailable
-	ledger        pidLedger
+	activityWrite    *os.File // the helper's end, closed with child
+	activityIdentity string
+	activityMu       sync.Mutex
+	activity         processtelemetry.Batch
+	mu               sync.Mutex
+	parent, child    *os.File
+	replies          chan frame
+	ended            chan struct{}
+	settled          chan struct{} // closed once a lost helper's tree is proven gone (empty is then true)
+	empty            atomic.Bool
+	pid              atomic.Int64
+	census           Census // last serialized diagnostic reply
+	failure          string // published by closing ended
+	label            string
+	helper           atomic.Int64 // pidfd of the helper process; -1 when unavailable
+	ledger           pidLedger
+	limit            *atomic.Pointer[func(string)]
 }
 
 // pidLedger holds a pidfd for every process the helper's tree ever ran, each received before that
@@ -190,6 +198,10 @@ func (r *streamReader) Read(b []byte) (int, error) {
 	return n, nil
 }
 
+// OnLimit sets who hears that a tree refused a new task, with the line to show. It must not hold up
+// its caller for long, and is called at most once a minute per tree.
+func (g *Group) OnLimit(notify func(message string)) { g.limit.Store(&notify) }
+
 func NewGroup(executable string, uid, gid uint32) *Group {
 	return &Group{executable: executable, uid: uid, gid: gid}
 }
@@ -214,6 +226,7 @@ func (g *Group) Start(cmd *exec.Cmd) error {
 	err = cmd.Start()
 	if err == nil {
 		p.pid.Store(int64(cmd.Process.Pid))
+		p.activityIdentity = processtelemetry.ProcessIdentity(cmd.Process.Pid)
 		// Nobody can reap the helper before Start returns, so this is the helper, never a reused PID.
 		// Without it a lost helper's tree is never proven gone (fail closed), as before the ledger.
 		if helper, e := unix.PidfdOpen(cmd.Process.Pid, 0); e == nil {
@@ -227,7 +240,8 @@ func (g *Group) Start(cmd *exec.Cmd) error {
 		}
 	}
 	if err == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// The reply comes at the command's exec, after one more process start than the helper's own.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		bootSent = true
 		err = p.call(ctx, "start")
 		cancel()
@@ -237,6 +251,7 @@ func (g *Group) Start(cmd *exec.Cmd) error {
 		}
 	}
 	_ = p.child.Close()
+	_ = p.activityWrite.Close()
 	if err != nil {
 		// A lost startup reply may follow an executed writer. Only a failure
 		// before bootstrap proves no untrusted process could have started.
@@ -264,26 +279,35 @@ func (g *Group) wrap(cmd *exec.Cmd) (*peer, error) {
 	if len(g.peers) >= 128 {
 		return nil, fmt.Errorf("%w: writer helper limit reached", ErrUnproven)
 	}
+	activityRead, activityWrite, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
 	pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
+		_ = activityRead.Close()
+		_ = activityWrite.Close()
 		return nil, err
 	}
 	_ = unix.SetNonblock(pair[0], true)
 	_ = unix.SetNonblock(pair[1], true)
-	p := &peer{replies: make(chan frame, 8), ended: make(chan struct{}), settled: make(chan struct{}), parent: os.NewFile(uintptr(pair[0]), "writer-control"), child: os.NewFile(uintptr(pair[1]), "writer-child"), label: g.Label}
+	p := &peer{replies: make(chan frame, 8), ended: make(chan struct{}), settled: make(chan struct{}), parent: os.NewFile(uintptr(pair[0]), "writer-control"), child: os.NewFile(uintptr(pair[1]), "writer-child"), activityWrite: activityWrite, label: g.Label, limit: &g.limit}
 	p.helper.Store(-1)
 	p.ledger.pruneAt = 64
 	raw, err := p.parent.SyscallConn()
 	if err != nil {
 		_ = p.parent.Close()
 		_ = p.child.Close()
+		_ = activityRead.Close()
+		_ = activityWrite.Close()
 		return nil, err
 	}
+	go p.readActivity(activityRead)
 	go p.read(&streamReader{raw: raw, ledger: &p.ledger, oob: make([]byte, unix.CmsgSpace(16*4))})
 	g.peers = append(g.peers, p)
 	fd := 3 + len(cmd.ExtraFiles)
-	cmd.ExtraFiles = append(cmd.ExtraFiles, p.child)
-	cmd.Args = append([]string{g.executable, "cluster-writer", strconv.Itoa(fd), strconv.FormatUint(uint64(g.uid), 10), strconv.FormatUint(uint64(g.gid), 10), cmd.Path}, cmd.Args[1:]...)
+	cmd.ExtraFiles = append(cmd.ExtraFiles, p.child, activityWrite)
+	cmd.Args = append([]string{g.executable, "cluster-writer", strconv.Itoa(fd) + "," + strconv.Itoa(fd+1), strconv.FormatUint(uint64(g.uid), 10), strconv.FormatUint(uint64(g.gid), 10), cmd.Path}, cmd.Args[1:]...)
 	cmd.Path = g.executable
 	cmd.Env = HelperEnvironment(cmd.Env)
 	// Parent cancellation kills this helper; EXITKILL then fences its whole
@@ -308,6 +332,13 @@ func (p *peer) read(r *streamReader) {
 			break
 		}
 		if f.Op == "ready" {
+			continue
+		}
+		if f.Op == "limit" {
+			p.logf("%s", f.Detail)
+			if notify := p.limit.Load(); notify != nil {
+				go (*notify)(f.Detail)
+			}
 			continue
 		}
 		if f.Op == "empty" && f.OK {
@@ -520,7 +551,9 @@ func ServeCommand(args []string) int {
 	if len(args) < 4 {
 		return 125
 	}
-	fd, e := strconv.Atoi(args[0])
+	// A daemon that predates the activity pipe passes only the control descriptor.
+	controlFd, activityFd, _ := strings.Cut(args[0], ",")
+	fd, e := strconv.Atoi(controlFd)
 	if e != nil || fd < 3 {
 		return 125
 	}
@@ -555,13 +588,22 @@ func ServeCommand(args []string) int {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
-	attrs := &syscall.SysProcAttr{Ptrace: true, Pdeathsig: syscall.SIGKILL, Setsid: true}
+	attrs := &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL, Setsid: true}
 	if uint64(os.Getuid()) != uid { //nolint:gosec // Linux getuid is an unsigned 32-bit UID represented as int by os.
 		attrs.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid), Groups: []uint32{}}
 		DropExecCapabilities(cmd)
 	}
 	cmd.SysProcAttr = attrs
 	tree := NewTree()
+	if n, err := strconv.Atoi(activityFd); err == nil && n >= 3 {
+		unix.CloseOnExec(n)
+		// Without nonblocking writes a stalled reader could park the sender, so no telemetry.
+		if unix.SetNonblock(n, true) == nil {
+			tree.EnableActivity()
+			tree.activity.sink = (&activityPipe{fd: n}).send
+		}
+	}
+	finish := func(f frame) { emit(f); tree.FlushActivity() }
 	// The control descriptor is blocking here (the parent handed it over with Fd), so a full socket
 	// stalls the tracer, and with it the tree, rather than dropping a record.
 	tree.Ledger = func(pidfd int) error {
@@ -586,10 +628,20 @@ func ServeCommand(args []string) int {
 	go func() { code, runErr = tree.Run(cmd, cmd.Start, WriterTaskLimit, ready); close(done) }()
 	if err := <-ready; err != nil {
 		<-done
-		emit(resultFrame("empty", runErr))
+		finish(resultFrame("empty", runErr))
 		return 125
 	}
 	emit(frame{Op: "start", OK: true})
+	go func() {
+		for {
+			select {
+			case <-tree.AtLimit():
+				emit(frame{Op: "limit", OK: true, Detail: TaskLimitMessage(WriterTaskLimit)})
+			case <-done:
+				return
+			}
+		}
+	}()
 	requests := make(chan frame)
 	go func() {
 		defer close(requests)
@@ -608,22 +660,14 @@ func ServeCommand(args []string) int {
 	for {
 		select {
 		case <-done:
-			if errors.Is(runErr, ErrTaskLimit) {
-				// The tree is gone (proven empty); say why on the command's own stderr, which the
-				// daemon shows with the exit, so the person and the agent can lower parallelism.
-				// A leading newline keeps it off any half-written engine line.
-				_, _ = fmt.Fprint(os.Stderr, "\n"+TaskLimitMessage(WriterTaskLimit, "session")+"\n")
-				emit(frame{Op: "empty", OK: true, Detail: runErr.Error()})
-				return code
-			}
-			emit(resultFrame("empty", runErr))
+			finish(resultFrame("empty", runErr))
 			return code
 		case f, ok := <-requests:
 			ctx, cancel := context.WithTimeout(context.Background(), controlTimeout)
 			if !ok || f.Op == "stop" {
 				err := tree.Stop(ctx)
 				cancel()
-				emit(resultFrame("empty", err))
+				finish(resultFrame("empty", err))
 				return 0
 			}
 			err := tree.Control(ctx, f.Op)

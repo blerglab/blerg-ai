@@ -15,6 +15,8 @@ require (
 	golang.org/x/text v0.41.0
 )
 
+require mvdan.cc/sh/v3 v3.12.0
+
 replace github.com/blerglab/blerg-ai/contracts => ../contracts
 
 require (

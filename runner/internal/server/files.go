@@ -29,6 +29,9 @@ type sessionFileEntry struct {
 	Version     int    `json:"version"`
 	Latest      int    `json:"latest_version"`
 	CreatedAt   string `json:"created_at"`
+	// Live (BLG-470): updated in place by `publish --live`, not a growing version series.
+	Live      bool   `json:"live,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
 }
 
 func (h *artifactsHandler) files(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +59,12 @@ func (h *artifactsHandler) files(w http.ResponseWriter, r *http.Request) {
 		if a.Origin != db.OriginAgent {
 			continue
 		}
-		out = append(out, sessionFileEntry{a.ID, a.Name, a.Size, a.ContentType, a.Version, latest[latestKey(a)], a.CreatedAt.UTC().Format(time.RFC3339)})
+		entry := sessionFileEntry{a.ID, a.Name, a.Size, a.ContentType, a.Version, latest[latestKey(a)], a.CreatedAt.UTC().Format(time.RFC3339), false, ""}
+		if a.Live {
+			entry.Live = true
+			entry.UpdatedAt = a.UpdatedAt.UTC().Format(time.RFC3339)
+		}
+		out = append(out, entry)
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	// used counts every file of the session, the person's attachments included: that is what
@@ -85,6 +93,7 @@ func (h *artifactsHandler) unpublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.api.withdrawDeletedReviews(context.WithoutCancel(r.Context()), sid, row.ID)
+	h.api.closeDeletedAnswer(context.WithoutCancel(r.Context()), sid, row.ID)
 	if err := os.RemoveAll(artifactDir(sid, row.ID)); err != nil {
 		log.Printf("files delete files %s/%s: %v", sid, row.ID, err)
 	}

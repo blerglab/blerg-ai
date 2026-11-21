@@ -110,8 +110,14 @@ func testP2DockerVMStorage(t *testing.T) {
 	t.Cleanup(func() { _ = runtime.Remove(context.Background()) })
 	member := w.state.Members[0]
 	p2Docker(t, "exec", "-w", "/workspace/"+member.Member.Path, id, "sh", "-c", "printf exact-vm-bytes > vm.txt; git add vm.txt; git -c user.name=Test -c user.email=test@example.com commit -m vm")
-	if _, err := w.Sync(ctx); err != nil {
+	if results, err := w.Sync(ctx); err != nil {
 		t.Fatal(err)
+	} else {
+		for _, result := range results {
+			if result.Pending || result.SyncError != "" {
+				t.Fatalf("VM copy failed: %+v", results)
+			}
+		}
 	}
 	if got := childRepoGit(t, member.Source.Repo, "show", "wip/vm-session:vm.txt"); got != "exact-vm-bytes" {
 		t.Fatal("VM snapshot not fetched")

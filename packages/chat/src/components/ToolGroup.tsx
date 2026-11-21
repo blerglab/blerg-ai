@@ -101,7 +101,7 @@ function ToolRow({ entry, open, onToggle, live }: {
   const ms = useRunningFor(entry, live && !entry.result)
   const { summary, shell } = describeInput(call.input)
   return (
-    <div className={`tcg-row ${result?.is_error ? 'tcg-row-failed' : ''}`} data-testid="tool-row" data-call-id={call.call_id}>
+    <div className={`tcg-row ${result?.is_error ? 'tcg-row-failed' : ''}`} data-testid="tool-row" data-call-id={call.call_id} data-event-id={entry.ev.client_event_id}>
       <button type="button" className="tcg-row-head" aria-expanded={open} onClick={onToggle} title={rowTitle(entry)}>
         <Status result={result} running={live} />
         <span className="tcg-name">{call.tool}</span>
@@ -171,6 +171,10 @@ export const ToolGroup = memo(function ToolGroup({ entries, live }: ToolGroupPro
       data-testid="tool-group"
       // Every call the group holds, so a link to one finds the group while it is folded.
       data-call-ids={entries.map(e => e.call.call_id).join(' ')}
+      // A group starts folded, and ToolRow's own data-event-id (below)
+      // only exists once it's open — so "the transcript painted" needs a
+      // signal on the folded wrapper too, not only its hidden rows.
+      data-event-id={entries[0].ev.client_event_id}
     >
       <button
         type="button"

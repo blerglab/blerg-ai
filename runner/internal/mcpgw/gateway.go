@@ -52,6 +52,8 @@ type ProposalSink interface {
 
 // ProposalRequest is everything a sink needs to freeze a call.
 type ProposalRequest struct {
+	SessionScope *db.MCPSessionScope `json:"-"`
+
 	SessionID      string
 	AccountID      string
 	ConnectionID   string
@@ -68,10 +70,19 @@ type Refresher interface {
 	RefreshSessionTools(sessionID string) bool
 }
 
+// AuthorityObservation is advisory metadata for the hosting Runner. It never
+// establishes resource authority and carries no credential or tool arguments.
+type AuthorityObservation struct {
+	SessionID, GrantKey, Kind, State, Cause string
+	Proof                                   Proof
+	AskedAt                                 time.Time
+}
+
 // Config configures a Gateway. DB and Core are required; zero values elsewhere take the defaults.
 type Config struct {
-	DB   *pgxpool.Pool
-	Core CoreClient
+	ObserveAuthority func(context.Context, AuthorityObservation)
+	DB               *pgxpool.Pool
+	Core             CoreClient
 	// Policy is the runner's network policy for upstream servers (allow-lists come from
 	// BLERG_RUNNER_MCP_ALLOW_HTTP_HOSTS and BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS).
 	Policy netguard.Policy
@@ -130,6 +141,7 @@ type Gateway struct {
 	// unrevoked are the session board credentials whose revoke failed, per account, until they
 	// expire (CallBoard stops minting past the unrevoked limit, maxUnrevokedBoardTokens unless
 	// SetUnrevokedBoardTokenLimit set another).
+	boardReads     boardReadCache
 	unrevoked      unrevokedBoardTokens
 	unrevokedLimit atomic.Int64
 }
@@ -891,7 +903,7 @@ func (g *Gateway) handleToolsCall(w http.ResponseWriter, r *http.Request, gr *db
 	switch {
 	case gr.Builtin != "" && !builtinToolOffered(p.Name):
 		mode = "off" // a built-in offers its fixed set, whatever a grant row says
-	case gr.Builtin != "" && boardColumnToolSet[p.Name]:
+	case gr.Builtin != "" && boardPersonToolSet[p.Name]:
 		mode = ModeAllow // column management: offered by the level, not by a grant row (launches before 0.5.0 have none)
 	}
 	g.guarded(w, r, gr, req, mode, p.Name, func(ctx context.Context, st *grantState) outcome {
@@ -906,8 +918,8 @@ func (g *Gateway) handleToolsCall(w http.ResponseWriter, r *http.Request, gr *db
 			if !BoardLevelAllows(level, p.Name) {
 				return refuse(mode, p.Name, "refused", codeInvalidParams, BoardLevelRefusal(gr.BuiltinRef, level, p.Name))
 			}
-			if boardColumnToolSet[p.Name] {
-				// Column management acts for a person: the current permission's sign-in, or the
+			if boardPersonToolSet[p.Name] {
+				// Archiving and column management act for a person: the current permission's sign-in, or the
 				// launch's when a person launched it. A cron or an unraised token launch has none.
 				if person == nil {
 					return unknown
@@ -967,7 +979,8 @@ func (g *Gateway) handleToolsCall(w http.ResponseWriter, r *http.Request, gr *db
 		}
 		if mode == ModePropose {
 			text, err := g.proposalSink().Propose(ctx, ProposalRequest{
-				SessionID: gr.SessionID, AccountID: gr.AccountID, ConnectionID: gr.ConnectionID,
+				SessionScope: gr.SessionScope,
+				SessionID:    gr.SessionID, AccountID: gr.AccountID, ConnectionID: gr.ConnectionID,
 				ConnectionName: gr.Name, URLSnapshot: gr.URLSnapshot, Tool: p.Name, ToolHash: entry.Hash,
 				Arguments: p.Arguments,
 			})
@@ -994,10 +1007,20 @@ func (g *Gateway) handleToolsCall(w http.ResponseWriter, r *http.Request, gr *db
 		if rerr != nil {
 			return upstreamRPCError(mode, p.Name, rerr)
 		}
-		result := sanitizeResult(res, g.cfg.MaxResultBytes)
+		sanitize := sanitizeResult
+		if gr.Builtin == BuiltinBoard {
+			sanitize = sanitizeBoardResult
+		}
+		result := sanitize(res, g.cfg.MaxResultBytes)
 		if o := g.boardObserver(); o != nil && gr.Builtin == BuiltinBoard {
 			o.BoardToolCalled(gr.SessionID, gr.BuiltinRef, p.Name, result)
 		}
 		return outcome{result: result, tool: p.Name, mode: mode, outcome: "ok"}
 	})
+}
+
+func (g *Gateway) observeAuthority(ctx context.Context, session, grant, kind string, proof Proof, askedAt time.Time, err error) {
+	if g.cfg.ObserveAuthority != nil {
+		g.cfg.ObserveAuthority(ctx, AuthorityObservation{SessionID: session, GrantKey: grant, Kind: kind, State: AuthorityState(err), Cause: AuthorityCause(err), Proof: proof, AskedAt: askedAt})
+	}
 }

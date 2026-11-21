@@ -40,10 +40,9 @@ const (
 	MaxAcceptanceText = 500
 	MaxURL            = 2000
 
-	// MaxPinned is how many tickets a session may have pinned at once; MaxEvents how many ticket
-	// events it may hold.
-	MaxPinned = 5
-	MaxEvents = 100
+	// MaxPinned bounds current pins; MaxEventsPerMinute limits pin bursts.
+	MaxPinned          = 5
+	MaxEventsPerMinute = 60
 )
 
 // Field is one extra field of the tracker's (a sprint, a component, a version).

@@ -10,13 +10,20 @@ export interface VisualTheme {
   fontFamily: string
   fontSize: number
   palette: readonly string[]
+  sequential?: readonly [string, string]
   dark: boolean
 }
 
+// The JS equivalent of a var(--x, fallback) default: color() below reads the live --chat-* custom
+// property at the rendering element and only falls back to these when it's absent or unparseable.
+// Every value here mirrors a --chat-* token packages/chat/src/theme/tokens.test.ts's CONTRACT
+// guarantees every theme defines (fg/muted/surface/surface-2/border/accent, and the palette
+// mirrors --chat-code-keyword/-string/-number/-title/-type), so the fallback is unreachable once a
+// stylesheet is present — the same already-exempt case the checker allows for a CSS var() call.
 const FALLBACK = {
-  fg: '#f0f3f7', muted: '#bfc7d2', surface: '#171b22', surface2: '#1f242d',
-  border: '#313a48', accent: '#ff6a3d',
-  palette: ['#b69cf0', '#8fc9a0', '#e0b36a', '#7fb2ee', '#6fc7c7'],
+  fg: '#f0f3f7', muted: '#bfc7d2', surface: '#171b22', surface2: '#1f242d', // themecheck:allow BLG-473: see above
+  border: '#313a48', accent: '#ff6a3d', // themecheck:allow BLG-473: see above
+  palette: ['#b69cf0', '#8fc9a0', '#e0b36a', '#7fb2ee', '#6fc7c7'], // themecheck:allow BLG-473: see above
 }
 const unsafeCss = /[;{}<>\\@]|url\s*\(|(?:https?|data|javascript|file):/i
 const byte = (number: number) => Math.max(0, Math.min(255, Math.round(number)))
@@ -62,6 +69,25 @@ function readable(preferred: string, ...backgrounds: string[]): string {
   return chosen
 }
 
+export function chartLabelColor(theme: VisualTheme, background: string): string {
+  return readable(theme.fg, background)
+}
+
+/** Sequential marks stay visible against the plot, independently of the UI accent. */
+export function heatmapRange(theme: VisualTheme): readonly [string,string] {
+  if(theme.sequential)return theme.sequential
+  return sequentialRange(theme.surface2, theme.palette[3] ?? theme.fg, theme.fg)
+}
+function sequentialRange(background:string, low:string, high:string): readonly [string,string] {
+  const target=readable(high,background)
+  const visible=(color:string)=>{
+    if(contrast(color,background)>=3.05)return color
+    for(let i=1;i<=100;i++){const candidate=mix(color,target,i/100);if(contrast(candidate,background)>=3.05)return candidate}
+    return target
+  }
+  return [visible(mix(background,low,.45)),visible(mix(low,target,.7))]
+}
+
 function safeFont(value: string): string {
   if (!value || value.length > 256 || unsafeCss.test(value) || [...value].some(char => char.charCodeAt(0) < 32 || (char.charCodeAt(0) >= 127 && char.charCodeAt(0) <= 159))) return 'system-ui, sans-serif'
   const families = value.split(',').map(family => family.trim())
@@ -80,7 +106,7 @@ export function readVisualTheme(element: HTMLElement): VisualTheme {
   element.append(probe)
   try {
     function color(name: string, fallback: string, background = fallback): string {
-      const value = token(name)
+      const value = name.startsWith('chart-') && !name.startsWith('chart-sequential-') ? styles.getPropertyValue('--' + name).trim() : token(name)
       if (!value || value.length > 256 || unsafeCss.test(value)) return fallback
       const direct = parseColor(value, background)
       if (direct) return direct
@@ -97,25 +123,41 @@ export function readVisualTheme(element: HTMLElement): VisualTheme {
     const muted = readable(color('muted', FALLBACK.muted, surface), surface, surface2)
     const border = color('border', FALLBACK.border, surface)
     const accent = color('accent', FALLBACK.accent, surface)
-    const palette = Array.from(new Set([accent, ...['keyword', 'string', 'number', 'title', 'type'].map((name, i) => color('code-' + name, FALLBACK.palette[i], surface))]))
+    // Token-driven, not theme-ID-driven (BLG-472): any theme that defines the chart series tokens
+    // gets them; a theme that does not (an older stylesheet, or one that never set them) falls
+    // back to the code-highlighting palette, which every theme has always defined.
+    const series = styles.getPropertyValue('--chart-tests').trim()
+      ? ['tests', 'build', 'git', 'read', 'edit', 'other', 'model', 'waiting'].map((name, i) => color('chart-' + name, FALLBACK.palette[i % FALLBACK.palette.length], surface))
+      : ['keyword', 'string', 'number', 'title', 'type'].map((name, i) => color('code-' + name, FALLBACK.palette[i], surface))
+    // Chart tokens are an ordered categorical palette. Prepending the UI accent can
+    // introduce a near-duplicate of its first hue, especially in color-blind themes.
+    const palette = Array.from(new Set(styles.getPropertyValue('--chart-tests').trim() ? [...series, accent] : [accent, ...series]))
     const size = token('text-sm')
     probe.style.fontSize = ''
     if (size.length <= 128 && !unsafeCss.test(size)) probe.style.fontSize = size
     const resolvedSize = window.getComputedStyle(probe).fontSize
     const numericSize = /^([\d.]+)px$/.exec(resolvedSize || size)
     const fontSize = numericSize && Number.isFinite(Number(numericSize[1])) ? Math.max(8, Math.min(32, Number(numericSize[1]))) : 13
-    return {fg, muted, surface, surface2, border, accent, palette, fontSize,
+    const sequential=sequentialRange(surface2,color('chart-sequential-low',series[3] ?? fg,surface2),color('chart-sequential-high',fg,surface2))
+    return {fg, muted, surface, surface2, border, accent, palette, sequential, fontSize,
       fontFamily: safeFont(token('font')), dark: luminance(surface) < 0.4}
   } finally {
     probe.remove()
   }
 }
 
+// Paint only (stroke width, corner radius) — never a size/layout property. Mermaid measures and
+// lays out a diagram before this CSS is applied, so anything that could change a measured size
+// has to go through themeVariables instead (fontFamily/fontSize below), never here. Fixed to the
+// same small values the rest of the chat chrome already uses (visual.css's 1px borders, 4-8px
+// radii), not read from a VisualTheme token: none of stroke width/radius is themeable today.
+const MERMAID_PAINT_CSS = '.node rect, .node circle, .node ellipse, .node polygon { stroke-width: 1.5px; rx: 4px; ry: 4px; } .edgePath path, .flowchart-link { stroke-width: 1.5px; }'
+
 export function mermaidTheme(theme: VisualTheme) {
   const secondary = mix(theme.surface2, theme.palette[1] ?? theme.accent, 0.12)
   const tertiary = mix(theme.surface2, theme.palette[2] ?? theme.accent, 0.12)
   const active = mix(theme.surface2, theme.accent, 0.16)
-  return {theme: 'base' as const, themeVariables: {
+  return {theme: 'base' as const, themeCSS: MERMAID_PAINT_CSS, themeVariables: {
     darkMode: theme.dark, background: 'transparent', fontFamily: theme.fontFamily, fontSize: `${theme.fontSize}px`,
     primaryColor: theme.surface2, primaryBorderColor: theme.border, primaryTextColor: theme.fg,
     secondaryColor: secondary, secondaryBorderColor: theme.border, secondaryTextColor: readable(theme.fg, secondary),
@@ -151,7 +193,7 @@ export function vegaTheme(theme: VisualTheme) {
       gridColor: theme.border, gridOpacity: 0.35, labelFontSize: theme.fontSize, titleFontSize: theme.fontSize},
     legend: {labelColor: theme.fg, titleColor: theme.fg, labelFontSize: theme.fontSize, titleFontSize: theme.fontSize},
     title: {color: theme.fg, subtitleColor: theme.muted, fontSize: theme.fontSize + 1, subtitleFontSize: theme.fontSize},
-    text: {color: theme.fg, fontSize: theme.fontSize}, range: {category: [...theme.palette]}}
+    text: {color: theme.fg, fontSize: theme.fontSize}, range: {category: [...theme.palette], heatmap: [...heatmapRange(theme)], ramp: [...heatmapRange(theme)]}}
 }
 
 /** Observe only inherited-theme inputs, never renderer children. A burst is sampled once

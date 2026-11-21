@@ -22,12 +22,23 @@ spec:
       labels:
         app: blerg-core
     spec:
+      securityContext:
+        fsGroup: 65532
       containers:
         - name: blerg-core
           image: "${REGISTRY}/blerg-core:${TAG}"
           ports:
+            - name: live-data
+              containerPort: 8443
             - containerPort: 8080
           env:
+            - name: BLERG_MCP_CLUSTER_DEPLOYMENT
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_MCP_CLUSTER_DEPLOYMENT, optional: true }
+            - name: BLERG_LIVE_DATA_AUTHORITY_BACKEND
+              value: kubernetes
+            - name: BLERG_LIVE_DATA_TLS_DIR
+              value: /live-data
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -150,6 +161,10 @@ spec:
           resources:
             requests: {cpu: 100m, memory: 128Mi}
             limits: {cpu: "1", memory: 1Gi}
+          volumeMounts:
+            - name: live-data
+              mountPath: /live-data
+              readOnly: true
           securityContext:
             runAsNonRoot: true
             # distroless "nonroot" is UID 65532; pin it numerically so the
@@ -159,6 +174,12 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             seccompProfile: {type: RuntimeDefault}
+      volumes:
+        - name: live-data
+          secret:
+            secretName: blerg-live-data-core
+            optional: true
+            defaultMode: 0440
 ---
 apiVersion: v1
 kind: Service

@@ -106,11 +106,17 @@ func WithRuntimeLaunchFence(parent context.Context, main *pgxpool.Pool, session 
 	return withAuthorityFence(parent, main, session, 876433, fn)
 }
 
+// authorityFenceContext owns the deadline policy separately from SQL acquisition
+// and callback cleanup, so its exact duration can be checked under virtual time.
+func authorityFenceContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, runtimeFenceTimeout)
+}
+
 func withAuthorityFence(parent context.Context, main *pgxpool.Pool, session string, namespace int64, fn func(context.Context) error) error {
 	if main == nil {
 		return ErrTokenInvalid
 	}
-	ctx, cancel := context.WithTimeout(parent, runtimeFenceTimeout)
+	ctx, cancel := authorityFenceContext(parent)
 	defer cancel()
 	pool, err := runtimeFencePool(ctx, main)
 	if err != nil {

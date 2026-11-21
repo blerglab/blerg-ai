@@ -31,7 +31,7 @@ export default function UsageNoticeSettings() {
   }
   return <section className="settings-section st-section" aria-labelledby={`${id}-heading`}>
     <h3 className="settings-heading st-heading" id={`${id}-heading`}>Usage-limit notices</h3>
-    <p className="settings-description">Install-wide thresholds for notices to working top-level sessions. These notices guide agents as an engine approaches its limit.</p>
+    <p className="settings-description">Install-wide thresholds for notices to working top-level workspaces. These notices guide agents as an engine approaches its limit.</p>
     {['Prefer other engines', 'Start nothing new', 'Save state'].map((label, i) => <label className="settings-field cc-field" key={label}>
       <span>{label} (%)</span>
       <input className="settings-field" type="number" min={1} max={100} step={1} value={thresholds[i]} onChange={e => setThresholds(t => t!.map((n, j) => j === i ? Number(e.target.value) : n))} />

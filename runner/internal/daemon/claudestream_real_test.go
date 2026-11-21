@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -81,5 +82,49 @@ func TestSteeringRealCLI(t *testing.T) {
 	wait("the last turn", idle(4))
 	if !strings.Contains(strings.Join(em.outline(), "\n"), "ALIVE") {
 		t.Fatalf("%v", em.outline())
+	}
+}
+
+// TestBackgroundWorkOutlivesIdleRealCLI runs a real background command on the real `claude` binary with
+// a one-second idle shutdown. Opt-in like TestSteeringRealCLI. The command must finish on a process that
+// was never closed, and the CLI's own turn for its end must run (the wake-up BLG-361 lost).
+func TestBackgroundWorkOutlivesIdleRealCLI(t *testing.T) {
+	if os.Getenv("BLERG_REAL_CLAUDE") != "1" {
+		t.Skip("set BLERG_REAL_CLAUDE=1 to run against the real claude CLI")
+	}
+	shrink(t, &ccIdleShutdown, time.Second)
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "finished")
+	em := &collectEmitter{}
+	d := newClaudeCodeDriver(dir, "haiku", "", em, nil)
+	d.steer.legacy = false
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { d.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	d.Enqueue("Call the Bash tool once with run_in_background true and exactly this command: sleep 20; touch "+marker+" . Then reply OK and stop.", "chat")
+	waitUntilLong := func(what string, cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(90 * time.Second)
+		for !cond() {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s; events: %v", what, em.outline())
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	waitUntilLong("the started task", func() bool { return countKind(em, "background_task_started") == 1 })
+	d.sm.Lock()
+	gen := d.steer.proc.gen
+	d.sm.Unlock()
+	waitUntilLong("the command to finish", func() bool { _, err := os.Stat(marker); return err == nil })
+	waitUntilLong("its reported end", func() bool { return countKind(em, "background_task_done") == 1 })
+	waitUntilLong("the CLI's own turn for it", func() bool { return em.count("turn_done") >= 2 })
+	d.sm.Lock()
+	same := d.steer.proc != nil && d.steer.proc.gen == gen
+	d.sm.Unlock()
+	if !same {
+		t.Fatalf("the process did not stay for the background command: %v", em.outline())
 	}
 }

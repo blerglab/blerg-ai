@@ -14,11 +14,11 @@ export default function BoardCreateAccess({ proposal, value, onChange, disabled 
   const requested = requestedBoardAccess(proposal)
   const id = `board-create-access-${proposal.id}`
   return <div className="board-create-access">
-    <label htmlFor={id}>Session access to the new board</label>
+    <label htmlFor={id}>Workspace access to the new board</label>
     <select id={id} value={value} disabled={disabled} onChange={e => onChange(e.target.value as BoardLevel)}>
       {BOARD_LEVELS.filter(l => boardLevelRank(l) <= boardLevelRank(requested)).reverse().map(l =>
         <option key={l} value={l}>{l === 'propose' ? 'None (propose only)' : BOARD_LEVEL_LABELS[l]}{l === requested ? ' (asked for)' : ''}</option>)}
     </select>
-    <p className="board-create-access-hint">{BOARD_ACCESS_HINT[value]} Only this session gets it.</p>
+    <p className="board-create-access-hint">{BOARD_ACCESS_HINT[value]} Only this workspace gets it.</p>
   </div>
 }

@@ -866,3 +866,10 @@ describe('gridCount', () => {
     expect(gridCount(700, 7, 0, 5)).toBe(100)
   })
 })
+
+it('renders saved ANSI history with the supplied live theme palette', () => {
+  const ansi = Array.from({length:16}, () => '#80caff')
+  const row = renderRow(makeLine([{ch:'X',fgPalette:true,fgColor:1}]),1,makeNullCell(),null,
+    {background:'#000000',foreground:'#ffffff',cursor:'#ffe080',ansi})
+  expect(row.querySelector('span')?.style.color).toBe('rgb(128, 202, 255)')
+})

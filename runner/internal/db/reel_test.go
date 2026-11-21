@@ -2,6 +2,7 @@ package db_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"reflect"
@@ -262,5 +263,119 @@ func TestAppendAgentEventTxRetriesASeqCollision(t *testing.T) {
 	}
 	if n, err := db.MaxAgentEventSeq(ctx, pool, sid); err != nil || n != 7 {
 		t.Errorf("MaxAgentEventSeq = %d, %v; want 7", n, err)
+	}
+}
+
+func TestHistoryStrokeReadBounded(t *testing.T) {
+	pool := reelTestPool(t)
+	if err := db.EnsureConcurrentIndexes(t.Context(), pool); err != nil {
+		t.Fatal(err)
+	}
+	sid := reelSession(t, pool)
+	if _, err := pool.Exec(t.Context(), `INSERT INTO agent_events(session_id,seq,client_event_id,kind,payload,ts)
+ SELECT $1,n,gen_random_uuid(),'mark',jsonb_build_object('kind','finding','text','mark '||n),now()+n*interval '1 second'
+ FROM generate_series(1,20000) n`, sid); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.ListStrokeEvents(t.Context(), pool, sid, 20000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) > 301 {
+		t.Fatalf("initial History query returned %d rows for 20,000 marks; want at most 301", len(rows))
+	}
+	if len(rows) == 0 || rows[0].Seq != 20000 {
+		t.Fatalf("History must start newest first")
+	}
+	seen := map[int64]bool{}
+	for {
+		if len(rows) > 301 {
+			t.Fatalf("unbounded page: %d", len(rows))
+		}
+		page := rows
+		if len(page) > 300 {
+			page = page[:300]
+		}
+		for _, row := range page {
+			if seen[row.Seq] {
+				t.Fatalf("duplicate seq %d", row.Seq)
+			}
+			seen[row.Seq] = true
+		}
+		if len(rows) <= 300 {
+			break
+		}
+		rows, err = db.ListStrokeEvents(t.Context(), pool, sid, 20000, page[len(page)-1].Seq)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(seen) != 20000 {
+		t.Fatalf("older pages reached %d of 20000 marks", len(seen))
+	}
+
+}
+
+func TestStrokeContextSkipsMarksAndUsesLifecycleIndex(t *testing.T) {
+	pool := reelTestPool(t)
+	if err := db.EnsureConcurrentIndexes(t.Context(), pool); err != nil {
+		t.Fatal(err)
+	}
+	var valid bool
+	if err := pool.QueryRow(t.Context(), `SELECT indisvalid FROM pg_index WHERE indexrelid='agent_events_stroke_context_idx'::regclass`).Scan(&valid); err != nil || !valid {
+		t.Fatalf("context index valid=%v err=%v", valid, err)
+	}
+	if !strings.Contains(db.StrokeContextKindsSQL, "'review_decided'") || strings.Contains(db.StrokeContextKindsSQL, "'mark'") {
+		t.Fatal("context index must exclude all mark payloads")
+	}
+}
+
+func TestInsightActivityMarksKeepsEffectiveTimeWindow(t *testing.T) {
+	pool := reelTestPool(t)
+	sid := reelSession(t, pool)
+	if err := db.SetSessionSpawningAccount(t.Context(), pool, sid, "window-owner"); err != nil {
+		t.Fatal(err)
+	}
+	from := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	to := from.Add(24 * time.Hour)
+	for i, at := range []time.Time{from.Add(-time.Second), from, to.Add(-time.Second), to} {
+		payload := fmt.Sprintf(`{"kind":"review","card":%d,"at":%q,"text":"private prose"}`, i+1, at.Format(time.RFC3339))
+		// All were recorded outside the range; effective timestamps govern evidence.
+		if _, _, err := db.AppendAgentEventAt(t.Context(), pool, sid, fmt.Sprintf("00000000-0000-4000-8000-%012d", i+1), "mark", payload, to.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := db.InsightActivityMarks(t.Context(), pool, "window-owner", sid, from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "private prose") {
+		t.Fatal("prose escaped projection")
+	}
+	var marks []struct{ Card int }
+	if err := json.Unmarshal(raw, &marks); err != nil {
+		t.Fatal(err)
+	}
+	if len(marks) != 2 || marks[0].Card != 2 || marks[1].Card != 3 {
+		t.Fatalf("windowed evidence = %s", raw)
+	}
+}
+
+func TestHistoryStrokeContextKeepsAllPending(t *testing.T) {
+	pool := reelTestPool(t)
+	sid := reelSession(t, pool)
+	if _, err := pool.Exec(t.Context(), `WITH inserted AS (
+ INSERT INTO messages(session_id,kind,body,status)
+ SELECT $1,'ask','Waiting','open' FROM generate_series(1,301) RETURNING id)
+ INSERT INTO agent_events(session_id,seq,client_event_id,kind,payload)
+ SELECT $1,row_number() OVER(),gen_random_uuid(),'ask',jsonb_build_object('message_id',id::text,'body','Waiting') FROM inserted`, sid); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.StrokeContext(t.Context(), pool, sid, 301, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 301 {
+		t.Fatalf("kept %d of 301 pending asks", len(rows))
 	}
 }

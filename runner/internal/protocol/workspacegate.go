@@ -35,6 +35,7 @@ func EnabledWorkspaceCapabilities() WorkspaceCapabilities {
 	if c.LinuxHost || c.MacOSHost || c.Sandbox || c.Cluster {
 		c.ManifestVersion = WorkspaceVersion
 		c.ShellVersion = 1
+		c.Membership = WorkspaceMembershipVersion
 	}
 	return c
 }
@@ -48,8 +49,10 @@ func WorkspaceCapabilitiesFor(runtime, platform string) WorkspaceCapabilities {
 	case "host":
 		c.LinuxHost = platform == "linux"
 		c.MacOSHost = platform == "darwin"
+		c.Membership = WorkspaceMembershipVersion
 	case "sandbox":
 		c.Sandbox = true
+		c.Membership = WorkspaceMembershipVersion
 	case "cluster":
 		c.Cluster = true
 	}
@@ -85,5 +88,29 @@ func NegotiateWorkspaceCapabilities(local, peer WorkspaceCapabilities) Workspace
 	if local.ShellVersion == 1 && peer.ShellVersion == 1 {
 		c.ShellVersion = 1
 	}
+	if local.Membership == WorkspaceMembershipVersion && peer.Membership == WorkspaceMembershipVersion {
+		c.Membership = WorkspaceMembershipVersion
+	}
+	if c.ShellVersion == 1 && local.ShellPersistence == ShellPersistenceVersion && peer.ShellPersistence == ShellPersistenceVersion {
+		c.PersistentHost = c.LinuxHost && local.PersistentHost && peer.PersistentHost
+		// Sandbox v2 is disabled: docker exec exposes bootstrap pipes to the agent UID.
+		c.PersistentSandbox = false
+		if c.PersistentHost || c.PersistentSandbox {
+			c.ShellPersistence = ShellPersistenceVersion
+		}
+	}
 	return c
+}
+
+func (c WorkspaceCapabilities) SupportsPersistence(runtime string) bool {
+	if c.ShellPersistence != ShellPersistenceVersion || !c.Supports(runtime, true) {
+		return false
+	}
+	switch runtime {
+	case "host":
+		return c.LinuxHost && c.PersistentHost
+	case "sandbox":
+		return false
+	}
+	return false
 }

@@ -27,6 +27,7 @@ type Request struct {
 	Call        json.RawMessage `json:"call"`
 	EnginePID   int             `json:"engine_pid"`
 	EngineStart string          `json:"engine_start"`
+	TimerUnit   string          `json:"timer_unit,omitempty"`
 }
 
 type Receipt struct {
@@ -132,6 +133,7 @@ type Observer struct {
 	mu       sync.Mutex
 	requests map[string]Request
 	attempts map[string]attempt
+	observed map[string]time.Time
 }
 
 func (o *Observer) Observe(r Request) {
@@ -142,15 +144,25 @@ func (o *Observer) Observe(r Request) {
 	defer o.mu.Unlock()
 	if o.requests == nil {
 		o.requests = make(map[string]Request)
+		o.observed = make(map[string]time.Time)
 	}
 	if len(r.Call) == 0 {
 		delete(o.requests, r.SessionID)
 		delete(o.attempts, r.SessionID)
+		delete(o.observed, r.SessionID)
 	} else {
+		previous := o.requests[r.SessionID]
+		if !bytes.Equal(previous.Call, r.Call) || previous.EnginePID != r.EnginePID || previous.EngineStart != r.EngineStart {
+			o.observed[r.SessionID] = time.Now()
+		}
 		o.requests[r.SessionID] = r
 	}
 }
 func (o *Observer) requester(pid int) *Request {
+	return o.requesterInUnit(pid, processUnit(pid))
+}
+
+func (o *Observer) requesterInUnit(pid int, unit string) *Request {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	tree := ancestors(pid)
@@ -165,7 +177,8 @@ func (o *Observer) requester(pid int) *Request {
 		}
 		direct := tree[r.EnginePID] == r.EngineStart
 		detached := inherited != "" && inherited == r.SessionID && processSession(r.EnginePID) == inherited
-		if !direct && !detached {
+		timer := r.TimerUnit != "" && unit == r.TimerUnit && time.Since(o.observed[r.SessionID]) < 45*time.Minute
+		if !direct && !detached && !timer {
 			continue
 		}
 		if result != nil {

@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 // #231 after review: two tabs never send the same waiting file twice, the waiting actions show once
 // (with Increase storage for an administrator), the Files tab offers Delete only where the person
 // may delete, and stale or discarded waiting files leave this device. Real Chromium: IndexedDB
@@ -67,7 +68,7 @@ describe('files waiting for space, after review', () => {
     expect(locks.mock.calls.some(([name]) => String(name).startsWith('blerg-attach:'))).toBe(true)
   })
 
-  for (const width of [390, 3840]) it(`shows the waiting actions once, tells the person to delete older attachments, and lets an admin increase storage at ${width}px`, async () => {
+  for (const width of browserWidths([390, 3840])) it(`shows the waiting actions once, tells the person to delete older attachments, and lets an admin increase storage at ${width}px`, async () => {
     await page.viewport(width, 1000)
     const {files, upload, increaseStorage} = fixture({canIncrease: true})
     const ui = render(<Composer files={files} label="admin" />)
@@ -94,11 +95,11 @@ describe('files waiting for space, after review', () => {
     const {files} = fixture()
     const ui = render(<Composer files={files} label="member" />)
     await userEvent.click(ui.getByRole('button', {name: 'Attach in member'}))
-    await waitFor(() => expect(ui.getByTestId('attach-space-panel')).toHaveTextContent('Ask an admin to increase this session’s storage.'))
+    await waitFor(() => expect(ui.getByTestId('attach-space-panel')).toHaveTextContent('Ask an admin to increase this workspace’s storage.'))
     expect(ui.queryByRole('button', {name: 'Increase storage'})).toBeNull()
   })
 
-  for (const width of [390, 3840]) it(`offers Delete in the Files tab only on files the person may delete at ${width}px`, async () => {
+  for (const width of browserWidths([390, 3840])) it(`offers Delete in the Files tab only on files the person may delete at ${width}px`, async () => {
     await page.viewport(width, 1000)
     const items: ArtifactInfo[] = [
       {id: 'mine', name: 'mine.txt', size: 4, content_type: 'text/plain', view: 'text', origin: 'user', created_at: '2026-10-03T00:00:00Z', can_delete: true},

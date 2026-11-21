@@ -52,8 +52,26 @@
 .icon-btn-count:has(.icon-btn-count-glyph) { display: inline-flex; align-items: center; gap: 2px; }
 .icon-btn-count-glyph { flex: none; }
 
-/* A row of them: the session header's controls. */
+/* A row of them: the session header's controls, grouped by what they do (card BLG-450): opens a
+   tab, non-destructive, destructive — spacing only, no boxes or dividers. */
 .icon-btn-group { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.session-header-group { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+/* The destructive group (Stop, End) sits after a visibly wider gap than the other groups'. */
+.session-header-group-destructive { margin-inline-start: 10px; }
+/* A short, muted divider between the groups (opens a tab · non-destructive · destructive), so the
+   grouping reads at a glance; it never draws before an empty group. */
+.session-header-group:not(:empty) + .session-header-group:not(:empty) { position: relative; padding-inline-start: 7px; }
+.session-header-group:not(:empty) + .session-header-group:not(:empty)::before {
+  content: '';
+  position: absolute;
+  inset-inline-start: 0;
+  top: 50%;
+  width: 1px;
+  height: 16px;
+  transform: translateY(-50%);
+  background: var(--stone);
+  opacity: .7;
+}
 
 .icon-menu { position: relative; flex-shrink: 0; }
 .icon-menu-list {
@@ -69,14 +87,19 @@
   border: 1px solid var(--stone);
   border-radius: 8px;
   background: var(--scree-2);
-  box-shadow: 0 8px 24px rgba(0,0,0,.35);
+  box-shadow: 0 8px 24px var(--shadow-3);
 }
 .icon-menu-list[hidden] { display: none; }
+.icon-menu-list-left { right: auto; left: 0; }
+/* One row style for every item in this menu (card BLG-450, review round 2): an icon, then the label
+   with its quiet secondary text underneath — a plain row, never a link (no underline, no link
+   color) whether it is a <button> (New shell, Insights, Open blackboard) or a real <a> that opens a
+   board in a new tab (SessionBoardMenuItem). */
 .icon-menu-item {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
   width: 100%;
   min-height: 36px;
   padding: 7px 10px;
@@ -87,12 +110,16 @@
   font: inherit;
   font-size: var(--text-sm);
   text-align: left;
+  text-decoration: none;
   cursor: pointer;
 }
-.icon-menu-item:hover, .icon-menu-item:focus-visible { background: var(--scree); outline: none; }
+.icon-menu-item:hover, .icon-menu-item:focus-visible { background: var(--scree); outline: none; color: var(--chalk); text-decoration: none; }
 .icon-menu-item:focus-visible { box-shadow: inset 0 0 0 2px var(--blaze); }
 .icon-menu-item:disabled { opacity: .5; cursor: default; }
 .icon-menu-item.danger .icon-menu-label { color: var(--danger); }
+.icon-menu-icon { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; color: inherit; }
+.icon-menu-text { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; flex: 1; min-width: 0; }
+.icon-menu-label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .icon-menu-hint { color: var(--fog-dim); font-size: var(--text-xs); white-space: normal; }
 
 @media (max-width: 768px) {

@@ -10,8 +10,8 @@ export function requestedBoardAccess(p: ProposalInfo): BoardLevel {
 
 /** What each level gives the session on the new board, said under the approval's choice. */
 export const BOARD_ACCESS_HINT: Record<BoardLevel, string> = {
-  propose: 'No access: the session proposes cards on it, each asking you.',
-  read: 'The session can list and read every card.',
-  file: 'The session can also file cards without asking.',
-  full: 'The session can also create, update, move and comment.',
+  propose: 'No access: the workspace proposes cards on it, each asking you.',
+  read: 'The workspace can list and read every card.',
+  file: 'The workspace can also file cards without asking.',
+  full: 'The workspace can also create, update, move and comment.',
 }

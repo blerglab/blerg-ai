@@ -169,7 +169,7 @@ func TestResumedRunOpenWorkAndEngineEnd(t *testing.T) {
 	}
 	d.noteSend("toolu_send2", json.RawMessage(`{"to":"a1b2c3d4e5f6a7b80","message":"also"}`))
 	d.sendResult("toolu_send2", `{"success":true,"message":"Message queued for delivery to a1b2c3d4e5f6a7b80 at its next tool round."}`, false)
-	d.endBackgroundTasks()
+	d.endBackgroundTasks(false)
 	if len(open) != 0 {
 		t.Fatalf("open work after the engine's end = %+v", open)
 	}
@@ -354,7 +354,7 @@ func TestResumedBackgroundRunIsABackgroundTask(t *testing.T) {
 	d := newClaudeCodeDriver(t.TempDir(), "claude-opus-5", "", em, nil)
 	d.now = func() time.Time { return time.Unix(1_800_000_000, 0) }
 	d.steer.legacy = false
-	p := &ccProc{}
+	p := claudeTestProc(t, d, &ccProc{})
 	d.steer.proc = p
 	var openTasks []agent.BackgroundTaskStartedPayload
 	d.onOpenWork = func(tasks []agent.BackgroundTaskStartedPayload, _ []OpenSubagent) { openTasks = tasks }
@@ -438,5 +438,42 @@ func TestResumedBackgroundRunCountsWithTheOthers(t *testing.T) {
 	defer d.subMu.Unlock()
 	if d.subagents["toolu_s"] != nil || d.bgTasks["toolu_s"] != nil {
 		t.Fatal("the run's notice left it open")
+	}
+}
+
+// BLG-447: a resumed run of a subagent whose ORIGINAL launch was in the foreground (not
+// run_in_background) is counted by backgroundRunningLocked (the "a resumed run of a foreground
+// one is counted here" branch) but, unlike a bash/monitor task or a resumed run of an originally
+// background subagent, trackResumedRunLocked refuses to track it as a background task (it only
+// tracks when resumedBg is true): there is no bgTasks entry for closeBackgroundTask's own wake-up
+// to find. That left closeBackgroundSubagent as the only place that could ever notice this run was
+// the last thing keeping the session open, and it only rearmed the ordinary idle timer
+// (backgroundIdleLocked), never armWakeFallback — so a worker that resumed a finished subagent
+// with SendMessage, let the call return detached, and ended its turn to wait for the result,
+// could sit idle forever once Claude Code itself did not resume the process on its own.
+func TestResumedForegroundSubagentEndWakesAnIdleSession(t *testing.T) {
+	shrink(t, &ccIdleShutdown, 10*time.Minute) // only the wake-up should start a new turn, not the idle timer
+	d, em, _ := newSteeringDriver(t)
+	d.Enqueue("one", "chat")
+	waitIdle(t, em, 1)
+
+	d.startSubagent("toolu_fg", json.RawMessage(`{"description":"Implement the data tasks"}`))
+	d.endSubagent("toolu_fg", "All five tasks are in.\nagentId: a1b2c3d4e5 (resume it with SendMessage)", false)
+	d.noteSend("toolu_send1", json.RawMessage(`{"to":"a1b2c3d4e5"}`))
+	d.sendResult("toolu_send1", `{"success":true,"message":"Resuming agent a1b2c3d4e5","resumedAgentId":"a1b2c3d4e5"}`, false)
+	if n := d.backgroundRunning(); n != 1 {
+		t.Fatalf("running after the detached resume = %d, want 1", n)
+	}
+	d.subMu.Lock()
+	_, tracked := d.bgTasks["toolu_send1"]
+	d.subMu.Unlock()
+	if tracked {
+		t.Fatal("a resumed run of a foreground original is not a bgTasks entry (by design); fix the test, not the driver")
+	}
+
+	d.closeNotified(noticeFromBlock("<task-id>a1b2c3d4e5</task-id><status>completed</status>"))
+	waitIdle(t, em, 2)
+	if n := em.count("turn_done"); n != 2 {
+		t.Fatalf("woken %d times for one finished resumed run, want exactly once", n-1)
 	}
 }

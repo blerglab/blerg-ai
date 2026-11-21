@@ -21,7 +21,6 @@ package server
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,17 +42,17 @@ import (
 
 // Messages a refused permission answers with.
 const (
-	msgPermNotActive   = "This session is not active, so it cannot be given permissions."
-	msgPermCron        = "A cron session's proposals always wait for you; session permissions are not available for crons."
-	msgPermRestricted  = "A restricted session's proposals always wait for you; session permissions are not available for it."
-	msgPermBoardRun    = "A board session's proposals always wait for you; session permissions are not available for it."
-	msgPermStarter     = "Only sessions you started, and the sessions they start, can have session permissions."
-	msgPermKind        = "Only agent sessions can have session permissions."
-	msgPermSignIn      = "Session permissions need your current sign-in: sign in again and retry."
-	msgPermPlugin      = "A plugin request is always decided by you; it cannot be allowed for the session."
-	msgPermBoardCreate = "A proposed board is always decided by you; it cannot be allowed for the session."
-	msgPermMCPTool     = "That tool is not one this session must ask about (it is not in approval mode for this session)."
-	msgPermBuiltin     = "Built-in connections cannot be allowed for the session."
+	msgPermNotActive   = "Permissions are only available while the channel or worker is active."
+	msgPermCron        = "A scheduled run's proposals always wait for you; permissions are not available for runs."
+	msgPermRestricted  = "Restricted channels and workers always wait for you to approve proposals; permissions are not available for them."
+	msgPermBoardRun    = "A board run's proposals always wait for you; permissions are not available for it."
+	msgPermStarter     = "Only channels you started, and their workers, can have permissions."
+	msgPermKind        = "Only agent channels and workers can have permissions."
+	msgPermSignIn      = "Permissions need your current sign-in: sign in again and retry."
+	msgPermPlugin      = "A plugin request is always decided by you; it cannot be allowed in advance."
+	msgPermBoardCreate = "A proposed board is always decided by you; it cannot be allowed in advance."
+	msgPermMCPTool     = "That tool is not in approval mode for this channel or worker."
+	msgPermBuiltin     = "Built-in connections cannot be allowed in advance."
 )
 
 // proposalGrantProblem is why the session cannot hold a proposal permission, or "". It does not
@@ -163,25 +162,40 @@ func (a *API) pinnedToolHashes(ctx context.Context, sessionID string) (map[strin
 	return out, err
 }
 
-// signInAlive reports whether a grant's sign-in can still act: core answers a refused proof for a
-// login session that ended. Unknown (core unreachable or not configured) counts as alive: the
-// approval itself still checks it. seen caches answers for one request.
-func (a *API) signInAlive(ctx context.Context, seen map[string]bool, account, sid, cacheScope string) bool {
-	if v, ok := seen[sid]; ok {
+// Read standing authority afresh on each request. A presentation cache cannot
+// extend authority, hide restoration or turn a transport outage into revocation.
+func (a *API) permissionAuthority(ctx context.Context, seen map[string]string, account, sid string) string {
+	if account == "" || sid == "" {
+		return "revoked"
+	}
+	key := account + "\x00" + sid
+	if v, ok := seen[key]; ok {
 		return v
 	}
-	alive := a.permissionSignIns.load(ctx, cacheScope+"\x00"+account+"\x00"+sid, func(ctx context.Context) (bool, bool) {
-		if cfg := a.hub.mcpStart.get(); cfg != nil && cfg.Core != nil {
-			_, err := cfg.Core.ListConnections(ctx, mcpgw.Proof{AccountID: account, SessionID: sid})
-			if errors.Is(err, ErrMCPProofInvalid) {
-				return false, true
+	state := "unavailable"
+	if cfg := a.hub.mcpStart.get(); cfg != nil && cfg.Core != nil {
+		if c, ok := cfg.Core.(*HTTPMCPCoreClient); ok {
+			err := verifyCorePrincipal(ctx, c.httpClient(), c.BaseURL, c.InternalKey, account, coreProof{SessionID: sid, standing: true})
+			switch {
+			case err == nil:
+				state = "active"
+			case errors.Is(err, errStandingSuspended):
+				state = "suspended"
+			case errors.Is(err, errStandingRevoked):
+				state = "revoked"
 			}
-			return true, err == nil
+		} else {
+			// Injected Core providers retain the same fail-closed presentation contract.
+			_, err := cfg.Core.ListConnections(ctx, mcpgw.Proof{AccountID: account, SessionID: sid})
+			if err == nil {
+				state = "active"
+			} else if errors.Is(err, ErrMCPProofInvalid) {
+				state = "suspended"
+			}
 		}
-		return true, false
-	})
-	seen[sid] = alive
-	return alive
+	}
+	seen[key] = state
+	return state
 }
 
 // mcpToolOption is a propose-mode tool of the session: one the panel can allow.
@@ -222,6 +236,7 @@ func (a *API) proposeTools(ctx context.Context, sessionID string) ([]mcpToolOpti
 // permissions, whether the session can hold them, and the MCP tools it could allow. Boards come
 // from GET /api/session-boards. Child approvals stay on .../child-approval.
 func (a *API) HandleGetSessionPermissions(w http.ResponseWriter, r *http.Request) {
+	askedAt := time.Now()
 	who, ok := a.permissionOwner(w, r)
 	if !ok {
 		return
@@ -240,20 +255,39 @@ func (a *API) HandleGetSessionPermissions(w http.ResponseWriter, r *http.Request
 		writeDatabaseFailure(w, "read the session permissions", "list propose tools", err)
 		return
 	}
-	// The database snapshot is part of the cache key: changes invalidate across
-	// replicas without sharing a process-local invalidation signal.
-	rawGrants, _ := json.Marshal(grants)
-	cacheScope := row.ID + fmt.Sprintf("%x", sha256.Sum256(rawGrants))
+	mcpGrants, err := db.ListMCPGrantsForSession(r.Context(), a.dbPool, row.ID)
+	if err != nil {
+		writeDatabaseFailure(w, "read the session permissions", "read MCP bindings", err)
+		return
+	}
+	scoped := map[string]*db.MCPSessionScope{}
+	for _, grant := range mcpGrants {
+		if grant.SessionScope != nil {
+			scoped[grant.ConnectionID] = grant.SessionScope
+		}
+	}
 	views := make([]proposalGrantView, 0, len(grants))
 	pinned, _ := a.pinnedToolHashes(r.Context(), row.ID)
-	alive := map[string]bool{who.Sid: true}
+	alive := map[string]string{}
 	for i := range grants {
 		v := viewOfProposalGrant(&grants[i])
 		switch {
 		case grants[i].Kind == db.ProposalGrantMCP && pinned[grants[i].ConnectionID+"\x00"+grants[i].Tool] != grants[i].ToolHash:
 			v.Active, v.Inactive = false, "tool_changed"
-		case !a.signInAlive(r.Context(), alive, who.Account, grants[i].ProofSessionID, cacheScope):
-			v.Active, v.Inactive = false, "signed_out"
+		case grants[i].Kind == db.ProposalGrantMCP && scoped[grants[i].ConnectionID] != nil:
+			state := a.permissionScopedMCPAuthority(r.Context(), who.Account, scoped[grants[i].ConnectionID])
+			if state != "active" {
+				v.Active, v.Inactive = false, state
+			}
+		default:
+			kind, resource := "board", grants[i].BoardID
+			if grants[i].Kind == db.ProposalGrantMCP {
+				kind, resource = "mcp", grants[i].ConnectionID
+			}
+			state := a.permissionResourceAuthority(r.Context(), alive, who.Account, grants[i].ProofSessionID, kind, resource)
+			if state != "active" {
+				v.Active, v.Inactive = false, state
+			}
 		}
 		views = append(views, v)
 	}
@@ -266,18 +300,80 @@ func (a *API) HandleGetSessionPermissions(w http.ResponseWriter, r *http.Request
 		if boards[i].child {
 			// A started session's board acts with its parent's sign-in for it: that is the one
 			// that has to be alive (the child's own row has none of its own).
-			if p := boards[i].capProof; boards[i].Level != db.BoardLevelPropose && p.SessionID != "" && !a.signInAlive(r.Context(), alive, p.AccountID, p.SessionID, cacheScope) {
-				boards[i].Active, boards[i].Inactive = false, "signed_out"
+			if p := boards[i].capProof; boards[i].Level != db.BoardLevelPropose && p.SessionID != "" {
+				state := a.permissionResourceAuthority(r.Context(), alive, p.AccountID, p.SessionID, "board", boards[i].BoardID)
+				if state != "active" {
+					boards[i].Active, boards[i].Inactive = false, state
+				}
 			}
 			continue
 		}
 		// An untouched launch board acts with the launch's own sign-in.
-		if p := boards[i].launchProof; boards[i].GrantID == "" && p.SessionID != "" && !a.signInAlive(r.Context(), alive, p.AccountID, p.SessionID, cacheScope) {
-			boards[i].Active, boards[i].Inactive = false, "signed_out"
+		if p := boards[i].launchProof; boards[i].GrantID == "" && p.SessionID != "" {
+			state := a.permissionResourceAuthority(r.Context(), alive, p.AccountID, p.SessionID, "board", boards[i].BoardID)
+			if state != "active" {
+				boards[i].Active, boards[i].Inactive = false, state
+			}
 		}
 		for _, v := range views {
 			if v.ID == boards[i].GrantID && v.Kind == db.ProposalGrantBoard && !v.Active {
 				boards[i].Active, boards[i].Inactive = false, v.Inactive
+			}
+		}
+	}
+	// The same safe state journal serves execution checks and this panel read.
+	for _, b := range boards {
+		state := "active"
+		if !b.Active {
+			state = b.Inactive
+		}
+		if state == "" {
+			state = "active"
+		}
+		cause := ""
+		if state == "board_owner_missing" {
+			cause = state
+			state = "unavailable"
+		}
+		if state != "active" && state != "suspended" && state != "revoked" && state != "unavailable" {
+			state = "revoked"
+		}
+		proof := b.launchProof
+		if b.child {
+			proof = b.capProof
+		}
+		for _, grant := range grants {
+			if grant.ID == b.GrantID {
+				proof = mcpgw.Proof{AccountID: grant.AccountID, SessionID: grant.ProofSessionID}
+				break
+			}
+		}
+		if err := db.RecordGrantAuthority(r.Context(), a.dbPool, row.ID, "board:"+b.BoardID, "Ticket board", state, db.GrantAuthorityObservation{AskedAt: askedAt, Cause: cause, AccountID: proof.AccountID, ProofKind: proof.Kind(), ProofValue: proof.Value()}); err != nil {
+			writeDatabaseFailure(w, "record permission state", "grant authority", err)
+			return
+		}
+	}
+	for _, v := range views {
+		if v.Kind == db.ProposalGrantMCP && scoped[v.ConnectionID] == nil {
+			state := "active"
+			if !v.Active {
+				state = v.Inactive
+			}
+			if state == "tool_changed" {
+				state = "revoked"
+			}
+			observation := db.GrantAuthorityObservation{AskedAt: askedAt}
+			for _, grant := range grants {
+				if grant.ID == v.ID {
+					observation.AccountID = grant.AccountID
+					observation.ProofKind = "session_id"
+					observation.ProofValue = grant.ProofSessionID
+					break
+				}
+			}
+			if err := db.RecordGrantAuthority(r.Context(), a.dbPool, row.ID, "mcp-tool:"+v.ID, "MCP tool", state, observation); err != nil {
+				writeDatabaseFailure(w, "record permission state", "grant authority", err)
+				return
 			}
 		}
 	}
@@ -456,6 +552,9 @@ func (a *API) grantFromProposal(ctx context.Context, who grantRequester, p *db.P
 	if db.IsSessionPluginProposal(p) {
 		return nil, apiErrorf(http.StatusUnprocessableEntity, "%s", msgPermPlugin)
 	}
+	if db.IsBoardMetadataProposal(p) {
+		return nil, apiErrorf(422, "Board metadata changes always need your approval.")
+	}
 	if db.IsBoardCreateProposal(p) {
 		return nil, apiErrorf(http.StatusUnprocessableEntity, "%s", msgPermBoardCreate)
 	}
@@ -481,7 +580,7 @@ func (a *API) grantFromProposal(ctx context.Context, who grantRequester, p *db.P
 // an MCP call, the tool's pinned definition (hash) it was made with.
 func proposalGrantScope(p *db.Proposal) (kind, board, connection, tool, hash string, ok bool) {
 	switch {
-	case db.IsSessionPluginProposal(p), db.IsBoardCreateProposal(p):
+	case db.IsSessionPluginProposal(p), db.IsBoardCreateProposal(p), db.IsBoardMetadataProposal(p):
 		return "", "", "", "", "", false
 	case db.IsBoardFilingProposal(p):
 		var args filingArguments
@@ -585,6 +684,9 @@ func (a *API) settleNewProposal(ctx context.Context, p *db.Proposal) (*db.Propos
 func proposalEventKind(p *db.Proposal) string {
 	if db.IsBoardFilingProposal(p) {
 		return "board_file"
+	}
+	if db.IsBoardMetadataProposal(p) {
+		return "board_metadata"
 	}
 	if db.IsBoardCreateProposal(p) {
 		return "board_create"

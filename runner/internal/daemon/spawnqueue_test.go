@@ -105,9 +105,7 @@ func TestKillCancelsAQueuedSpawn(t *testing.T) {
 
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		mgr.mu.Lock()
-		_, live := mgr.sessions["s-killed"]
-		mgr.mu.Unlock()
+		live := mgr.agents != nil && mgr.agents.Has("s-killed")
 		if live {
 			t.Fatal("a spawn that was killed while cloning still created a session")
 		}

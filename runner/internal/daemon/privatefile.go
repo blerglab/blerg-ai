@@ -17,7 +17,7 @@ func writePrivateOnHost(dirPrefix, name string, body []byte) (dir, path string, 
 		return "", "", fmt.Errorf("could not create a private directory: %w", err)
 	}
 	path = filepath.Join(dir, name)
-	if err := os.WriteFile(path, body, 0o600); err != nil { //nolint:gosec // G703: a fixed name in the fresh, private MkdirTemp directory above.
+	if err := os.WriteFile(path, body, 0o600); err != nil {
 		_ = os.RemoveAll(dir)
 		return "", "", fmt.Errorf("could not write a private file: %w", err)
 	}

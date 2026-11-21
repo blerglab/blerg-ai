@@ -52,7 +52,7 @@ function fakeSocket(opts: { open?: boolean } = {}) {
 }
 
 // The members every subscriber gives (onEvents, onReset and onAskClosed are optional).
-type MockHandlers = { [K in keyof Omit<SubscribeHandlers, 'onEvents' | 'onReset' | 'onAskClosed'>]: Mock<SubscribeHandlers[K]> }
+type MockHandlers = { [K in keyof Omit<SubscribeHandlers, 'onEvents' | 'onReset' | 'onAskClosed' | 'onArtifactUpdated' | 'onArtifactsStale'>]: Mock<SubscribeHandlers[K]> }
 function handlers(): MockHandlers {
   return {
     onEvent: vi.fn<SubscribeHandlers['onEvent']>(),
@@ -97,6 +97,22 @@ void _socketTypeCheck
 // ─── subscribe ───────────────────────────────────────────────────────────────
 
 describe('createBlergTransport subscribe', () => {
+  it('fetches the missing tail before older history on a cached workspace return', () => {
+    useTranscriptStore.setState({ sessions: {} })
+    const { t, socket } = make()
+    useTranscriptStore.getState().ingestMany('s1', [ev(800), ev(801)])
+    useTranscriptStore.getState().ingestReplayDone('s1', { lastSeq: 801, hasMore: false, older: true, hasOlder: true, firstSeq: 800 })
+    const view = renderHook(() => useSession(t, 's1', { meta: { status: 'idle', started_at: '2026-10-13T00:00:00Z' } }))
+    const requests = socket.sent.filter(m => (m as { type: string }).type === 'subscribe_agent_events')
+    expect(requests).toEqual([{ type: 'subscribe_agent_events', session_id: 's1', after_seq: 801 }])
+    act(() => { socket.emit(ev(802)); socket.emit(done(802, false)) })
+    expect(view.result.current.events.at(-1)?.seq).toBe(802)
+    act(() => { void view.result.current.loadOlder() })
+    expect(socket.sent.at(-1)).toEqual({ type: 'subscribe_agent_events', session_id: 's1', before_seq: 800, limit: 200 })
+    act(() => socket.drop())
+    view.unmount()
+  })
+
   it('asks for the newest page first when tail is set, exactly as the runner does', () => {
     const { t, socket } = make()
     const h = handlers()
@@ -651,6 +667,16 @@ describe('createBlergTransport messages', () => {
     expect(socket.sent).toEqual([{ type: 'agent_user_message', session_id: 's1', text: 'yes', client_id: 'q-2', answer_message_id: 'm1' }])
   })
 
+  it('preserves withdrawal on live updates and reconnect', () => {
+    const { t, socket } = make()
+    const onAskClosed = vi.fn()
+    t.subscribe('s1', {}, { ...handlers(), onAskClosed })
+    const message = { id: 'm1', session_id: 's1', kind: 'ask', status: 'withdrawn', answer: null }
+    socket.emit({ type: 'message_answered', message })
+    socket.emit({ type: 'initial_state', daemons: [], sessions: [], messages: [message] })
+    expect(onAskClosed.mock.calls).toEqual([['m1', '', false, undefined, true], ['m1', '', false, undefined, true]])
+  })
+
   it('reports the asks of its session the server closed: live, and those closed while away', () => {
     const { t, socket } = make()
     const onAskClosed = vi.fn()
@@ -692,6 +718,23 @@ describe('createBlergTransport messages', () => {
     expect(socket.sent).toEqual([{ type: 'interrupt_session', session_id: 's1' }])
     socket.drop()
     await expect(t.interrupt!('s1')).rejects.toThrow(/not connected/i)
+  })
+
+  it('interrupt carries the turn event the person pressed Stop on', async () => {
+    const { t, socket } = make()
+    await t.interrupt!('s1', 'turn-event')
+    expect(socket.sent).toEqual([{ type: 'interrupt_session', session_id: 's1', target_event_id: 'turn-event' }])
+  })
+
+  it('claims a refused input through the authenticated return route', async () => {
+    const { t, fetch } = make()
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify({text:'canonical draft'})))
+    await expect(t.claimRecoveryInput!('s 1', 'client/1')).resolves.toBe('canonical draft')
+    expect(fetch).toHaveBeenCalledWith('/api/sessions/s%201/inputs/client%2F1/return', expect.objectContaining({method:'POST',headers:{Authorization:'Bearer tok'}}))
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify({text:null})))
+    await expect(t.claimRecoveryInput!('s 1','client/1')).resolves.toBeNull()
+    fetch.mockResolvedValueOnce(new Response('{}',{status:503}))
+    await expect(t.claimRecoveryInput!('s1','client')).rejects.toThrow('HTTP 503')
   })
 
   it('stop ends the session through the browser route with the bearer token', async () => {

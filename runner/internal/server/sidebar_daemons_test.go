@@ -17,8 +17,10 @@ func sidebarHubFixture(t *testing.T) (*Hub, *DaemonConn, *DaemonConn, *BrowserCo
 	hub := NewHub()
 	ws := &DaemonConn{ID: "00000000-0000-4000-8000-0000000000b1", Name: "desk", Mode: "local", ReposRoot: "/r", send: make(chan []byte, 4)}
 	ws.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	ws.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	pod := &DaemonConn{ID: "runner-abc", Name: "runner-abc", Mode: "runner", send: make(chan []byte, 4)}
 	pod.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	pod.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	pool := connectSrvTestDB(t)
 	NewAPI(hub, pool, "", nil, "")
 	fixtureOwnDesktop(t, pool, ws, "user-1")

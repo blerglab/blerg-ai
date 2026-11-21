@@ -14,3 +14,15 @@ func TestSelectedBoardSurvivesPodSpawn(t *testing.T) {
 		t.Fatal("pod spawn lost selected board, gateway, or normal coding tools")
 	}
 }
+
+func TestPodSpawnCarriesSessionMessagingToken(t *testing.T) {
+	t.Setenv("BLERG_RUNNER_SESSION_TOKEN", "fixture-session-token")
+	t.Setenv("BLERG_RUNNER_DAEMON_TOKEN", "fixture-runtime-token")
+	spawn := podSpawn(ConfigFromEnv(), "/workspace/app")
+	if spawn.SessionToken != "fixture-session-token" {
+		t.Fatal("pod spawn dropped session messaging token")
+	}
+	if spawn.SessionToken == "fixture-runtime-token" {
+		t.Fatal("runtime credential reached agent")
+	}
+}

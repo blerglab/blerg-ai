@@ -93,6 +93,12 @@ func DesktopRemovedBy(ctx context.Context, pool *pgxpool.Pool, id, actor string,
 // AssignDesktopAudited is AssignDesktop with its audit record in the same transaction: a desktop
 // added with an enrollment code is either owned and audited, or neither.
 func AssignDesktopAudited(ctx context.Context, pool *pgxpool.Pool, id, owner string, revision int64, action string) (*DesktopRow, error) {
+	return AssignDesktopAuditedBy(ctx, pool, id, owner, owner, revision, action)
+}
+
+// AssignDesktopAuditedBy records the administrator who changed ownership, independently of
+// the new owner. Enrollment's existing wrapper above records the enrolling person themselves.
+func AssignDesktopAuditedBy(ctx context.Context, pool *pgxpool.Pool, id, owner, actor string, revision int64, action string) (*DesktopRow, error) {
 	if owner == "" {
 		return nil, ErrDesktopAuthority
 	}
@@ -107,11 +113,35 @@ func AssignDesktopAudited(ctx context.Context, pool *pgxpool.Pool, id, owner str
 	if err != nil {
 		return nil, ErrDesktopAuthority
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO desktop_enrollment_audit(desktop_id,actor_id,action,ownership_revision) VALUES($1,$2,$3,$4)`, id, owner, action, next); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO desktop_enrollment_audit(desktop_id,actor_id,action,ownership_revision) VALUES($1,$2,$3,$4)`, id, actor, action, next); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return GetDesktop(ctx, pool, id)
+}
+
+// DisableDesktopOwner invalidates standing desktop authority while retaining ownership so an
+// administrator can recover and reassign it. Caller holds WithDesktopFence and closes the live
+// connection. The revision and audit commit atomically; retry detection belongs to the caller.
+func DisableDesktopOwner(ctx context.Context, pool *pgxpool.Pool, id, owner, actor string, revision int64) (int64, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var next int64
+	err = tx.QueryRow(ctx, `UPDATE daemons SET ownership_revision=GREATEST(ownership_revision,enrollment_revision)+1,connection_generation=NULL,status='disconnected',status_reason='Owner disabled by an administrator.',desktop_compatibility=false,enrollment_owner_id=NULL,enrollment_token_id=NULL,enrollment_request_id=NULL,enrollment_generation=NULL
+ WHERE id=$1 AND desktop_owner_id=$2 AND ownership_revision=$3 AND mode<>'runner' RETURNING ownership_revision`, id, owner, revision).Scan(&next)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM desktop_compatibility_accounts WHERE desktop_id=$1`, id); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO desktop_enrollment_audit(desktop_id,actor_id,action,ownership_revision) VALUES($1,$2,'owner_disabled',$3)`, id, actor, next); err != nil {
+		return 0, err
+	}
+	return next, tx.Commit(ctx)
 }

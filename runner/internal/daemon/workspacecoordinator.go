@@ -40,6 +40,10 @@ type workspaceSupervisors struct {
 	sessions map[string]*workspaceCoordinator
 }
 
+func (s *workspaceSupervisors) PrivilegedShellOpen(session string) (bool, bool) {
+	return s.service.PrivilegedShellOpen(session)
+}
+
 func newWorkspaceSupervisors(s *shellruntime.Service) *workspaceSupervisors {
 	return &workspaceSupervisors{service: s, sessions: map[string]*workspaceCoordinator{}}
 }
@@ -119,11 +123,22 @@ func (c *workspaceCoordinator) peer(l protocol.SupervisorLaunch) (protocol.Runti
 	if l != c.launch || c.retired || c.fencedRuntime {
 		return nil, protocol.SupervisorLaunch{}, errors.New("workspace shell incarnation fenced")
 	}
-	b, err := c.service.Binding(l.SessionID)
+	var b ownershell.Binding
+	var err error
+	if c.host {
+		b, err = c.service.WorkspaceBinding(l.SessionID)
+	} else {
+		b, err = c.service.Binding(l.SessionID)
+	}
 	if err != nil || b.Session != l.SessionID || b.Launch != l.LaunchGeneration || b.RuntimeGeneration != l.RuntimeGeneration || b.Runtime != l.Runtime || b.Root != c.binding.Root || b.ManifestDigest != c.binding.ManifestDigest {
 		return nil, protocol.SupervisorLaunch{}, errors.New("workspace shell binding changed")
 	}
-	p := c.service.Lifecycle(l.SessionID)
+	var p protocol.RuntimeSupervisor
+	if c.host {
+		p = c.service.WorkspaceLifecycle(l.SessionID)
+	} else {
+		p = c.service.Lifecycle(l.SessionID)
+	}
 	if p == nil {
 		return nil, protocol.SupervisorLaunch{}, errors.New("workspace shell lifecycle is not registered")
 	}
@@ -343,6 +358,7 @@ for name in os.listdir('/proc'):
   if os.stat('/proc/'+name).st_uid!=os.geteuid(): continue
   p=os.stat('/proc/'+name+'/exe')
  except FileNotFoundError: continue
+ except PermissionError: sys.exit(1)
  if (p.st_dev,p.st_ino)==(helper.st_dev,helper.st_ino): sys.exit(1)
 print('empty')
 `
@@ -422,6 +438,12 @@ func (c *workspaceCoordinator) rebindStopping(ctx context.Context, l protocol.Su
 	old.ConnectionID = l.ConnectionID
 	if old != l || l.Validate() != nil {
 		return errors.New("workspace stop rebind incarnation changed")
+	}
+	if c.host {
+		// Preserve the local terminal fence. Live recovery is deliberately
+		// forbidden once Stop has begun; keeper retirement retries separately.
+		c.launch = l
+		return nil
 	}
 	absent, err := c.docker.Absent(ctx)
 	if err != nil {

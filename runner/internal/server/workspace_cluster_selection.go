@@ -23,15 +23,20 @@ type WorkspaceClusterConsumer interface {
 	Start(context.Context, protocol.WorkspaceManifest, WorkspaceLaunchRequest) (string, error)
 }
 type WorkspaceLaunchRequest struct {
-	Title, Prompt, Engine, Model, Effort, Interaction string
-	selectionStartedAt                                time.Time
-	principal                                         identity.Principal // verified requester; never decoded from the launch body
+	RuntimeTargetID                                              string
+	Title, Prompt, Engine, Model, Effort, Interaction, Verbosity string
+	selectionStartedAt                                           time.Time
+	principal                                                    identity.Principal // verified requester; never decoded from the launch body
 }
 
 func (a *API) SetWorkspaceClusterConsumer(c WorkspaceClusterConsumer) { a.workspaceCluster = c }
 
 func (a *API) authorizedHostedSelection(ctx context.Context, p identity.Principal, selection protocol.WorkspaceSelectionRequest) (protocol.WorkspaceManifest, error) {
-	m := protocol.WorkspaceManifest{Version: 2, Kind: "repo", Layout: protocol.WorkspaceLayoutNames, OwnerID: p.Sub, Runtime: "cluster", LaunchGeneration: newUUID(), Members: []protocol.WorkspaceMember{}}
+	return a.authorizedHostedSelectionWithProof(ctx, p.Sub, proofFromPrincipal(p), selection)
+}
+
+func (a *API) authorizedHostedSelectionWithProof(ctx context.Context, owner string, proof coreProof, selection protocol.WorkspaceSelectionRequest) (protocol.WorkspaceManifest, error) {
+	m := protocol.WorkspaceManifest{Version: 2, Kind: "repo", Layout: protocol.WorkspaceLayoutNames, OwnerID: owner, Runtime: "cluster", LaunchGeneration: newUUID(), Members: []protocol.WorkspaceMember{}}
 	if !selection.Layout.Valid() || selection.Layout == protocol.WorkspaceLayoutStructure || selection.DaemonID != "" || selection.Folder != nil || len(selection.Members) != 0 || len(selection.Hosted) < 1 || len(selection.Hosted) > 20 {
 		return m, errDiscoveryUnavailable
 	}
@@ -41,7 +46,7 @@ func (a *API) authorizedHostedSelection(ctx context.Context, p identity.Principa
 		sources = append(sources, list)
 	}
 	if a.userRepos != nil {
-		list, _ := a.userRepos.List(withCoreProof(ctx, proofFromPrincipal(p)), p.Sub)
+		list, _ := a.userRepos.List(withCoreProof(ctx, proof), owner)
 		sources = append(sources, list)
 	}
 	allowed := map[string]RepoInfo{}
@@ -103,6 +108,11 @@ func (a *API) startSelectedCluster(w http.ResponseWriter, r *http.Request, p ide
 		writeAPIError(w, apiErr)
 		return
 	}
+	verbosity, verbosityErr := a.resolveVerbosity(r.Context(), req.Verbosity, p.Sub, false)
+	if verbosityErr != nil {
+		writeAPIError(w, verbosityErr)
+		return
+	}
 	m.Root, err = consumer.Prepare(r.Context(), m)
 	if err == nil {
 		m.Digest = workspaceselection.Digest(m)
@@ -112,7 +122,7 @@ func (a *API) startSelectedCluster(w http.ResponseWriter, r *http.Request, p ide
 		writeError(w, 409, "The cluster workspace could not be prepared.")
 		return
 	}
-	id, err := consumer.Start(r.Context(), m, WorkspaceLaunchRequest{principal: p, selectionStartedAt: selectionStartedAt, Title: cleanSessionTitle(req.Title), Prompt: workspacePrompt(req.InitialPrompt, &m), Engine: req.Engine, Model: req.Model, Effort: req.Effort, Interaction: interaction})
+	id, err := consumer.Start(r.Context(), m, WorkspaceLaunchRequest{RuntimeTargetID: req.RuntimeTargetID, principal: p, selectionStartedAt: selectionStartedAt, Title: cleanSessionTitle(req.Title), Prompt: req.InitialPrompt, Engine: req.Engine, Model: req.Model, Effort: req.Effort, Interaction: interaction, Verbosity: verbosity})
 	if err != nil || id == "" {
 		writeError(w, 409, "The cluster workspace could not be started.")
 		return

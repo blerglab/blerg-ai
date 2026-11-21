@@ -38,13 +38,10 @@ func recoveryHostAfter(t *testing.T, cause RestartCause) (host func() (*AgentHos
 	}
 	recDir = filepath.Join(t.TempDir(), "agents")
 	home := t.TempDir()
-	oldDelay := adoptContinueDelay
-	adoptContinueDelay = 10 * time.Millisecond
-	t.Cleanup(func() { adoptContinueDelay = oldDelay })
 	host = func() (*AgentHost, *agentTestSender) {
 		sender := &agentTestSender{}
 		h := NewAgentHost(sender, AgentHostConfig{ReposRoot: reposRoot, HomeDir: home, ClaudeCode: true, RecordsDir: recDir,
-			RestartCause: cause})
+			RestartCause: cause, AdoptContinueDelay: 10 * time.Millisecond})
 		// Nothing may still be writing a record when the test's directories are removed.
 		t.Cleanup(func() {
 			h.Freeze()
@@ -817,4 +814,69 @@ func TestAdoptPauseDetailIsPunctuated(t *testing.T) {
 	if len(notices) != 1 || notices[0] != want {
 		t.Fatalf("notice %q, want %q", notices, want)
 	}
+}
+
+func TestIdleStopReportsNothingToStopWithoutEndingAnotherTurn(t *testing.T) {
+	newHost, _, _, _ := recoveryHost(t)
+	host, sender := newHost()
+	host.Spawn(protocol.SpawnSession{SessionID: "idle-stop", Repo: "proj", Kind: "agent", InitialPrompt: "start"})
+	sender.waitForKind(t, "turn_done")
+	waitUntil(t, "idle worker", func() bool {
+		for _, ev := range sender.agentEvents() {
+			var p agent.StatusPayload
+			if ev.Kind == "status_changed" && json.Unmarshal(ev.Payload, &p) == nil && p.Status == "idle" {
+				return true
+			}
+		}
+		return false
+	})
+	before := len(sender.agentEvents())
+	host.Interrupt("idle-stop")
+	events := sender.agentEvents()[before:]
+	if len(events) != 1 || events[0].Kind != "stop_result" || !strings.Contains(string(events[0].Payload), "There is no active turn to stop") {
+		t.Fatalf("idle Stop did not report a no-op: %+v", events)
+	}
+	if host.get("idle-stop").record.rec.StopRequested {
+		t.Fatal("idle Stop retained cancellation for a future turn")
+	}
+	if host.get("idle-stop").status.Load() != "idle" {
+		t.Fatal("idle Stop changed the worker lifecycle")
+	}
+}
+
+func TestHermesClearsStopAfterNewInputWithoutNativeTurnID(t *testing.T) {
+	newHost, records, _, _ := recoveryHost(t)
+	fakeHermesGateway(t)
+	t.Setenv("FAKE_HERMES_HOLD", "1")
+	host, sender := newHost()
+	host.Spawn(protocol.SpawnSession{SessionID: "clear-stop", Repo: "proj", Kind: "agent", Engine: "hermes", InitialPrompt: "first"})
+	sender.waitForKind(t, "user_message")
+	host.Interrupt("clear-stop")
+	waitRecord(t, records, "clear-stop", "Stop settled", func(r AgentRecord) bool { return r.StopRequested && !r.TurnActive })
+	host.UserInput("clear-stop", agent.Input{Text: "next", Source: "chat", ClientID: "next-id"})
+	waitRecord(t, records, "clear-stop", "new input clears Stop", func(r AgentRecord) bool { return !r.StopRequested && r.TurnActive })
+}
+
+func TestOpenclawStopDoesNotCreateRecoveryIntent(t *testing.T) {
+	newHost, _, _, _ := recoveryHost(t)
+	bin := fakeOpenclaw(t, `{"ok":true,"final":"done"}`, 0)
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	t.Setenv("FAKE_OPENCLAW_LOG", filepath.Join(t.TempDir(), "calls"))
+	host, sender := newHost()
+	host.Spawn(protocol.SpawnSession{SessionID: "stateless", Repo: "proj", Kind: "agent", Engine: "openclaw", InitialPrompt: "first"})
+	sender.waitForKind(t, "turn_done")
+	if host.get("stateless").record != nil {
+		t.Fatal("stateless OpenClaw unexpectedly retains Stop intent")
+	}
+	host.Interrupt("stateless")
+	host.UserInput("stateless", agent.Input{Text: "next", ClientID: "next-id"})
+	waitUntil(t, "next OpenClaw turn", func() bool {
+		n := 0
+		for _, e := range sender.agentEvents() {
+			if e.Kind == "turn_done" {
+				n++
+			}
+		}
+		return n == 2
+	})
 }

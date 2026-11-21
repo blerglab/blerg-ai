@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
 
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"github.com/blerglab/blerg-ai/contracts/netguard"
+	"github.com/blerglab/blerg-ai/runner/internal/db"
 	"github.com/blerglab/blerg-ai/runner/internal/mcpgw"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -47,8 +50,13 @@ func startMCPGateway(ctx context.Context, env func(string) string, pool *pgxpool
 		return nil
 	}
 	cfg := mcpgw.Config{
+		ObserveAuthority: func(ctx context.Context, o mcpgw.AuthorityObservation) {
+			if err := db.RecordGrantAuthority(ctx, pool, o.SessionID, o.GrantKey, o.Kind, o.State, db.GrantAuthorityObservation{AskedAt: o.AskedAt, Cause: o.Cause, AccountID: o.Proof.AccountID, ProofKind: o.Proof.Kind(), ProofValue: o.Proof.Value()}); err != nil {
+				failurelog.Default.Event("runner:grant_authority_observation", slog.LevelWarn, "component", "runner", "operation", "permission_observation", "cause", failurelog.Cause(err))
+			}
+		},
 		DB:   pool,
-		Core: &mcpgw.HTTPCoreClient{BaseURL: coreURL, InternalKey: coreInternalKey},
+		Core: &mcpgw.HTTPCoreClient{BaseURL: coreURL, InternalKey: coreInternalKey, ClusterDeployment: env("BLERG_MCP_CLUSTER_DEPLOYMENT") == "true"},
 		Policy: netguard.Policy{
 			AllowHTTPHosts:    netguard.ParseHostList(env("BLERG_RUNNER_MCP_ALLOW_HTTP_HOSTS")),
 			AllowPrivateHosts: netguard.ParseHostList(env("BLERG_RUNNER_MCP_ALLOW_PRIVATE_HOSTS")),

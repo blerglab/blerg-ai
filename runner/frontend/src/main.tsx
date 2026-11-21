@@ -4,6 +4,7 @@ import './index.css'
 import App from './App.tsx'
 import { consumeAccessTokenFromFragment, getAccessToken, startTokenRenewal } from './authClient'
 import { clearRefreshAttempted } from './refreshGuard'
+import { initializePersonTime } from './lib/personTime'
 import { applyCodeColoursToPage } from './lib/codeColours'
 
 // Pick up an access token left in the URL fragment by GET /auth/refresh
@@ -18,7 +19,12 @@ consumeAccessTokenFromFragment()
 if (getAccessToken()) clearRefreshAttempted()
 // Keep the token fresh in the background so a request after ten minutes does not have to send the
 // page away to renew it.
-if (getAccessToken()) startTokenRenewal()
+function initializeSignedInPage(): void {
+  startTokenRenewal()
+  void initializePersonTime()
+}
+if (getAccessToken()) initializeSignedInPage()
+else window.addEventListener('blerg-auth-refreshed', initializeSignedInPage, { once: true })
 
 // The last choice of code colours, before the first paint (the server's choice follows).
 applyCodeColoursToPage()

@@ -24,7 +24,7 @@ func (a *API) requestLocalWorkspaceStop(ctx context.Context, id string, end db.S
 		return err
 	}
 	if complete {
-		return a.hub.completeLocalWorkspaceFinal(ctx, a.dbPool, id)
+		return retryWorkspaceFinalEffects(ctx, func() error { return a.hub.completeLocalWorkspaceFinal(ctx, a.dbPool, id) })
 	}
 	// Rows/tokens already revoke read/admission. Only cleanup RPCs survive.
 	if dc := a.hub.FindDaemonForSession(id); dc != nil {
@@ -32,6 +32,9 @@ func (a *API) requestLocalWorkspaceStop(ctx context.Context, id string, end db.S
 		if !a.hub.trySendToDaemon(dc, raw) {
 			return fmt.Errorf("desktop cleanup queue full; stop retained")
 		}
+	}
+	if strict && a.hub.FindDaemonForSession(id) == nil {
+		return fmt.Errorf("workspace cleanup is pending and its daemon is unavailable; all work is retained")
 	}
 	if strict {
 		// Stop admission is already closed, but a stop request is not a final
@@ -47,7 +50,7 @@ func (a *API) requestLocalWorkspaceStop(ctx context.Context, id string, end db.S
 				return err
 			}
 			if settled {
-				return a.hub.completeLocalWorkspaceFinal(wait, a.dbPool, id)
+				return retryWorkspaceFinalEffects(wait, func() error { return a.hub.completeLocalWorkspaceFinal(wait, a.dbPool, id) })
 			}
 			select {
 			case <-wait.Done():
@@ -57,6 +60,26 @@ func (a *API) requestLocalWorkspaceStop(ctx context.Context, id string, end db.S
 		}
 	}
 	return nil
+}
+
+// Completion effects are idempotent and fenced against another finalizer.
+func retryWorkspaceFinalEffects(ctx context.Context, complete func() error) error {
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := complete()
+		if !errors.Is(err, db.ErrLimitResumeBusy) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
 }
 
 // Receipt delivery never depends on a later raw notification. The final journal

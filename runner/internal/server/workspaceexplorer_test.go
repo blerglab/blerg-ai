@@ -74,6 +74,7 @@ func TestWorkspaceExplorerCancelOnNavigation(t *testing.T) {
 	h := NewHub()
 	dc := &DaemonConn{ID: "daemon", send: make(chan []byte, 8)}
 	dc.SetSandboxClones(true)
+	dc.SetWorkBranches(true) // current daemon: immutable recorded branch names
 	h.Register(dc)
 	h.SetSessionOwner("session", dc.ID)
 	dc.AuthorizeWorkspaceRuntime("session", protocol.WorkspaceRuntimeRef{LaunchGeneration: "launch", Generation: 1})
@@ -119,6 +120,7 @@ func TestWorkspaceExplorerHTTPBindingAndAuthorization(t *testing.T) {
 	fx.api.RegisterWorkspaceFileRoutes(fx.mux)
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 16)}
 	dc.SetSandboxClones(true)
+	dc.SetWorkBranches(true) // current daemon: immutable recorded branch names
 	fx.api.hub.Register(dc)
 	fx.api.hub.SetSessionOwner(fx.sess, dc.ID)
 	manifest := protocol.WorkspaceManifest{Version: 2, Kind: "folder", OwnerID: topicOwner, Runtime: "host", LaunchGeneration: "launch", Digest: "digest", Members: []protocol.WorkspaceMember{{ID: "one", Name: "one", Path: "member", SourceIdentity: "source", CommonDirectoryIdentity: "common", Destination: "example-org/one"}}}
@@ -299,6 +301,7 @@ func TestWorkspaceFileFolderWithoutManifestRefusesLegacyFallback(t *testing.T) {
 	fx.api.RegisterWorkspaceFileRoutes(fx.mux)
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 4)}
 	dc.SetSandboxClones(true)
+	dc.SetWorkBranches(true) // current daemon: immutable recorded branch names
 	fx.api.hub.Register(dc)
 	fx.api.hub.SetSessionOwner(fx.sess, dc.ID)
 	if _, err := fx.pool.Exec(t.Context(), `UPDATE sessions SET workspace_kind='folder' WHERE id=$1`, fx.sess); err != nil {

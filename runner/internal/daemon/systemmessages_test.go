@@ -26,7 +26,7 @@ func assertNeutralized(t *testing.T, got string) {
 }
 
 func TestClaudeRelayedDecisionsHaveSystemMarker(t *testing.T) {
-	for _, source := range []string{"review", "proposal", "chat"} {
+	for _, source := range []string{"review", "proposal", "child_turn", "chat"} {
 		for _, mode := range []string{"streaming", "legacy"} {
 			t.Run(source+"/"+mode, func(t *testing.T) {
 				env, logPath := installFakeClaude(t)
@@ -96,7 +96,7 @@ func TestClaudeRelayedDecisionsHaveSystemMarker(t *testing.T) {
 }
 
 func TestCodexRelayedDecisionsHaveSystemMarker(t *testing.T) {
-	for _, source := range []string{"review", "proposal", "chat"} {
+	for _, source := range []string{"review", "proposal", "child_turn", "chat"} {
 		for _, mode := range []string{"start", "steer"} {
 			t.Run(source+"/"+mode, func(t *testing.T) {
 				bin := fakeCodex(t)

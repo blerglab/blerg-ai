@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 import { page } from 'vitest/browser'
@@ -40,7 +41,7 @@ function show(width: number, owner: boolean) {
 beforeEach(() => localStorage.clear())
 
 describe('a context meter on every Running now row, in Chromium', () => {
-  it.each([390, 3840])('at %i px for the owner: Main, a Claude, a Codex and a Hermes child, and the Session section', async width => {
+  it.each(browserWidths([390, 3840]))('at %i px for the owner: Main, a Claude, a Codex and a Hermes child, and the Session section', async width => {
     await page.viewport(width, width === 3840 ? 2160 : 844)
     const running = show(width, true)
     const main = within(running).getByTestId('rail-main')

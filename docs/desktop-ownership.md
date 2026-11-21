@@ -19,15 +19,15 @@ and each heartbeat; local expiration is also checked on every frame and delivery
 ## Install and upgrade
 
 Existing unassigned desktops recorded at the 0.5 upgrade keep working automatically,
-including launches, children and session file references. Runner migration 087
-snapshots those desktops and the people with historical sessions on them. This
+including launches, children and workspace file references. Runner migration 087
+snapshots those desktops and the people with historical workspaces on them. This
 temporary access never assigns ownership or grants another person's desktop or
-session files. New desktop rows do not enter compatibility. Desktops with no
+workspace files. New desktop rows do not enter compatibility. Desktops with no
 historical people remain visible only in administrator assignment inventory.
 
 Desktops are managed in core: **Settings → Account → Your desktops** lists each of
 the person's desktops (enrolled, needs enrolling, offline, last seen) with Rename,
-Remove and Enroll. A session on a desktop that needs enrolling shows a one-line
+Remove and Enroll. A workspace on a desktop that needs enrolling shows a one-line
 notice linking there. Core reaches the runner's internal desktop routes on
 `BLERG_CORE_RUNNER_URL` with the internal key and the person's account; the runner
 keeps every guard below. Choose **Enroll** there. The human login proves the person. Before confirming enrollment, review the
@@ -159,10 +159,10 @@ Codex/Hermes questions and the native engine's messenger, project tools and
 explicit publishing tools use the existing per-session message credential. They
 read its private token file on each request to honor renewal. They never send a
 person's desktop bearer to an agent HTTP endpoint. Native project/publication
-helpers require a live session on its exact persisted owner's current desktop
+helpers require a live workspace on its exact persisted owner's current desktop
 connection; wrong owner, obsolete connection generation and reassignment are
 refused. Existing restrictions and exact single-project checks still apply;
-folder sessions cannot use these unqualified project operations. This does not
+folder workspaces cannot use these unqualified project operations. This does not
 broaden P0 member/project authority. Explicit legacy publication remains an
 unguessable non-enumerable link; ordinary CLI session artifacts keep their existing
 session scope.
@@ -182,7 +182,7 @@ session scope.
   an existing unowned row can only be adopted through trusted enrollment/assignment.
 - `db.AssignDesktop`: compare the expected revision, increase it and invalidate the
   connection. Its caller holds the desktop fence. `desktopOwnershipChanged` tears down
-  pending requests and sockets after persistence. Old session ownership remains intact.
+  pending requests and sockets after persistence. Old workspace ownership remains intact.
 - `desktop_ownership_changed` carries desktop ID and revision only to its old/new owner;
   `desktop_inventory_invalidated` carries no desktop metadata. P1 must clear all affected
   browser caches and invalidate owner/generation-bound picker requests on these events.
@@ -198,11 +198,11 @@ The default `BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS=auto` (or unset variable) admits
 only the persisted upgrade snapshot during **0.5**. Explicit `false` disables shared
 connections. Explicit `true` permits unowned legacy connections but grants no new
 desktop launch or discovery scope. No shared bearer can attach an owned desktop
-by name. Compatibility is removed in **0.6**, after this release's session and
+by name. Compatibility is removed in **0.6**, after this release's workspace and
 Settings warnings. Enroll every desktop before upgrading to 0.6.
 
 Authenticated shared-credential refusals and closed sockets update status and a
-safe reason immediately. Session recovery grace still preserves running work.
+safe reason immediately. Workspace recovery grace still preserves running work.
 Automatic desktop config uploads remain retired, including in compatibility;
 the historical install-wide archive is ignored. Personal configuration is never
 distributed through a shared desktop credential.

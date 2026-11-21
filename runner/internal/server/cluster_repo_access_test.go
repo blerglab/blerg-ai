@@ -15,12 +15,15 @@ import (
 func TestClusterRepoResolution(t *testing.T) {
 	a := &DaemonConn{ID: "desktop-a"}
 	a.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	a.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	a.SetRepoRemotes(map[string]string{"app": "example-org/app"})
 	b := &DaemonConn{ID: "desktop-b"}
 	b.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	b.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	b.SetRepoRemotes(map[string]string{"app": "another-org/app"})
 	lab := &DaemonConn{ID: "desktop-lab"}
 	lab.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	lab.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	lab.SetRepoOrigins(map[string]protocol.RepoOrigin{"app": {Provider: "gitlab", FullName: "example-group/app"}}, nil)
 	for _, tc := range []struct {
 		name       string

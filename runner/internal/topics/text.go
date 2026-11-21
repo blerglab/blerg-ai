@@ -23,8 +23,8 @@ const (
 	// MaxTitle is a topic title's length in runes; MaxOutcome an outcome's.
 	MaxTitle   = 80
 	MaxOutcome = 200
-	// MaxEvents is how many topic events one session may hold.
-	MaxEvents = 200
+	// MaxEventsPerMinute limits bursts without ending long sessions.
+	MaxEventsPerMinute = 60
 	// maxRequest is how much of the opening message a request row carries.
 	maxRequest = 280
 	// MaxCommits is how many commits one done may name.

@@ -170,7 +170,7 @@ func TestCreateBoardTemplateFailureLeavesNoBoard(t *testing.T) {
 	}
 }
 
-func TestCreateBoardWithoutTemplateUnchanged(t *testing.T) {
+func TestCreateBoardWithoutTemplateMarksOnlyDoneTerminal(t *testing.T) {
 	srv, pool := testServer(t)
 	resp := request(t, srv, "POST", "/api/boards", tplToken, nil, map[string]any{"name": "plain"})
 	if resp.StatusCode != http.StatusCreated {
@@ -187,8 +187,8 @@ func TestCreateBoardWithoutTemplateUnchanged(t *testing.T) {
 		t.Fatalf("columns = %v", cols)
 	}
 	for i, c := range cols {
-		if c.Name != want[i] || c.IsTerminal {
-			t.Errorf("column %d = %+v, want %q non-flagged", i, c, want[i])
+		if c.Name != want[i] || c.IsTerminal != (want[i] == "done") {
+			t.Errorf("column %d = %+v, want %q terminal=%v", i, c, want[i], want[i] == "done")
 		}
 	}
 	if string(b.FieldSchema) != "[]" {

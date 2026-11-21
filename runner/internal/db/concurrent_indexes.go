@@ -28,6 +28,14 @@ type concurrentIndex struct {
 
 // concurrentIndexes are built in this order.
 var concurrentIndexes = []concurrentIndex{
+	// BLG-767: latest grant observation and latest non-unavailable authority. Build
+	// first: these hot lookups otherwise walk the parent session's whole journal.
+	// Matches the lab's manually created index, which must be retained as-is.
+	{"agent_events_grant_authority_idx", "ON agent_events USING btree (session_id, ((payload ->> 'grant_key'::text)), seq DESC) WHERE (kind = 'grant_authority'::text)", []string{"session_id", "((payload ->> 'grant_key'::text))", "seq"}},
+	// Read a fixed newest-first History page without walking unrelated tool events.
+	{"agent_events_history_page_idx", "ON agent_events (session_id, seq) WHERE kind IN " + HistoryKindsSQL, []string{"session_id", "seq"}},
+	// Page lifecycle context must never scan the much larger retained mark history.
+	{"agent_events_stroke_context_idx", "ON agent_events (session_id, seq) WHERE kind IN " + StrokeContextKindsSQL, []string{"session_id", "seq"}},
 	// The History tab's rename rows (ListSessionRenamedEvents), as 067's index serves its card chips.
 	{"agent_events_session_renamed_idx", "ON agent_events (session_id, seq) WHERE kind = 'session_renamed'", []string{"session_id", "seq"}},
 	// The History feed's strokes (ListStrokeEvents): marks, asks, approvals, proposals and reviews.

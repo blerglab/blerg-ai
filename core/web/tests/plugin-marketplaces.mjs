@@ -36,7 +36,7 @@ try {
     });
     await page.route('**/brand/tokens.css', async route => route.fulfill({ status: 200, contentType: 'text/css', body: await readFile('../internal/landing/static/tokens.css', 'utf8') }));
     const token = caps => `x.${Buffer.from(JSON.stringify({ caps })).toString('base64url')}.y`;
-    await page.goto(`${origin}settings#access_token=${token(['account.manage'])}`);
+    await page.goto(`${origin}settings?section=install#access_token=${token(['account.manage'])}`);
     const section = page.getByTestId('plugin-marketplaces');
     await section.waitFor();
     await section.scrollIntoViewIfNeeded();
@@ -58,14 +58,16 @@ try {
     await remove.waitFor({ state: 'detached' });
     assert.equal(puts.length, 3);
     assert.equal(policy.marketplaces.length, 3);
+    await page.getByRole('link', { name: /Integrations/ }).click();
     await page.getByText(/Marketplace no longer allowed/).waitFor();
+    await page.getByRole('link', { name: /Install/ }).click();
     const bounds = await input.boundingBox();
     assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= width, `field clipped at ${width}px`);
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `horizontal overflow at ${width}px`);
     await section.screenshot({ path: `../../.cache/marketplace-settings-${width}.png` });
     await page.goto('about:blank');
-    await page.goto(`${origin}settings#access_token=${token(['card.read'])}`);
-    await page.getByRole('heading', { name: 'Credentials', exact: true }).waitFor();
+    await page.goto(`${origin}settings?section=install#access_token=${token(['card.read'])}`);
+    await page.getByRole('heading', { name: 'Account', exact: true }).waitFor();
     assert.equal(await page.getByTestId('plugin-marketplaces').count(), 0);
     assert.deepEqual(errors, []);
     await page.close();

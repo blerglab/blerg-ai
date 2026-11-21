@@ -98,7 +98,7 @@ function Window({ provider, w, now, fetchedAt }: { provider: string; w: UsageWin
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={underOne ? Math.round(w.used_percent * 10) / 10 : pct}
-      aria-label={`${providerName(provider)} ${name.toLowerCase()}, ${spoken}% used, ${leftText(w.used_percent).replace('<1', 'under 1')}% left${when ? `, resets ${when}` : ''}${asOf ? `, as of ${asOf}` : ''}${pct >= 95 ? ', usage limit nearly reached' : ''}`}
+      aria-label={`${providerName(provider)} ${name.toLowerCase()}, ${spoken}% used, ${leftText(w.used_percent).replace('<1', 'under 1')}% left${when ? `, resets ${when}` : ''}${asOf ? `, as of ${asOf}` : ''}${pct >= 95 ? ', usage limit nearly reached' : pct >= 90 ? ', high usage' : pct >= 80 ? ', usage warning' : ''}`}
       className={`usage-meter usage-meter--${meterLevel(pct)}${pct >= 95 ? ' usage-meter--pulse' : ''}`}
       title={title}
     >
@@ -151,7 +151,7 @@ export default function UsageMeters({ daemons, now: fixedNow }: { daemons: Daemo
         const summary = r.pending
           ? r.expired
             ? `${engine}: the last reading's windows have all reset. The daemon's next read (within 10 minutes, or a few seconds after a ${engine} turn) brings the new ones.`
-            : `${engine}: no usage limits from this machine yet. A daemon from 0.4.5 on reads them when it connects, every 10 minutes and a few seconds after a ${engine} turn (no session needed), and says here if it cannot read them. An older daemon never fills this row: update it, or see its log ("usage limits: ${r.provider}: …").`
+            : `${engine}: no usage limits from this machine yet. A daemon from 0.4.5 on reads them when it connects, every 10 minutes and a few seconds after a ${engine} turn (no workspace needed), and says here if it cannot read them. An older daemon never fills this row: update it, or see its log ("usage limits: ${r.provider}: …").`
           : r.notRead
             ? `${engine}: this machine's daemon does not read its usage limits: turned off (BLERG_RUNNER_CLAUDE_USAGE=0 for Claude), or the engine's sign-in is not one it can read (an API key, a token in the daemon's environment, or a macOS login kept in the Keychain). The daemon's log says which.`
             : r.windows.length === 0

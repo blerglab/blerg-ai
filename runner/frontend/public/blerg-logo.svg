@@ -1,3 +1,4 @@
+<!-- themecheck:allow-file BLG-473: a static brand-identity asset, served as an external image resource (favicon/logo) with no access to the embedding page's CSS cascade -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 40" role="img" aria-label="blerg">
   <text x="0" y="29" font-family="ui-monospace, 'SF Mono', 'Cascadia Mono', monospace"
         font-size="28" font-weight="500" fill="#e8ecef" letter-spacing="0.5">blerg</text>

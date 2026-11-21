@@ -1,12 +1,7 @@
 package server
 
-// New Terminal (tmux) sessions are deprecated: a person or an agent can no longer start one from
-// the launch sheet, REST, the browser socket or MCP, and children only ever start agent sessions
-// (StartSession). Existing Terminal sessions keep working. Board Assist is exempt for now
-// (HandlePostAssist): it still starts a Terminal session until card #103 moves it to an agent
-// session in 0.5.0.
-
-const terminalDeprecationMessage = "Terminal sessions were removed in 0.5.0: start an agent session"
+// Terminal sessions retain readable history but cannot be started or resumed.
+const terminalDeprecationMessage = "Terminal sessions have been removed. Start an agent session."
 
 // kindRequiredMessage answers a start that names no kind: it used to mean a Terminal session.
 const kindRequiredMessage = `kind "agent" is required`

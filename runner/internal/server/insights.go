@@ -2,13 +2,8 @@ package server
 
 // Insights: GET /api/insights (and the price table behind its dollar estimates).
 //
-// Who sees what. An administrator (the account.manage capability) sees every session; everyone else sees only
-// the sessions they started. An administrator can ask for ?scope=mine to look at their own. Private sessions
-// (every cron session, and any session with MCP connections) are visible to their owner alone on every
-// surface, so for anyone else they never appear BY NAME: the lists (slowest starts, top token users) skip
-// them. Their counts, durations and token totals do go into an administrator's aggregates, as a total with no
-// session, title or content attached, because leaving the crons out would leave out most of what a person
-// asked to see. docs/telemetry.md says so.
+// Browser Insights is owner-only, optionally restricted to one workspace tree.
+// Installation aggregates remain available only to internal metrics callers.
 
 import (
 	"context"
@@ -59,6 +54,29 @@ type insightsSessions struct {
 	IdleSeconds    float64     `json:"idle_seconds"`
 	BusyFraction   float64     `json:"busy_fraction"`
 	ByDay          []dayCounts `json:"by_day"`
+	// Started split by role (BLG-466): a workspace root (Main), a person-started channel, or a
+	// worker (agent/session/runner-key-started) or cron run, each counted for the selected range —
+	// never from today's live session tree, which cannot answer for a past range.
+	Main     int `json:"main"`
+	Channels int `json:"channels"`
+	Workers  int `json:"workers"`
+}
+
+// sessionInsightRole mirrors the frontend's sessionRole() (lib/sessionRole.ts): a session with no
+// parent is a workspace root (Main); one started by an agent, another session or a runner key is a
+// worker (a cron run counts as a worker here too — Insights shows three roles, not four); anything
+// else with a parent is a person-started channel.
+func sessionInsightRole(s db.InsightSession) string {
+	if s.CronID != "" || s.StartedByKind == "cron" {
+		return "worker"
+	}
+	if s.StartedByKind == "session" || s.StartedByKind == "agent" || s.StartedByKind == "runner_key" {
+		return "worker"
+	}
+	if s.ParentID == "" {
+		return "main"
+	}
+	return "channel"
 }
 
 type dayCounts struct {
@@ -133,12 +151,22 @@ type topSession struct {
 }
 
 type insightsTokens struct {
-	Totals         tokenCounts  `json:"totals"`
-	CacheHitRate   float64      `json:"cache_hit_rate"`
-	ByModel        []modelRow   `json:"by_model"`
-	Daily          []dayRow     `json:"daily"`
-	TopSessions    []topSession `json:"top_sessions"`
-	UnpricedModels []string     `json:"unpriced_models"`
+	Totals              tokenCounts  `json:"totals"`
+	CacheHitRate        float64      `json:"cache_hit_rate"`
+	ByModel             []modelRow   `json:"by_model"`
+	Daily               []dayRow     `json:"daily"`
+	TopSessions         []topSession `json:"top_sessions"`
+	UnpricedModels      []string     `json:"unpriced_models"`
+	ByEngineDay         []engineDay  `json:"by_engine_day"`
+	PreviousByEngineDay []engineDay  `json:"previous_by_engine_day"`
+}
+
+type engineDay struct {
+	At       time.Time `json:"at"`
+	Day      string    `json:"day"`
+	Engine   string    `json:"engine"`
+	Complete bool      `json:"complete"`
+	tokenCounts
 }
 
 type insightsCluster struct {
@@ -156,21 +184,76 @@ type insightsCrons struct {
 }
 
 type insightsResponse struct {
-	Range       insightsRange    `json:"range"`
-	Scope       string           `json:"scope"` // "all" | "mine"
-	IsAdmin     bool             `json:"is_admin"`
-	GeneratedAt time.Time        `json:"generated_at"`
-	Sessions    insightsSessions `json:"sessions"`
-	Startup     insightsStartup  `json:"startup"`
-	Tokens      insightsTokens   `json:"tokens"`
-	Cluster     *insightsCluster `json:"cluster"`
-	Crons       insightsCrons    `json:"crons"`
+	Range         insightsRange    `json:"range"`
+	WorkspaceID   string           `json:"workspace_id,omitempty"`
+	WorkspaceName string           `json:"workspace_name,omitempty"`
+	Scope         string           `json:"scope"` // "all" | "mine"
+	IsAdmin       bool             `json:"is_admin"`
+	GeneratedAt   time.Time        `json:"generated_at"`
+	Sessions      insightsSessions `json:"sessions"`
+	Startup       insightsStartup  `json:"startup"`
+	Tokens        insightsTokens   `json:"tokens"`
+	Cluster       *insightsCluster `json:"cluster"`
+	Crons         insightsCrons    `json:"crons"`
+	// UsageBudget is the owner's recorded weekly ("7d") usage-window samples, current and
+	// previous window, for every provider that has reported one (a subscription plan with a
+	// usage window; a metered/API-billed engine never has samples here). Independent of Range:
+	// the weekly window does not follow the Insights period picker.
+	UsageBudget []db.UsageWindowSample `json:"usage_budget"`
+	// ContextFill is each turn's context-window reading in range (BLG-463), one line per
+	// conversation on the frontend (BLG-464 round 2: a single workspace-wide maximum attributed
+	// any conversation's compaction to the whole workspace): how full the conversation was when
+	// the turn reported it, whether the engine compacted, and enough identity (role, title) to
+	// draw and name that conversation's own line and open it. A turn that reported no context is
+	// absent, not zero.
+	ContextFill          []contextFillReading `json:"context_fill"`
+	ContextFillTruncated bool                 `json:"context_fill_truncated,omitempty"`
 }
 
-// HandleGetInsights is GET /api/insights?range=24h|7d|30d|90d&scope=mine.
+// contextFillReading is one conversation's context reading (BLG-464 round 2), carried through the
+// same visible() gate as every other per-session Insights list.
+type contextFillReading struct {
+	SessionID string    `json:"session_id"`
+	Title     string    `json:"title"`
+	Role      string    `json:"role"` // sessionInsightRole's classification: "main" | "channel" | "worker"
+	At        time.Time `json:"at"`
+	Percent   float64   `json:"percent"`
+	Compacted bool      `json:"compacted"`
+}
+
+// insightsWorkspaceRoot validates every ancestor before choosing the workspace Main.
+// Invalid IDs, foreign ancestors and malformed cycles all have the same 404 surface.
+func (a *API) insightsWorkspaceRoot(ctx context.Context, account, id string) *db.SessionRow {
+	seen := map[string]bool{}
+	for len(seen) < 100 {
+		if seen[id] {
+			return nil
+		}
+		seen[id] = true
+		row, err := db.GetSession(ctx, a.dbPool, id)
+		if err != nil || row == nil || !ownsSession(account, row) || !canSeeAccount(account, row) {
+			return nil
+		}
+		if row.ParentSessionID == nil {
+			return row
+		}
+		id = *row.ParentSessionID
+	}
+	return nil
+}
+
+// HandleGetInsights is GET /api/insights?range=24h|7d|30d|90d[&workspace=id].
 func (a *API) HandleGetInsights(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.authBrowser(w, r)
 	if !ok {
+		return
+	}
+	if apiErr := checkGrantRequester(requesterOf(p)); apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
+	if p.Project != "" {
+		writeError(w, http.StatusForbidden, "Insights requires an account-wide sign-in.")
 		return
 	}
 	if a.dbPool == nil {
@@ -189,21 +272,32 @@ func (a *API) HandleGetInsights(w http.ResponseWriter, r *http.Request) {
 	isAdmin := p.Has(insightsAdminCap)
 	owner := p.Sub
 	scope := "mine"
-	if isAdmin && r.URL.Query().Get("scope") != "mine" {
-		owner, scope = "", "all"
-	}
+
 	if owner == "" && scope == "mine" { // a token with no subject cannot have "its own" sessions
 		writeError(w, http.StatusForbidden, "no account")
 		return
 	}
+	workspace := r.URL.Query().Get("workspace")
+	workspaceName := ""
+	if workspace != "" {
+		row := a.insightsWorkspaceRoot(r.Context(), p.Sub, workspace)
+		if row == nil {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		workspace = row.ID
+		workspaceName = derefOrEmpty(row.Title)
+	}
 	now := time.Now().UTC()
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	resp, err := a.buildInsights(ctx, now, now.Add(-span), now.Add(time.Minute), owner, p.Sub)
+	resp, err := a.buildInsights(ctx, now, now.Add(-span).Truncate(time.Hour), now.Add(time.Minute), owner, p.Sub, workspace)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not compute insights")
 		return
 	}
+	resp.WorkspaceID = workspace
+	resp.WorkspaceName = workspaceName
 	resp.Range.Label = label
 	resp.Scope, resp.IsAdmin = scope, isAdmin
 	writeJSON(w, http.StatusOK, resp)
@@ -211,8 +305,10 @@ func (a *API) HandleGetInsights(w http.ResponseWriter, r *http.Request) {
 
 // buildInsights computes the whole report for [from, to). owner "" = every session; viewer is the account
 // asking, whose own private sessions stay visible by name.
-func (a *API) buildInsights(ctx context.Context, now, from, to time.Time, owner, viewer string) (*insightsResponse, error) {
-	sessions, err := db.ListInsightSessions(ctx, a.dbPool, from, to, owner)
+func (a *API) buildInsights(ctx context.Context, now, from, to time.Time, owner, viewer string, workspace ...string) (*insightsResponse, error) {
+	finishProfile := db.ObserveInsights(db.InsightsSummary)
+	defer finishProfile()
+	sessions, err := db.ListInsightSessions(ctx, a.dbPool, from, to, owner, workspace...)
 	if err != nil {
 		return nil, err
 	}
@@ -224,21 +320,39 @@ func (a *API) buildInsights(ctx context.Context, now, from, to time.Time, owner,
 			byID[s.ID] = s
 		}
 	}
-	events, err := db.ListInsightEvents(ctx, a.dbPool, from, to, owner, []string{"start_stage", "status_changed"})
+	events, err := db.ListInsightEvents(ctx, a.dbPool, from, to, owner, []string{"start_stage", "status_changed"}, workspace...)
 	if err != nil {
 		return nil, err
 	}
-	tokenRows, err := db.ListTokenUsage(ctx, a.dbPool, from, to, owner)
+	tokenRows, err := db.ListTokenUsage(ctx, a.dbPool, from, to, owner, workspace...)
 	if err != nil {
 		return nil, err
 	}
-	cronRuns, err := db.ListInsightCronRuns(ctx, a.dbPool, from, to, owner)
+	previousRows, err := db.ListTokenUsage(ctx, a.dbPool, from.Add(-to.Sub(from)), from, owner, workspace...)
+	if err != nil {
+		return nil, err
+	}
+	contextFill, contextFillTruncated, err := db.ListContextFill(ctx, a.dbPool, from, to, owner, workspace...)
+	if err != nil {
+		return nil, err
+	}
+	cronRuns, err := db.ListInsightCronRuns(ctx, a.dbPool, from, to, owner, workspace...)
 	if err != nil {
 		return nil, err
 	}
 	prices, err := db.ListModelPrices(ctx, a.dbPool)
 	if err != nil {
 		return nil, err
+	}
+	var usageBudget []db.UsageWindowSample
+	if owner != "" {
+		for _, provider := range []string{"claude", "codex"} {
+			samples, err := db.ListOwnerUsageWindowSamples(ctx, a.dbPool, owner, provider, usageSampleWindow, now.Add(-usageSampleKeepDuration))
+			if err != nil {
+				return nil, err
+			}
+			usageBudget = append(usageBudget, samples...)
+		}
 	}
 	// Sessions named in a list may have started before the range: look them up so a private one is recognised.
 	needed := map[string]bool{}
@@ -248,9 +362,14 @@ func (a *API) buildInsights(ctx context.Context, now, from, to time.Time, owner,
 			needed[at.SessionID] = true
 		}
 	}
-	for _, tr := range tokenRows {
+	for _, tr := range append(append([]db.TokenRow{}, tokenRows...), previousRows...) {
 		if _, ok := byID[tr.SessionID]; !ok {
 			needed[tr.SessionID] = true
+		}
+	}
+	for _, cf := range contextFill {
+		if _, ok := byID[cf.SessionID]; !ok {
+			needed[cf.SessionID] = true
 		}
 	}
 	if len(needed) > 0 {
@@ -276,8 +395,20 @@ func (a *API) buildInsights(ctx context.Context, now, from, to time.Time, owner,
 	resp.Sessions = summariseSessions(agent, events, byID, from, now, to)
 	resp.Startup = summariseStartup(attempts, byID, visible)
 	resp.Tokens = summariseTokens(tokenRows, byID, prices, visible)
+	resp.Tokens.PreviousByEngineDay = summariseTokens(previousRows, byID, prices, visible).ByEngineDay
 	resp.Crons = summariseCrons(cronRuns, now)
-	if jm := a.hub.JobManager(); jm != nil {
+	resp.UsageBudget = usageBudget
+	for _, cf := range contextFill {
+		if visible(cf.SessionID) {
+			s := byID[cf.SessionID]
+			resp.ContextFill = append(resp.ContextFill, contextFillReading{
+				SessionID: cf.SessionID, Title: s.Title, Role: sessionInsightRole(s),
+				At: cf.At, Percent: cf.Percent, Compacted: cf.Compacted,
+			})
+		}
+	}
+	resp.ContextFillTruncated = contextFillTruncated
+	if jm := a.hub.JobManager(); jm != nil && owner == "" {
 		st := jm.Status() //nolint:contextcheck // bounded by the JobManager client timeout and deliberately not tied to the caller, like the status endpoint
 		resp.Cluster = &insightsCluster{
 			Active: st.ActiveSessions, Max: st.MaxSessions,
@@ -325,6 +456,14 @@ func summariseSessions(sessions []db.InsightSession, events []db.InsightEvent, b
 			out.Started++
 			runtimes[orUnknown(s.Runtime)]++
 			days[s.StartedAt.UTC().Format("2006-01-02")]++
+			switch sessionInsightRole(s) {
+			case "main":
+				out.Main++
+			case "channel":
+				out.Channels++
+			case "worker":
+				out.Workers++
+			}
 		}
 		if !isTerminalStatus(s.Status) && s.Status != "disconnected" {
 			out.Alive++
@@ -459,6 +598,7 @@ func summariseTokens(rows []db.TokenRow, byID map[string]db.InsightSession, pric
 	days := map[string]*dayRow{}
 	sessionsTok := map[string]*topSession{}
 	unpriced := map[string]bool{}
+	engineDays := map[string]*engineDay{}
 	for _, r := range rows {
 		model := orUnknown(r.Model)
 		price, priced := pm[r.Model]
@@ -481,6 +621,23 @@ func summariseTokens(rows []db.TokenRow, byID map[string]db.InsightSession, pric
 			days[d.Day] = d
 		}
 		addTokens(&d.tokenCounts, r)
+		engine := orUnknown(byID[r.SessionID].Engine)
+		at := r.Hour
+		if at.IsZero() {
+			at = r.Day
+		}
+		ek := at.Format(time.RFC3339) + "|" + engine
+		ed := engineDays[ek]
+		if ed == nil {
+			ed = &engineDay{At: at, Day: d.Day, Engine: engine, Complete: true}
+			engineDays[ek] = ed
+		}
+		addTokens(&ed.tokenCounts, r)
+		if priced {
+			addCost(&ed.tokenCounts, cost)
+		} else {
+			ed.Complete = false
+		}
 		ts := sessionsTok[r.SessionID]
 		if ts == nil {
 			s := byID[r.SessionID]
@@ -505,6 +662,20 @@ func summariseTokens(rows []db.TokenRow, byID map[string]db.InsightSession, pric
 		}
 	}
 	roundCost(&out.Totals)
+	for _, ed := range engineDays {
+		roundCost(&ed.tokenCounts)
+		if !ed.Complete {
+			ed.CostUSD = nil
+		}
+		out.ByEngineDay = append(out.ByEngineDay, *ed)
+	}
+	sort.Slice(out.ByEngineDay, func(i, j int) bool {
+		a, b := out.ByEngineDay[i], out.ByEngineDay[j]
+		if a.At.Equal(b.At) {
+			return a.Engine < b.Engine
+		}
+		return a.At.Before(b.At)
+	})
 	for _, m := range models {
 		roundCost(&m.tokenCounts)
 		out.ByModel = append(out.ByModel, *m)

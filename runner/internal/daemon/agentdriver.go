@@ -1,7 +1,10 @@
 package daemon
 
 import (
+	"errors"
+	"os"
 	"os/exec"
+	"syscall"
 
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
@@ -112,8 +115,19 @@ func startEngineCommand(cmd *exec.Cmd, start func(*exec.Cmd) error) error {
 // cancelEngineCommand preserves the pod helper long enough to acknowledge its
 // traced descendants' cleanup. Host commands keep their existing kill behavior.
 func cancelEngineCommand(cmd *exec.Cmd, contained bool) error {
+	var err error
 	if contained && cmd.Cancel != nil {
-		return cmd.Cancel()
+		err = cmd.Cancel()
+	} else {
+		err = cmd.Process.Kill()
 	}
-	return cmd.Process.Kill()
+	if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	return err
+}
+
+// Use the same credential redaction for every command-boundary refusal.
+func safeEngineCommandError(err error, env []string) string {
+	return (&codexDriver{env: env}).safeCodexError(codexTurnError{Message: err.Error()})
 }

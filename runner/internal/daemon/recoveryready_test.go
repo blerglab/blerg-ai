@@ -97,7 +97,7 @@ func TestMarkedAdoptionWaitsForRecoveryReady(t *testing.T) {
 					t.Fatal("socket input handler blocked waiting for ready")
 				}
 			}
-			time.Sleep(4 * adoptContinueDelay) // beyond the injectable legacy grace
+			time.Sleep(4 * h.cfg.AdoptContinueDelay) // beyond the injectable legacy grace
 			assertNoCalls := func() {
 				t.Helper()
 				if raw, _ := os.ReadFile(claudeLog); len(raw) > 0 {

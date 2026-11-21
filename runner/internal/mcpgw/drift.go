@@ -384,7 +384,7 @@ func (g *Gateway) reconcileListing(ctx context.Context, gr *db.MCPGrant, st *gra
 		level, person := g.boardGrantAccess(ctx, gr)
 		for _, t := range tools {
 			entry, ok := gr.Tools[t.Name]
-			if boardColumnToolSet[t.Name] {
+			if boardPersonToolSet[t.Name] {
 				// Offered by the level and a person behind the access, not by a grant row.
 				ok, entry = person != nil, db.MCPGrantTool{Mode: ModeAllow}
 			}

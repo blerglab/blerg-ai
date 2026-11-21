@@ -219,6 +219,69 @@ func TestDiskGitTLSIsolationRecoveryAndTampering(t *testing.T) {
 			t.Fatal("root recovery failed", err)
 		}
 	})
+	t.Run("unreadable folder can be repaired before retry", func(t *testing.T) {
+		home := t.TempDir()
+		public := filepath.Join(home, "projects")
+		private := filepath.Join(home, "private")
+		disk, err := newDiskGit(public, private, p.SessionID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rt, err := New(p, disk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := rt.Prepare(t.Context(), false); err != nil {
+			t.Fatal(err)
+		}
+		identities := disk.Identities()
+		checkout := filepath.Join(public, "project-one")
+		fixtureGit(t, checkout, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "--allow-empty", "-qm", "retained work")
+		head := fixtureGit(t, checkout, "rev-parse", "HEAD")
+		blocked := filepath.Join(checkout, "unreadable")
+		if err := os.Mkdir(blocked, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(blocked, "work"), []byte("unfinished"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		disk.Close()
+		if err := os.Chmod(blocked, 0000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(blocked, 0700) })
+		for attempt := range 2 {
+			resumed, err := newDiskGit(public, private, p.SessionID, false, identities...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rt, err := New(p, resumed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = rt.Prepare(t.Context(), true)
+			resumed.Close()
+			if attempt == 0 {
+				if !errors.Is(err, ErrRetainedVerification) {
+					t.Fatal("scan failure needs named refusal", err)
+				}
+				if strings.Contains(err.Error(), home) || !strings.Contains(err.Error(), "checkout scan") || !strings.Contains(err.Error(), "worker's volume") || !strings.Contains(err.Error(), "projects/project-one") {
+					t.Fatal("unsafe or unclear refusal", err)
+				}
+				if got := fixtureGit(t, checkout, "rev-parse", "HEAD"); got != head {
+					t.Fatal("checkout changed", got)
+				}
+				if err := os.Chmod(blocked, 0700); err != nil {
+					t.Fatal("checkout was moved", err)
+				}
+			} else if err != nil {
+				t.Fatal("repaired checkout could not resume", err)
+			}
+		}
+		if data, err := os.ReadFile(filepath.Join(blocked, "work")); err != nil || string(data) != "unfinished" {
+			t.Fatal("retained work changed", err)
+		}
+	})
 	publicPlan := p
 	publicPlan.Members = append([]Member(nil), p.Members...)
 	publicPlan.Members[0].Token = ""
@@ -319,6 +382,14 @@ func TestDiskGitTLSIsolationRecoveryAndTampering(t *testing.T) {
 	if wrongHost.Load() != 0 {
 		t.Fatal("credential crossed scopes on push")
 	}
+	// Uncommitted agent work must survive the failed publication and reopening
+	// the retained allocation; it must not enter either published snapshot.
+	for i := range p.Members {
+		dirty := filepath.Join(public, p.Manifest.Members[i].Path, "uncommitted-work")
+		if err := os.WriteFile(dirty, []byte("retained dirty work"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	p.PreviousResults = results
 	p.Identities = disk.Identities()
 	p.Runtime.Generation++
@@ -340,10 +411,22 @@ func TestDiskGitTLSIsolationRecoveryAndTampering(t *testing.T) {
 	if results[0].Pending || results[1].Pending {
 		t.Fatal("failed push did not resume", results)
 	}
-	for _, m := range p.Members {
+	for i, m := range p.Members {
 		head := fixtureGit(t, filepath.Join(repos, m.ID+".git"), "rev-parse", "refs/heads/wip/"+p.SessionID)
-		if len(head) != 40 {
-			t.Fatal(head)
+		if head != results[i].Head || head != p.PreviousResults[i].Head {
+			t.Fatal("resume changed the committed publication", head, results[i])
+		}
+		checkout := filepath.Join(public, p.Manifest.Members[i].Path)
+		dirty, err := os.ReadFile(filepath.Join(checkout, "uncommitted-work"))
+		if err != nil || string(dirty) != "retained dirty work" {
+			t.Fatal("resume lost uncommitted work", err)
+		}
+		index, err := os.ReadFile(filepath.Join(checkout, ".git", "index"))
+		if err != nil || string(index) != "hostile-index" {
+			t.Fatal("resume rewrote the retained agent index", err)
+		}
+		if got := fixtureGit(t, filepath.Join(repos, m.ID+".git"), "ls-tree", "--name-only", head); strings.Contains(got, "uncommitted-work") {
+			t.Fatal("publication included uncommitted work")
 		}
 	}
 	t.Run("deep member refusal preserves unrelated push", func(t *testing.T) {
@@ -473,8 +556,14 @@ func TestDiskGitTLSIsolationRecoveryAndTampering(t *testing.T) {
 	defer resumedDisk.Close()
 	member := p.Members[0]
 	member.Path = p.Manifest.Members[0].Path
-	if _, _, e = resumedDisk.Prepare(context.Background(), member, "wip/"+p.SessionID, true); e == nil {
-		t.Fatal("resume adopted copied Git metadata with a new identity")
+	if _, _, e = resumedDisk.Prepare(context.Background(), member, "wip/"+p.SessionID, true); e == nil || !strings.Contains(e.Error(), "could not be verified") {
+		t.Fatal("resume did not name unverifiable retained checkout", e)
+	}
+	if _, err := os.Stat(filepath.Join(firstDir, ".git-old", "objects")); err != nil {
+		t.Fatal("refusal changed retained checkout", err)
+	}
+	if strings.Contains(e.Error(), public) || !strings.Contains(e.Error(), "projects/project-one") {
+		t.Fatal("recovery message must use a relative volume path", e)
 	}
 
 }

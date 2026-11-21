@@ -36,6 +36,7 @@ type noticeFixture struct {
 func newNoticeFixture(t *testing.T) *noticeFixture {
 	t.Helper()
 	pool := connectSrvTestDB(t)
+	livePushCore(t)
 	ctx := context.Background()
 	daemonID := "00000000-0000-0000-0000-0000000000c1"
 	sid := "00000000-0000-0000-0000-0000000000c2"
@@ -47,7 +48,7 @@ func newNoticeFixture(t *testing.T) *noticeFixture {
 	}
 	t.Setenv("BLERG_RUNNER_VAPID_PUBLIC_KEY", "x")
 	t.Setenv("BLERG_RUNNER_VAPID_PRIVATE_KEY", "y")
-	if err := db.UpsertPushSubscription(ctx, pool, "http://127.0.0.1:1/never", "p", "a"); err != nil {
+	if err := db.UpsertPushSubscription(ctx, pool, "http://127.0.0.1:1/never", "p", "a", "owner", testSID); err != nil {
 		t.Fatal(err)
 	}
 	pushes := &atomic.Int32{}
@@ -177,6 +178,19 @@ func TestIdleNotice_NewTurnCancels(t *testing.T) {
 	f.expect("the task ended during a new turn", 0)
 	f.state("idle")
 	f.expect("the new turn ended with nothing running", 1)
+}
+
+func TestIdleNotice_PinnedNonIdleStatusCancels(t *testing.T) {
+	f := newNoticeFixture(t)
+	f.taskStarted("t1")
+	f.state("idle")
+	if _, held := f.hub.idleNotices.heldAt(f.sid); !held {
+		t.Fatal("expected a held idle notice")
+	}
+	publishPinnedSessionStatus(f.ctx, f.hub, f.pool, f.sid, "running", false)
+	if _, held := f.hub.idleNotices.heldAt(f.sid); held {
+		t.Fatal("pinned non-idle status left the idle notice held")
+	}
 }
 
 // A question cancels a deferred notice (its own notice covers it); so does the session's end.

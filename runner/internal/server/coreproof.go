@@ -16,6 +16,7 @@ import (
 // There is no fallback: a call with neither (a token minted before core started stamping `sid`,
 // a legacy path) fails closed with errNoLivenessProof rather than asking core "any live session".
 type coreProof struct {
+	standing  bool
 	TokenID   string
 	SessionID string
 }

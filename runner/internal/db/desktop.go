@@ -199,3 +199,50 @@ func DesktopAccessible(ctx context.Context, pool *pgxpool.Pool, d DesktopRow, ac
 	err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM desktop_compatibility_accounts WHERE desktop_id=$1 AND account_id=$2)`, d.ID, account).Scan(&ok)
 	return err == nil && ok
 }
+
+// DaemonAuthority pins the connection used for reconciliation.
+type DaemonAuthority struct {
+	DaemonID, OwnerID, Generation string
+	Revision                      int64
+	Legacy                        bool
+}
+
+// lockDaemonAuthorityTx linearizes a reconcile commit with ownership rotation.
+// The daemon row must be acquired before any session row.
+func lockDaemonAuthorityTx(ctx context.Context, tx pgx.Tx, a DaemonAuthority) error {
+	if a.DaemonID == "" || a.Generation == "" || a.Revision < 1 || (a.Legacy != (a.OwnerID == "")) {
+		return ErrDesktopAuthority
+	}
+	if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '250ms'`); err != nil {
+		return err
+	}
+	var owner any
+	if !a.Legacy {
+		owner = a.OwnerID
+	}
+	var one int
+	err := tx.QueryRow(ctx, `SELECT 1 FROM daemons WHERE id=$1 AND connection_generation=$2 AND ownership_revision=$3 AND desktop_owner_id IS NOT DISTINCT FROM $4 AND mode<>'runner' FOR SHARE`, a.DaemonID, a.Generation, a.Revision, owner).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrDesktopAuthority
+	}
+	return err
+}
+
+// TouchPinnedDaemon updates liveness only if the pinned row is immediately
+// available. A busy row is retried on a later heartbeat, without holding the
+// advisory fence while another reconciliation transaction finishes.
+func TouchPinnedDaemon(ctx context.Context, pool *pgxpool.Pool, a DaemonAuthority) (bool, error) {
+	if a.DaemonID == "" || a.Generation == "" || a.Revision < 1 || (a.Legacy != (a.OwnerID == "")) {
+		return false, ErrDesktopAuthority
+	}
+	var owner any
+	if !a.Legacy {
+		owner = a.OwnerID
+	}
+	tag, err := pool.Exec(ctx, `WITH available AS (SELECT id FROM daemons WHERE id=$1 AND connection_generation=$2 AND ownership_revision=$3 AND desktop_owner_id IS NOT DISTINCT FROM $4 AND mode<>'runner' FOR NO KEY UPDATE SKIP LOCKED)
+ UPDATE daemons d SET status='connected',status_reason='',last_seen_at=now() FROM available WHERE d.id=available.id`, a.DaemonID, a.Generation, a.Revision, owner)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}

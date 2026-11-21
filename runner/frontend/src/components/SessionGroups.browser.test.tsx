@@ -1,3 +1,4 @@
+import { browserWidths } from '../test/browserWidths'
 import { useEffect } from 'react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
@@ -27,7 +28,7 @@ const key = sessionTabsKey('person-a', 'sess-a')
 const paths = ['main.ts', 'notes.md', 'tests.ts']
 const shotDir = import.meta.env.VITE_FILE_TAB_SHOTS_DIR
 const persisted = () => JSON.parse(localStorage.getItem(key)!)
-const groupNodes = () => [...document.querySelectorAll<HTMLElement>('.session-group')]
+const groupNodes = () => [...document.querySelectorAll<HTMLElement>('.session-group:not(.session-dock-windows .session-group)')]
 const composer = () => document.querySelector<HTMLTextAreaElement>('.agent-composer textarea')!
 const groupOf = (element: Element) => element.closest<HTMLElement>('.session-group')!
 const fileTab = (name: string) => screen.getByRole('tab', { name: new RegExp(name) })
@@ -91,7 +92,7 @@ it('splits, nests, resizes, scopes shortcuts, moves Chat with its draft and prun
   await cdp().send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x + 120 * scale, y, button: 'left', buttons: 1 })
   await cdp().send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: x + 120 * scale, y, button: 'left', clickCount: 1 })
   await waitFor(() => expect(Number(right.getAttribute('aria-valuenow'))).toBeGreaterThan(50))
-  await userEvent.click(fileTab('Chat'))
+  await userEvent.click(fileTab('Main'))
   await command('Move tab to next group')
   expect(composer()).toBe(input); expect(input).toBeVisible(); expect(input).toHaveValue('Keep this draft while moving Chat')
   await userEvent.click(fileTab('main.ts'))
@@ -151,7 +152,7 @@ it.each(['left', 'right', 'top', 'bottom'] as const)('highlights the %s half of 
 it.each(['left', 'right', 'top', 'bottom', 'center'] as const)('in a split the %s overlay covers that region of the group below its tab strip', async zone => {
   await page.viewport(2000, 1100); mount()
   await userEvent.click(fileTab('main.ts')); await command('Split tab group right')
-  await command('Focus next tab group'); await userEvent.click(fileTab('Chat'))
+  await command('Focus next tab group'); await userEvent.click(fileTab('Main'))
   const group = groupOf(fileTab('main.ts')), strip = group.querySelector<HTMLElement>('.session-tabbar')!.getBoundingClientRect().height
   const content = group.querySelector<HTMLElement>('.session-group-content')!, rect = group.getBoundingClientRect()
   const x = zone === 'left' ? rect.left + 10 : zone === 'right' ? rect.right - 10 : rect.left + rect.width / 2
@@ -248,28 +249,23 @@ it.each([1024, 2860, 3840])('keeps split tab strips on the top row with the togg
     const r = strip.getBoundingClientRect()
     expect(Math.abs(r.top - single.top)).toBeLessThan(1); expect(Math.abs(r.height - single.height)).toBeLessThan(1)
   }
-  expect(Math.abs(within(strips[0]).getByRole('tab', { name: /Chat/ }).getBoundingClientRect().top - singleTab.top)).toBeLessThan(1)
-  // The explorer toggle at the left end of the first strip; shell, board and panel at the right end of
-  // the top-right strip (the top group's strip when the groups stack).
-  const first = strips[0], last = stacked ? strips[0] : strips[1]
+  expect(Math.abs(within(strips[0]).getByRole('tab', { name: /Main/ }).getBoundingClientRect().top - singleTab.top)).toBeLessThan(1)
+  // The explorer toggle at the left end of the first strip. Shell, board, Insights, blackboard and
+  // the panel toggle live in the session header now (card BLG-450), not at a strip's right end, so
+  // neither strip carries them.
   const explorerToggle = screen.getByRole('button', { name: 'Toggle explorer' })
   expect(screen.getAllByRole('button', { name: 'Toggle explorer' })).toHaveLength(1)
-  expect(first.firstElementChild).toBe(explorerToggle)
+  expect(strips[0].firstElementChild).toContainElement(explorerToggle)
   const panel = screen.getByTestId('rail-toggle')
   expect(screen.getAllByTestId('rail-toggle')).toHaveLength(1)
-  expect(last.lastElementChild).toBe(panel)
-  expect(last.getBoundingClientRect().right - panel.getBoundingClientRect().right).toBeLessThan(12)
-  if (!stacked) {
-    expect(within(strips[1]).queryByRole('button', { name: 'Toggle explorer' })).toBeNull()
-    expect(within(strips[0]).queryByTestId('rail-toggle')).toBeNull()
-  }
-  expect(within(stacked ? strips[1] : strips[0]).queryByTestId('rail-toggle')).toBeNull()
+  for (const strip of strips) expect(strip.contains(panel)).toBe(false)
+  if (!stacked) expect(within(strips[1]).queryByRole('button', { name: 'Toggle explorer' })).toBeNull()
   if (width === 1024) {
     expect(screen.queryByTestId('session-rail')).toBeNull()
     expect(screen.getByRole('separator', { name: /Resize tab groups/ })).toHaveAttribute('aria-orientation', 'horizontal')
     expect(within(strips[1]).queryByRole('button', { name: 'Toggle explorer' })).toBeNull()
     await userEvent.click(panel)
-    expect(screen.getByRole('dialog', { name: 'Session panel' })).toBeVisible()
+    expect(screen.getByRole('dialog', { name: 'Workspace panel' })).toBeVisible()
     expect(columns.scrollWidth).toBe(columns.clientWidth)
     await userEvent.keyboard('{Escape}')
   } else expect(screen.getByTestId('session-rail')).toBeVisible()
@@ -288,7 +284,7 @@ it('Focus mode retains the focused group with several visible files or Chat', as
   await command('Focus mode')
   expect(screen.getByRole('region', { name: 'main.ts' })).toHaveFocus()
   await command('Focus mode')
-  await userEvent.click(fileTab('Chat'))
+  await userEvent.click(fileTab('Main'))
   await command('Focus mode')
   expect(composer()).toHaveFocus()
 })
@@ -327,8 +323,8 @@ it('cleans up targets when navigating between terminal sessions with the same ta
 it('gives each group a distinct name, announces focus and reports the drawn divider ratio', async () => {
   await page.viewport(1024, 900); mount()
   await userEvent.click(fileTab('main.ts')); await command('Split tab group right')
-  expect(screen.getByRole('tablist', { name: 'Session tabs, group 1' })).toBeVisible()
-  expect(screen.getByRole('tablist', { name: 'Session tabs, group 2' })).toBeVisible()
+  expect(screen.getByRole('tablist', { name: 'Workspace tabs, group 1' })).toBeVisible()
+  expect(screen.getByRole('tablist', { name: 'Workspace tabs, group 2' })).toBeVisible()
   expect(screen.getByRole('navigation', { name: 'Workspace group 1' })).toBeVisible()
   expect(screen.getByRole('navigation', { name: 'Workspace group 2' })).toHaveAttribute('aria-current', 'true')
   expect(screen.getByTestId('group-announce')).toHaveTextContent(/^Focused tab group 2 of 2, 1 tab$/)
@@ -351,7 +347,7 @@ it('drops a tab from another group before the tab whose left half is under the p
   await userEvent.click(fileTab('main.ts')); await command('Split tab group right')
   await userEvent.dragAndDrop(fileTab('main.ts').closest<HTMLElement>('.session-tab')!, fileTab('tests.ts'), { targetPosition: { x: 4, y: 10 } })
   expect(groupNodes()).toHaveLength(1)
-  expect([...screen.getByRole('tablist', { name: 'Session tabs' }).querySelectorAll<HTMLElement>('[role=tab]')].map(t => t.dataset.tabId)).toEqual(['chat', 'workspace:notes.md', 'workspace:main.ts', 'workspace:tests.ts'])
+  expect([...screen.getByRole('tablist', { name: 'Workspace tabs' }).querySelectorAll<HTMLElement>('[role=tab]')].map(t => t.dataset.tabId)).toEqual(['chat', 'workspace:notes.md', 'workspace:main.ts', 'workspace:tests.ts'])
 })
 
 it.each([{ prune: false, fallback: false }, { prune: false, fallback: true }, { prune: true, fallback: false }])('retains viewer scroll when moving to another group (source pruned=$prune, fallback=$fallback)', async ({ prune, fallback }) => {
@@ -395,7 +391,7 @@ it('keeps an iframe document when an atomic move can retain both groups', async 
   expect(frame.contentDocument!.querySelector('input')!.value).toBe('State after loading')
 })
 
-it.each([390, 1024, 3840])('focuses the active tab and restores the workbench at %i px', async width => {
+it.each(browserWidths([390, 1024, 3840]))('focuses the active tab and restores the workbench at %i px', async width => {
   await page.viewport(width, width === 390 ? 844 : 2160); const view = mount(width !== 390)
   if (width !== 390) {
     await userEvent.click(fileTab('main.ts')); await command('Split tab group right')
@@ -407,8 +403,8 @@ it.each([390, 1024, 3840])('focuses the active tab and restores the workbench at
   if (width !== 390) await command('Toggle explorer')
   if (width === 3840) {
     if (screen.getByTestId('rail-toggle').getAttribute('aria-expanded') === 'false') await userEvent.click(screen.getByTestId('rail-toggle'))
-    await screen.findByRole('separator', { name: 'Session panel width' })
-    for (const name of ['Explorer width', 'Session list width', 'Session panel width']) {
+    await screen.findByRole('separator', { name: 'Workspace panel width' })
+    for (const name of ['Explorer width', 'Workspace list width', 'Workspace panel width']) {
       const divider = screen.getByRole('separator', { name })
       divider.focus(); await userEvent.keyboard('{ArrowRight}')
     }
@@ -417,15 +413,16 @@ it.each([390, 1024, 3840])('focuses the active tab and restores the workbench at
   const explorer = width === 390 ? 0 : explorerRegion().getBoundingClientRect().width
   await command('Focus mode')
   expect(screen.queryByRole('region', { name: 'Explorer' })).toBeNull()
-  expect(screen.queryByRole('region', { name: 'Session list' })).toBeNull()
+  expect(screen.queryByRole('region', { name: 'Workspace list' })).toBeNull()
   expect(groupNodes()).toEqual(nodes)
   expect(nodes.filter(n => n.checkVisibility())).toHaveLength(1)
   expect(screen.queryByRole('separator', { name: /Resize tab groups/ })).toBeNull()
   expect(screen.getByTestId('tab-focus-announce')).toHaveTextContent('Entered tab focus mode')
   await waitFor(() => {
     const visible = nodes.find(n => n.checkVisibility())!.getBoundingClientRect()
-    const area = screen.getByTestId('session-groups').getBoundingClientRect()
-    expect(visible.width).toBe(area.width); expect(visible.height).toBe(area.height)
+    // SessionGroups measures client sizes, which round fractional CSS pixels to integers.
+    const area = screen.getByTestId('session-groups')
+    expect(visible.width).toBe(area.clientWidth); expect(visible.height).toBe(area.clientHeight)
   })
   const exit = screen.getByRole('button', { name: 'Exit tab focus' })
   expect(exit.title).toMatch(/Shift.*Enter/)
@@ -453,12 +450,12 @@ it.each([390, 1024, 3840])('focuses the active tab and restores the workbench at
   expect(await screen.findByRole('region', { name: 'new.ts' })).toBeVisible()
   expect(nodes.filter(n => n.checkVisibility())).toHaveLength(1)
   await userEvent.keyboard('{Control>}p{/Control}')
-  await userEvent.fill(screen.getByRole('combobox', { name: 'Search session files' }), 'notes.md')
+  await userEvent.fill(screen.getByRole('combobox', { name: 'Search workspace files' }), 'notes.md')
   await screen.findByRole('option', { name: /notes.md/ })
   await userEvent.keyboard('{Enter}')
   expect(await screen.findByRole('heading', { name: 'Release notes' })).toBeVisible()
   expect(nodes.filter(n => n.checkVisibility())).toHaveLength(1)
-  await command('Back to Chat')
+  await command('Back to Main')
   expect(composer()).toHaveFocus()
   expect(nodes.filter(n => n.checkVisibility())).toHaveLength(1)
   await userEvent.click(fileTab('notes.md'))
@@ -485,7 +482,7 @@ it('exits focus in the group of the last tab selected through quick open', async
   const original = groupOf(fileTab('main.ts'))
   await userEvent.dblClick(fileTab('main.ts'))
   await userEvent.keyboard('{Control>}p{/Control}')
-  await userEvent.fill(screen.getByRole('combobox', { name: 'Search session files' }), 'notes.md')
+  await userEvent.fill(screen.getByRole('combobox', { name: 'Search workspace files' }), 'notes.md')
   await screen.findByRole('option', { name: /notes.md/ })
   await userEvent.keyboard('{Enter}')
   const last = groupOf(fileTab('notes.md'))
@@ -495,3 +492,101 @@ it('exits focus in the group of the last tab selected through quick open', async
   expect(screen.getByRole('region', { name: 'notes.md' })).toHaveFocus()
   expect(groupNodes().every(node => node.checkVisibility())).toBe(true)
 })
+
+it.each([1024, 3840])('keeps dock and workspace drag targets separate at %i px', async width => {
+  await page.viewport(width, 1100); mount()
+  await userEvent.click(screen.getByRole('button', { name: 'Toggle explorer' }))
+  const dock = screen.getByTestId('dock-groups')
+  const workspace = screen.getByTestId('session-groups')
+  const transfer = new DataTransfer()
+  const dockState = () => localStorage.getItem('blerg-runner.session-dock.windows.person-a.sess-a')
+  const panelState = () => localStorage.getItem(key)
+  const beforeDock = dockState(), beforePanel = panelState()
+  fireEvent.dragStart(fileTab('notes.md'), { dataTransfer: transfer })
+  const dockRect = dock.getBoundingClientRect()
+  fireEvent.dragOver(dock.querySelector('.session-group')!, { dataTransfer: transfer, clientX: dockRect.left + 10, clientY: dockRect.bottom - 10 })
+  expect(dock.querySelector('[data-testid="drop-overlay"]')).toBeNull()
+  fireEvent.drop(dock.querySelector('.session-group')!, { dataTransfer: transfer })
+  expect(dockState()).toBe(beforeDock); expect(panelState()).toBe(beforePanel)
+  fireEvent.dragStart(screen.getByRole('tab', { name: 'Files' }), { dataTransfer: transfer })
+  fireEvent.dragOver(workspace.querySelector('.session-group')!, { dataTransfer: transfer, clientX: 900, clientY: 900 })
+  expect(workspace.querySelector('[data-testid="drop-overlay"]')).toBeNull()
+  fireEvent.drop(workspace.querySelector('.session-group')!, { dataTransfer: transfer })
+  expect(dockState()).toBe(beforeDock); expect(panelState()).toBe(beforePanel)
+  // The same drag splits inside its own dock and preserves the main layout.
+  const group = dock.querySelector('.session-group')!
+  fireEvent.dragStart(screen.getByRole('tab', { name: 'Files' }), { dataTransfer: transfer })
+  fireEvent.dragOver(group, { dataTransfer: transfer, clientX: dockRect.left + dockRect.width / 2, clientY: dockRect.bottom - 10 })
+  expect(within(dock).getByTestId('drop-overlay')).toHaveAttribute('data-zone', 'bottom')
+  fireEvent.drop(group, { dataTransfer: transfer, clientX: dockRect.left + dockRect.width / 2, clientY: dockRect.bottom - 10 })
+  expect(dock.querySelectorAll('.session-group')).toHaveLength(2)
+  expect(screen.getByRole('tab', { name: 'Files' })).toHaveFocus()
+  expect(panelState()).toBe(beforePanel)
+  // Clicking a tool in the other stack never reorders its strip.
+  const order = () => within(dock).getAllByRole('tab').map(tab => tab.getAttribute('aria-label'))
+  const beforeOrder = order()
+  await userEvent.click(screen.getByRole('tab', { name: 'Repositories' }))
+  expect(order()).toEqual(beforeOrder)
+  const mainActive = screen.getByRole('tab', { name: /Main/, selected: true })
+  fireEvent.keyDown(screen.getByRole('tab', { name: 'Repositories' }), { key: ']', altKey: true })
+  expect(screen.getByRole('tab', { name: 'Questions' })).toHaveFocus()
+  expect(mainActive).toHaveAttribute('aria-selected', 'true')
+  const strip = within(dock).getAllByRole('tablist')[0]
+  const channel = screen.getByRole('tab', { name: 'Channels' })
+  fireEvent.dragStart(screen.getByRole('tab', { name: 'Repositories' }), { dataTransfer: transfer })
+  fireEvent.drop(strip, { dataTransfer: transfer, clientX: channel.getBoundingClientRect().left })
+  expect(order()).toEqual(['Repositories', 'Channels', 'Questions', 'Inbox', 'Files'])
+  await userEvent.click(channel)
+  expect(order()).toEqual(['Repositories', 'Channels', 'Questions', 'Inbox', 'Files'])
+  expect(JSON.parse(dockState()!).layout.first.tabs).toEqual(['repositories', 'sessions', 'questions', 'inbox'])
+  const shots = import.meta.env.VITE_CHROME_SHOTS_DIR
+  if (shots) await page.screenshot({ path: `${shots}/dock-split-${width}.png` })
+})
+
+for (const width of [390, 3840]) for (const count of [1, 2, 3]) {
+  it(`shows ordinary Main with ${count} channel panels at ${width}px`, async () => {
+    await page.viewport(width, width === 390 ? 844 : 2160)
+    const channels = ['Review', 'Planning'].slice(0, count - 1).map((title, index) => makeSession({ id: `channel-${index}`, title, parent_session_id: 'sess-a', kind: 'agent', status: 'idle' }))
+    useSessionStore.setState(s => ({ sessions: [...s.sessions, ...channels] }))
+    for (const channel of channels) {
+      const transcript = useTranscriptStore.getState()
+      transcript.ingest({ session_id: channel.id, seq: 1, client_event_id: channel.id, ts: '2026-10-25T12:00:00Z', kind: 'assistant_text', payload: { text: `${channel.title} is ready.`, done: true } } as AgentEvent)
+      transcript.ingestReplayDone(channel.id, { lastSeq: 1, hasMore: false })
+    }
+    const tabs = channels.map(channel => ({ id: `session-chat:${channel.id}`, view: { kind: 'session-chat', sessionId: channel.id, label: channel.title }, preview: false }))
+    let layout: import('../lib/sessionGroups').TabLayout = { type: 'group', id: 'main', tabs: ['chat'], active: 'chat' }
+    for (const [index, tab] of tabs.entries()) layout = { type: 'split', id: `split-${index}`, axis: 'vertical', ratio: (index + 1) / (index + 2), first: layout, second: { type: 'group', id: `channel-group-${index}`, tabs: [tab.id], active: tab.id } }
+    localStorage.setItem(key, JSON.stringify({ tabs, layout, focused: 'main', active: 'chat' }))
+    mount()
+    expect(screen.queryByLabelText('Pinned')).toBeNull()
+    await screen.findByRole('button', { name: 'Close Main' })
+    if (width === 3840) await userEvent.click(screen.getByRole('button', { name: 'Toggle explorer' }))
+    if (width === 3840) for (const channel of channels) {
+      const row = screen.getByRole('treeitem', { name: channel.title })
+      expect(row).toHaveAttribute('data-visible', 'true')
+      expect(row).toHaveAttribute('aria-selected', 'false')
+      await userEvent.click(screen.getByRole('tab', { name: channel.title }))
+      expect(row).toHaveAttribute('aria-selected', 'true')
+      expect(screen.getByRole('treeitem', { name: 'Main' })).toHaveAttribute('aria-selected', 'false')
+    }
+    if (width === 3840) await userEvent.click(screen.getByRole('tab', { name: 'Main' }))
+    if (shotDir) await page.screenshot({ path: `${shotDir}/main-${count}-panels-${width}.png` })
+    const draft = document.querySelector<HTMLTextAreaElement>('[data-view-id=chat] .agent-composer textarea')!
+    await userEvent.fill(draft, 'Keep this draft while Main is closed')
+    await userEvent.click(screen.getByRole('button', { name: 'Close Main' }))
+    expect(screen.queryByRole('tab', { name: /^Main$/ })).toBeNull()
+    if (count === 1) expect(screen.getByText('Open a channel from the sidebar, or a file from the explorer.')).toBeVisible()
+    if (width === 390) await userEvent.click(screen.getByRole('button', { name: 'Toggle explorer' }))
+    const main = await screen.findByRole('treeitem', { name: 'Main' })
+    expect(main).toHaveAttribute('aria-selected', 'false')
+    expect(main).not.toHaveAttribute('data-visible')
+    await userEvent.click(main)
+    if (width === 390) {
+      await screen.findByRole('button', { name: 'Close Main' })
+      await userEvent.click(screen.getByRole('button', { name: 'Toggle explorer' }))
+    }
+    expect(screen.getByRole('treeitem', { name: 'Main' })).toHaveAttribute('aria-selected', 'true')
+    expect(document.querySelector('[data-view-id=chat] .agent-composer textarea')).toBe(draft)
+    expect(draft).toHaveValue('Keep this draft while Main is closed')
+  })
+}

@@ -282,3 +282,49 @@ func TestReconcileDisablesThenReEnablesAndIsIdempotent(t *testing.T) {
 		t.Fatal("a member who is back in the org must be re-enabled and un-revoked")
 	}
 }
+
+func TestPeopleAdminDisableSurvivesReconcile(t *testing.T) {
+	pool, st, svc := reconcileFixture(t)
+	ctx := t.Context()
+	var admin, sid string
+	if err := pool.QueryRow(ctx, `INSERT INTO accounts(provider,provider_subject,role) VALUES('local','manual-disable-admin','admin') RETURNING id::text`).Scan(&admin); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO human_sessions(account_id,token_hash,chain_id) VALUES($1,'manual-disable-hash',gen_random_uuid()) RETURNING id::text`, admin).Scan(&sid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE human_sessions SET chain_id=id WHERE id=$1`, sid); err != nil {
+		t.Fatal(err)
+	}
+	target := insertGitHubAccount(t, pool, "42", "still-a-member")
+	if err := svc.DisablePerson(ctx, admin, sid, target); err != nil {
+		t.Fatal(err)
+	}
+	members := fakeOrgMembersServer(t, "theorg", []string{"still-a-member"})
+	withFakeGitHubBaseURL(t, members)
+	reconcileOnce(ctx, st, svc, "theorg", testGHToken, members.Client())
+	if !isAccountDisabled(t, pool, target) || !isAccountRevoked(t, st, target) {
+		t.Fatal("reconcile undid administrative disable")
+	}
+}
+
+func TestPeopleAdminUsesLiveSessionChainAfterRotation(t *testing.T) {
+	pool, _, svc := reconcileFixture(t)
+	ctx := t.Context()
+	var actor, sid string
+	if err := pool.QueryRow(ctx, `INSERT INTO accounts(provider,provider_subject,role) VALUES('local','rotated-admin','admin') RETURNING id::text`).Scan(&actor); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO human_sessions(account_id,token_hash,chain_id,revoked_at) VALUES($1,'rotated-root',gen_random_uuid(),now()) RETURNING id::text`, actor).Scan(&sid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE human_sessions SET chain_id=id WHERE id=$1`, sid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO human_sessions(account_id,token_hash,chain_id) VALUES($1,'rotated-successor',$2)`, actor, sid); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.InvitePerson(ctx, actor, sid, "Person", "person@example.com"); err != nil {
+		t.Fatalf("live rotated chain refused: %v", err)
+	}
+}

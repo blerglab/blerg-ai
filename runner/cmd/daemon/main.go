@@ -15,15 +15,40 @@ import (
 
 	"github.com/blerglab/blerg-ai/runner/internal/daemon"
 	"github.com/blerglab/blerg-ai/runner/internal/hostgit"
+	"github.com/blerglab/blerg-ai/runner/internal/plancli"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 	"github.com/blerglab/blerg-ai/runner/internal/shellruntime"
+	"github.com/blerglab/blerg-ai/runner/internal/testreportcli"
 	"github.com/blerglab/blerg-ai/runner/internal/updatehandoff"
+	"github.com/blerglab/blerg-ai/runner/internal/workspacecli"
 )
 
 var version = "dev"
 var commit = "dev"
 
+// Keep the startup cleanup behind the same exclusive ownership as recovery.
+func prepareAgentRecords() string {
+	dir := daemon.AgentRecordsDir(daemon.DaemonStateDir())
+	if !daemon.LockAgentRecords(dir) {
+		return ""
+	}
+	daemon.SweepSessionSkillPacks(dir)
+	return dir
+}
+
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "test" {
+		os.Exit(testreportcli.Main(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "plan" {
+		os.Exit(plancli.Main(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	if shellKeeperCommand(os.Args[1:]) {
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "workspace" {
+		os.Exit(workspacecli.Main(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) == 2 && (os.Args[1] == "begin-update" || os.Args[1] == "prepare-update" || os.Args[1] == "cancel-update") {
 		binary, err := os.Executable()
 		if err == nil {
@@ -51,6 +76,32 @@ func main() {
 	if daemon.WorkspaceWorkerMain(os.Args[1:]) {
 		return
 	}
+	if len(os.Args) >= 3 && os.Args[1] == "shell-supervisor" && os.Args[2] == "--keeper-restart" {
+		var err error
+		switch {
+		case len(os.Args) == 3:
+			err = shellruntime.ServeKeeperHelper(os.Stdin, os.Stdout)
+		case len(os.Args) == 4 && os.Args[3] == "--probe":
+			err = shellruntime.Probe(os.Stdout)
+		case len(os.Args) == 4 && os.Args[3] == "--probe-persistence":
+			err = shellruntime.ProbeKeeperPersistence(os.Stdin, os.Stdout)
+		default:
+			os.Exit(1)
+		}
+		if err != nil {
+			if errors.Is(err, shellruntime.ErrIdentityChanged) {
+				os.Exit(3)
+			}
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) == 3 && os.Args[1] == "shell-supervisor" && os.Args[2] == "--probe-persistence" {
+		if shellruntime.ProbePersistent(os.Stdin, os.Stdout) != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) == 3 && os.Args[1] == "shell-supervisor" && os.Args[2] == "--probe" {
 		if shellruntime.Probe(os.Stdout) != nil {
 			os.Exit(1)
@@ -71,6 +122,14 @@ func main() {
 	if len(os.Args) > 1 {
 		os.Exit(runCommand(os.Args[1:], os.Stdout, os.Stderr))
 	}
+	keeperDone, err := keeperStartup()
+	if err != nil {
+		log.Print("host shells unavailable: waiting for the shell keeper to reconnect")
+		daemon.SetHostKeeperFactory(shellruntime.RefusedHostBridge)
+		keeperDone = func() {}
+	}
+	// The keeper reconciles shell cgroups under keeper.lock. Agent startup
+	// must neither wait for it nor sweep custody owned by a live keeper.
 	if err := hostgit.Initialize(); err != nil {
 		log.Printf("hardened Git unavailable: %v", err)
 	}
@@ -78,16 +137,13 @@ func main() {
 	// Systemd user services start with a minimal PATH that omits ~/.local/bin,
 	// where `claude` is typically installed. Without it, exec.LookPath("claude")
 	// fails and every spawned/recovered session execs a non-existent binary,
-	// dying instantly. Prepend it so child tmux/claude processes inherit it.
+	// dying instantly. Prepend it so child engine processes inherit it.
 	ensureLocalBinOnPath()
 	// A PATH the owner re-detected from the app (engine discovery's "Re-detect PATH") goes
 	// ahead of the service's own, so an engine found by it stays found after a restart.
 	daemon.ApplySavedLoginPath(daemon.DaemonStateDir())
 
-	// Systemd user services also start with no TERM. The session PTY runs
-	// `tmux attach`, and a tmux client with an empty TERM aborts with
-	// "open terminal failed: terminal does not support clear". The browser
-	// renders with xterm.js, so default to xterm-256color.
+	// Service environments may omit TERM; child CLI tools use the standard xterm palette.
 	if os.Getenv("TERM") == "" {
 		if err := os.Setenv("TERM", "xterm-256color"); err != nil {
 			log.Printf("set TERM: %v", err)
@@ -127,6 +183,11 @@ func main() {
 		log.Fatal("enroll this desktop with the installer first")
 	}
 	var workspaces *daemon.LocalWorkspaceService
+	defer func() {
+		if err := shellruntime.RemoveEmptyShellCgroupParent(); err != nil {
+			log.Printf("shell cgroup parent cleanup incomplete: %v", err)
+		}
+	}()
 	cfg := daemon.Config{
 		WorkspaceCapabilitiesProvider: func(ctx context.Context) protocol.WorkspaceCapabilities { return workspaces.Capabilities(ctx) },
 		ServerURL:                     requireEnv("BLERG_RUNNER_SERVER_URL"),
@@ -145,10 +206,7 @@ func main() {
 
 	// Recovery records of agent sessions belong to one daemon process at a time: a second
 	// daemon run by the same user (a build started by hand) keeps none and recovers nothing.
-	agentRecordsDir := daemon.AgentRecordsDir(daemon.DaemonStateDir())
-	if !daemon.LockAgentRecords(agentRecordsDir) {
-		agentRecordsDir = ""
-	}
+	agentRecordsDir := prepareAgentRecords()
 	// Why the previous run ended (the installer's marker, or its own note of a clean stop), read
 	// once by the daemon that holds the records: the sessions it cut off are told.
 	stateDir := ""
@@ -198,6 +256,7 @@ func main() {
 		Workspaces:       workspaces,
 		ReposRoot:        cfg.ReposRoot,
 		ReposRootSetting: reposRoot,
+		WorkerPriority:   daemon.NewWorkerPriority(settingsPath),
 		DaemonName:       cfg.DaemonName,
 		DaemonToken:      cfg.DaemonToken,
 		ServerHTTP:       serverHTTP,
@@ -241,8 +300,7 @@ func main() {
 	client.OnMessage("engine_check", daemon.EngineCheckHandler(client, daemon.DaemonStateDir(), prober.Kick))
 	go limits.Run(ctx)
 
-	// Reattach to any persistent tmux sessions left by a prior run on every
-	// (re)connect, so Claude sessions survive a daemon restart.
+	// Reconnect agent sessions and recover their authenticated workspaces.
 	attachmentCleaner := daemon.NewAttachmentCleaner(client, mgr.ActiveSessionIDs, stateDir)
 	go attachmentCleaner.Run(ctx)
 	client.SetOnConnect(func() {
@@ -254,7 +312,7 @@ func main() {
 		// The hello says which sessions are alive, not what they are doing: a heartbeat now
 		// moves a session the server marked lost straight to its real state.
 		client.RequestHeartbeat()
-		mgr.ReattachSessions()
+		mgr.ReconnectSessions()
 		attachmentCleaner.Sweep()
 	})
 
@@ -263,6 +321,9 @@ func main() {
 	client.SetSessionStates(mgr.SessionStates)
 	// ...and the spawns still in its queue, so a slow start is not read as a lost session.
 	client.SetQueuedSessions(mgr.QueuedSpawnIDs)
+
+	var legacyTerminals daemon.LegacyTerminalWarning
+	legacyTerminals.Warn()
 
 	// Claim the agent sessions the previous run of the daemon left behind, before connecting:
 	// the hello then lists them and the server keeps their rows while they are hosted again.
@@ -277,6 +338,7 @@ func main() {
 		daemon.NoteCleanStop(stateDir)
 	}
 	log.Println("blerg-runner-daemon: stopped")
+	keeperDone() // Fatal startup exits release the flock through kernel FD teardown.
 }
 
 func requireEnv(key string) string {
@@ -389,6 +451,7 @@ func hostname() string {
 
 const usage = `Usage:
   blerg-runner-daemon                      run the daemon (its settings come from the environment)
+  blerg-runner-daemon cleanup-scratch [--apply]  inspect old scratch folders; --apply removes safe ones
   blerg-runner-daemon status --open-work   list the agent sessions a restart would cut off:
                                            a turn running, background tasks, subagents
                                            (nothing printed: none; run inside an agent
@@ -399,6 +462,13 @@ const usage = `Usage:
 // error rather than ignored: the daemon itself takes none, and must never start by mistake.
 func runCommand(args []string, stdout, stderr io.Writer) int {
 	switch {
+	case (len(args) == 1 || len(args) == 2 && args[1] == "--apply") && args[0] == "cleanup-scratch":
+		root, _ := daemon.LoadReposRootSetting(daemon.DaemonSettingsPath(daemon.DaemonStateDir()), os.Getenv("BLERG_RUNNER_REPOS_ROOT"))
+		if err := daemon.CleanupScratchFolders(root.Get(), daemon.DaemonStateDir(), len(args) == 2, stdout); err != nil {
+			_, _ = fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
 	case len(args) == 1 && (args[0] == "-h" || args[0] == "--help" || args[0] == "help"):
 		_, _ = fmt.Fprint(stdout, usage)
 		return 0

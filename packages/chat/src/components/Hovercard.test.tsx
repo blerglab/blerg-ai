@@ -681,7 +681,7 @@ it('renders host session facts in the existing run hovercard and escapes their t
   const chip = show({}, { kind: 'run', title: 'Build widgets', facts: { model: { value: 'Model next' } }, details: [
     { label: 'Repository / folder', value: 'example-org/widget' },
     { label: 'Runtime', value: 'Sandbox' },
-    { label: 'Started session', value: '<script>Child checks</script>' },
+    { label: 'Worker', value: '<script>Child checks</script>' },
   ] })
   fireEvent.pointerEnter(chip, { pointerType: 'mouse' })
   act(() => { vi.advanceTimersByTime(DELAY + 1) })

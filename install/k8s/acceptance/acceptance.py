@@ -216,6 +216,10 @@ def render(ns, v, run_id, credentials=None):
                 pod = template["spec"]
                 required_affinity(pod, v["excluded_nodes"])
                 pod["automountServiceAccountToken"] = d["metadata"]["name"] == "blerg-runner"
+                if d["metadata"]["name"] == "blerg-core":
+                    pod.pop("serviceAccountName", None)
+                # Optional leaf Secrets remain absent. The shared acceptance
+                # namespace never receives the authority or its renewal Job.
                 for c in pod["containers"]:
                     name = c["name"]
                     image = {"blerg-core": "blerg-core", "blerg-board": "blerg-board", "blerg-runner": "blerg-runner-enabled"}.get(name)

@@ -18,6 +18,8 @@ var errCorePrincipalUnavailable = errors.New("the session owner's current author
 // a 5xx, a malformed answer) is only "could not tell". errors.Is(…, errCorePrincipalUnavailable)
 // holds for both.
 var errCorePrincipalRefused = fmt.Errorf("%w: refused", errCorePrincipalUnavailable)
+var errStandingSuspended = fmt.Errorf("%w: suspended", errCorePrincipalRefused)
+var errStandingRevoked = fmt.Errorf("%w: revoked", errCorePrincipalRefused)
 
 // verifyCorePrincipal checks the named principal without reading any credential.
 // Unlike credential-fetch fallback, a revoked proof or unavailable core fails
@@ -38,7 +40,7 @@ func listCorePersonalKinds(parent context.Context, client *http.Client, coreURL,
 	}
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
-	body, err := json.Marshal(internalCredentialListRequest{AccountID: accountID, TokenID: proof.TokenID, SessionID: proof.SessionID})
+	body, err := json.Marshal(internalCredentialListRequest{AccountID: accountID, TokenID: proof.TokenID, SessionID: proof.SessionID, Standing: proof.standing && proof.SessionID != "" && proof.TokenID == ""})
 	if err != nil {
 		return nil, errCorePrincipalUnavailable
 	}
@@ -55,6 +57,16 @@ func listCorePersonalKinds(parent context.Context, client *http.Client, coreURL,
 	defer func() { _ = resp.Body.Close() }()
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound:
+		if proof.standing {
+			switch resp.Header.Get("X-Blerg-Standing-State") {
+			case "suspended":
+				return nil, errStandingSuspended
+			case "revoked":
+				return nil, errStandingRevoked
+			default:
+				return nil, errCorePrincipalUnavailable
+			}
+		}
 		return nil, errCorePrincipalRefused
 	case resp.StatusCode != http.StatusOK:
 		return nil, errCorePrincipalUnavailable

@@ -66,9 +66,9 @@ describe('XHTML label conversion and the parent SVG policy', () => {
     expect(new DOMParser().parseFromString(fixtures.outputs.safe, 'image/svg+xml').querySelector('parsererror')).not.toBeNull()
     const host = document.createElement('section')
     document.body.append(host)
-    let dispose: (() => void) | undefined
+    let visual: {svg: string; width: number; height: number; dispose(): void} | undefined
     try {
-      dispose = await renderMermaid('flowchart LR\nsafe', host)
+      visual = await renderMermaid('flowchart LR\nsafe', host)
       const image = host.querySelector('img')!
       expect(image.naturalWidth).toBeGreaterThan(0)
       const svg = new DOMParser().parseFromString(decodeURIComponent(image.src.split(',')[1]), 'image/svg+xml')
@@ -82,7 +82,7 @@ describe('XHTML label conversion and the parent SVG policy', () => {
         expect(span.childNodes).toHaveLength(1)
         expect(span.firstChild!.nodeType).toBe(Node.TEXT_NODE)
       }
-    } finally { dispose?.(); host.remove() }
+    } finally { visual?.dispose(); host.remove() }
   })
 
   it.each([
@@ -95,7 +95,7 @@ describe('XHTML label conversion and the parent SVG policy', () => {
     ['rootHandler', 'Unsupported SVG attribute: onload'],
     ['textReference', 'Unsupported SVG attribute: href'],
   ])('converts the label but the parent still refuses %s', async (name, reason) => {
-    const converted = await renderInFrame(`flowchart LR\n${name}`, CONFIG)
+    const { svg: converted } = await renderInFrame(`flowchart LR\n${name}`, CONFIG)
     const svg = new DOMParser().parseFromString(converted, 'image/svg+xml')
     expect(svg.querySelector('parsererror, foreignObject')).toBeNull()
     expect(textOf(svg)).toBe('Use <b>literal</b> & "quotes" next line')

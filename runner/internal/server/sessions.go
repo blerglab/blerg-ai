@@ -152,12 +152,16 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 	// same runtime/kind labels the sessions list shows.
 	kind := msg.Kind
 	runtime := ""
+	runtimeTargetID := ""
 	effort := "" // the launch effort, recorded on the row at spawn
 	engine := ""
 	cronID := "" // set when a cron started the session, so the badge shows from the first message
 	var startedBy *protocol.StartedBy
 	var parentSessionID *string
 	interaction := ""
+	verbosity := "standard"
+	color := ""
+	emoji := ""
 	if pool != nil {
 		if row, err := db.GetSession(ctx, pool, msg.SessionID); err != nil {
 			log.Printf("session_started GetSession %s: %v", msg.SessionID, err)
@@ -168,11 +172,15 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 			if row.Effort != nil {
 				effort = *row.Effort
 			}
+			runtimeTargetID = derefOrEmpty(row.RuntimeTargetID)
 			engine = derefOrEmpty(row.Engine)
 			cronID = derefOrEmpty(row.CronID)
 			startedBy = startedByOf(row)
 			parentSessionID = row.ParentSessionID
 			interaction = effectiveInteraction(row)
+			verbosity = effectiveVerbosity(row)
+			color = row.Color
+			emoji = row.Emoji
 			if kind == "" {
 				kind = row.Kind
 			}
@@ -185,7 +193,17 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 	advanceStart(ctx, hub, pool, msg.SessionID, false,
 		protocol.StartStage{ID: protocol.StageEngine, State: protocol.StageStateActive, Detail: "Starting the engine"})
 
+	var startedRow *db.SessionRow
+	if pool != nil {
+		startedRow, _ = db.GetSession(ctx, pool, msg.SessionID)
+	}
 	hub.BroadcastJSONPerAccount(func(account string) any { //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
+		var workspace *protocol.WorkspaceManifest
+		var workspaceResults []protocol.WorkspaceMemberResult
+		if startedRow != nil {
+			info := hub.sessionInfoFor(ctx, *startedRow, account)
+			workspace, workspaceResults = info.Workspace, info.WorkspaceResults
+		}
 		visible := runtime == runnerRuntimeCluster || hub.ownsDesktopID(ctx, account, daemonID)
 		publicDaemon, publicPath, publicRepo := "", "", ""
 		if visible {
@@ -194,10 +212,14 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 		return protocol.BrowserSessionStarted{
 			Type: "session_started",
 			Session: protocol.SessionInfo{
+				Workspace:            workspace,
+				WorkspaceResults:     workspaceResults,
 				ParentSessionID:      parentSessionID,
 				SteeringSupported:    engineSteeringSupported(engine, kind),
 				LimitResumeSupported: kind == "agent" && engineLimitResumeSupported(engine),
 				ID:                   msg.SessionID,
+				Color:                color,
+				Emoji:                emoji,
 				DaemonID:             publicDaemon,
 				Status:               "starting",
 				ProjectPath:          publicPath,
@@ -209,9 +231,11 @@ func HandleSessionStarted(ctx context.Context, hub *Hub, pool *pgxpool.Pool, dae
 				StartedAt:            time.Now().UTC().Format(time.RFC3339),
 				Kind:                 kind,
 				Runtime:              runtime,
+				RuntimeTargetID:      runtimeTargetID,
 				CronID:               cronID,
 				StartedBy:            startedBy,
 				Interaction:          interaction,
+				Verbosity:            verbosity,
 			},
 		}
 	})
@@ -232,6 +256,10 @@ func handleSessionNotFound(hub *Hub, msg protocol.SessionStateChanged) error {
 	return nil
 }
 
+type pinnedStateContextKey struct{}
+
+var errPinnedStateRetry = errors.New("pinned state changed before commit")
+
 // HandleSessionStateChanged handles a session_state_changed message from a daemon.
 // It validates the transition, updates Postgres, broadcasts to browsers, and —
 // when the session enters waiting, or idle with nothing left running — sends the
@@ -243,18 +271,50 @@ func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 	msg.EndReason, msg.EndedBy = "", nil
 	var shown sessionEnd
 	var notice func()
+	pin, _ := ctx.Value(pinnedStateContextKey{}).(*db.DaemonAuthority)
 	if pool != nil {
 		current, err := db.GetSession(ctx, pool, msg.SessionID)
 		if err != nil {
 			return fmt.Errorf("GetSession %s: %w", msg.SessionID, err)
 		}
 		if current == nil {
+			if pin != nil {
+				if err := db.ValidatePinnedDaemon(ctx, pool, *pin); err != nil {
+					return err
+				}
+			}
 			return handleSessionNotFound(hub, msg) //nolint:contextcheck // broadcasts have independent bounded delivery checks and outlive this request
+		}
+		if pin != nil && (current.DaemonID != pin.DaemonID || (!pin.Legacy && (current.SpawningAccountID == nil || *current.SpawningAccountID != pin.OwnerID))) {
+			return db.ErrDesktopAuthority
 		}
 		if blocked, err := db.DelegationResumeBlocked(ctx, pool, msg.SessionID); err != nil {
 			return err
 		} else if blocked {
-			return endOrphanedSession(ctx, hub, pool, msg.SessionID, hub.FindDaemonForSession(msg.SessionID))
+			if pin == nil {
+				return endOrphanedSession(ctx, hub, pool, msg.SessionID, hub.FindDaemonForSession(msg.SessionID))
+			}
+			var applied bool
+			if current.DiscardRequestedAt != nil {
+				applied, err = db.ReconcilePinnedPendingEnd(ctx, pool, *pin, msg.SessionID, current.Status, current.EndReason, true)
+			} else {
+				now := time.Now()
+				applied, err = db.ApplyPinnedSessionFrame(ctx, pool, *pin, msg.SessionID, current.Status, current.EndReason, "ended", &now, systemEnd(db.EndReasonParentEnded), true, nil)
+			}
+			if err != nil {
+				return err
+			}
+			if !applied {
+				return errPinnedStateRetry
+			}
+			revokeBoardTokens(ctx, msg.SessionID)
+			if current.DiscardRequestedAt == nil {
+				hub.SessionTerminallyEnded(msg.SessionID)
+			}
+			if dc := hub.FindDaemonForSession(msg.SessionID); dc != nil && dc.ID == pin.DaemonID && dc.DesktopGeneration == pin.Generation {
+				killStoppedSessions(dc, []string{msg.SessionID})
+			}
+			return nil
 		}
 
 		if !isValidTransition(current.Status, msg.Status) {
@@ -292,25 +352,53 @@ func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 			now := time.Now()
 			endedAt = &now
 		}
+		var frameEffects db.PinnedFrameEffects
+		if msg.Status == "error" && msg.Message != nil && *msg.Message != "" {
+			frameEffects.ErrorReason = msg.Message
+		}
+		readyIdle := (current.Status == "starting" || current.Status == "disconnected") && msg.Status == "idle"
+		frameEffects.SetUnread = (msg.Status == "waiting" || msg.Status == "idle") && !readyIdle
 		var updateErr error
-		if end.Reason != "" {
+		switch {
+		case pin != nil:
+			var applied bool
+			applied, updateErr = db.ApplyPinnedSessionFrame(ctx, pool, *pin, msg.SessionID, current.Status, current.EndReason, msg.Status, endedAt, end, end.Reason != "", &frameEffects)
+			if updateErr == nil && !applied {
+				return errPinnedStateRetry
+			}
+			if updateErr == nil && end.Reason != "" {
+				_ = db.RefreshInsightTiming(ctx, pool, msg.SessionID)
+			}
+		case end.Reason != "":
 			updateErr = db.EndSessionStatus(ctx, pool, msg.SessionID, msg.Status, endedAt, end)
-		} else {
+		default:
 			updateErr = db.UpdateSessionStatusGuarded(ctx, pool, msg.SessionID, msg.Status, endedAt)
 		}
 		if errors.Is(updateErr, db.ErrDelegationEnded) {
+			if pin != nil {
+				return errPinnedStateRetry
+			}
 			return endOrphanedSession(ctx, hub, pool, msg.SessionID, hub.FindDaemonForSession(msg.SessionID))
 		}
 		if updateErr != nil {
 			return fmt.Errorf("UpdateSessionStatus %s → %s: %w", msg.SessionID, msg.Status, updateErr)
 		}
+		if isLiveStatus(msg.Status) {
+			if err := resolveSessionFailureAlerts(ctx, hub, pool, msg.SessionID); err != nil {
+				return fmt.Errorf("resolve recovered failure: %w", err)
+			}
+		}
 		if end.Reason != "" {
 			hub.SessionTerminallyEnded(msg.SessionID)
+			hub.ChildTurnEnded(msg.SessionID, "recommended_channel_closed", "")
 		}
 		if msg.Status == "error" && current.Status != "error" {
 			hub.ChildTurnEnded(msg.SessionID, childTurnFailed, "") // child_turn_notes.go
 		}
 		hub.ChildActivity(msg.SessionID)
+		if msg.Status == "idle" {
+			hub.applyPendingMembership(ctx, pool, msg.SessionID)
+		}
 		if msg.Status == "running" {
 			hub.checkUsageNotices(hub.FindDaemonForSession(msg.SessionID), msg.SessionID)
 		}
@@ -318,7 +406,7 @@ func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 		// Persist why a spawn/run failed so the row isn't left with a bare
 		// "error" status once the daemon's one-shot broadcast is gone (trial
 		// blocker 2 / R7).
-		if msg.Status == "error" && msg.Message != nil && *msg.Message != "" {
+		if pin == nil && msg.Status == "error" && msg.Message != nil && *msg.Message != "" {
 			if err := db.SetSessionError(ctx, pool, msg.SessionID, *msg.Message); err != nil {
 				log.Printf("SetSessionError %s: %v", msg.SessionID, err)
 			}
@@ -336,18 +424,34 @@ func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 		// daemon's session_ended, or by the reconciler's sweep.
 		if terminalSessionStatus(msg.Status) && msg.Status != "error" {
 			failPendingSessionInputs(ctx, hub, pool, msg.SessionID)
-			revokeSessionTokens(ctx, pool, msg.SessionID, "daemon reported "+msg.Status)
+			if pin != nil {
+				revokeBoardTokens(ctx, msg.SessionID)
+			} else {
+				revokeSessionTokens(ctx, pool, msg.SessionID, "daemon reported "+msg.Status)
+			}
 			hub.NotifyCompletion(msg.SessionID)
 		} else if finalStartFailure {
+			// Error rows are outside the Job reconciler's live-session sweep.
+			// Remove the failed launch now, retaining its workspace PVC.
+			if jm := hub.JobManager(); jm != nil {
+				if err := jm.cleanupFailedSessionJob(ctx, msg.SessionID); err != nil {
+					logLaunchFailure("failed_start_cleanup", err)
+				}
+			}
 			failPendingSessionInputs(ctx, hub, pool, msg.SessionID)
-			revokeSessionTokens(ctx, pool, msg.SessionID, "cluster start failed")
+			if pin != nil {
+				revokeBoardTokens(ctx, msg.SessionID)
+			} else {
+				revokeSessionTokens(ctx, pool, msg.SessionID, "cluster start failed")
+			}
 			hub.NotifyCompletion(msg.SessionID)
 		}
 
-		data, _ := json.Marshal(map[string]string{"status": msg.Status})
-		if err := db.AppendSessionEvent(ctx, pool, msg.SessionID, "state_change",
-			string(data), 0); err != nil {
-			log.Printf("AppendSessionEvent state_change %s: %v", msg.SessionID, err)
+		if pin == nil {
+			data, _ := json.Marshal(map[string]string{"status": msg.Status})
+			if err := db.AppendSessionEvent(ctx, pool, msg.SessionID, "state_change", string(data), 0); err != nil {
+				log.Printf("AppendSessionEvent state_change %s: %v", msg.SessionID, err)
+			}
 		}
 
 		// Leaving a start (fresh or resumed) closes its start attempt: live
@@ -364,7 +468,6 @@ func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 		}
 		// A session that has just become ready and idle has not "finished a
 		// turn" — it has not had one. No unread badge, no push for that.
-		readyIdle := (current.Status == "starting" || current.Status == "disconnected") && msg.Status == "idle"
 
 		// Set unread=true on genuine transitions into waiting or idle.
 		// isValidTransition already rejected any self-loop (e.g. idle→idle), so
@@ -372,8 +475,10 @@ func HandleSessionStateChanged(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 		newUnread := current.Unread
 		if (msg.Status == "waiting" || msg.Status == "idle") && !readyIdle {
 			newUnread = true
-			if err := db.SetSessionUnread(ctx, pool, msg.SessionID, true); err != nil {
-				log.Printf("SetSessionUnread %s: %v", msg.SessionID, err)
+			if pin == nil {
+				if err := db.SetSessionUnread(ctx, pool, msg.SessionID, true); err != nil {
+					log.Printf("SetSessionUnread %s: %v", msg.SessionID, err)
+				}
 			}
 		}
 		// Carry the post-update unread value in the broadcast so clients update
@@ -455,6 +560,7 @@ func handleSessionEndedEffects(ctx context.Context, hub *Hub, pool *pgxpool.Pool
 			hub.releaseWorkspaceSelection(hub.FindDaemonForSession(msg.SessionID), ws.Manifest)
 		}
 		hub.SessionTerminallyEnded(msg.SessionID)
+		hub.ChildTurnEnded(msg.SessionID, "recommended_channel_closed", "")
 		if msg.Message != "" {
 			// Why it failed (its engine runtime stopped): the reason the session page, the
 			// sidebar and `session watch` show.

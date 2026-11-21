@@ -1,7 +1,7 @@
 // StartProgress: what a session is doing between "Start" and ready. Renders
 // whatever stages the server and runner pod reported (model/startStages) — the
 // stage list is data, so a runtime with other steps needs no change here.
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import ConfirmPopover from './ConfirmPopover'
 import { endSessionText } from '../model/endSession'
 import { useTicker } from '../hooks/useTicker'
@@ -28,6 +28,9 @@ const STATE_WORDS: Record<AttemptStage['state'], string> = {
 }
 
 interface Props {
+  noun?: 'workspace' | 'worker' | 'channel'
+  name?: string
+  actions?: ReactNode
   attempt: StartAttempt
   /** The session's id and status; absent while there is no session row yet. */
   /** runtime: where it runs ("daemon", "docker", "cluster"), for what ending it keeps; absent: not known. */
@@ -43,7 +46,7 @@ interface Props {
 
 const TERMINAL = new Set(['error', 'stopped'])
 
-export default function StartProgress({ attempt, session, onStop, clockOffset = 0, resuming = false }: Props) {
+export default function StartProgress({ attempt, session, onStop, clockOffset = 0, resuming = false, noun = 'workspace', name, actions }: Props) {
   const [showDetails, setShowDetails] = useState(false)
   // The stop asks first, in a small confirmation anchored to its button (ConfirmPopover).
   const [confirmStop, setConfirmStop] = useState(false)
@@ -90,26 +93,30 @@ export default function StartProgress({ attempt, session, onStop, clockOffset = 
     }
   }
 
-  const title = resuming
+  const workspaceTitle = resuming
     ? (gaveUp
-      ? "Couldn't resume the session"
+      ? "Couldn't resume the workspace"
       : retrying
-        ? 'Resuming session — a step is failing, still retrying'
+        ? 'Resuming workspace — a step is failing, still retrying'
         : attempt.ready
-        ? 'Session ready'
-        : 'Resuming session — your message is delivered when it is ready')
+        ? 'Workspace ready'
+        : 'Resuming workspace — your message is delivered when it is ready')
     : gaveUp
-    ? "Couldn't start the session"
+    ? "Couldn't start the workspace"
     : retrying
-      ? 'Starting session — a step is failing, still retrying'
+      ? 'Starting workspace — a step is failing, still retrying'
       : attempt.ready
-      ? 'Session ready'
-      : 'Starting session'
+      ? 'Workspace ready'
+      : 'Starting workspace'
+
+  const title = noun === 'workspace' ? workspaceTitle
+    : gaveUp ? `Couldn't ${resuming ? 'resume' : 'start'} this ${noun}${name ? `: ${name}` : ''}`
+    : workspaceTitle.replaceAll('workspace', noun).replaceAll('Workspace', noun === 'worker' ? 'Worker' : 'Channel')
 
   return (
     <section
       className={`start-progress${gaveUp ? ' failed' : retrying ? ' retrying' : ''}${resuming ? ' resuming' : ''}`}
-      aria-label="Session start progress"
+      aria-label={`${noun === 'worker' ? 'Worker' : noun === 'channel' ? 'Channel' : 'Workspace'} start progress`}
       data-testid="start-progress"
     >
       <header className="sp-header">
@@ -121,8 +128,9 @@ export default function StartProgress({ attempt, session, onStop, clockOffset = 
         {current ? `${current.label}: ${current.state === 'failed' && retrying ? 'failing, still retrying' : STATE_WORDS[current.state]}` : title}
       </div>
 
+      {gaveUp && noun === 'worker' && !attempt.stages.some(s => s.detail?.includes('workspace and Main are still available')) && <p className="sp-detail">Your workspace and Main are still available.</p>}
       <ol className="sp-stages">
-        {attempt.stages.map(s => {
+        {attempt.stages.filter(s => !(s.id === 'plugins' && s.detail === 'skipped: started by another session')).map(s => {
           const showText = showDetails || s.state === 'active' || s.state === 'failed' || s.state === 'warning'
           const took = s.startedAt && s.endedAt ? formatElapsed(s.endedAt - s.startedAt) : null
           return (
@@ -156,7 +164,7 @@ export default function StartProgress({ attempt, session, onStop, clockOffset = 
               from assistive tech, which hears a fixed "over 2 minutes". */}
           Still starting after <span aria-hidden="true">{formatElapsed(elapsed)}</span>
           <span className="sp-sr-only">over 2 minutes</span>. {current ? `It is on “${current.label}”.` : ''}
-          {' '}Starts can take a few minutes (a cold node pulling the image, a large clone); if nothing moves, view the details or stop the session.
+          {' '}Starts can take a few minutes (a cold node pulling the image, a large clone); if nothing moves, view the details or stop this {noun}.
         </div>
       )}
 
@@ -164,23 +172,24 @@ export default function StartProgress({ attempt, session, onStop, clockOffset = 
         <button type="button" className="sp-btn" onClick={() => setShowDetails(d => !d)} aria-expanded={showDetails}>
           {showDetails ? 'Hide details' : 'View details'}
         </button>
-        {onStop && session && (live || failedStage) && (
+        {actions}
+        {(noun !== 'worker' || live) && onStop && session && (live || failedStage) && (
           <button ref={stopButton} type="button" className="sp-btn sp-stop" aria-haspopup="dialog" aria-expanded={confirmStop}
             disabled={stopping} aria-busy={stopping || undefined} onClick={() => setConfirmStop(true)}>
             {/* A failed start is ended the same way (its history stays): never "delete". */}
-            {live ? 'Stop session' : 'End session'}
+            {live ? `Stop ${noun}` : `End ${noun}`}
           </button>
         )}
         {stopError && <span className="sp-stop-error">Stop failed: {stopError}</span>}
       </div>
       {confirmStop && (
-        <ConfirmPopover anchor={stopButton} title="End this session?" description={endSessionText(session?.runtime || attempt.runtime)}
-          confirmLabel="End session" onConfirm={() => void stop()} onCancel={() => setConfirmStop(false)} testId="start-stop-confirm" />
+        <ConfirmPopover anchor={stopButton} title={noun === 'workspace' ? "End this workspace?" : `${live ? 'Stop' : 'End'} this ${noun}?`} description={noun === 'workspace' ? endSessionText(session?.runtime || attempt.runtime) : `Stops only this ${noun}. Your workspace and Main stay available.`}
+          confirmLabel={noun === 'workspace' ? "End workspace" : `${live ? 'Stop' : 'End'} ${noun}`} onConfirm={() => void stop()} onCancel={() => setConfirmStop(false)} testId="start-stop-confirm" />
       )}
       {showDetails && (
         <div className="sp-meta">
           {attempt.runtime && <span>runtime: {attempt.runtime}</span>}
-          {session && <span>session: {session.id}</span>}
+          {session && <span>{noun === 'worker' ? 'Worker' : noun === 'channel' ? 'Channel' : 'Workspace'} ID: {session.id}</span>}
           <span>started {new Date(attempt.startedAt).toLocaleTimeString()}</span>
         </div>
       )}

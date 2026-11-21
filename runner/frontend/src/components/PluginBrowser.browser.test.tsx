@@ -89,7 +89,7 @@ describe.each([
     )
     await userEvent.click(screen.getByRole('tab', { name: /^Capabilities/ }))
     await screen.findByText('frontend-design')
-    return mode === 'drawer' ? screen.getByRole('dialog', { name: 'Session panel' }) : screen.getByTestId('session-rail')
+    return mode === 'drawer' ? screen.getByRole('dialog', { name: 'Workspace panel' }) : screen.getByTestId('session-rail')
   }
 
   it.each(['session', 'always'])('installs a native Codex plugin for %s and displays disabled reasons', async scope => {
@@ -175,13 +175,13 @@ describe.each([
     const select = within(dialog).getByLabelText('Apply plugin') as HTMLSelectElement
     select.value = scope
     select.dispatchEvent(new Event('change', { bubbles: true }))
-    const add = within(dialog).getByRole('button', { name: scope === 'session' ? 'Add to session' : 'Save always on' })
+    const add = within(dialog).getByRole('button', { name: scope === 'session' ? 'Add to workspace' : 'Save always on' })
     expect(add).toBeEnabled()
     await userEvent.click(add)
     await waitFor(() => expect(apiFetch).toHaveBeenCalledWith(expect.stringMatching(/\/plugins$/), expect.objectContaining({
       body: JSON.stringify({ marketplace: 'codex:openai-curated', plugin: 'helper', scope }),
     })))
-    expect(await within(dialog).findByRole('status')).toHaveTextContent(sessionApply ? 'Queued until' : 'Saved for new sessions')
+    expect(await within(dialog).findByRole('status')).toHaveTextContent(sessionApply ? 'Queued until' : 'Saved for new workspaces')
     expect(dialog.scrollWidth).toBeLessThanOrEqual(dialog.clientWidth + 1)
     expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width)
   })
@@ -197,7 +197,7 @@ describe.each([
     await userEvent.click(screen.getByRole('button', { name: 'Add plugin or skill' }))
     const dialog = await screen.findByRole('dialog', { name: 'Add a plugin' })
     await userEvent.type(await within(dialog).findByLabelText('Plugin name'), 'helper')
-    const add = within(dialog).getByRole('button', { name: 'Add to session' })
+    const add = within(dialog).getByRole('button', { name: 'Add to workspace' })
     expect(add).toBeDisabled()
     expect(add).toHaveAccessibleDescription('This marketplace requires Codex.')
     const reason = within(dialog).getByText('This marketplace requires Codex.')
@@ -220,9 +220,9 @@ describe.each([
     const dialog = await screen.findByRole('dialog', { name: 'Add a plugin' })
     const install = await within(dialog).findByRole('button', { name: 'Install plugin-03' })
     expect(install).toBeEnabled()
-    expect(within(dialog).getByRole('option', { name: 'This session only' })).toBeDisabled()
+    expect(within(dialog).getByRole('option', { name: 'This workspace only' })).toBeDisabled()
     await userEvent.click(install)
-    expect(await within(dialog).findByRole('button', { name: 'Start a new session with it' })).toBeVisible()
+    expect(await within(dialog).findByRole('button', { name: 'Start a new workspace with it' })).toBeVisible()
     expect(dialog.scrollWidth).toBeLessThanOrEqual(dialog.clientWidth + 1)
     expect(apiFetch).toHaveBeenCalledWith(expect.stringMatching(/\/plugins$/), expect.objectContaining({ body: JSON.stringify({ marketplace: 'example-org/plugins', plugin: 'plugin-03', scope: 'always' }) }))
   })
@@ -270,7 +270,7 @@ describe.each([
     const connect = screen.getByRole('link', { name: /Connect claude.ai Gmail/ })
     expect(connect.getAttribute('href')).toBe('https://claude.ai/customize/connectors')
     expect(connect.getAttribute('target')).toBe('_blank')
-    expect(screen.getByText('After connecting, restart the session to load it.')).toBeTruthy()
+    expect(screen.getByText('After connecting, restart the workspace to load it.')).toBeTruthy()
     const signIn = screen.getByRole('button', { name: 'Sign in to tracker' })
     await userEvent.click(signIn)
     expect((await screen.findByTestId('caps-mcp-host')).textContent).toContain('auth.example')

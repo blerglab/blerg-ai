@@ -3,7 +3,7 @@
 // open file tab's scroll, and the session panel's tab (the Files list) scroll, before the first paint.
 import { beforeEach, afterEach, expect, it, vi } from 'vitest'
 import { useEffect } from 'react'
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { page, userEvent } from 'vitest/browser'
 import { useTranscriptStore, type AgentEvent } from '@blerglab/chat'
@@ -16,6 +16,7 @@ import { RAIL_PREF_KEY, RAIL_TAB_KEY } from '../lib/sessionRail'
 import { invalidateChatTransport } from '../lib/chatTransport'
 import { resetSessionRetentionForTest } from '../lib/sessionRetention'
 import { emit } from '../test/wsMock'
+import { loadHighlighter } from '../../../../packages/chat/src/model/highlight'
 import '../index.css'
 import '@blerglab/chat/blerg.css'
 
@@ -42,10 +43,11 @@ beforeEach(() => {
   useSessionStore.setState({ daemons: [makeDaemon()], sessions: ['a', 'b'].map(x => makeSession({ id: `sess-${x}`, kind: 'agent', status: 'idle', title: `Session ${x.toUpperCase()}` })) })
   localStorage.setItem(RAIL_PREF_KEY, '1')
   localStorage.setItem(RAIL_TAB_KEY, 'files')
+  localStorage.setItem('blerg-runner.session-dock.windows', JSON.stringify({ active: 'files', panels: [], ratio: .5 }))
   localStorage.setItem(explorerPrefKey('person-a'), JSON.stringify({ open: true, width: 320 }))
   apiFetch.mockReset().mockImplementation(async (url: string) => {
     const id = /\/api\/sessions\/([^/]+)\//.exec(url)?.[1] ?? ''
-    if (url.includes('/workspace?')) return json({ result: { ok: true, launch_generation: 'launch', generation: 1, entries: [{ name: `notes-${id}.md`, path: 'notes.md', directory: false }], truncated: false }, members: [], runtime: 'host' })
+    if (url.includes('/workspace?')) return json({ result: { ok: true, launch_generation: 'launch', generation: 1, entries: [{ name: `notes-${id}.ts`, path: 'notes.ts', directory: false }], truncated: false }, members: [], runtime: 'host' })
     if (url.endsWith('/permissions')) return json({ can_grant: true, reason: '', grants: [], mcp_tools: [], boards: [] })
     return json({})
   })
@@ -53,7 +55,7 @@ beforeEach(() => {
     const url = String(input)
     const id = /\/api\/sessions\/([^/]+)\//.exec(url)?.[1] ?? ''
     if (url.endsWith('/artifacts')) return json({ artifacts: artifacts(id) })
-    if (url.includes('/workspace-file')) return json({ path: 'notes.md', view: 'text', content_type: 'text/plain', mtime: '2026-10-27T12:00:00Z', content_b64: btoa(longText) })
+    if (url.includes('/workspace-file')) return json({ path: 'notes.ts', view: 'text', content_type: 'text/plain', mtime: '2026-10-27T12:00:00Z', content_b64: btoa(longText) })
     return json([])
   }))
 })
@@ -98,8 +100,10 @@ for (const [width, height] of [[390, 844], [3840, 2160]] as const) {
     await screen.findByText(/sess-a message 400/)
     await frame()
     const root = timeline()
+    root.dispatchEvent(new PointerEvent('pointerdown', { button: 0 }))
     root.scrollTop = Math.round(root.scrollHeight / 2)
     root.dispatchEvent(new Event('scroll'))
+    window.dispatchEvent(new PointerEvent('pointerup'))
     await frame()
     const place = root.scrollTop, seen = firstSeen()
     expect(atEnd(root)).toBe(false)
@@ -128,19 +132,24 @@ for (const [width, height] of [[390, 844], [3840, 2160]] as const) {
   })
 
   it(`an open file tab's scroll comes back, at ${width}px`, async () => {
+    // Exercise the loaded highlighter too: a line can span several text nodes.
+    await loadHighlighter()
     await page.viewport(width, height)
     mount()
-    await userEvent.click(await screen.findByRole('treeitem', { name: /^notes-sess-a\.md/ }))
-    await screen.findByText(/line 1 of the notes/)
+    await userEvent.click(await screen.findByRole('treeitem', { name: /^notes-sess-a\.ts/ }))
+    const scroller = () => screen.getByTestId('workspace-code')
+    // Read the whole code element: highlighting can split a line across spans.
+    const ready = () => waitFor(() => expect(scroller().querySelector('code')?.textContent).toBe(longText), { timeout: 10_000 })
+    await ready()
+    expect(scroller().querySelector('.hljs-number')).not.toBeNull()
     await frame()
-    const scroller = () => [...document.querySelectorAll<HTMLElement>('.hosted-view *')].find(el => el.scrollHeight > el.clientHeight + 50 && getComputedStyle(el).overflowY !== 'visible' && getComputedStyle(el).overflowY !== 'hidden')!
     scroller().scrollTop = 1200
     scroller().dispatchEvent(new Event('scroll'))
     await frame()
     const place = scroller().scrollTop
     expect(place).toBeGreaterThan(100)
     await awayAndBack()
-    await screen.findByText(/line 1 of the notes/)
+    await ready()
     expect(scroller().scrollTop).toBe(place)
   })
 }
@@ -187,7 +196,7 @@ it('each panel tab keeps its own scroll place, also when shown from the command 
   const live = body().scrollTop
   expect(live).toBeGreaterThan(0)
   expect(live).not.toBe(files)
-  fireEvent.click(tab('Files'))
+  fireEvent.click(tab('Shared'))
   await frame()
   expect(body().scrollTop).toBe(files)
   fireEvent.click(tab('Live'))
@@ -202,7 +211,7 @@ it('each panel tab keeps its own scroll place, also when shown from the command 
     await userEvent.keyboard('{Enter}')
     await frame()
   }
-  await command('Show Files panel')
+  await command('Show Shared panel')
   expect(body().scrollTop).toBe(files)
   await command('Show Live panel')
   expect(body().scrollTop).toBe(live)
@@ -214,8 +223,10 @@ it('a reading place that came back is kept on the next leaving too, across a lay
   await screen.findByText(/sess-a message 400/)
   await frame()
   const root = timeline()
+  root.dispatchEvent(new PointerEvent('pointerdown', { button: 0 }))
   root.scrollTop = Math.round(root.scrollHeight / 2)
   root.dispatchEvent(new Event('scroll'))
+  window.dispatchEvent(new PointerEvent('pointerup'))
   await frame()
   const seen = firstSeen()
   await awayAndBack()
@@ -252,26 +263,26 @@ for (const [width, height] of [[390, 844], [1440, 900]] as const) {
     const files = body().scrollTop
     expect(files).toBeGreaterThan(100)
     // ArrowRight from Files to Capabilities and back with ArrowLeft: the focused tab is in view.
-    fireEvent.keyDown(tab('Files'), { key: 'ArrowRight' })
+    fireEvent.keyDown(tab('Shared'), { key: 'ArrowRight' })
     await frame()
     expect(document.activeElement).toBe(tab('Capabilities'))
     expect(inView(document.activeElement!)).toBe(true)
     fireEvent.keyDown(tab('Capabilities'), { key: 'ArrowLeft' })
     await frame()
-    expect(document.activeElement).toBe(tab('Files'))
+    expect(document.activeElement).toBe(tab('Shared'))
     expect(body().scrollTop).toBe(files)
     expect(inView(document.activeElement!)).toBe(true)
     // The palette command too.
     {
       // On a phone the drawer is closed first; the command opens it on Files (a new body, put back).
       if (width < 1024) { await userEvent.keyboard('{Escape}'); await frame(); screen.getByTestId('rail-toggle').focus() }
-      else tab('Files').focus()
+      else tab('Shared').focus()
       await userEvent.keyboard('{Control>}k{/Control}')
       const palette = screen.getByRole('dialog', { name: 'Command palette' })
-      await userEvent.fill(within(palette).getByRole('combobox'), '>Show Files panel')
+      await userEvent.fill(within(palette).getByRole('combobox'), '>Show Shared panel')
       await userEvent.keyboard('{Enter}')
       await frame()
-      expect(document.activeElement).toBe(tab('Files'))
+      expect(document.activeElement).toBe(tab('Shared'))
       expect(body().scrollTop).toBe(files)
       expect(inView(document.activeElement!)).toBe(true)
     }

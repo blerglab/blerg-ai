@@ -2,15 +2,30 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/blerglab/blerg-ai/runner/internal/agent"
 
 	"github.com/blerglab/blerg-ai/runner/internal/clusterworkspace"
 	"github.com/blerglab/blerg-ai/runner/internal/daemon"
 	"github.com/blerglab/blerg-ai/runner/internal/protocol"
 )
+
+type clusterContextProvider struct{ request chan agent.Request }
+
+func (p clusterContextProvider) Stream(_ context.Context, r agent.Request) (<-chan agent.StreamEvent, error) {
+	p.request <- r
+	events := make(chan agent.StreamEvent, 1)
+	events <- agent.StreamEvent{Kind: "done", StopReason: "end_turn"}
+	close(events)
+	return events, nil
+}
 
 type launchExplorer struct{ requestServices }
 
@@ -105,11 +120,141 @@ func TestClusterPreparedWorkspaceStartsAgentHost(t *testing.T) {
 			default:
 				t.Fatal("CLUSTER_AGENT_START: prepared cluster workspace did not reach session_started")
 			}
+			skillState := daemon.PodSkillStateDir(home)
+			t.Cleanup(func() { _ = os.RemoveAll(skillState) })
+			foundSkill := false
+			err = filepath.WalkDir(skillState, func(path string, d os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if d.Name() != "SKILL.md" {
+					return nil
+				}
+				foundSkill = true
+				info, err := d.Info()
+				if err != nil {
+					return err
+				}
+				if info.Mode().Perm() != 0640 {
+					t.Fatalf("skill file must be supervisor-owned and group-readable, got %o", info.Mode().Perm())
+				}
+				for parent := filepath.Dir(path); parent != filepath.Dir(skillState); parent = filepath.Dir(parent) {
+					info, err := os.Stat(parent)
+					if err != nil {
+						return err
+					}
+					if info.Mode().Perm() != 0750 {
+						t.Fatalf("skill ancestor must allow only group read/traverse, got %o", info.Mode().Perm())
+					}
+				}
+				return nil
+			})
+			if err != nil || !foundSkill {
+				t.Fatalf("missing skill pack: %v", err)
+			}
 			rt.FenceAdmission()
 			if _, _, err := admit(t.Context(), msg); err == nil {
 				t.Fatal("fenced runtime admitted")
 			}
 
+		})
+	}
+}
+
+func TestClusterGuideReachesEngineContext(t *testing.T) {
+	p := clusterworkspace.Plan{SessionID: "guide", Manifest: protocol.WorkspaceManifest{Runtime: "cluster", Members: []protocol.WorkspaceMember{{ID: "one", Name: "app", Path: "app"}}}}
+	home := t.TempDir()
+	cwd := filepath.Join(home, "projects", "app")
+	if err := os.MkdirAll(cwd, 0700); err != nil {
+		t.Fatal(err)
+	}
+	provider := clusterContextProvider{request: make(chan agent.Request, 1)}
+	cfg := Config{Home: home, SessionID: p.SessionID, Workspace: &p}
+	host := newPodAgentHost(launchSender{started: make(chan protocol.SessionStarted, 1)}, cfg, nil, func() ClusterServices { return nil }, daemon.AgentHostConfig{HomeDir: home, ReposRoot: filepath.Join(home, "projects"), Provider: provider})
+	defer host.Kill(p.SessionID)
+	// This fixture bypasses workspace admission but exercises the pod's engine context.
+	host.Spawn(protocol.SpawnSession{SessionID: p.SessionID, Repo: "app", Kind: "agent", InitialPrompt: "hello"})
+	select {
+	case req := <-provider.request:
+		if !strings.Contains(req.System, clusterWorkspaceGuide(p)) {
+			t.Fatal("cluster guide missing from engine context")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("engine did not start")
+	}
+}
+
+func TestClusterSpawnPreservesPersonPrompt(t *testing.T) {
+	p := clusterworkspace.Plan{Manifest: protocol.WorkspaceManifest{Runtime: "cluster", Members: []protocol.WorkspaceMember{{ID: "one", Path: "app"}}}}
+	for _, prompt := range []string{"", "fix the build"} {
+		cfg := Config{Workspace: &p, InitialPrompt: prompt}
+		if got := podSpawn(cfg, "/workspace/projects/app").InitialPrompt; got != prompt {
+			t.Fatalf("initial prompt = %q, want %q", got, prompt)
+		}
+	}
+}
+
+type promptEventSender struct{ events chan any }
+
+func (s promptEventSender) Send(v any) error { s.events <- v; return nil }
+
+func TestClusterLaunchPromptEvents(t *testing.T) {
+	for _, prompt := range []string{"", "fix the build"} {
+		t.Run(fmt.Sprintf("empty=%t", prompt == ""), func(t *testing.T) {
+			p := clusterworkspace.Plan{SessionID: "prompt", Manifest: protocol.WorkspaceManifest{Runtime: "cluster", Members: []protocol.WorkspaceMember{{ID: "one", Path: "app"}}}}
+			home := t.TempDir()
+			cwd := filepath.Join(home, "projects", "app")
+			if err := os.MkdirAll(cwd, 0700); err != nil {
+				t.Fatal(err)
+			}
+			provider := clusterContextProvider{request: make(chan agent.Request, 1)}
+			sender := promptEventSender{events: make(chan any, 128)}
+			cfg := Config{Home: home, SessionID: p.SessionID, Workspace: &p, InitialPrompt: prompt}
+			host := newPodAgentHost(sender, cfg, nil, func() ClusterServices { return nil }, daemon.AgentHostConfig{HomeDir: home, ReposRoot: filepath.Join(home, "projects"), Provider: provider})
+			defer host.Kill(p.SessionID)
+			msg := podSpawn(cfg, cwd)
+			msg.Workspace = nil
+			msg.ProjectPath = ""
+			msg.Repo = "app"
+			host.Spawn(msg)
+			deadline := time.After(10 * time.Second)
+			for {
+				select {
+				case raw := <-sender.events:
+					if ev, ok := raw.(protocol.AgentEvent); ok && ev.Kind == "user_message" {
+						var payload struct {
+							Text string `json:"text"`
+						}
+						if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+							t.Fatal(err)
+						}
+						if prompt == "" || payload.Text != prompt {
+							t.Fatalf("unexpected user message %q", payload.Text)
+						}
+						goto checkRequest
+					}
+					if state, ok := raw.(protocol.SessionStateChanged); ok && state.Status == "idle" && prompt == "" {
+						select {
+						case <-provider.request:
+							t.Fatal("empty prompt started a turn")
+						default:
+						}
+						host.UserMessage(p.SessionID, "later", "chat")
+						prompt = "later"
+					}
+				case <-deadline:
+					t.Fatal("launch did not deliver the expected event")
+				}
+			}
+		checkRequest:
+			select {
+			case req := <-provider.request:
+				if !strings.Contains(req.System, clusterWorkspaceGuide(p)) {
+					t.Fatal("engine did not receive guidance")
+				}
+			case <-deadline:
+				t.Fatal("engine did not receive prompt")
+			}
 		})
 	}
 }

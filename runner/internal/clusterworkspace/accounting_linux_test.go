@@ -5,12 +5,11 @@ package clusterworkspace
 import (
 	"context"
 	"errors"
-	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -33,58 +32,119 @@ func accountingFixture(t *testing.T) (*DiskGit, string) {
 func TestClusterRefusedDeepMemberStillAccountsAggregate(t *testing.T) {
 	for _, kind := range []string{"bytes", "entries"} {
 		t.Run(kind, func(t *testing.T) {
-			d, root := accountingFixture(t)
-			deep := filepath.Join(root, "two")
-			for range 130 {
-				deep = filepath.Join(deep, "d")
-			}
-			if err := os.MkdirAll(deep, 0700); err != nil {
-				t.Fatal(err)
-			}
-			file := filepath.Join(deep, "payload")
-			f, err := os.Create(file)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if kind == "bytes" {
-				if err := f.Truncate(11 << 30); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := f.Close(); err != nil {
-				t.Fatal(err)
-			}
-			if kind == "entries" {
-				// Hard links consume directory entries without filling the shared disk.
-				for i := range 500000 {
-					if i%60000 == 0 && i != 0 {
-						file = filepath.Join(deep, fmt.Sprintf("payload-%d", i))
-						extra, err := os.Create(file)
-						if err != nil {
-							t.Fatal(err)
-						}
-						if err := extra.Close(); err != nil {
-							t.Fatal(err)
-						}
-					}
-					if err := os.Link(file, filepath.Join(deep, fmt.Sprint(i))); err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			defer cancel()
+			d := &DiskGit{members: map[string]*diskMember{"one": {path: "one"}, "two": {path: "two"}}}
+			d.budgetRoot = func() (budgetDirectory, error) { return &accountingStream{kind: kind}, nil }
 			refusals := map[string]error{}
-			if err := d.scanBudget(ctx, refusals); !errors.Is(err, errAggregateBudget) {
+			if err := d.scanBudget(t.Context(), refusals); !errors.Is(err, errAggregateBudget) || !errors.Is(refusals["two"], ErrPlan) {
 				t.Fatal("partial member accounting accepted hidden exhaustion", err, refusals)
 			}
 			d.BeginRound()
-			if blocked := d.ValidateRound(ctx); blocked["one"] == nil || blocked["two"] == nil {
+			if blocked := d.ValidateRound(t.Context()); blocked["one"] == nil || blocked["two"] == nil {
 				t.Fatal("aggregate exhaustion did not block both members", blocked)
 			}
 		})
 	}
 }
+
+// A bounded stream supplies the same 130 directories and 500,001 payload
+// entries without making the filesystem materialize the policy matrix.
+type accountingStream struct {
+	kind           string
+	depth, emitted int
+}
+
+func (s *accountingStream) ReadDir(n int) ([]os.DirEntry, error) {
+	total := 1
+	if s.depth == 131 && s.kind == "entries" {
+		total = 500001
+	}
+	if s.emitted == total {
+		return nil, io.EOF
+	}
+	count := min(n, total-s.emitted)
+	out := make([]os.DirEntry, count)
+	name := "d"
+	if s.depth == 0 {
+		name = "two"
+	}
+	if s.depth == 131 {
+		name = "payload"
+	}
+	for i := range out {
+		out[i] = accountingEntry{name: name, directory: s.depth < 131}
+	}
+	s.emitted += count
+	return out, nil
+}
+func (s *accountingStream) Stat(string) (unix.Stat_t, error) {
+	if s.depth < 131 {
+		return unix.Stat_t{Mode: unix.S_IFDIR}, nil
+	}
+	size := int64(0)
+	if s.kind == "bytes" {
+		size = 11 << 30
+	}
+	return unix.Stat_t{Mode: unix.S_IFREG, Size: size}, nil
+}
+func (s *accountingStream) Open(string) (budgetDirectory, error) {
+	return &accountingStream{kind: s.kind, depth: s.depth + 1}, nil
+}
+func (*accountingStream) Close() {}
+
+type accountingEntry struct {
+	name      string
+	directory bool
+}
+
+func (e accountingEntry) Name() string { return e.name }
+func (e accountingEntry) IsDir() bool  { return e.directory }
+func (e accountingEntry) Type() os.FileMode {
+	if e.directory {
+		return os.ModeDir
+	}
+	return 0
+}
+func (e accountingEntry) Info() (os.FileInfo, error) { return nil, errors.New("unexpected Info call") }
+
+// Keep the real descriptor traversal, depth refusal, sparse stat and hard-link
+// accounting path: two names for one inode must each consume logical bytes.
+func TestClusterDeepHardLinksAccountAggregateOnDisk(t *testing.T) {
+	d, root := accountingFixture(t)
+	deep := filepath.Join(root, "two")
+	for range 130 {
+		deep = filepath.Join(deep, "d")
+	}
+	if err := os.MkdirAll(deep, 0700); err != nil {
+		t.Fatal(err)
+	}
+	payload := filepath.Join(deep, "payload")
+	f, err := os.Create(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(6 << 30); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	refusals := map[string]error{}
+	if err := d.scanBudget(t.Context(), refusals); err != nil || !errors.Is(refusals["two"], ErrPlan) {
+		t.Fatal("small refused member must still be fully accounted", err, refusals)
+	}
+	if err := os.Link(payload, filepath.Join(deep, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.scanBudget(t.Context(), map[string]error{}); !errors.Is(err, errAggregateBudget) {
+		t.Fatal("hard-link usage omitted", err)
+	}
+	d.BeginRound()
+	if blocked := d.ValidateRound(t.Context()); blocked["one"] == nil || blocked["two"] == nil {
+		t.Fatal("aggregate exhaustion did not block both members", blocked)
+	}
+}
+
 func TestClusterUnreadableMemberCannotAuthorizePartialBudget(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("requires nonprivileged host UID")

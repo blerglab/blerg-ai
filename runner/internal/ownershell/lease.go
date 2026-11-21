@@ -28,7 +28,7 @@ func NewRuntimeLease(key ed25519.PublicKey, grant SignedGrant, expected protocol
 	if now == nil {
 		now = time.Now
 	}
-	if policy.Version != 1 || !policy.Enabled || teardown == nil || VerifyGrant(key, grant, expected, policy.Revision, now()) != nil {
+	if grant.Grant.Version != 1 || policy.Version != 1 || !policy.Enabled || teardown == nil || VerifyGrant(key, grant, expected, policy.Revision, now()) != nil {
 		return nil, ErrDenied
 	}
 	return &RuntimeLease{key: append(ed25519.PublicKey(nil), key...), expected: expected, policy: policy, active: grant, now: now, teardown: teardown}, nil

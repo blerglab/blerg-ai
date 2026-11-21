@@ -27,6 +27,9 @@ import (
 //
 // What gets reviewed depends on what the card produced — see reviewTarget.
 
+// The optional GitHub review automation is separate from local card Git reads.
+var prURLRE = regexp.MustCompile(`github\.com/([^/]+)/([^/]+)/pull/(\d+)`)
+
 var verdictRE = regexp.MustCompile(`(?i)verdict:\s*(approve|request[- ]changes)`)
 
 // reviewerAttemptCap bounds how many reviewer sessions blerg-board will start for

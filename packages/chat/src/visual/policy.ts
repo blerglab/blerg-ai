@@ -1,5 +1,5 @@
 // Agent output is untrusted. Validate before importing a renderer or giving it DOM access.
-export type VisualKind = 'mermaid' | 'vega-lite'
+export type VisualKind = 'mermaid' | 'vega-lite' | 'dashboard'
 import { MAX_CHART_SOURCE } from './vegaPolicy'
 export const MAX_VISUAL_SOURCE = MAX_CHART_SOURCE
 const SVG_NS = 'http://www.w3.org/2000/svg'
@@ -145,18 +145,32 @@ function safeStyle(value: string): boolean {
   return !/url\s*\(|image-set\s*\(|@|\\|(?:https?|data|file|javascript|vbscript):|expression\s*\(|</i.test(withoutLocal)
 }
 
-export function sanitizeSvg(source: string): string {
+export function sanitizeSvg(source: string, {stripAriaLabels = false}: {stripAriaLabels?: boolean} = {}): string {
   if (source.length > 2_000_000 || /<!DOCTYPE|<!ENTITY/i.test(source)) throw new Error('Unsupported SVG')
   const doc = new DOMParser().parseFromString(source, 'image/svg+xml')
   if (doc.querySelector('parsererror') || doc.documentElement.localName !== 'svg') throw new Error('Invalid SVG')
-  for (const el of [doc.documentElement, ...doc.documentElement.querySelectorAll('*')]) {
+  validateSvgElement(doc.documentElement, {stripAriaLabels})
+  return new XMLSerializer().serializeToString(doc.documentElement)
+}
+
+/** The same closed SVG/resource boundary for native scene nodes, without serializing and
+ * reparsing a native drawing. Validate detached nodes before any live-scene mutation. */
+export function validateSvgElement(root: Element, {stripAriaLabels = false}: {stripAriaLabels?: boolean} = {}): void {
+  if (root.localName !== 'svg') throw new Error('Invalid SVG')
+  for (const el of [root, ...root.querySelectorAll('*')]) {
     if (el.namespaceURI !== SVG_NS || !SVG_TAGS.has(el.localName)) throw new Error(`Unsupported SVG element: ${el.localName}`)
-    for (const attr of el.attributes) {
+    for (const attr of [...el.attributes]) {
+      // The chart is copied to a canvas whose host has its own accessible label. Generated
+      // ARIA descriptions can contain literal inline-data URLs or angle brackets; discard
+      // those nonvisual descriptions instead of treating their text as a style/resource.
+      if (stripAriaLabels && (attr.name === 'aria-label' || attr.name === 'aria-roledescription')) {
+        el.removeAttributeNode(attr)
+        continue
+      }
       const xmlSpace = attr.namespaceURI === 'http://www.w3.org/XML/1998/namespace'
         && attr.localName === 'space' && /^(preserve|default)$/.test(attr.value)
       if (/^on/i.test(attr.name) || attr.localName === 'href' || (attr.namespaceURI && attr.namespaceURI !== 'http://www.w3.org/2000/xmlns/' && !xmlSpace) || (!attr.name.startsWith('xmlns') && !safeStyle(attr.value))) throw new Error(`Unsupported SVG attribute: ${attr.name}`)
     }
     if (el.localName === 'style' && !safeStyle(el.textContent ?? '')) throw new Error('Unsupported SVG styles')
   }
-  return new XMLSerializer().serializeToString(doc.documentElement)
 }

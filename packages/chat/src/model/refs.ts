@@ -5,8 +5,8 @@
 //   - a hash (7 to 40 hex digits, at least one a digit) only when the session's repository says it
 //     is a commit (the transport's commit read, which only the session's owner may make).
 // Until then the text is drawn exactly as it is, so nothing moves. Lookups are batched: every
-// reference asked for within DEBOUNCE_MS goes in one pass, each key at most once per session; the
-// answers (yes or no) are kept until the viewer or the corresponding resolver changes.
+// reference asked for within DEBOUNCE_MS goes in one pass. Confirmed answers are cached; misses
+// and failures retry after 5 seconds with exponential backoff, up to five attempts per resolver.
 import type { CardTarget } from '../components/Hovercard'
 import type { Ticket } from '../types'
 
@@ -17,6 +17,8 @@ export interface ChatRefs {
   cards?: (numbers: number[]) => Promise<Map<number, CardTarget>>
   /** Explicit board IDs or board keys (including aliases). The host enforces access when reading the card. */
   boardCards?: (boardId: string, numbers: number[]) => Promise<Map<number, CardTarget>>
+  /** The host-owned Board app URL; snapshot data cannot supply a destination. */
+  boardUrl?: (boardId: string) => string
   /** Opens a confirmed card (the host's ticket dialog). */
   openCard?: (t: CardTarget) => void
   /** Opens a pinned ticket in the host's ticket dialog (the runner's: the live Board card in the
@@ -38,6 +40,7 @@ export type RefState =
 export const DEBOUNCE_MS = 60
 /** Commit reads in flight at once. */
 const COMMIT_CONCURRENCY = 4
+const MAX_REF_ATTEMPTS = 5
 
 const HASH = /^(?=[0-9a-fA-F]*\d)[0-9a-fA-F]{7,40}$/
 export function isHash(word: string): boolean {
@@ -60,6 +63,7 @@ const NONE: RefState = { state: 'none' }
 
 export function createRefStore(timer: { set: (fn: () => void, ms: number) => unknown } = { set: (fn, ms) => setTimeout(fn, ms) }): RefStore {
   const known = new Map<RefKey, RefState>()
+  const retries = new Map<RefKey, { delay: number; attempts: number }>()
   const wanted = new Set<RefKey>()
   const listeners = new Set<() => void>()
   let scheduled = false
@@ -71,7 +75,20 @@ export function createRefStore(timer: { set: (fn: () => void, ms: number) => unk
   let commit: ((sha: string) => Promise<string | null>) | null | undefined
   const calls = { cards: 0, commits: 0 }
   const emit = () => { for (const l of listeners) l() }
-  const settle = (k: RefKey, s: RefState) => { known.set(k, s); wanted.delete(k) }
+  const settle = (k: RefKey, s: RefState) => { known.set(k, s); wanted.delete(k); retries.delete(k) }
+  function retry(k: RefKey, failed = false) {
+    const attempts = (retries.get(k)?.attempts ?? 0) + 1
+    if (attempts >= MAX_REF_ATTEMPTS) { settle(k, NONE); return }
+    const attempt = { delay: Math.min((retries.get(k)?.delay ?? 2500) * 2, 60000), attempts }
+    retries.set(k, attempt)
+    known.set(k, failed ? PENDING : NONE)
+    wanted.delete(k)
+    timer.set(() => {
+      if (retries.get(k) !== attempt) return
+      known.delete(k)
+      if (listeners.size) { wanted.add(k); schedule() }
+    }, attempt.delay)
+  }
 
   function schedule() {
     if (scheduled) return
@@ -101,8 +118,8 @@ export function createRefStore(timer: { set: (fn: () => void, ms: number) => unk
       for (const n of numbers) known.set(`card:${n}`, PENDING)
       calls.cards++
       jobs.push(readCards(numbers).then(
-        found => { if (revision !== boardRevision) return; for (const n of numbers) { const t = found.get(n); settle(`card:${n}`, t ? { state: 'card', target: t } : NONE) } },
-        () => { if (revision !== boardRevision) return; for (const n of numbers) settle(`card:${n}`, NONE) },
+        found => { if (revision !== boardRevision) return; for (const n of numbers) { const t = found.get(n); if (t) settle(`card:${n}`, { state: 'card', target: t }); else retry(`card:${n}`) } },
+        () => { if (revision !== boardRevision) return; for (const n of numbers) retry(`card:${n}`, true) },
       ))
     }
     for (const [board, ns] of qualified) {
@@ -111,8 +128,8 @@ export function createRefStore(timer: { set: (fn: () => void, ms: number) => unk
       for (const n of ns) known.set(key(n), PENDING)
       calls.cards++
       jobs.push(readBoardCards(board, ns).then(
-        found => { if (qualifiedVersion !== qualifiedRevision) return; for (const n of ns) { const t = found.get(n); settle(key(n), t ? { state: 'card', target: t } : NONE) } },
-        () => { if (qualifiedVersion !== qualifiedRevision) return; for (const n of ns) settle(key(n), NONE) },
+        found => { if (qualifiedVersion !== qualifiedRevision) return; for (const n of ns) { const t = found.get(n); if (t) settle(key(n), { state: 'card', target: t }); else retry(key(n)) } },
+        () => { if (qualifiedVersion !== qualifiedRevision) return; for (const n of ns) retry(key(n), true) },
       ))
     }
     if (shas.length && readCommit && commits === commitRevision) {
@@ -123,9 +140,11 @@ export function createRefStore(timer: { set: (fn: () => void, ms: number) => unk
           const s = shas[i++]
           calls.commits++
           let full: string | null
-          try { full = await readCommit(s) } catch { full = null }
+          let failed = false
+          try { full = await readCommit(s) } catch { full = null; failed = true }
           if (commits !== commitRevision) return
-          settle(`commit:${s}`, full && full.toLowerCase().startsWith(s.toLowerCase()) ? { state: 'commit', sha: full } : NONE)
+          if (full && full.toLowerCase().startsWith(s.toLowerCase())) settle(`commit:${s}`, { state: 'commit', sha: full })
+          else retry(`commit:${s}`, failed)
           emit()
         }
       }
@@ -148,6 +167,7 @@ export function createRefStore(timer: { set: (fn: () => void, ms: number) => unk
       boardRevision++
       qualifiedRevision++
       commitRevision++
+      retries.clear()
       known.clear()
       wanted.clear()
       cards = undefined
@@ -160,17 +180,17 @@ export function createRefStore(timer: { set: (fn: () => void, ms: number) => unk
       if (cardsNew) {
         boardRevision++
         // A board created or pinned during the session replaces the bare-number context.
-        for (const k of known.keys()) if (/^card:\d+$/.test(k)) { known.delete(k); wanted.add(k) }
+        for (const k of new Set([...known.keys(), ...retries.keys()])) if (/^card:\d+$/.test(k)) { retries.delete(k); known.delete(k); wanted.add(k) }
       }
       const qualifiedNew = r.boardCards !== boardCards
       if (qualifiedNew) {
         qualifiedRevision++
-        for (const k of known.keys()) if (/^card:[^:]+:\d+$/.test(k)) { known.delete(k); wanted.add(k) }
+        for (const k of new Set([...known.keys(), ...retries.keys()])) if (/^card:[^:]+:\d+$/.test(k)) { retries.delete(k); known.delete(k); wanted.add(k) }
       }
       const commitNew = r.commit !== commit
       if (commitNew) {
         commitRevision++
-        for (const k of known.keys()) if (k.startsWith('commit:')) { known.delete(k); wanted.add(k) }
+        for (const k of new Set([...known.keys(), ...retries.keys()])) if (k.startsWith('commit:')) { retries.delete(k); known.delete(k); wanted.add(k) }
       }
       boardCards = r.boardCards
       cards = r.cards
@@ -202,7 +222,7 @@ export function resetRefStoresForTest(): void {
 }
 
 /** A piece of text split into plain text and reference candidates, in order. */
-export type RefPiece = { text: string } | { text: string; key: RefKey } | { text: string; cards: number[] }
+export type RefPiece = { text: string } | { text: string; key: RefKey } | { text: string; cards: number[] } | { text: string; href: string }
 
 /** At most ten cards per ascending range, including both endpoints. */
 export const MAX_CARD_RANGE = 10
@@ -238,7 +258,7 @@ function splitUnqualifiedRefs(text: string): RefPiece[] {
 }
 
 /** Canonical KEY-N and legacy board:<board-id>#N forms, in prose or tables. */
-export function splitRefs(text: string): RefPiece[] {
+function splitBoardRefs(text: string): RefPiece[] {
   const out: RefPiece[] = []
   const qualified = /(^|[^\w&#-])(?:board:([A-Za-z0-9_-]{1,64})#([1-9]\d{0,6})|([A-Z][A-Z0-9]{1,4})-([1-9]\d{0,6}))(?![\w#-])/g
   let last = 0
@@ -251,5 +271,29 @@ export function splitRefs(text: string): RefPiece[] {
     last = start + word.length
   }
   out.push(...splitUnqualifiedRefs(text.slice(last)))
+  return out
+}
+
+/** Repository-qualified issues take precedence over board and commit candidates.
+ * Only an adjacent list inherits the repository; ordinary prose ends that scope. */
+export function splitRefs(text: string): RefPiece[] {
+  const out: RefPiece[] = []
+  const issues = /(?<![\w./:-])([A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9_][A-Za-z0-9_.-]*)(?:[ \t]+issues?[ \t]+)?(#[1-9]\d{0,6}(?![\w-])(?:(?:[ \t]*,[ \t]*(?:and[ \t]+)?|[ \t]+and[ \t]+)#[1-9]\d{0,6}(?![\w-]))*)/g
+  let last = 0
+  for (const match of text.matchAll(issues)) {
+    out.push(...splitBoardRefs(text.slice(last, match.index)))
+    const start = match.index!
+    const numbersStart = start + match[0].length - match[2].length
+    out.push({ text: text.slice(start, numbersStart) })
+    let cursor = numbersStart
+    for (const number of match[2].matchAll(/#(\d+)/g)) {
+      const at = numbersStart + number.index!
+      if (at > cursor) out.push({ text: text.slice(cursor, at) })
+      out.push({ text: number[0], href: `https://github.com/${match[1]}/issues/${number[1]}` })
+      cursor = at + number[0].length
+    }
+    last = start + match[0].length
+  }
+  out.push(...splitBoardRefs(text.slice(last)))
   return out
 }

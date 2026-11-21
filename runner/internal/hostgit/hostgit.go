@@ -27,6 +27,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -308,7 +311,19 @@ func killGroup(cmd *exec.Cmd, kill func(int, syscall.Signal) error) {
 
 // Run runs git with args under o, bounded by ctx and o.Timeout; the whole process group is killed
 // on either, and once git is done.
-func Run(ctx context.Context, o Options, args ...string) error {
+func Run(ctx context.Context, o Options, args ...string) (result error) {
+	defer func() {
+		if result != nil {
+			operation := "other"
+			if len(args) > 0 {
+				switch args[0] {
+				case "show", "rev-parse", "status", "diff", "log", "branch", "worktree", "init", "fetch", "push", "merge", "config":
+					operation = args[0]
+				}
+			}
+			failurelog.Default.Event("git:"+operation, slog.LevelError, "component", "git", "operation", operation, "cause", failurelog.Cause(result))
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return err
 	}

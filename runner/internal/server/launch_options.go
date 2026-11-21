@@ -14,17 +14,19 @@ import (
 )
 
 type LaunchOptionsRequest struct {
-	SessionID    string `json:"session_id,omitempty"`
-	Runtime      string `json:"runtime,omitempty"`
-	DaemonID     string `json:"daemon_id,omitempty"`
-	Repo         string `json:"repo,omitempty"`
-	Kind         string `json:"kind,omitempty"`
-	Restricted   bool   `json:"restricted,omitempty"`
-	Refresh      bool   `json:"refresh,omitempty"`
-	PersonalOnly bool   `json:"personal_only,omitempty"`
+	RuntimeTargetID string `json:"runtime_target_id,omitempty"`
+	SessionID       string `json:"session_id,omitempty"`
+	Runtime         string `json:"runtime,omitempty"`
+	DaemonID        string `json:"daemon_id,omitempty"`
+	Repo            string `json:"repo,omitempty"`
+	Kind            string `json:"kind,omitempty"`
+	Restricted      bool   `json:"restricted,omitempty"`
+	Refresh         bool   `json:"refresh,omitempty"`
+	PersonalOnly    bool   `json:"personal_only,omitempty"`
 }
 
 type LaunchEngine struct {
+	RuntimeTargetID string `json:"runtime_target_id,omitempty"`
 	engines.Descriptor
 	Models   models.List `json:"models"`
 	DaemonID string      `json:"daemon_id,omitempty"`
@@ -32,11 +34,12 @@ type LaunchEngine struct {
 }
 
 type LaunchOptions struct {
-	Refreshing bool           `json:"refreshing,omitempty"`
-	Runtime    string         `json:"runtime"`
-	DaemonID   string         `json:"daemon_id,omitempty"`
-	State      string         `json:"state"`
-	Engines    []LaunchEngine `json:"engines"`
+	RuntimeTargetID string         `json:"runtime_target_id,omitempty"`
+	Refreshing      bool           `json:"refreshing,omitempty"`
+	Runtime         string         `json:"runtime"`
+	DaemonID        string         `json:"daemon_id,omitempty"`
+	State           string         `json:"state"`
+	Engines         []LaunchEngine `json:"engines"`
 	// Unavailable is every other known engine, with why it can't run on this
 	// target and the exact fix (engine discovery after install). Absent when
 	// every engine is offered or nothing is known.
@@ -62,9 +65,10 @@ type UnavailableEngine struct {
 }
 
 type LaunchTarget struct {
-	DaemonID string   `json:"daemon_id,omitempty"`
-	Name     string   `json:"name"`
-	Runtimes []string `json:"runtimes"`
+	RuntimeTargetID string   `json:"runtime_target_id,omitempty"`
+	DaemonID        string   `json:"daemon_id,omitempty"`
+	Name            string   `json:"name"`
+	Runtimes        []string `json:"runtimes"`
 	// HasRepo (a desktop, when the request names a repo): whether that desktop has a folder for
 	// it, matched the way a start pinned to it finds one (repoFolderOn). Absent otherwise.
 	HasRepo *bool `json:"has_repo,omitempty"`
@@ -94,7 +98,7 @@ func (a *API) HandleLaunchOptions(w http.ResponseWriter, r *http.Request) {
 	snapshot := a.hub.ownedHostDaemons(r.Context(), p.spawningAccountID())
 	ctx := withDesktopReadSnapshot(r.Context(), snapshot)
 	q := r.URL.Query()
-	options, err := a.DiscoverLaunchOptions(ctx, p, LaunchOptionsRequest{SessionID: q.Get("session_id"), Runtime: q.Get("runtime"), DaemonID: q.Get("daemon_id"), Repo: q.Get("repo"), Kind: q.Get("kind"), Restricted: q.Get("restricted") == "1", Refresh: q.Get("refresh") == "1", PersonalOnly: q.Get("personal_only") == "1"})
+	options, err := a.DiscoverLaunchOptions(ctx, p, LaunchOptionsRequest{RuntimeTargetID: q.Get("runtime_target_id"), SessionID: q.Get("session_id"), Runtime: q.Get("runtime"), DaemonID: q.Get("daemon_id"), Repo: q.Get("repo"), Kind: q.Get("kind"), Restricted: q.Get("restricted") == "1", Refresh: q.Get("refresh") == "1", PersonalOnly: q.Get("personal_only") == "1"})
 	if err != nil {
 		writeAPIError(w, err)
 		return
@@ -123,14 +127,24 @@ func folderOrigin(dc *DaemonConn, folder string) *protocol.RepoOrigin {
 // as launch. It never substitutes another account's catalog or a host union for
 // a Cluster catalog. Catalog acquisition itself remains asynchronous.
 func (a *API) DiscoverLaunchOptions(parent context.Context, p RunnerPrincipal, req LaunchOptionsRequest) (LaunchOptions, *APIError) {
+	if err := a.runtimeTargetProblem(parent, req.Runtime, req.RuntimeTargetID); err != nil {
+		return LaunchOptions{}, err
+	}
+	if req.RuntimeTargetID != "" && req.Runtime == "" {
+		req.Runtime = "cluster"
+	}
 	parent = withDesktopViewer(parent, desktopViewer(parent, p.spawningAccountID()))
 	if req.SessionID != "" {
 		return a.discoverExistingSessionOptions(parent, p, req)
 	}
-	out := LaunchOptions{Runtime: req.Runtime, State: "known", Engines: []LaunchEngine{}}
+	out := LaunchOptions{RuntimeTargetID: clusterTargetID(req.Runtime), Runtime: req.Runtime, State: "known", Engines: []LaunchEngine{}}
 	out.Targets = []LaunchTarget{}
 	if jm := a.hub.JobManager(); jm != nil {
-		out.Targets = append(out.Targets, LaunchTarget{Name: "Cluster", Runtimes: []string{runnerRuntimeCluster},
+		target, err := a.defaultRuntimeTarget(parent)
+		if err != nil {
+			return out, err
+		}
+		out.Targets = append(out.Targets, LaunchTarget{RuntimeTargetID: target.ID, Name: target.Name, Runtimes: []string{runnerRuntimeCluster},
 			ResolvesBareRepos: jm.GitHubOrg != "" || jm.ExplicitGitURLBase != ""})
 	}
 	hosts := a.hub.ownedHostDaemons(parent, p.spawningAccountID())
@@ -154,8 +168,8 @@ func (a *API) DiscoverLaunchOptions(parent context.Context, p RunnerPrincipal, r
 	if req.Runtime != "" && req.Runtime != runnerRuntimeCluster && req.Runtime != runnerRuntimeDocker && req.Runtime != runnerRuntimeDaemon {
 		return out, apiErrorf(http.StatusUnprocessableEntity, "%s", runnerRuntimeMessage)
 	}
-	if req.Kind != "" && req.Kind != "agent" && req.Kind != "tmux" {
-		return out, apiErrorf(http.StatusUnprocessableEntity, "kind must be agent or tmux")
+	if req.Kind != "" && req.Kind != "agent" {
+		return out, apiErrorf(http.StatusUnprocessableEntity, "Terminal sessions have been removed; kind must be agent")
 	}
 	if req.Repo != "" {
 		if err := validateRepoName(req.Repo); err != nil {
@@ -165,6 +179,7 @@ func (a *API) DiscoverLaunchOptions(parent context.Context, p RunnerPrincipal, r
 	autoHost := req.Runtime == "" && (req.DaemonID != "" || a.hub.JobManager() == nil)
 	if out.Runtime == "" && req.DaemonID == "" && a.hub.JobManager() != nil {
 		out.Runtime = runnerRuntimeCluster
+		out.RuntimeTargetID = clusterTargetID(out.Runtime)
 	}
 	var dc *DaemonConn
 	if out.Runtime != runnerRuntimeCluster {
@@ -187,7 +202,7 @@ func (a *API) DiscoverLaunchOptions(parent context.Context, p RunnerPrincipal, r
 	}
 	var clusterAvailable []string
 	if out.Runtime == runnerRuntimeCluster {
-		if a.hub.JobManager() == nil || req.Kind == "tmux" {
+		if a.hub.JobManager() == nil {
 			return out, nil
 		}
 		var known bool
@@ -201,10 +216,6 @@ func (a *API) DiscoverLaunchOptions(parent context.Context, p RunnerPrincipal, r
 		}
 	}
 	for _, descriptor := range engines.All() {
-		if req.Kind == "tmux" && !descriptor.Terminal {
-			out.Unavailable = append(out.Unavailable, unsupportedEngine(descriptor, descriptor.Name+" has no terminal mode: start an Agent session instead."))
-			continue
-		}
 		if req.Restricted && !descriptor.Restricted {
 			out.Unavailable = append(out.Unavailable, unsupportedEngine(descriptor, descriptor.Name+" can't run with restricted tools."))
 			continue
@@ -271,7 +282,7 @@ func (a *API) DiscoverLaunchOptions(parent context.Context, p RunnerPrincipal, r
 		}
 		list.Models = append([]models.Model{}, list.Models...)
 		list.EngineEfforts = append([]string{}, models.EffortsFor(descriptor.ID)...)
-		option := LaunchEngine{Descriptor: descriptor, Models: list, Runtime: runtime}
+		option := LaunchEngine{RuntimeTargetID: clusterTargetID(runtime), Descriptor: descriptor, Models: list, Runtime: runtime}
 		if target != nil {
 			option.DaemonID = target.ID
 		}
@@ -290,6 +301,7 @@ func (a *API) DiscoverLaunchOptions(parent context.Context, p RunnerPrincipal, r
 			out.Runtime = common
 		}
 	}
+	out.RuntimeTargetID = clusterTargetID(out.Runtime)
 	return out, nil
 }
 
@@ -365,11 +377,6 @@ func unavailableOnHost(d engines.Descriptor, dc *DaemonConn, runtime string, req
 	if st, ok := engineStatusOn(dc, d.ID); ok && st.Status != protocol.EngineAvailable {
 		out.Status, out.Reason, out.Fix, out.Action = st.Status, st.Reason, st.Fix, st.Action
 		out.FoundAt, out.SearchedPath = st.FoundAt, st.SearchedPath
-		return out
-	}
-	if d.ID == "claude" && req.Kind == "tmux" && runtime == runnerRuntimeDaemon {
-		out.Status, out.Reason = protocol.EngineNotInstalled, "A Claude terminal needs the `claude` CLI on "+dc.Name+"."
-		out.Fix, out.Action = "Install Claude Code there, or Re-detect PATH if your shell already finds it.", "redetect_path"
 		return out
 	}
 	out.Status, out.Reason = protocol.EngineNotInstalled, dc.Name+" doesn't report "+d.Name+" as set up."

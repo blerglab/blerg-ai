@@ -81,7 +81,7 @@ describe('the children rules and their disabled reasons', () => {
   it('a sandboxed session offers unsandboxed children disabled, with the reason', () => {
     const opts = launchChildOptions('docker')
     expect(opts.map(o => [o.runtime, o.canEnable])).toEqual([['docker', true], ['daemon', false]])
-    expect(opts[1].reason).toMatch(/sandboxed session can't pre-approve unsandboxed children/)
+    expect(opts[1].reason).toMatch(/sandboxed workspace can't pre-approve unsandboxed workers/)
   })
   it('an unsandboxed session may pre-approve both', () => {
     expect(launchChildOptions('daemon').every(o => o.canEnable)).toBe(true)

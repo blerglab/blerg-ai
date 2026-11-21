@@ -27,6 +27,10 @@ type CredentialSummary struct {
 	State      string
 	Generation string
 	ExpiresAt  *time.Time
+	// LastUsedAt is the most recent credential_access_log row for this (account, engine) —
+	// when a component actually fetched the plaintext, not when it was stored or rotated. Nil
+	// when it has never been fetched.
+	LastUsedAt *time.Time
 }
 
 // Service is the credentials.Service seam described in the plan: it owns the
@@ -70,8 +74,23 @@ func (s *Service) Store(ctx context.Context, accountID, engine string, plaintext
 // never ciphertext or plaintext (spec §5: GET /api/credentials must never return secret
 // material).
 func (s *Service) List(ctx context.Context, accountID string) ([]CredentialSummary, error) {
+	// last_used is a LATERAL join (not a GROUP BY engine) because it must see uc.created_at:
+	// after a credential is removed and re-added, old access-log rows for the same engine string
+	// are still there (Delete never touches credential_access_log) and must not resurface as the
+	// new credential's "last used". Filtering by account_id here too, as before the earlier fix,
+	// so the join condition can never pull in another account's access history.
 	rows, err := s.st.Pool().Query(ctx,
-		`SELECT engine, updated_at,kind,CASE WHEN state='refresh_pending' AND (claim_deadline IS NULL OR claim_deadline<=now()) THEN 'reconnect_required' ELSE state END,generation::text,expires_at FROM user_credentials WHERE account_id = $1 ORDER BY engine`, accountID)
+		`SELECT uc.engine, uc.updated_at, uc.kind,
+		        CASE WHEN uc.state='refresh_pending' AND (uc.claim_deadline IS NULL OR uc.claim_deadline<=now()) THEN 'reconnect_required' ELSE uc.state END,
+		        uc.generation::text, uc.expires_at, last_used.last_used_at
+		   FROM user_credentials uc
+		   LEFT JOIN LATERAL (
+		     SELECT MAX(fetched_at) AS last_used_at
+		       FROM credential_access_log cal
+		      WHERE cal.account_id = uc.account_id AND cal.engine = uc.engine AND cal.fetched_at >= uc.created_at
+		   ) last_used ON true
+		  WHERE uc.account_id = $1
+		  ORDER BY uc.engine`, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +99,7 @@ func (s *Service) List(ctx context.Context, accountID string) ([]CredentialSumma
 	var out []CredentialSummary
 	for rows.Next() {
 		var c CredentialSummary
-		if err := rows.Scan(&c.Engine, &c.UpdatedAt, &c.Kind, &c.State, &c.Generation, &c.ExpiresAt); err != nil {
+		if err := rows.Scan(&c.Engine, &c.UpdatedAt, &c.Kind, &c.State, &c.Generation, &c.ExpiresAt, &c.LastUsedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

@@ -18,7 +18,8 @@ package server
 //  2. snapshot checks, leaving the proposal pending when they fail: the connection must still
 //     exist for this person with EXACTLY the recorded URL and be ready, and the tool's live
 //     definition must still hash to the recorded tool_hash (a deleted connection also fails the
-//     proposal, since it can never run);
+//     proposal, since it can never run). Scoped snapshots are validated here and
+//     their live binding, approver, resource and pin checks run in ExecuteApproved;
 //  3. compare-and-set pending -> executing (refused for a proposal past its expiry window even
 //     when the sweeper has not expired it yet): one of any number of concurrent approvals wins, the
 //     rest answer 409 and never reach the upstream. The CAS and every recording step run on a
@@ -40,8 +41,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -165,6 +168,8 @@ func viewOfProposal(p *db.Proposal) proposalView {
 	switch {
 	case db.IsBoardFilingProposal(p):
 		v.Kind = "board_file"
+	case db.IsBoardMetadataProposal(p):
+		v.Kind = "board_metadata"
 	case db.IsBoardCreateProposal(p):
 		v.Kind = "board_create"
 	case db.IsSessionPluginProposal(p):
@@ -471,6 +476,11 @@ func (h *proposalsHandler) approve(w http.ResponseWriter, r *http.Request) {
 		h.approveSessionPlugin(w, r, who, p, http.StatusOK)
 		return
 	}
+	if db.IsBoardMetadataProposal(p) {
+		h.approveBoardMetadata(r.Context(), w, who, p, raw)
+		h.api.announceProposalDecision(context.WithoutCancel(r.Context()), p.AccountID, p.ID)
+		return
+	}
 	if db.IsBoardCreateProposal(p) {
 		// A proposed board is approved by its owner only, never for the session: its own body
 		// carries the reviewed arguments and, optionally, a lower access level.
@@ -558,7 +568,7 @@ func (h *proposalsHandler) execute(ctx context.Context, w http.ResponseWriter, w
 		writeError(w, http.StatusConflict, "a plugin request is approved by a person only")
 		return
 	}
-	if db.IsBoardCreateProposal(p) {
+	if db.IsBoardCreateProposal(p) || db.IsBoardMetadataProposal(p) {
 		writeError(w, http.StatusConflict, "a proposed board is approved by a person only")
 		return
 	}
@@ -593,7 +603,8 @@ func (h *proposalsHandler) execute(ctx context.Context, w http.ResponseWriter, w
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), proposalExecuteBudget)
 	defer cancel()
 	res, err := exec.ExecuteApproved(runCtx, mcpgw.ApprovedCall{
-		Proof: proof, ConnectionID: p.ConnectionID, URLSnapshot: p.URLSnapshot,
+		SessionScope: p.SessionScope,
+		Proof:        proof, ConnectionID: p.ConnectionID, URLSnapshot: p.URLSnapshot,
 		Tool: p.Tool, ToolHash: p.ToolHash, Arguments: p.Arguments,
 	})
 	rec, cancelRec := context.WithTimeout(context.WithoutCancel(ctx), proposalWriteBudget)
@@ -659,6 +670,17 @@ func (h *proposalsHandler) releaseUnsent(ctx context.Context, w http.ResponseWri
 
 // snapshotHolds checks the approval's preconditions and writes the refusal when one fails.
 func (h *proposalsHandler) snapshotHolds(ctx context.Context, w http.ResponseWriter, cfg *mcpStartConfig, proof mcpgw.Proof, p *db.Proposal) bool {
+	if p.SessionScope != nil {
+		scope := p.SessionScope
+		if !scope.Valid() || scope.AccountID != p.AccountID || scope.RunnerSessionID != p.SessionID || p.CronID != "" || proof.AccountID != scope.AccountID || proof.TokenID != "" || proof.SessionID == "" {
+			failurelog.Default.Event("mcp_session_proposal:scope_refused", slog.LevelInfo, "component", "runner", "operation", "mcp_session_proposal", "cause", "scope_refused")
+			writeError(w, http.StatusConflict, "The original session sign-in is no longer available.")
+			return false
+		}
+		// ExecuteApproved checks this frozen scope, the current approver, exact resource
+		// and live tool pin before IO. Account listing must never stand in for that proof.
+		return true
+	}
 	conns, err := cfg.Core.ListConnections(ctx, proof)
 	switch {
 	case errors.Is(err, ErrMCPProofInvalid):

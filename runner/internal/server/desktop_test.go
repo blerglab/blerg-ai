@@ -269,6 +269,10 @@ func TestDesktopReassignmentFencesQueuedDeliveryAcrossReplicas(t *testing.T) {
 	if response.Code != 200 {
 		t.Fatalf("remote assignment: %d %s", response.Code, response.Body.String())
 	}
+	var audits int
+	if err := fx.pool.QueryRow(t.Context(), `SELECT count(*) FROM desktop_enrollment_audit WHERE desktop_id=$1 AND actor_id=$2 AND action='assigned'`, id, privAcctA).Scan(&audits); err != nil || audits != 1 {
+		t.Fatalf("assignment audits %d %v", audits, err)
+	}
 	old.send <- []byte(`{"type":"set_repos_root","root":"/must-not-be-delivered"}`)
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, payload, err := conn.ReadMessage(); err == nil {
@@ -305,5 +309,34 @@ func TestDesktopCredentialsDoNotTransferOldSessions(t *testing.T) {
 	}
 	if allowed, err := db.DesktopSessionIDs(t.Context(), fx.pool, fx.dc.ID, privAcctB); err != nil || allowed[fx.pubSession] {
 		t.Fatal("old session entered new owner's recovery inventory", err)
+	}
+}
+
+func TestDesktopAssignmentAuditFailurePreservesOwner(t *testing.T) {
+	fx := newPrivFixture(t)
+	desktopFakeCore(t, fx.api, nil)
+	id := newUUID()
+	if err := db.UpsertDaemon(t.Context(), fx.pool, id, "audit-desktop", "local", ""); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := db.GetDesktop(t.Context(), fx.pool, id)
+	if err != nil || initial == nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.pool.Exec(t.Context(), `ALTER TABLE desktop_enrollment_audit ADD CONSTRAINT reject_assignment_fixture CHECK(action<>'assigned')`); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	fx.api.RegisterDesktopRoutes(mux)
+	request := httptest.NewRequest(http.MethodPut, "/api/desktop-ownership/"+id, strings.NewReader(fmt.Sprintf(`{"owner_id":%q,"ownership_revision":%d}`, privAcctB, initial.Revision)))
+	request.Header.Set("Authorization", "Bearer "+fx.tok(t, "human", privAcctA, "session.start", "account.manage"))
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != 409 {
+		t.Fatalf("failed audit status %d", response.Code)
+	}
+	after, err := db.GetDesktop(t.Context(), fx.pool, id)
+	if err != nil || after.OwnerID != initial.OwnerID || after.Revision != initial.Revision {
+		t.Fatal("assignment survived failed audit")
 	}
 }

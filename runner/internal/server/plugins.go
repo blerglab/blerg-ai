@@ -257,6 +257,9 @@ func (j *JobManager) pluginEnv(spec SessionJobSpec) []map[string]any {
 // list could not be loaded gets a stage in the "warning" state saying so: it is over, it did not
 // happen, and the panel shows it as such rather than folding it to a green check.
 func pluginStage(plugins []pluginspec.Entry, note string) *protocol.StartStage {
+	if len(plugins) == 0 && note == pluginsNoteDelegated {
+		return nil
+	}
 	switch {
 	case len(plugins) > 0:
 		names := make([]string, len(plugins))

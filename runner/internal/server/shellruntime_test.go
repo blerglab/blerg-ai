@@ -165,3 +165,131 @@ func TestShellOutputBurstQueuesBoundedAndCoalesced(t *testing.T) {
 		t.Fatalf("%d bytes queued past the %d byte bound", total, remoteOutputQueue+ownershell.MaxFrame)
 	}
 }
+
+func TestShellCallPreservesPersistentVersionAndRejectsLegacyReply(t *testing.T) {
+	hub := NewHub()
+	dc := &DaemonConn{ID: "desktop", send: make(chan []byte, 8), shellControl: make(chan []byte, 2)}
+	hub.Register(dc)
+	hub.SetSessionOwner("session", dc.ID)
+	done := make(chan error, 1)
+	go func() {
+		_, err := hub.shellCall(t.Context(), dc, shellruntime.RPC{Version: 2, SessionID: "session", Op: "inventory"})
+		done <- err
+	}()
+	var request shellruntime.RPC
+	if err := json.Unmarshal(<-dc.shellControl, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Version != 2 {
+		t.Fatalf("persistent request downgraded to %d", request.Version)
+	}
+	reply := request
+	reply.Version = 1
+	reply.OK = true
+	reply.Type = "owner_shell_result"
+	hub.deliverShell(dc, reply)
+	select {
+	case <-done:
+		t.Fatal("legacy reply satisfied v2 request")
+	default:
+	}
+	reply.Version = 2
+	hub.deliverShell(dc, reply)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDaemonIngressDispatchesBothShellWireVersions(t *testing.T) {
+	for _, version := range []int{1, 2, 3} {
+		t.Run(string(rune('0'+version)), func(t *testing.T) {
+			hub := NewHub()
+			dc := &DaemonConn{ID: "daemon", send: make(chan []byte, 8)}
+			hub.Register(dc)
+			hub.SetSessionOwner("session", dc.ID)
+			replies := make(chan shellruntime.RPC, 1)
+			hub.shellRPC.pending = map[string]shellWaiter{"request": {dc: dc, session: "session", version: version, op: "consent_challenge", reply: replies}}
+			frame := shellruntime.RPC{Version: version, Type: "owner_shell_result", SessionID: "session", RequestID: "request", Op: "consent_challenge", OK: true}
+			raw, err := json.Marshal(frame)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !handleDaemonFrame(t.Context(), hub, dc, nil, raw, envelope{Type: frame.Type, SessionID: frame.SessionID}) {
+				t.Fatal("shell frame rejected")
+			}
+			select {
+			case <-replies:
+				if version == 3 {
+					t.Fatal("unsupported version delivered")
+				}
+			default:
+				if version != 3 {
+					t.Fatal("supported shell wire version dropped")
+				}
+			}
+		})
+	}
+}
+
+func TestClusterOpenSendsPodBindingWithoutServerTarget(t *testing.T) {
+	hub := NewHub()
+	dc := &DaemonConn{ID: "pod", BoundSessionID: "session", send: make(chan []byte, 8), shellControl: make(chan []byte, 8)}
+	hub.Register(dc)
+	hub.SetSessionOwner("session", dc.ID)
+	remote := newRemoteShell(&API{hub: hub})
+	podBinding := ownershell.Binding{Session: "session", Runtime: "cluster", Launch: "launch"}
+	serverBinding := podBinding
+	serverBinding.RuntimeTargetID = "cluster-target"
+	done := make(chan error, 1)
+	go func() {
+		_, err := remote.Open(t.Context(), serverBinding, ownershell.SignedGrant{}, make([]byte, 32))
+		done <- err
+	}()
+	for _, op := range []string{"configure", "open"} {
+		var request shellruntime.RPC
+		if err := json.Unmarshal(<-dc.shellControl, &request); err != nil {
+			t.Fatal(err)
+		}
+		reply := shellruntime.RPC{Type: "owner_shell_result", Version: request.Version, SessionID: request.SessionID, RequestID: request.RequestID, Op: request.Op, OK: true}
+		if request.Op != op {
+			t.Fatalf("got %s, want %s", request.Op, op)
+		}
+		if op == "configure" && request.Binding != podBinding {
+			reply.OK = false
+			reply.ErrorCode = string(ownershell.ReasonRuntimeBinding)
+		}
+		hub.deliverShell(dc, reply)
+		if !reply.OK {
+			break
+		}
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("cluster open refused by pod binding validation: %v", err)
+	}
+}
+
+func TestPrepareCustodySendsPodBindingWithoutServerTarget(t *testing.T) {
+	hub := NewHub()
+	dc := &DaemonConn{ID: "pod", BoundSessionID: "session", send: make(chan []byte, 8), shellControl: make(chan []byte, 8)}
+	hub.Register(dc)
+	hub.SetSessionOwner("session", dc.ID)
+	remote := newRemoteShell(&API{hub: hub})
+	binding := ownershell.Binding{Session: "session", Runtime: "cluster", Launch: "launch", RuntimeTargetID: "cluster-target"}
+	done := make(chan error, 1)
+	go func() {
+		done <- remote.PrepareCustody(t.Context(), binding, "transaction", ownershell.CustodyInventory{}, nil, nil)
+	}()
+	var req shellruntime.RPC
+	if err := json.Unmarshal(<-dc.shellControl, &req); err != nil {
+		t.Fatal(err)
+	}
+	expected := binding
+	expected.RuntimeTargetID = ""
+	if req.Op != "prepare" || req.Version != 2 || req.Binding != expected {
+		t.Errorf("prepare did not send the registered pod binding: %+v", req.Binding)
+	}
+	hub.deliverShell(dc, shellruntime.RPC{Type: "owner_shell_result", Version: req.Version, SessionID: req.SessionID, RequestID: req.RequestID, Op: req.Op, OK: true})
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}

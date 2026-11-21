@@ -6,7 +6,7 @@ import type { OlderPage, ReplayDone } from '../transport/types'
 import { isTurnError } from '../model/notices'
 import { NO_REASONING, nextReasoning, type ReasoningScopes } from '../model/reasoning'
 import { nextAnswering, nextThinking } from '../model/workingActivity'
-import type { AgentEvent, AssistantTextPayload } from '../types'
+import type { AgentEvent, ArtifactPayload, AssistantTextPayload } from '../types'
 
 export interface SessionTranscript {
   events: AgentEvent[] // sorted by seq; live unseq'd events at the tail
@@ -39,6 +39,10 @@ export interface SessionTranscript {
   // Event ts values are server time; subtract this from Date.now() to get
   // "server now" so elapsed times don't inherit the browser's clock skew.
   clockOffset: number
+  // A live file's (BLG-470) latest republish, by artifact id, pushed outside the transcript
+  // (never a persisted event: an in-place update is not history). useArtifacts merges these over
+  // its list reads. Optional so a host's own transcript fixture need not name it (absent: none).
+  liveArtifacts?: Record<string, ArtifactPayload>
 }
 
 interface TranscriptState {
@@ -49,6 +53,12 @@ interface TranscriptState {
   ingestMany: (sessionId: string, events: AgentEvent[]) => void
   /** A typing delta: appended to the in-flight text. */
   appendStreaming: (sessionId: string, delta: string) => void
+  /** A live file's republish, pushed outside the transcript (see liveArtifacts). */
+  applyLiveArtifact: (sessionId: string, payload: ArtifactPayload) => void
+  /** Drops patches useArtifacts says are no longer useful (the list has caught up, or the file is
+   *  gone): keeps liveArtifacts from growing across a long session's republishes. A no-op call
+   *  (every id already gone) changes nothing, including the session's object identity. */
+  pruneLiveArtifacts: (sessionId: string, ids: string[]) => void
   ingestReplayDone: (sessionId: string, done: ReplayDone) => void
   /** An older page, put in front of what is held. */
   ingestOlder: (sessionId: string, page: OlderPage) => void
@@ -229,6 +239,27 @@ export const useTranscriptStore = create<TranscriptState>((set) => ({
       const cur = state.sessions[sessionId] ?? empty()
       // The model is writing its answer: any think is over, and any retry got through.
       return { sessions: { ...state.sessions, [sessionId]: { ...cur, thinking: false, answering: true, streaming: cur.streaming + delta } } }
+    }),
+
+  applyLiveArtifact: (sessionId, payload) =>
+    set((state) => {
+      const cur = state.sessions[sessionId] ?? empty()
+      return { sessions: { ...state.sessions, [sessionId]: { ...cur, liveArtifacts: { ...cur.liveArtifacts, [payload.id]: payload } } } }
+    }),
+
+  pruneLiveArtifacts: (sessionId, ids) =>
+    set((state) => {
+      const cur = state.sessions[sessionId]
+      if (!cur?.liveArtifacts || ids.length === 0) return state
+      let changed = false
+      const next = { ...cur.liveArtifacts }
+      for (const id of ids) {
+        if (id in next) { delete next[id]; changed = true }
+      }
+      // No-op guard: a stray call (the same ids pruned twice) must not make a new sessions
+      // object every time, or useArtifacts' memo (keyed on this object) churns right back.
+      if (!changed) return state
+      return { sessions: { ...state.sessions, [sessionId]: { ...cur, liveArtifacts: next } } }
     }),
 
   ingestReplayDone: (sessionId, done) =>

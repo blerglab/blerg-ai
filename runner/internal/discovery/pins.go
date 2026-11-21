@@ -27,6 +27,15 @@ type BoundPins struct {
 	Sources        []SourcePin                `json:"-"`
 }
 
+func (p *SourcePin) Close() {
+	if p.Directory != nil {
+		_ = p.Directory.Close()
+	}
+	if p.CommonDirectory != nil {
+		_ = p.CommonDirectory.Close()
+	}
+}
+
 func (pins *BoundPins) Close() {
 	if pins.ConfiguredRoot != nil {
 		_ = pins.ConfiguredRoot.Close()
@@ -73,7 +82,7 @@ func (s *Service) PinBound(ctx context.Context, m protocol.WorkspaceManifest) (*
 	if root.tag != record.resolved.RootIdentity || record.rootName != root.name {
 		return nil, errStale
 	}
-	op := &operation{ctx: ctx}
+	op := &operation{ctx: ctx, service: s}
 	current := record.selectionRecord
 	if len(record.refs) > 0 || record.resolved.Folder != nil {
 		current, err = s.resolve(root, protocol.DiscoverWorkspace{Operation: "resolve", Layout: record.resolved.Layout, RootIdentity: record.resolved.RootIdentity, Members: record.refs, Folder: record.resolved.Folder, MembershipSnapshot: record.resolved.MembershipSnapshot, Runtime: record.runtime}, op)

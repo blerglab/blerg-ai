@@ -12,14 +12,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/blerglab/blerg-ai/board/internal/api"
 	"github.com/blerglab/blerg-ai/board/internal/auth"
 	"github.com/blerglab/blerg-ai/board/internal/db"
+	"github.com/blerglab/blerg-ai/contracts/failurelog"
+	"github.com/blerglab/blerg-ai/contracts/releasecut"
 )
 
 type Server struct {
@@ -251,7 +256,10 @@ func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, ar
 
 	case "blerg_board_get", "blerg_board_schema":
 		var a struct {
-			BoardID string `json:"board_id"`
+			BoardID     string `json:"board_id"`
+			EventsFrom  string `json:"events_from"`
+			EventsTo    string `json:"events_to"`
+			CardNumbers []int  `json:"card_numbers"`
 		}
 		if err := json.Unmarshal(args, &a); err != nil || a.BoardID == "" {
 			return nil, fmt.Errorf("board_id required")
@@ -265,6 +273,29 @@ func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, ar
 		}
 		if name == "blerg_board_schema" {
 			return toolText(b.FieldSchema), nil
+		}
+		if a.EventsFrom != "" || a.EventsTo != "" {
+			if len(a.CardNumbers) > 1000 {
+				return nil, fmt.Errorf("at most 1000 card numbers")
+			}
+			from, e1 := time.Parse(time.RFC3339Nano, a.EventsFrom)
+			to, e2 := time.Parse(time.RFC3339Nano, a.EventsTo)
+			if e1 != nil || e2 != nil || !to.After(from) || to.Sub(from) > 180*24*time.Hour {
+				return nil, fmt.Errorf("events_from and events_to must bound at most 180 days")
+			}
+			events, err := db.ListBoardTimeEvents(ctx, pool, a.BoardID, from, to)
+			if err != nil {
+				return nil, err
+			}
+			cards, err := db.InsightCardMetadata(ctx, pool, a.BoardID, a.CardNumbers)
+			if err != nil {
+				return nil, err
+			}
+			return toolText(struct {
+				db.Board
+				Events []db.BoardTimeEvent `json:"events"`
+				Cards  json.RawMessage     `json:"insight_cards"`
+			}{b, events, cards}), nil
 		}
 		return toolText(b), nil
 
@@ -434,19 +465,123 @@ func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, ar
 		s.api.Hub.Broadcast(moved.BoardID, "board_changed")
 		return toolText(moved), nil
 
+	case "blerg_release_list", "blerg_release_get", "blerg_release_save", "blerg_release_close", "blerg_release_delete":
+		var a struct {
+			BoardID      string    `json:"board_id"`
+			ReleaseID    string    `json:"release_id"`
+			Next         string    `json:"next_release_id"`
+			AskID        string    `json:"cut_ask_id"`
+			CardDigest   string    `json:"card_digest"`
+			Deadline     time.Time `json:"execution_deadline"`
+			EvidenceOnly bool      `json:"evidence_only"`
+			db.ReleaseParams
+		}
+		if err := json.Unmarshal(args, &a); err != nil || a.BoardID == "" {
+			return nil, fmt.Errorf("board_id required")
+		}
+		if err := p.RequireBoard(a.BoardID, "card.read"); err != nil {
+			return nil, err
+		}
+		if name == "blerg_release_list" {
+			v, err := db.ListReleases(ctx, pool, a.BoardID)
+			if err != nil {
+				return nil, err
+			}
+			return toolText(v), nil
+		}
+		if name == "blerg_release_get" {
+			if a.EvidenceOnly {
+				v, e := db.ReadReleaseEvidence(ctx, pool, a.BoardID, a.ReleaseID)
+				if e != nil {
+					return nil, e
+				}
+				return toolText(v), nil
+			}
+			v, err := db.ReadRelease(ctx, pool, a.BoardID, a.ReleaseID)
+			if err != nil {
+				return nil, err
+			}
+			return toolText(v), nil
+		}
+		if err := p.RequireArchive(a.BoardID); err != nil {
+			return nil, err
+		}
+		b, err := db.GetBoard(ctx, pool, a.BoardID)
+		if err != nil {
+			return nil, err
+		}
+		if b.DrivenBy != nil && *b.DrivenBy != "" {
+			return nil, fmt.Errorf("mirrored boards are read-only")
+		}
+		if name == "blerg_release_delete" {
+			if err = db.DeleteRelease(ctx, pool, a.BoardID, a.ReleaseID); err != nil {
+				return nil, err
+			}
+			s.api.Hub.Broadcast(a.BoardID, "board_changed")
+			return toolText(map[string]bool{"ok": true}), nil
+		}
+		if name == "blerg_release_close" {
+			var intent []releasecut.Intent
+			if a.AskID != "" {
+				intent = []releasecut.Intent{{AskID: a.AskID, CardDigest: a.CardDigest, Deadline: a.Deadline}}
+			}
+			out, err := s.api.CloseReleaseGated(ctx, p, a.BoardID, a.ReleaseID, a.Next, intent...)
+			if err != nil {
+				if a.AskID != "" {
+					cause := ""
+					var field *db.FieldError
+					if errors.Is(err, db.ErrStaleVersion) {
+						cause = "stale_version"
+					} else if errors.As(err, &field) {
+						cause = field.CutCause
+					}
+					if cause != "" {
+						failurelog.Default.Event("release_cut", slog.LevelWarn, "component", "board", "cause", cause)
+						return toolText(map[string]any{"executed": false, "cause": cause}), nil
+					}
+				}
+				return nil, err
+			}
+			if out != nil {
+				if a.AskID != "" {
+					cause := "archive_gate_deny"
+					if out.Held {
+						cause = "archive_gate_hold"
+					}
+					failurelog.Default.Event("release_cut", slog.LevelWarn, "component", "board", "cause", cause)
+					return toolText(map[string]any{"executed": false, "cause": cause}), nil
+				}
+				return toolError(out.Body), nil
+			}
+			s.api.Hub.Broadcast(a.BoardID, "board_changed")
+			return toolText(map[string]bool{"ok": true, "executed": true}), nil
+		}
+		v, err := db.SaveRelease(ctx, pool, a.BoardID, a.ReleaseID, a.ReleaseParams)
+		if err != nil {
+			return nil, err
+		}
+		s.api.Hub.Broadcast(a.BoardID, "board_changed")
+		return toolText(v), nil
+
 	case "blerg_card_search":
 		var a struct {
+			Numbers         []int             `json:"numbers"`
+			ReleaseID       string            `json:"release_id"`
 			BoardID         string            `json:"board_id"`
 			Query           string            `json:"query"`
 			Type            string            `json:"type"`
 			Tag             string            `json:"tag"`
 			Column          json.RawMessage   `json:"column"`
+			Size            string            `json:"size"`
+			Risk            string            `json:"risk"`
+			Complexity      string            `json:"complexity"`
 			Priority        string            `json:"priority"`
 			Fields          map[string]string `json:"fields"`
 			IncludeArchived bool              `json:"include_archived"`
 			Limit           int               `json:"limit"`
 			Page            bool              `json:"page"`
 			Cursor          string            `json:"cursor"`
+			Summary         bool              `json:"summary"`
 		}
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, fmt.Errorf("invalid card search arguments: %w", err)
@@ -468,8 +603,8 @@ func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, ar
 			}
 		}
 		params := db.SearchParams{
-			BoardID: a.BoardID, Query: a.Query, Type: a.Type, Tag: a.Tag,
-			Priority: a.Priority, Fields: a.Fields, Columns: columns,
+			Numbers: a.Numbers, ReleaseID: a.ReleaseID, BoardID: a.BoardID, Query: a.Query, Type: a.Type, Tag: a.Tag,
+			Size: a.Size, Risk: a.Risk, Complexity: a.Complexity, Priority: a.Priority, Fields: a.Fields, Columns: columns,
 			IncludeArchived: a.IncludeArchived, Limit: a.Limit,
 		}
 		if a.Page || a.Cursor != "" {
@@ -477,23 +612,46 @@ func (s *Server) dispatch(ctx context.Context, p auth.Principal, name string, ar
 			if err != nil {
 				return nil, err
 			}
+			if a.Summary {
+				if err := db.AddReconciliationEvidence(ctx, pool, page.Cards); err != nil {
+					return nil, err
+				}
+				for i := range page.Cards {
+					page.Cards[i].Body = nil
+				}
+			}
 			return toolText(page), nil
 		}
 		cards, err := db.SearchCards(ctx, pool, params)
 		if err != nil {
 			return nil, err
 		}
+		if a.Summary {
+			if err := db.AddReconciliationEvidence(ctx, pool, cards); err != nil {
+				return nil, err
+			}
+			for i := range cards {
+				cards[i].Body = nil
+			}
+		}
 		return toolText(cards), nil
 
 	case "blerg_card_get":
 		var a struct {
-			CardID    string `json:"card_id"`
-			BoardID   string `json:"board_id"`
-			Number    int    `json:"number"`
-			WithTrail bool   `json:"with_trail"`
+			CardID        string `json:"card_id"`
+			BoardID       string `json:"board_id"`
+			Number        int    `json:"number"`
+			WithTrail     bool   `json:"with_trail"`
+			TitleFallback bool   `json:"title_fallback"`
 		}
 		_ = json.Unmarshal(args, &a)
 		card, err := s.resolveCard(ctx, a.CardID, a.BoardID, a.Number)
+		if errors.Is(err, db.ErrNotFound) && a.TitleFallback && a.CardID == "" && a.BoardID != "" && a.Number > 0 {
+			if err := p.RequireBoard(a.BoardID, "card.read"); err != nil {
+				return nil, err
+			}
+			card, err = s.numericTitleCard(ctx, a.BoardID, a.Number)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -775,6 +933,20 @@ func (s *Server) cardWithTrail(ctx context.Context, card db.Card) (map[string]an
 	}
 	out["columns"] = columns
 	out["trail"] = trail
+	if slices.Contains(card.Tags, "to-test") {
+		added, err := db.ToTestAddedAt(ctx, s.api.Pool, card.ID)
+		if err != nil {
+			return nil, err
+		}
+		if added != nil {
+			out["to_test_added_at"] = *added
+		}
+	}
+	flow, err := db.CardFlow(ctx, s.api.Pool, card.ID)
+	if err != nil {
+		return nil, err
+	}
+	out["flow"] = flow
 	return toolText(out), nil
 }
 
@@ -820,4 +992,32 @@ func (s *Server) resolveKeyArgs(ctx context.Context, name string, args json.RawM
 	fields["board_id"], _ = json.Marshal(board)
 	fields["number"], _ = json.Marshal(number)
 	return json.Marshal(fields)
+}
+
+// numericTitleCard is only used after a missing bare card number. Explicit
+// references remain strict, and a title never wins over an existing number.
+func (s *Server) numericTitleCard(ctx context.Context, board string, number int) (db.Card, error) {
+	cards, err := db.ListCards(ctx, s.api.Pool, board, false)
+	if err != nil {
+		return db.Card{}, err
+	}
+	var matches []db.Card
+	var refs []string
+	for _, card := range cards {
+		if strings.TrimSpace(card.Title) == strconv.Itoa(number) {
+			matches = append(matches, card)
+			ref := card.Reference
+			if ref == "" {
+				ref = fmt.Sprintf("board:%s#%d", board, card.Number)
+			}
+			refs = append(refs, ref)
+		}
+	}
+	if len(matches) == 0 {
+		return db.Card{}, db.ErrNotFound
+	}
+	if len(matches) > 1 {
+		return db.Card{}, fmt.Errorf("ambiguous title %q: %s; use a card reference", strconv.Itoa(number), strings.Join(refs, ", "))
+	}
+	return db.GetCard(ctx, s.api.Pool, matches[0].ID)
 }

@@ -20,7 +20,7 @@
 .proposal-notifications { position: relative; flex-shrink: 0; }
 .proposal-bell.urgent { border-color: var(--amber); }
 /* Drawn in a portal at the bell (ProposalNotifications places it), over the sidebar and the page. */
-.proposal-notification-list { position: fixed; box-sizing: border-box; top: 56px; left: 12px; width: min(calc(100vw - 24px), max(640px, 40vw)); max-height: 75dvh; overflow: auto; padding: 12px; z-index: 1500; border: 1px solid var(--stone); border-radius: 8px; background: var(--basalt); color: var(--chalk); box-shadow: 0 10px 32px #0005; }
+.proposal-notification-list { position: fixed; box-sizing: border-box; top: 56px; left: 12px; width: min(calc(100vw - 24px), max(640px, 40vw)); max-height: 75dvh; overflow: auto; padding: 12px; z-index: 1500; border: 1px solid var(--stone); border-radius: 8px; background: var(--basalt); color: var(--chalk); box-shadow: 0 10px 32px var(--shadow-3); }
 .proposal-notification-list h2 { font-size: 16px; margin: 0 auto 0 0; }
 .proposal-permission-audit, .proposal-extension-history { color: var(--fog-dim); font-size: 12px; }
 .proposal-extension-history { margin: 0; padding-left: 18px; }
@@ -46,3 +46,10 @@
 @media (max-width: 768px) {
   .board-create-access select { min-height: 44px; }
 }
+
+.proposal-row { padding: 6px 8px; }
+.proposal-row-open { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 44px; padding: 4px; text-align: left; background: none; border: 0; color: var(--chalk); font: inherit; cursor: pointer; overflow-wrap: anywhere; }
+.proposal-row .proposal-expiry { margin-block: 4px; }
+
+/* Keep the notification panel below the ticket dialog it opened. */
+.proposal-notification-list:has(.proposal-row-open[aria-expanded="true"]) { z-index: 900; }

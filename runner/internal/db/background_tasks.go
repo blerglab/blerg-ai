@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blerglab/blerg-ai/runner/internal/livestate"
@@ -135,6 +137,10 @@ type BackgroundTaskReconciliation struct {
 // daemon explicitly reports alive. An absent lifetime/inventory is an old peer and does nothing.
 // boundSessionID confines a session pod; daemon ownership is rechecked under each row lock.
 func ReconcileBackgroundTasks(ctx context.Context, pool *pgxpool.Pool, daemonID, boundSessionID, lifetime string, inventory map[string][]string) ([]BackgroundTaskReconciliation, error) {
+	return reconcileBackgroundTasks(ctx, pool, daemonID, boundSessionID, lifetime, inventory, nil, false)
+}
+
+func reconcileBackgroundTasks(ctx context.Context, pool *pgxpool.Pool, daemonID, boundSessionID, lifetime string, inventory map[string][]string, pin *DaemonAuthority, waitForRow bool) ([]BackgroundTaskReconciliation, error) {
 	if lifetime == "" || inventory == nil {
 		return nil, nil
 	}
@@ -159,9 +165,12 @@ func ReconcileBackgroundTasks(ctx context.Context, pool *pgxpool.Pool, daemonID,
 	if err != nil {
 		return nil, err
 	}
+	if pin != nil {
+		return reconcilePinnedBackgroundSessions(ctx, pool, daemonID, lifetime, inventory, pin, sessions, waitForRow)
+	}
 	var out []BackgroundTaskReconciliation
 	for _, sid := range sessions {
-		changed, err := reconcileSessionBackgroundTasks(ctx, pool, daemonID, sid, lifetime, inventory[sid])
+		changed, err := reconcileSessionBackgroundTasks(ctx, pool, daemonID, sid, lifetime, inventory[sid], pin, false)
 		if err != nil {
 			return out, err
 		}
@@ -172,21 +181,80 @@ func ReconcileBackgroundTasks(ctx context.Context, pool *pgxpool.Pool, daemonID,
 	return out, nil
 }
 
-func reconcileSessionBackgroundTasks(ctx context.Context, pool *pgxpool.Pool, daemonID, sid, lifetime string, reported []string) (*BackgroundTaskReconciliation, error) {
-	tx, err := pool.Begin(ctx)
+// Independent session transactions run in a small bounded pool. Each still
+// locks and validates the daemon generation before it can mutate a row.
+func reconcilePinnedBackgroundSessions(ctx context.Context, pool *pgxpool.Pool, daemonID, lifetime string, inventory map[string][]string, pin *DaemonAuthority, sessions []string, waitForRow bool) ([]BackgroundTaskReconciliation, error) {
+	type result struct {
+		change *BackgroundTaskReconciliation
+		err    error
+	}
+	results := make([]result, len(sessions))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	var stop atomic.Bool
+	for range min(4, len(sessions)) {
+		wg.Go(func() {
+			for i := range jobs {
+				if stop.Load() {
+					continue
+				}
+				sid := sessions[i]
+				change, err := reconcileSessionBackgroundTasks(ctx, pool, daemonID, sid, lifetime, inventory[sid], pin, waitForRow)
+				results[i] = result{change, err}
+				if err != nil {
+					stop.Store(true)
+				}
+			}
+		})
+	}
+	for i := range sessions {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	var changes []BackgroundTaskReconciliation
+	var first error
+	for _, r := range results {
+		if r.change != nil {
+			changes = append(changes, *r.change)
+		}
+		if first == nil && r.err != nil {
+			first = r.err
+		}
+	}
+	return changes, first
+}
+
+func reconcileSessionBackgroundTasks(ctx context.Context, pool *pgxpool.Pool, daemonID, sid, lifetime string, reported []string, pin *DaemonAuthority, waitForRow bool) (*BackgroundTaskReconciliation, error) {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Release()
+	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer rollbackBackgroundTaskTx(ctx, tx)
+	if pin != nil {
+		if err := lockDaemonAuthorityTx(ctx, tx, *pin); err != nil {
+			return nil, err
+		}
+	}
+	var account *string
 	var owner, status string
 	var ended *time.Time
 	var before int
-	if err := tx.QueryRow(ctx, `SELECT daemon_id,status,ended_at,background_tasks FROM sessions WHERE id=$1 FOR UPDATE`, sid).Scan(&owner, &status, &ended, &before); errors.Is(err, pgx.ErrNoRows) {
+	lock := ` FOR UPDATE`
+	if pin != nil && !waitForRow {
+		lock += ` SKIP LOCKED`
+	}
+	if err := tx.QueryRow(ctx, `SELECT daemon_id,status,ended_at,background_tasks,spawning_account_id FROM sessions WHERE id=$1`+lock, sid).Scan(&owner, &status, &ended, &before, &account); errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	} else if err != nil {
 		return nil, err
 	}
-	if owner != daemonID {
+	if owner != daemonID || (pin != nil && !pin.Legacy && (account == nil || *account != pin.OwnerID)) {
 		return nil, nil
 	}
 	events, err := backgroundTaskEvents(ctx, tx, sid)
@@ -331,4 +399,14 @@ func appendReboundBackgroundTask(ctx context.Context, tx pgx.Tx, sid, lifetime s
 		return nil, nil
 	}
 	return &AgentEventRow{SessionID: sid, Seq: seq, ClientEventID: id, Kind: "background_task_started", Payload: string(payload), Ts: at}, nil
+}
+
+func ReconcileBackgroundTasksPinned(ctx context.Context, pool *pgxpool.Pool, pin DaemonAuthority, boundSessionID, lifetime string, inventory map[string][]string) ([]BackgroundTaskReconciliation, error) {
+	return reconcileBackgroundTasks(ctx, pool, pin.DaemonID, boundSessionID, lifetime, inventory, &pin, false)
+}
+
+// ReconcileBackgroundTasksPinnedWait waits briefly for busy rows. Call outside
+// the authority fence and retry lock timeouts within the caller's deadline.
+func ReconcileBackgroundTasksPinnedWait(ctx context.Context, pool *pgxpool.Pool, pin DaemonAuthority, boundSessionID, lifetime string, inventory map[string][]string) ([]BackgroundTaskReconciliation, error) {
+	return reconcileBackgroundTasks(ctx, pool, pin.DaemonID, boundSessionID, lifetime, inventory, &pin, true)
 }

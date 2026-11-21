@@ -89,6 +89,9 @@ func TestInternalTokenExchangeIssuesScopedShortLivedToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
+	if !p.PersonBehind {
+		t.Error("human-session exchange is missing its signed person proof")
+	}
 	if p.Kind != "agent" || p.Project != "board-7" || p.OnBehalfOf != e.acctA || p.Lineage != e.acctA {
 		t.Errorf("claims kind/project/obo/lineage = %q/%q/%q/%q", p.Kind, p.Project, p.OnBehalfOf, p.Lineage)
 	}
@@ -200,10 +203,11 @@ func TestInternalTokenExchangeCapsFollowTheProof(t *testing.T) {
 		proof map[string]any
 		want  []string
 	}{
-		"read-only token": {map[string]any{"token_id": readOnly.ID}, []string{"card.read"}},
-		"board token":     {map[string]any{"token_id": boardTok.ID}, []string{"card.read", "card.write", "column.write"}},
-		"cron token":      {map[string]any{"token_id": cronID}, []string{"card.read", "card.write", "column.write"}},
-		"human session":   {map[string]any{"session_id": e.sidA}, []string{"card.read", "card.write", "column.write"}},
+		"read-only token":         {map[string]any{"token_id": readOnly.ID}, []string{"card.read"}},
+		"board token":             {map[string]any{"token_id": boardTok.ID}, []string{"card.read", "card.write", "column.write"}},
+		"cron token":              {map[string]any{"token_id": cronID}, []string{"card.read", "card.write", "column.write"}},
+		"human session":           {map[string]any{"session_id": e.sidA}, []string{"card.read", "card.write", "column.write"}},
+		"read-only human session": {map[string]any{"session_id": e.sidA, "read_only": true}, []string{"card.read"}},
 	} {
 		body := map[string]any{"account_id": e.acctA, "target": "board", "board_id": "b1"}
 		for k, v := range tc.proof {
@@ -212,6 +216,9 @@ func TestInternalTokenExchangeCapsFollowTheProof(t *testing.T) {
 		p, err := e.verifyBoard(t, e.exchangeOK(t, body).Token)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
+		}
+		if p.PersonBehind != (name == "human session") {
+			t.Errorf("%s: person proof=%v", name, p.PersonBehind)
 		}
 		if len(p.Caps) != len(tc.want) {
 			t.Errorf("%s: caps = %v, want %v", name, p.Caps, tc.want)

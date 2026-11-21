@@ -4,6 +4,8 @@
 // fallback so the choice still holds for the life of the page.
 
 export interface ChatStorage {
+  /** Removes matching entries and returns their keys for one-time migrations. */
+  removePrefix?(prefix: string): readonly string[]
   get(key: string): string | null
   /** null removes the entry. */
   set(key: string, value: string | null): void
@@ -12,6 +14,17 @@ export interface ChatStorage {
 const memory = new Map<string, string>()
 
 export const localStorageChatStorage: ChatStorage = {
+  removePrefix(prefix) {
+    const removed = new Set<string>()
+    for (const key of memory.keys()) if (key.startsWith(prefix)) { removed.add(key); memory.delete(key) }
+    try {
+      for (let index = localStorage.length - 1; index >= 0; index--) {
+        const key = localStorage.key(index)
+        if (key?.startsWith(prefix)) { removed.add(key); localStorage.removeItem(key) }
+      }
+    } catch { /* storage unavailable */ }
+    return [...removed]
+  },
   get(key) {
     try {
       const v = localStorage.getItem(key)

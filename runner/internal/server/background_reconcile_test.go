@@ -13,15 +13,14 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Use the real hello socket and a subsequent durable event acknowledgement as a
-// barrier: reconciliation must finish before ordinary frames can be ingested.
-func backgroundHelloBarrier(t *testing.T, fx *topicFx, srvURL string, inventory any) {
+// A durable acknowledgement confirms hello attachment, not completion of deferred reconciliation.
+func backgroundHelloBarrier(t *testing.T, fx *topicFx, srvURL string, inventory any) *websocket.Conn {
 	t.Helper()
 	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srvURL, "http"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	t.Cleanup(func() { _ = conn.Close() })
 	ownedToken := "bdt_" + strings.Repeat("b", 64)
 	binding := desktopauth.Binding{DesktopID: topicDaemonID, OwnerID: topicOwner, Revision: 1, TokenID: newUUID(), ExpiresAt: time.Now().Add(time.Hour)}
 	desktopFakeCore(t, fx.api, map[string]desktopauth.Binding{ownedToken: binding})
@@ -43,7 +42,7 @@ func backgroundHelloBarrier(t *testing.T, fx *topicFx, srvURL string, inventory 
 			t.Fatal(err)
 		}
 		if ack.Type == "agent_event_ack" && ack.ClientEventID == id {
-			return
+			return conn
 		}
 	}
 }
@@ -52,14 +51,33 @@ func TestBackgroundReconcileHelloClosesOrphanAcrossTwoRestarts(t *testing.T) {
 	fx := newLiveFx(t)
 	dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 16)}
 	dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+	dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 	HandleAgentEvent(t.Context(), fx.api.hub, fx.pool, dc, protocol.AgentEvent{Type: "agent_event", SessionID: fx.sess, ClientEventID: newUUID(), Kind: "background_task_started", Payload: json.RawMessage(`{"task_id":"orphan","call_id":"call","kind":"bash"}`)})
 	srv := httptest.NewServer(fx.api.hub.ServeDaemon(topicDaemonToken, fx.pool))
 	defer srv.Close()
-	for _, life := range []string{"00000000-0000-4000-8000-000000000091", "00000000-0000-4000-8000-000000000092"} {
-		backgroundHelloBarrier(t, fx, srv.URL, map[string]any{"lifetime": life, "sessions": map[string][]string{}})
+	updates := make(chan []byte, 16)
+	fx.api.hub.Subscribe(fx.sess, "orphan-test", updates)
+	defer fx.api.hub.Unsubscribe(fx.sess, "orphan-test")
+	for i, life := range []string{"00000000-0000-4000-8000-000000000091", "00000000-0000-4000-8000-000000000092"} {
+		conn := backgroundHelloBarrier(t, fx, srv.URL, map[string]any{"lifetime": life, "sessions": map[string][]string{}})
+		if i == 0 {
+			_ = conn.Close()
+		}
+	}
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	for {
 		row, err := db.GetSession(t.Context(), fx.pool, fx.sess)
-		if err != nil || row.BackgroundTasks != 0 {
-			t.Fatalf("orphan survived restart: count=%v err=%v", row, err)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if row.BackgroundTasks == 0 {
+			break
+		}
+		select {
+		case <-updates:
+		case <-deadline.C:
+			t.Fatal("orphan did not close within 10 seconds after final hello")
 		}
 	}
 	var n int
@@ -87,6 +105,7 @@ func TestBackgroundReconcileHelloPreservesUnknownAndContinuingTasks(t *testing.T
 			}
 			dc := &DaemonConn{ID: topicDaemonID, send: make(chan []byte, 8)}
 			dc.SetSandboxClones(true) // a current daemon: every sandbox in a clone of its own
+			dc.SetWorkBranches(true)  // current daemon: immutable recorded branch names
 			HandleAgentEvent(t.Context(), fx.api.hub, fx.pool, dc, protocol.AgentEvent{Type: "agent_event", SessionID: fx.sess, ClientEventID: newUUID(), Kind: "background_task_started", Payload: json.RawMessage(`{"task_id":"alive","call_id":"call","kind":"monitor"}`)})
 			srv := httptest.NewServer(fx.api.hub.ServeDaemon(topicDaemonToken, fx.pool))
 			defer srv.Close()

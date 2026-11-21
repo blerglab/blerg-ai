@@ -1,5 +1,5 @@
 /* Insights page: tokens come from the app's palette (index.css custom properties). */
-.insights { padding: 20px 24px 64px; max-width: 980px; margin: 0 auto; color: var(--chalk); }
+.insights { padding: 20px 24px 64px; min-width: 0; margin: 0 auto; color: var(--chalk); }
 .insights h1 { font-size: 1.4rem; margin: 0; }
 .insights h2 { font-size: 1.05rem; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--stone); letter-spacing: 0.03em; }
 .insights h3 { font-size: 0.85rem; margin: 18px 0 8px; color: var(--fog); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
@@ -60,7 +60,7 @@
 .sb-tick:first-child { transform: none; }
 .sb-tick:last-child { transform: translateX(-100%); }
 .sb-axis .sb-stats { font-size: 0.7rem; }
-.sb-tip { position: absolute; z-index: 5; top: calc(100% + 4px); right: 4px; min-width: 210px; padding: 8px 10px; background: var(--scree-2); border: 1px solid var(--stone); border-radius: 8px; box-shadow: 0 6px 18px rgb(0 0 0 / 0.35); font-size: 0.78rem; color: var(--fog); pointer-events: none; max-width: calc(100vw - 16px); box-sizing: border-box; }
+.sb-tip { position: absolute; z-index: 5; top: calc(100% + 4px); right: 4px; min-width: 210px; padding: 8px 10px; background: var(--scree-2); border: 1px solid var(--stone); border-radius: 8px; box-shadow: 0 6px 18px var(--shadow-3); font-size: 0.78rem; color: var(--fog); pointer-events: none; max-width: calc(100vw - 16px); box-sizing: border-box; }
 .sb-tip.up { top: auto; bottom: calc(100% + 4px); }
 /* a pinned tooltip takes taps itself (closing it), so a tap on it never lands on the row underneath */
 .sb-rows > li.pinned .sb-tip { pointer-events: auto; }
@@ -123,3 +123,110 @@
 /* the model keeps a readable width in the scrolling editor instead of folding into a narrow column */
 .prices td:first-child { min-width: 9.5rem; overflow-wrap: anywhere; }
 .prices .actions button { margin-left: 6px; }
+
+.insights-shell { width: 100%; height: 100%; min-height: 0; }
+.workspace-insights .si-body { padding: 20px 0; }
+
+/* The section picker and activity filters share one natural-width Insights control. */
+.insights-select { width: auto; min-width: 0; max-width: 100%; padding: 6px 10px; font: inherit; color: var(--chalk); background: var(--scree); border: 1px solid var(--stone); border-radius: 6px; }
+.insights-report { display: grid; grid-template-columns: minmax(0,1fr); gap: 0 28px; align-items: start; }
+.insights-report > * { min-width: 0; }
+.insights-report > .cards, .insights-activity { grid-column: 1 / -1; }
+.insights-activity[hidden] { display: none; }
+@media(min-width:1600px) {
+
+ .workspace-insights .si-body { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 24px; }
+}
+
+
+.insights-tab-workspace { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; height: 100%; }
+.insights-tab { display: block; overflow: auto; height: 100%; container-type: inline-size; }
+.insights-section-tabs { display: flex; flex-wrap: wrap; gap: 2px; padding: 8px 10px; border-bottom: 1px solid var(--stone); }
+.insights-section-tabs button { background: transparent; border: 0; color: var(--fog); padding: 6px 8px; font: inherit; font-size: .82rem; border-radius: 6px; cursor: pointer; }
+.insights-section-tabs button.on { background: var(--selected-bg); color: var(--selected-text); }
+.insights-updated { font-size: .8rem; color: var(--fog-dim); }
+.insights-tab .insights-head { flex-direction: column; align-items: flex-start; gap: 8px; }
+.insights-tab .insights-controls { align-items: center; gap: 8px; }
+.insights-tab .activity-controls { display: contents; }
+.insights-tab .insights-controls label { display: inline-flex; align-items: center; gap: 4px; font-size: .8rem; }
+@container (max-width: 640px) {
+ .insights { padding: 12px 14px 40px; }
+ .insights-report, .activity-report, .activity-columns, .activity-metrics, .workspace-insights .si-body { grid-template-columns: minmax(0,1fr); }
+ .activity-spreads li { grid-template-columns: 60px minmax(0,1fr); grid-template-areas: "name stats" ". plot"; }
+ .insights .grid { display: block; overflow-x: auto; max-width: 100%; }
+}
+.insights-sort { background: transparent; border: 0; color: inherit; padding: 0; font: inherit; text-align: inherit; cursor: pointer; }
+.insights-sort:hover { color: var(--blaze); }
+.insights-list-sort { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; color: var(--fog); font-size: .8rem; }
+.activity-bars button.activity-bar-track { padding: 0; border: 0; cursor: pointer; }
+.insights-tab .activity-controls > label { gap: 4px; }
+
+.cards button.card { text-align: left; color: inherit; font: inherit; cursor: pointer; }
+.cards button.card:hover { border-color: var(--fog-dim); }
+
+@container (max-width: 640px) {
+ .sb-rows > li { grid-template-columns: 1fr auto; grid-template-areas: "name stats" "plot plot"; gap: 0 8px; padding: 4px; }
+ .sb-tip { right: auto; left: 4px; }
+ .sb-rows > li.sb-axis { grid-template-columns: minmax(0,1fr); grid-template-areas: "plot" "stats"; gap: 2px 0; }
+ .sb-axis .sb-name { display: none; }
+ .sb-axis .sb-axis-note { text-align: right; }
+ .insights .two { grid-template-columns: minmax(0,1fr); }
+}
+
+/* Compact controls share the Board tab's natural-width toolbar. */
+.insights-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:6px 12px; padding:6px 10px; border-bottom:1px solid var(--stone); }
+.insights-toolbar .insights-section-tabs { padding:0; border:0; }
+.insights-toolbar .insights-controls { display:flex; flex-basis:auto; align-items:center; gap:8px; flex-wrap:wrap; }
+.insights-toolbar .seg button { background:transparent; border:0; color:var(--fog); padding:6px 8px; font:inherit; font-size:.82rem; cursor:pointer; border-radius:6px; }
+.insights-toolbar .seg button.on { background:var(--selected-bg); color:var(--selected-text); }
+.insights-tab .insights { padding:8px 10px 24px; }
+.insights .cards { margin-top:0; align-items:start; }
+/* A label or hint wraps instead of truncating: a stat's name and reset-time hint must stay
+   readable at every pane width, never cut off mid-word (BLG-466 review). */
+.insights .card-label, .insights .card-hint { overflow-wrap: anywhere; }
+.insights-report { container-type:inline-size; }
+@container (max-width: 960px) { .insights-report { grid-template-columns:minmax(0,1fr); } }
+.insights-skeleton .initial-skeleton-value { display:block; width:65%; height:14px; margin:8px 0; }
+.insights-skeleton .insights-skeleton-chart { width:100%; height:160px; }
+
+.insights-question { grid-column:1 / -1; min-width:0; width:100%; }
+.insights-question > .usage-meters { max-width:480px; }
+.insights .insights-question h1 { margin:12px 0 6px; font-size:1.15rem; }
+.insights-answer { margin:0 0 18px; color:var(--fog); line-height:1.5; font-size:.9rem; }
+.insights-details { margin-top:20px; color:var(--fog); font-size:.85rem; }
+.insights-details > summary { cursor:pointer; width:fit-content; }
+.insights-question .activity-bars, .insights-question .activity-spreads { max-width:100%; }
+.insights-question .activity-bars > li { grid-template-columns:minmax(90px,180px) minmax(0,1fr) 90px; }
+.insights-question .activity-bars > li > span { overflow-wrap:anywhere; white-space:normal; }
+@container (max-width:640px) {
+ .insights-question .activity-bars > li { grid-template-columns:90px minmax(0,1fr) 70px; }
+}
+
+.insights-mobile-view, .insights-mobile-range { display:none; }
+.insights-filter-menu { position:relative; }
+.insights-filter-menu > summary { cursor:pointer; list-style:none; }
+.insights-filter-menu > .filter-pop { position:absolute; top:calc(100% + 6px); left:0; width:240px; max-width:calc(100vw - 32px); }
+.insights-tab .insights-filter-menu .activity-controls { display:grid; gap:10px; }
+.insights-filter-menu label { justify-content:space-between; }
+.insights-filter-menu .insights-select { max-width:150px; }
+.insights-toolbar .insights-updated { font-size:.72rem; }
+.insights > .activity-report, .insights .activity-report { margin:0; }
+@container (max-width:640px) {
+ .insights-toolbar { gap:6px; }
+ .insights-mobile-view, .insights-mobile-range { display:inline-block; }
+ .insights-toolbar .insights-section-tabs, .insights-toolbar .insights-range-buttons, .insights-toolbar .insights-updated { display:none; }
+ .insights-toolbar .insights-controls { gap:6px; }
+ .insights-chart-choice { font-size:0; }
+ .insights-chart-choice .insights-select { max-width:140px; font-size:.8rem; }
+}
+
+@container (min-width:1500px) { .insights-report { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@container (min-width:2600px) { .insights-report { grid-template-columns:repeat(3,minmax(0,1fr)); } }
+.insights table:not(.prices) { display:table; table-layout:fixed; width:100%; }
+.insights table:not(.prices) th, .insights table:not(.prices) td { overflow-wrap:anywhere; }
+.insights table:not(.prices) .insights-sort { white-space:normal; }
+.insights-skeleton h1 .initial-skeleton-value { width:min(100%,360px); height:22px; }
+.insights-skeleton p .initial-skeleton-value { width:min(100%,720px); height:16px; }
+.insights-skeleton-chart .initial-skeleton-key { width:120px; height:14px; }
+/* The range buttons retain their styling when portaled into the toolbar. */
+.insights-range-buttons button { background:transparent; border:0; }

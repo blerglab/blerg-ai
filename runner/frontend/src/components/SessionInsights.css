@@ -1,34 +1,9 @@
-/* Session insights dialog: the Skills & plugins dialog shell (CapabilitiesPanel.css) holding a row of
-   headline tiles and one card per subject. Ink, surfaces and type come from the app's tokens (index.css);
-   the only colours added here are the chart series below.
-
-   Series colours: the dataviz reference palette's first three categorical slots, in its fixed order
-   (blue, orange, aqua), stepped per mode. Validated with validate_palette.js against the card surface
-   (--scree-2) and the dialog surface (--scree), both modes: every check passes; in light mode aqua sits
-   at 2.8:1 on white, so every value it marks is also printed in the legend beside it (the relief rule).
-   Text never wears a series colour; a percent set inside a segment uses --si-on-series, which clears
-   4.5:1 on all six fills. Single-series bar lists (tools, models) use the neutral --si-bar so a
-   series hue always means the same thing inside one card. */
+/* Session insights use the shared categorical palette in every appearance preset. */
 .session-insights-dialog {
   width: min(840px, 100%);
-  --si-series-1: #3987e5;
-  --si-series-2: #d95926;
-  --si-series-3: #199e70;
-  --si-on-series: #000;
+  --si-on-series: var(--series-fg);
   --si-bar: var(--fog-dim);
   --si-rule: color-mix(in srgb, var(--stone) 60%, transparent);
-}
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) .session-insights-dialog {
-    --si-series-1: #2a78d6;
-    --si-series-2: #eb6834;
-    --si-series-3: #1baf7a;
-  }
-}
-:root[data-theme="light"] .session-insights-dialog {
-  --si-series-1: #2a78d6;
-  --si-series-2: #eb6834;
-  --si-series-3: #1baf7a;
 }
 
 /* ── header strip ─────────────────────────────────────────────────────────── */
@@ -133,9 +108,9 @@
 }
 .si-seg:first-child { border-top-left-radius: 4px; border-bottom-left-radius: 4px; }
 .si-seg:last-child { border-top-right-radius: 4px; border-bottom-right-radius: 4px; }
-.si-s-1 { background: var(--si-series-1); }
-.si-s-2 { background: var(--si-series-2); }
-.si-s-3 { background: var(--si-series-3); }
+.si-s-1 { background: var(--si-series-1); background-image: var(--si-pattern-1); }
+.si-s-2 { background: var(--si-series-2); background-image: var(--si-pattern-2); }
+.si-s-3 { background: var(--si-series-3); background-image: var(--si-pattern-3); }
 
 .si-legend { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px 24px; font-size: var(--text-sm); }
 .si-legend li { display: flex; align-items: center; gap: 8px; }

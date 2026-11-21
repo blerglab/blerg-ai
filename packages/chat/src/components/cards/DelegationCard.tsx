@@ -86,7 +86,7 @@ export default function DelegationCard({ ev }: { ev: AgentEvent }) {
   return (
     <div className={`agent-card delegation-card status-${status}`} data-testid="delegation-card" data-event-id={ev.client_event_id}>
       <div className="delegation-head">
-        <span className="delegation-title">This session wants to start a <b>{engine}</b> session</span>
+        <span className="delegation-title">This agent wants to start a <b>{engine}</b> worker</span>
         <TimeLabel ts={ev.ts} className="card-time-end" />
       </div>
       <div className="delegation-body">
@@ -96,7 +96,7 @@ export default function DelegationCard({ ev }: { ev: AgentEvent }) {
           <span className={unsandboxed ? 'delegation-warn' : undefined}>{runtimeWords(p.runtime)}</span>
         </div>
         {!p.metadata_hidden && !!p.members?.length && <ul className="delegation-members" aria-label="Chosen repositories">{p.members.map(m => <li key={m.id}><b>{m.name}</b> <code>{m.path}</code></li>)}</ul>}
-        {boards && <div className="delegation-boards" data-testid="delegation-boards" title="Board access the new session gets, never above this session's own">{boards}</div>}
+        {boards && <div className="delegation-boards" data-testid="delegation-boards" title="Board access the new worker gets, never above this agent's own">{boards}</div>}
         {p.title && <div className="delegation-name">{p.title}</div>}
         {prompt && <div className="delegation-prompt" data-testid="delegation-prompt">{excerpt}</div>}
         {canShowAll && <button type="button" className="delegation-link" onClick={() => void showAll()}>Show all</button>}
@@ -105,7 +105,7 @@ export default function DelegationCard({ ev }: { ev: AgentEvent }) {
       {pending && decide && (
         <div className="delegation-actions">
           {offered.has('once') && <button type="button" className="delegation-btn" disabled={busy || conflict} onClick={() => void choose('once')}>Allow once</button>}
-          {offered.has('session') && <button type="button" className="delegation-btn" disabled={busy || conflict} onClick={() => void choose('session')}>Allow for this session</button>}
+          {offered.has('session') && <button type="button" className="delegation-btn" disabled={busy || conflict} onClick={() => void choose('session')}>Allow for this workspace</button>}
           {offered.has('always') && (
             <button
               type="button"
@@ -133,7 +133,7 @@ export default function DelegationCard({ ev }: { ev: AgentEvent }) {
           <span>{line}</span>
           {state.decided?.status === 'allowed' && ctx?.onManageChildApproval && <button type="button" className="delegation-link" onClick={ctx.onManageChildApproval}>Change child approvals</button>}
           {child && (ctx?.onOpenSession
-            ? <button type="button" className="delegation-link" onClick={() => ctx.onOpenSession?.(child)}>Open the session</button>
+            ? <button type="button" className="delegation-link" onClick={() => ctx.onOpenSession?.(child)}>Open the worker</button>
             : <span className="delegation-child">{child.slice(0, 8)}</span>)}
           {startError && <span className="delegation-start-error">{startError}</span>}
         </div>

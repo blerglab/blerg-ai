@@ -48,8 +48,7 @@ const claudeModelMaxLen = 64
 // (claude-sonnet-5), a CLI alias (sonnet, opus) or an alias with a context
 // suffix (sonnet[1m]). Lowercase, no leading dash (it would read as a flag),
 // no whitespace or shell metacharacters. The brackets reach the CLI as a
-// plain argv element: tmux ≥ 3.0 runs a multi-argument new-session command
-// without a shell (see runner/README.md).
+// plain argv element; the engine is invoked without a shell.
 var claudeModelPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.\-\[\]]{0,63}$`)
 
 // genericModelPattern is the rule for engines whose model names are

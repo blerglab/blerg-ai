@@ -1,6 +1,6 @@
 # This is the in-cluster blerg-runner SERVER only (runner/Dockerfile.server).
 # The actual agent-session daemon is NOT deployed here — it runs on a human's
-# workstation (their own `claude` CLI install, auth, and tmux), and connects
+# workstation (their own engine CLI install and login), and connects
 # in to this service's /ws/daemon over the Ingress from outside the cluster,
 # exactly as it does against the desktop stack. See README.md.
 #
@@ -66,6 +66,8 @@ spec:
         - name: blerg-runner
           image: "${REGISTRY}/blerg-runner:${TAG}"
           ports:
+            - name: live-data
+              containerPort: 8443
             - containerPort: 8080
             # The MCP gateway's own listener (BLERG_RUNNER_MCP_GW_ADDR). It is
             # reached only through the internal-only blerg-runner-mcp-gateway
@@ -74,6 +76,11 @@ spec:
             - name: mcp-gateway
               containerPort: 8090
           env:
+            - name: BLERG_MCP_CLUSTER_DEPLOYMENT
+              valueFrom:
+                configMapKeyRef: { name: blerg-config, key: BLERG_MCP_CLUSTER_DEPLOYMENT, optional: true }
+            - name: BLERG_LIVE_DATA_TLS_DIR
+              value: /live-data
             - name: BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS
               valueFrom:
                 configMapKeyRef: { name: blerg-config, key: BLERG_RUNNER_ALLOW_LEGACY_DESKTOPS, optional: true }
@@ -326,12 +333,20 @@ spec:
             readOnlyRootFilesystem: true
             seccompProfile: {type: RuntimeDefault}
           volumeMounts:
+            - name: live-data
+              mountPath: /live-data
+              readOnly: true
             - name: data
               mountPath: /data
       # The runner's files (published and attached files, agent-config bundles, mockups) must
       # survive a restart: the database indexes them. deploy.sh creates the claim before this
       # Deployment is applied (runner-data-pvc.yaml).
       volumes:
+        - name: live-data
+          secret:
+            secretName: blerg-live-data-runner
+            optional: true
+            defaultMode: 0440
         - name: data
           persistentVolumeClaim:
             claimName: blerg-runner-data

@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/blerglab/blerg-ai/contracts/netguard"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -152,16 +155,17 @@ type tokenBundle struct {
 
 // oauthMeta is oauth_meta: issuer, resource, client id and endpoints. No secrets.
 type oauthMeta struct {
-	Issuer                string `json:"issuer"`
-	Resource              string `json:"resource"`
-	ClientID              string `json:"client_id"`
-	Dynamic               bool   `json:"dynamic_client"`
-	AuthorizationEndpoint string `json:"authorization_endpoint"`
-	TokenEndpoint         string `json:"token_endpoint"`
-	RevocationEndpoint    string `json:"revocation_endpoint,omitempty"`
-	AuthMethod            string `json:"token_endpoint_auth_method"`
-	Scope                 string `json:"scope,omitempty"`
-	IssParamSupported     bool   `json:"iss_param_supported"`
+	SessionAuthorization  *SessionOAuthAuthorization `json:"session_authorization,omitempty"`
+	Issuer                string                     `json:"issuer"`
+	Resource              string                     `json:"resource"`
+	ClientID              string                     `json:"client_id"`
+	Dynamic               bool                       `json:"dynamic_client"`
+	AuthorizationEndpoint string                     `json:"authorization_endpoint"`
+	TokenEndpoint         string                     `json:"token_endpoint"`
+	RevocationEndpoint    string                     `json:"revocation_endpoint,omitempty"`
+	AuthMethod            string                     `json:"token_endpoint_auth_method"`
+	Scope                 string                     `json:"scope,omitempty"`
+	IssParamSupported     bool                       `json:"iss_param_supported"`
 	// RedirectURI is the redirect URI a dynamically registered client was registered with: a
 	// reconnect under a different one registers again.
 	RedirectURI string `json:"redirect_uri,omitempty"`
@@ -202,8 +206,8 @@ func (s *Service) SetOAuthStartLimit(n int, window time.Duration) {
 	s.limiter.max, s.limiter.window = n, window
 }
 
-func randomToken(n int) (string, error) {
-	b := make([]byte, n)
+func randomToken() (string, error) {
+	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
@@ -222,19 +226,21 @@ var clientIDRe = regexp.MustCompile(`^[\x21-\x7e]{1,256}$`)
 // checkRoom is the non-authoritative early check of the connection limit and the name, so a
 // person is told before being sent to the provider. The insert re-checks under the account lock.
 func (s *Service) checkRoom(ctx context.Context, accountID, name string) error {
-	rows, err := s.st.Pool().Query(ctx, `SELECT name FROM mcp_connections WHERE account_id = $1`, accountID)
+	rows, err := s.st.Pool().Query(ctx, `SELECT name FROM mcp_connections WHERE runner_session_id IS NULL AND account_id = $1`, accountID)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	n := 0
+	if err := s.st.Pool().QueryRow(ctx, `SELECT count(*) FROM mcp_connections WHERE account_id=$1 AND lifecycle IS DISTINCT FROM 'deleted'`, accountID).Scan(&n); err != nil {
+		return err
+	}
 	want := NormalizeName(name)
 	for rows.Next() {
 		var other string
 		if err := rows.Scan(&other); err != nil {
 			return err
 		}
-		n++
 		if NormalizeName(other) == want {
 			return ErrNameTaken
 		}
@@ -309,7 +315,7 @@ func (s *Service) StartOAuth(ctx context.Context, in OAuthStartInput) (OAuthStar
 		var ct []byte
 		var keyID *string
 		var meta []byte
-		if err := s.st.Pool().QueryRow(ctx, `SELECT secret_ciphertext, key_id, oauth_meta FROM mcp_connections WHERE id = $1 AND account_id = $2`,
+		if err := s.st.Pool().QueryRow(ctx, `SELECT secret_ciphertext, key_id, oauth_meta FROM mcp_connections WHERE runner_session_id IS NULL AND id = $1 AND account_id = $2`,
 			c.ID, in.AccountID).Scan(&ct, &keyID, &meta); err != nil {
 			return OAuthStartResult{}, err
 		}
@@ -379,11 +385,11 @@ func (s *Service) StartOAuth(ctx context.Context, in OAuthStartInput) (OAuthStar
 		return OAuthStartResult{}, invalid("this server does not support dynamic client registration: supply a client_id registered with it")
 	}
 
-	state, err := randomToken(32)
+	state, err := randomToken()
 	if err != nil {
 		return OAuthStartResult{}, err
 	}
-	verifier, err := randomToken(32)
+	verifier, err := randomToken()
 	if err != nil {
 		return OAuthStartResult{}, err
 	}
@@ -598,7 +604,7 @@ func (s *Service) replaceOAuth(ctx context.Context, accountID, id string, ct []b
 	var oldCT []byte
 	var oldKey *string
 	err = tx.QueryRow(ctx,
-		`SELECT secret_ciphertext, key_id FROM mcp_connections WHERE id = $1 AND account_id = $2 AND auth_kind = 'oauth' FOR UPDATE`,
+		`SELECT secret_ciphertext, key_id FROM mcp_connections WHERE runner_session_id IS NULL AND id = $1 AND account_id = $2 AND auth_kind = 'oauth' FOR UPDATE`,
 		id, accountID).Scan(&oldCT, &oldKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Connection{}, nil, ErrNotFound
@@ -609,7 +615,7 @@ func (s *Service) replaceOAuth(ctx context.Context, accountID, id string, ct []b
 	c, err := scan(tx.QueryRow(ctx,
 		`UPDATE mcp_connections SET secret_ciphertext = $1, key_id = $2, oauth_meta = $3, status = 'ok',
 		        last_verified_at = now(), updated_at = now()
-		  WHERE id = $4 AND account_id = $5 AND auth_kind = 'oauth' RETURNING `+cols,
+		  WHERE runner_session_id IS NULL AND id = $4 AND account_id = $5 AND auth_kind = 'oauth' RETURNING `+cols,
 		ct, keyID, meta, id, accountID))
 	if err != nil {
 		return Connection{}, nil, err
@@ -627,33 +633,36 @@ func (s *Service) replaceOAuth(ctx context.Context, accountID, id string, ct []b
 type tokenResult struct {
 	accessToken, refreshToken string
 	expiresAt                 time.Time
+	scopeRaw                  json.RawMessage
 }
 
 // tokenError is a failed call to the token endpoint. rejected means the provider refused the grant
 // or the client: a 400 or 401 whose RFC 6749 error code is invalid_grant, invalid_client or
-// unauthorized_client. Anything else (network, 5xx, 408, 429, other 4xx, an unparseable or
-// non-bearer 200) is transient and must never cost the person their connection.
+// unauthorized_client. notSent is positive local proof that no grant was spent.
+// Account connections treat other failures as transient; scoped connections suspend
+// uncertain post-send failures to avoid spending a rotating refresh token twice.
 type tokenError struct {
+	notSent bool // positively proven local failure before any grant could be spent
+
 	rejected bool
 	status   int
-	code     string // the RFC 6749 error code when well formed, never free text
+	code     string // allowlisted RFC error code, never arbitrary provider text
+	cause    string // fixed diagnostic vocabulary
 }
 
 func (e *tokenError) Error() string {
-	return fmt.Sprintf("token endpoint: status %d code %q rejected=%v", e.status, e.code, e.rejected)
+	return fmt.Sprintf("token endpoint: status %d code %q rejected=%v cause=%s", e.status, e.code, e.rejected, e.cause)
 }
-
-var errCodeRe = regexp.MustCompile(`^[a-z_]{1,40}$`)
 
 // tokenRequest posts form to b's token endpoint with the client authenticated as registered.
 func (s *Service) tokenRequest(ctx context.Context, b tokenBundle, form url.Values) (tokenResult, error) {
 	req, err := newFormRequest(ctx, b.TokenEndpoint, form, b)
 	if err != nil {
-		return tokenResult{}, &tokenError{}
+		return tokenResult{}, &tokenError{cause: "endpoint", notSent: true}
 	}
 	resp, err := s.httpc.Do(req)
 	if err != nil {
-		return tokenResult{}, &tokenError{}
+		return tokenResult{}, &tokenError{cause: "transport", notSent: tokenRequestNotSent(err)}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	var body struct {
@@ -662,13 +671,14 @@ func (s *Service) tokenRequest(ctx context.Context, b tokenBundle, form url.Valu
 		RefreshToken string          `json:"refresh_token"`
 		ExpiresIn    json.RawMessage `json:"expires_in"`
 		Error        string          `json:"error"`
+		Scope        json.RawMessage `json:"scope"`
 	}
 	dec := json.NewDecoder(resp.Body)
 	derr := dec.Decode(&body)
 	if resp.StatusCode != http.StatusOK {
-		te := &tokenError{status: resp.StatusCode}
-		if derr == nil && errCodeRe.MatchString(body.Error) {
-			te.code = body.Error
+		te := &tokenError{status: resp.StatusCode, cause: "http_status"}
+		if derr == nil {
+			te.code = tokenErrorCode(body.Error)
 		}
 		te.rejected = (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized) &&
 			(te.code == "invalid_grant" || te.code == "invalid_client" || te.code == "unauthorized_client")
@@ -676,13 +686,13 @@ func (s *Service) tokenRequest(ctx context.Context, b tokenBundle, form url.Valu
 	}
 	if derr != nil || body.AccessToken == "" || !strings.EqualFold(body.TokenType, "bearer") {
 		// A success that is not a usable bearer token says nothing about the grant: transient.
-		return tokenResult{}, &tokenError{status: resp.StatusCode}
+		return tokenResult{}, &tokenError{status: resp.StatusCode, cause: "response"}
 	}
 	ttl := defaultAccessTTL
 	if secs, ok := parseExpiresIn(body.ExpiresIn); ok {
 		ttl = min(time.Duration(secs*float64(time.Second)), maxAccessTTL)
 	}
-	return tokenResult{accessToken: body.AccessToken, refreshToken: body.RefreshToken, expiresAt: s.oauthTime().Add(ttl)}, nil
+	return tokenResult{accessToken: body.AccessToken, refreshToken: body.RefreshToken, expiresAt: s.oauthTime().Add(ttl), scopeRaw: body.Scope}, nil
 }
 
 // parseExpiresIn reads expires_in as a JSON number or a numeric string (some providers send
@@ -733,4 +743,16 @@ func cloneValues(v url.Values) url.Values {
 		out[k] = append([]string(nil), vs...)
 	}
 	return out
+}
+
+// Classify only positive proof. Unknown transport/read/TLS/timeouts may follow a
+// partial write; lack of a trace callback is not proof for a custom transport.
+func tokenRequestNotSent(err error) bool {
+	var dial *net.OpError
+	var dns *net.DNSError
+	var certificate *tls.CertificateVerificationError
+	if errors.As(err, &dial) {
+		return dial.Op == "dial"
+	}
+	return errors.As(err, &certificate) || errors.As(err, &dns) || errors.Is(err, netguard.ErrBlockedAddress) || errors.Is(err, netguard.ErrURLNotPermitted)
 }

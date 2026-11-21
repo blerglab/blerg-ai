@@ -79,3 +79,89 @@ func TestCardSearchColumnSchema(t *testing.T) {
 	}
 	t.Fatal("missing card search tool")
 }
+
+func TestCardSearchOmitsCommitSummary(t *testing.T) {
+	w := newDiffWorld(t)
+	board := w.ids["A"]["board_id"]
+	for _, paged := range []bool{false, true} {
+		args, _ := json.Marshal(map[string]any{"board_id": board, "page": paged})
+		res, err := w.srv.dispatch(t.Context(), w.scoped, "blerg_card_search", args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := contentText(res)
+		if strings.Contains(text, "commit_summary") {
+			t.Fatalf("search includes heavy summaries: %.300s", text)
+		}
+	}
+}
+
+func TestCardListOmitsCommitSummaryButGetKeepsIt(t *testing.T) {
+	w := newDiffWorld(t)
+	cards, err := db.ListCards(t.Context(), w.pool, w.ids["A"]["board_id"], false)
+	if err != nil || len(cards) == 0 {
+		t.Fatalf("list: %v, %d cards", err, len(cards))
+	}
+	for _, card := range cards {
+		raw, _ := json.Marshal(card)
+		if strings.Contains(string(raw), "commit_summary") {
+			t.Fatal("list includes commit summary")
+		}
+		full, err := db.GetCard(t.Context(), w.pool, card.ID)
+		if err != nil || len(full.CommitSummary) == 0 {
+			t.Fatalf("get lost summary: %v", err)
+		}
+	}
+}
+
+func TestCardSearchSummaryOmitsBodies(t *testing.T) {
+	w := newDiffWorld(t)
+	board := w.ids["A"]["board_id"]
+	body := strings.Repeat("long card body ", 40)
+	if _, err := w.pool.Exec(t.Context(), `UPDATE cards SET body=$1 WHERE board_id=$2`, body, board); err != nil {
+		t.Fatal(err)
+	}
+	for _, paged := range []bool{false, true} {
+		for _, summary := range []bool{false, true} {
+			args, _ := json.Marshal(map[string]any{"board_id": board, "page": paged, "summary": summary})
+			res, err := w.srv.dispatch(t.Context(), w.scoped, "blerg_card_search", args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(contentText(res), "long card body"); got == summary {
+				t.Fatalf("paged=%v summary=%v carried body=%v", paged, summary, got)
+			}
+		}
+	}
+}
+
+func TestCardSearchNumbers(t *testing.T) {
+	w := newDiffWorld(t)
+	board := w.ids["A"]["board_id"]
+	title := "Another card"
+	if _, err := db.CreateCard(t.Context(), w.pool, board, db.CardParams{Title: &title}, db.EventMeta{}); err != nil {
+		t.Fatal(err)
+	}
+	cards, err := db.SearchCards(t.Context(), w.pool, db.SearchParams{BoardID: board, Limit: 100})
+	if err != nil || len(cards) < 2 {
+		t.Fatalf("fixture: %v %d", err, len(cards))
+	}
+	args, _ := json.Marshal(map[string]any{"board_id": board, "numbers": []int{cards[0].Number}, "page": true, "include_archived": true})
+	res, err := w.srv.dispatch(t.Context(), w.scoped, "blerg_card_search", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var page db.SearchPage
+	if err = json.Unmarshal([]byte(contentText(res)), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Cards) != 1 || page.Cards[0].Number != cards[0].Number {
+		t.Fatalf("numbers ignored: %+v", page)
+	}
+	for _, numbers := range []any{[]int{}, []int{0}, []int{-1}, make([]int, 101), "1"} {
+		args, _ = json.Marshal(map[string]any{"board_id": board, "numbers": numbers})
+		if _, err = w.srv.dispatch(t.Context(), w.scoped, "blerg_card_search", args); err == nil {
+			t.Errorf("accepted %v", numbers)
+		}
+	}
+}

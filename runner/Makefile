@@ -5,17 +5,25 @@ GO ?= $(shell if [ -x $(HOME)/go/bin/go ]; then echo $(HOME)/go/bin/go; else com
 SERVER_IMAGE     ?= blerg-runner-server:latest
 
 COMMIT := $(shell git rev-parse HEAD 2>/dev/null || echo dev)
+DAEMON_OUTPUT := bin/blerg-runner-daemon
+ifneq ($(filter install-daemon restart-daemon,$(MAKECMDGOALS)),)
+DAEMON_OUTPUT := bin/blerg-runner-daemon.new
+endif
 
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 
 # ── build ──────────────────────────────────────────────────────────────────────
 
 .PHONY: build
-build: build-server build-daemon build-runner build-frontend
+build: build-server build-daemon build-runner build-test-timing build-frontend
 
 .PHONY: build-runner
 build-runner:
 	$(GO) build -ldflags "-X main.version=$(VERSION)" -o bin/blerg-runner ./cmd/runner
+
+.PHONY: build-test-timing
+build-test-timing:
+	$(GO) build -ldflags "-X main.version=$(VERSION)" -o bin/blerg-test-timing ./cmd/test-timing
 
 .PHONY: docker-build-devcontainer
 docker-build-devcontainer: ## Repo-root context required (contracts/ replace) — confirmed by testing
@@ -27,7 +35,7 @@ build-server:
 
 .PHONY: build-daemon
 build-daemon:
-	$(GO) build -ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT)" -o bin/blerg-runner-daemon ./cmd/daemon
+	$(GO) build -ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT)" -o $(DAEMON_OUTPUT) ./cmd/daemon
 
 # Capture the updater's live call before compilation. Both helper invocations
 # descend from this make process, even though recipe shells differ.
@@ -72,23 +80,27 @@ DAEMON_SERVICE   := $(SYSTEMD_USER_DIR)/blerg-runner-daemon.service
 run-daemon: build-daemon ## Build and run daemon locally (reads .env.daemon)
 	@bash -c 'set -a && . ./.env.daemon && set +a && exec ./bin/blerg-runner-daemon'
 
-define write-service
-	@mkdir -p $(SYSTEMD_USER_DIR)
-	@printf '[Unit]\nDescription=Blerg Runner Daemon\nAfter=network.target\n\n[Service]\nType=simple\nKillMode=process\nWorkingDirectory=$(CURDIR)\nEnvironmentFile=$(CURDIR)/$(1)\nExecStart=$(CURDIR)/bin/blerg-runner-daemon\nRestart=always\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n' \
-		> $(DAEMON_SERVICE)
-endef
-
 # The daemon observes the requesting process and writes its own planned update.
 # A missing older-daemon socket keeps normal pause behavior without blocking install.
 define restart-service
-@bash -c 'set -a; . ./.env.daemon; set +a; ./bin/blerg-runner-daemon prepare-update || true; systemctl --user restart blerg-runner-daemon; rc=$$?; if [ $$rc -ne 0 ]; then ./bin/blerg-runner-daemon cancel-update || true; fi; exit $$rc'
+@bash -ec 'umask 077; set -a; . ./.env.daemon; set +a; \
+  trap '\''rc=$$?; if [ $$rc -ne 0 ]; then ./bin/blerg-runner-daemon cancel-update || true; echo "Daemon install failed (exit $$rc); update handoff canceled. Check the preceding build, file operation, or service error and retry. Keeper state does not block daemon installation." >&2; fi'\'' EXIT; \
+  ./bin/blerg-runner-daemon.new prepare-update || true; \
+  export BLERG_RUNNER_DAEMON_STATE_DIR="$${BLERG_RUNNER_DAEMON_STATE_DIR:-$$HOME/.blerg-runner-daemon}"; \
+  mv -f ./bin/blerg-runner-daemon.new ./bin/blerg-runner-daemon; \
+  ./bin/blerg-runner-daemon shell-keeper init || echo "Warning: keeper state needs repair; agents will start, host shells stay unavailable. Preserve keeper keys." >&2; \
+  mkdir -p "$(SYSTEMD_USER_DIR)"; \
+  printf "[Unit]\nDescription=Blerg Runner Daemon\nAfter=network.target\nWants=blerg-shell-keeper.service\n\n[Service]\nType=simple\nKillMode=mixed\nWorkingDirectory=$(CURDIR)\nEnvironmentFile=$(CURDIR)/.env.daemon\nExecStart=$(CURDIR)/bin/blerg-runner-daemon\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n" > "$(DAEMON_SERVICE)"; \
+  keeper_cgroup=0; if [ "$${BLERG_HOST_SHELL_CGROUP:-0}" = 1 ]; then keeper_cgroup=1; fi; \
+  sed -e "s|__BIN_PATH__|$(CURDIR)/bin/blerg-runner-daemon|g" -e "s|__DAEMON_STATE_DIR__|$$BLERG_RUNNER_DAEMON_STATE_DIR|g" -e "s|__HOST_SHELL_CGROUP__|$$keeper_cgroup|g" ../install/desktop/daemon/blerg-shell-keeper.service.tmpl > "$(SYSTEMD_USER_DIR)/blerg-shell-keeper.service"; \
+  systemctl --user daemon-reload; \
+  systemctl --user enable --now --no-block blerg-shell-keeper.service || echo "Warning: keeper could not start; agents will start, host shells stay unavailable." >&2; \
+  systemctl --user enable blerg-runner-daemon; \
+  systemctl --user restart blerg-runner-daemon'
 endef
 
 .PHONY: install-daemon
 install-daemon: build-daemon ## Build + install systemd user service (reads .env.daemon); safe to re-run
-	$(call write-service,.env.daemon)
-	systemctl --user daemon-reload
-	systemctl --user enable blerg-runner-daemon
 	$(restart-service)
 	@echo "blerg-runner-daemon installed. Run: systemctl --user status blerg-runner-daemon"
 
@@ -99,7 +111,8 @@ restart-daemon: build-daemon ## Rebuild binary and restart the systemd service
 .PHONY: uninstall-daemon
 uninstall-daemon: ## Stop, disable, and remove the systemd user service
 	-systemctl --user disable --now blerg-runner-daemon
-	rm -f $(DAEMON_SERVICE)
+	-systemctl --user disable --now blerg-shell-keeper.service
+	rm -f $(DAEMON_SERVICE) $(SYSTEMD_USER_DIR)/blerg-shell-keeper.service
 	systemctl --user daemon-reload
 
 # ── dev ────────────────────────────────────────────────────────────────────────

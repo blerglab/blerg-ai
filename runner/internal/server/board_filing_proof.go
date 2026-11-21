@@ -14,7 +14,7 @@ type filingProjectKey struct{}
 const (
 	msgChildFilingNoParent  = "This session files with the sign-in of the session that started it, and that session has ended for good, was discarded or is gone; ask the person to file it."
 	msgChildFilingNoSignIn  = "This session files with the sign-in of the session that started it, and that session has no board sign-in; ask the person to file it."
-	msgChildFilingSignedOut = "This session files with the sign-in of the session that started it, and that sign-in has ended; the person has to sign in again and renew it."
+	msgChildFilingSignedOut = "Ticket board permission is unavailable. Sign in to restore suspended access, or check session Permissions."
 )
 
 func withFilingProject(ctx context.Context, project string) context.Context {

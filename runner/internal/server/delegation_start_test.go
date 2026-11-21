@@ -177,7 +177,7 @@ func TestChildrenBodyAllowlist(t *testing.T) {
 	fx := newDelegFx(t)
 	fx.rule("codex", runnerRuntimeDocker, false) // would start at once if the field slipped through
 	for _, field := range []string{"env", "callback_url", "callback_secret", "git_url", "provider",
-		"auto_stop", "daemon_id", "interaction", "grant", "kind", "dangerously_skip_permissions",
+		"auto_stop", "daemon_id", "interaction", "grant", "dangerously_skip_permissions",
 		"cron_id", "target_daemon_id", "parent_session_id", "delegation_via", "idem_scope"} {
 		t.Run(field, func(t *testing.T) {
 			body := codexBody()
@@ -560,7 +560,9 @@ func TestDelegationViaRecorded(t *testing.T) {
 	if code != http.StatusCreated || out["via"] != "rule:"+ruleID || out["plugins"] != "skipped" {
 		t.Fatalf("rule start: %d %v", code, out)
 	}
-	fx.spawn()
+	if msg := fx.spawn(); msg.Verbosity != "terse" {
+		t.Fatalf("child verbosity %q", msg.Verbosity)
+	}
 	child, _ := out["child"].(map[string]any)
 	for _, k := range []string{"id", "engine", "model", "effort", "runtime", "repo", "no_repo", "title", "keep_running"} {
 		if _, ok := child[k]; !ok {
@@ -739,6 +741,7 @@ func TestDelegationLockNeverExhaustsThePool(t *testing.T) {
 		dc.SetCheckedOutRepos([]string{"app"})
 		dc.SetSandboxAvailable(true)
 		dc.SetSandboxClones(true)
+		dc.SetWorkBranches(true) // current daemon: immutable recorded branch names
 		dc.RecoveryReadyCapable = true
 		dc.SetAvailableEngines([]string{"claude"})
 		if _, err := db.InsertDelegationRule(context.Background(), fx.pool, db.DelegationRule{AccountID: owner, Engine: "claude",
@@ -880,7 +883,7 @@ func TestDelegatedSpawnCarriesNoEnvOrCallback(t *testing.T) {
 	}
 }
 
-func TestNoPushForPrivateOrHeadlessParent(t *testing.T) {
+func TestPrivateParentPushesAndHeadlessParentStaysQuiet(t *testing.T) {
 	fx := newDelegFx(t)
 	var mu sync.Mutex
 	var pushes [][3]string
@@ -899,16 +902,16 @@ func TestNoPushForPrivateOrHeadlessParent(t *testing.T) {
 			t.Fatalf("%s: %d %v", name, code, out)
 		}
 	}
-	if len(pushes) != 0 {
-		t.Fatalf("pushed for a private or headless parent: %v", pushes)
+	if len(pushes) != 1 || pushes[0][2] != "/sessions/"+private {
+		t.Fatalf("expected only private parent notification: %v", pushes)
 	}
 	body := codexBody()
 	body["title"] = "Review"
 	if code, out, _ := fx.postChild(fx.parent, fx.parentTok, body, "p"); code != http.StatusAccepted {
 		t.Fatalf("direct: %d %v", code, out)
 	}
-	want := [3]string{"Parent — wants to start a session", "Start a Codex session: Review", "/sessions/" + fx.parent}
-	if len(pushes) != 1 || pushes[0] != want {
+	want := [3]string{"Parent — wants to start a worker", "Start a Codex worker: Review", "/sessions/" + fx.parent}
+	if len(pushes) != 2 || pushes[1] != want {
 		t.Fatalf("pushes = %v, want [%v]", pushes, want)
 	}
 }

@@ -3,6 +3,8 @@ import { Blob as NodeBlob } from 'node:buffer'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { inputClock } from '../../../../packages/chat/src/model/clock'
 import WorkspaceTree from './WorkspaceTree'
+import { PaletteContext } from '../commands/context'
+import { CommandRegistry } from '../commands/registry'
 
 const read = vi.hoisted(() => vi.fn())
 const fileRead = vi.hoisted(() => vi.fn())
@@ -109,7 +111,7 @@ it('refreshes expired status on re-expansion and recovers from unavailable witho
   render(<WorkspaceTree sessionId="session" active />)
   await screen.findByText('README.md')
   fireEvent.click(screen.getByText('member'))
-  await screen.findByText('status unavailable')
+  await screen.findByText('Git status unavailable')
   fireEvent.click(screen.getByText('member'))
   now += 4999
   fireEvent.click(screen.getByText('member'))
@@ -121,6 +123,24 @@ it('refreshes expired status on re-expansion and recovers from unavailable witho
   await screen.findByText('feature/<script> · 3 changed (partial)')
   expect(attempts).toBe(2)
   expect(read.mock.calls.filter(([url]) => String(url).includes('op=list'))).toHaveLength(2)
+})
+
+it('retries unavailable Git status immediately and keeps details in a tooltip', async () => {
+  fixture()
+  const base = read.getMockImplementation()!
+  let attempts = 0
+  read.mockImplementation(async (...args: unknown[]) => {
+    if (String(args[0]).includes('op=status') && ++attempts === 1) return new Response('', { status: 409 })
+    return base(...args)
+  })
+  render(<WorkspaceTree sessionId="session" active />)
+  await screen.findByText('README.md')
+  fireEvent.click(screen.getByText('member'))
+  await screen.findByText('Git status unavailable')
+  expect(screen.getByText('Git status unavailable').parentElement).toHaveAttribute('title')
+  fireEvent.click(screen.getByRole('button', { name: 'Retry Git status' }))
+  await screen.findByText('feature/<script> · 3 changed (partial)')
+  expect(attempts).toBe(2)
 })
 
 it.each([false, true])('refreshes expired cached repository status entered from Find (unavailable=%s)', async unavailable => {
@@ -136,7 +156,7 @@ it.each([false, true])('refreshes expired cached repository status entered from 
   render(<WorkspaceTree sessionId="session" active />)
   await screen.findByText('README.md')
   fireEvent.click(screen.getByText('member'))
-  await screen.findByText(unavailable ? 'status unavailable' : 'feature/<script> · 3 changed (partial)')
+  await screen.findByText(unavailable ? 'Git status unavailable' : 'feature/<script> · 3 changed (partial)')
   fireEvent.click(screen.getByText('member'))
   now += 6000
   fireEvent.change(screen.getByRole('combobox'), { target: { value: 'member' } })
@@ -186,14 +206,17 @@ it('associates the combobox with loaded options, navigates without moving input 
 })
 
 it('shows a specific refusal and retries with refresh progress and a result', async () => {
-  read.mockResolvedValueOnce(new Response(JSON.stringify({ code: 'not_running', error: 'The session has no live workspace daemon.' }), { status: 409 }))
+  // A lasting refusal: the quiet retries (BLG-517's transient codes) run out before it shows.
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  read.mockImplementation(async () => new Response(JSON.stringify({ code: 'not_running', error: 'The session has no live workspace daemon.' }), { status: 409 }))
   render(<WorkspaceTree sessionId="legacy" active />)
+  await vi.advanceTimersByTimeAsync(9000)
+  vi.useRealTimers()
   await screen.findByText('The session has no live workspace daemon.')
   let resolve!: (value: Response) => void
   read.mockImplementationOnce(() => new Promise<Response>(done => { resolve = done }))
   fireEvent.click(screen.getByRole('button', { name: 'Refresh workspace' }))
   await screen.findByText('Refreshing workspace…')
-  expect(read).toHaveBeenCalledTimes(2)
   resolve(new Response(JSON.stringify({ result: { ok: true, entries: [], truncated: false, launch_generation: 'legacy', generation: 1 }, members: [], runtime: 'host' })))
   await screen.findByText('Workspace refreshed.')
   expect(screen.queryByText('The session has no live workspace daemon.')).toBeNull()
@@ -220,6 +243,26 @@ it('shows a lasting busy refusal after its retries', async () => {
   vi.useRealTimers()
 })
 
+it('heals by itself after a lasting runtime timeout, without Refresh (owner 2026-11-05)', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  fixture()
+  const base = read.getMockImplementation()!
+  let down = true
+  read.mockImplementation(async (url: string, init?: RequestInit) => down
+    ? new Response(JSON.stringify({ error: 'The workspace runtime did not reply.', code: 'daemon_timeout' }), { status: 409 })
+    : base(url, init))
+  render(<WorkspaceTree sessionId="session" active />)
+  // The quiet retries run out first (a deploy-length gap would have healed inside them)...
+  await vi.advanceTimersByTimeAsync(9000)
+  await screen.findByText('The workspace runtime did not reply.')
+  // ...then the runtime comes back, and the pane reads again by itself.
+  down = false
+  await vi.advanceTimersByTimeAsync(6000)
+  await screen.findByText('README.md')
+  expect(screen.queryByText('The workspace runtime did not reply.')).toBeNull()
+  vi.useRealTimers()
+})
+
 it('keeps listed folders and files fully visible and searchable', async () => {
   read.mockImplementation(async (url: string) => {
     const path = new URL(url, 'https://example.com').searchParams.get('path')
@@ -237,4 +280,35 @@ it('keeps listed folders and files fully visible and searchable', async () => {
   fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } })
   fireEvent.click(await screen.findByRole('treeitem', { name: 'package.js' }))
   await waitFor(() => expect(fileRead).toHaveBeenCalled())
+})
+
+it('collapses every folder while retaining the selected path for reopening', async () => {
+  fixture()
+  render(<WorkspaceTree sessionId="collapse-session" active />)
+  fireEvent.click(await screen.findByText('member'))
+  fireEvent.click(await screen.findByText('nested.txt'))
+  fireEvent.click(screen.getByRole('button', { name: 'Collapse folders' }))
+  expect(screen.getByRole('treeitem', { name: 'member' })).toHaveAttribute('aria-expanded', 'false')
+  expect(screen.queryByRole('treeitem', { name: 'nested.txt' })).toBeNull()
+  fireEvent.click(screen.getByText('member'))
+  await screen.findByRole('treeitem', { name: 'nested.txt' })
+})
+
+it('offers collapse through the Ctrl+K registry and copies the selected relative path', async () => {
+  fixture()
+  const registry = new CommandRegistry()
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
+  render(<PaletteContext.Provider value={{ registry, open: vi.fn() }}><WorkspaceTree sessionId="commands-session" active /></PaletteContext.Provider>)
+  fireEvent.click(await screen.findByText('member'))
+  await screen.findByText('nested.txt')
+  fireEvent.click(screen.getByRole('button', { name: 'Copy relative path' }))
+  await screen.findByText('Relative path copied.')
+  expect(writeText).toHaveBeenCalledWith('member')
+  const command = registry.getSnapshot().items.find(item => item.title === 'Collapse folders')!
+  expect(command.destructive).toBe(false)
+  fireEvent.click(screen.getByRole('button', { name: 'Collapse folders' }))
+  expect(screen.getByRole('treeitem', { name: 'member' })).toHaveAttribute('aria-selected', 'true')
+  expect(screen.getByRole('treeitem', { name: 'member' })).toHaveAttribute('aria-expanded', 'false')
+  vi.unstubAllGlobals()
 })

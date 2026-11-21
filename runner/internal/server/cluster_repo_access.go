@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,12 +18,14 @@ import (
 	"github.com/blerglab/blerg-ai/runner/internal/gitprovider"
 )
 
+var repositoryDisplayName = regexp.MustCompile(`^[a-zA-Z0-9_.~-]+(/[a-zA-Z0-9_.~-]+)+$`)
+
 var errRepositoryUnreadable = errors.New("the cluster cannot read this repository with the selected git credential; check its owner/name and connect a git credential with repository read access in Settings, then retry")
 var errRepositoryCheckUnavailable = errors.New("repository read access could not be checked right now; retry when the git service is available")
 var errRepositoryAddress = errors.New("the cluster repository check needs a permitted HTTP(S) clone URL; use an HTTPS repository URL or the install's configured git base")
 
 func clusterStartFailureStatus(err error) int {
-	if errors.Is(err, errRepositoryUnreadable) || errors.Is(err, errRepositoryAddress) {
+	if clusterRefusal(err) != nil || errors.Is(err, errRepositoryUnreadable) || errors.Is(err, errRepositoryAddress) {
 		return http.StatusUnprocessableEntity
 	}
 	return http.StatusServiceUnavailable
@@ -75,7 +78,17 @@ func checkRepositoryRead(ctx context.Context, client *http.Client, cloneURL, tok
 		if response.StatusCode != http.StatusOK {
 			_ = response.Body.Close()
 			if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusGone {
-				return errRepositoryUnreadable
+				switch response.StatusCode {
+				case http.StatusUnauthorized:
+					if token == "" {
+						return &clusterAuthorizationRefusal{code: "owner_token_missing"}
+					}
+					return &clusterAuthorizationRefusal{code: "owner_token_rejected"}
+				case http.StatusForbidden:
+					return &clusterAuthorizationRefusal{code: "repository_scope_insufficient"}
+				default:
+					return &clusterAuthorizationRefusal{code: "repository_not_visible"}
+				}
 			}
 			return errRepositoryCheckUnavailable
 		}
@@ -138,7 +151,26 @@ func (j *JobManager) operatorGitToken(ctx context.Context) (string, error) {
 func (j *JobManager) precheckRepository(spec SessionJobSpec, cloneURL string, sessionData map[string][]byte, personalKeys map[string]bool, operatorOK bool) error {
 	return j.precheckRepositoryContext(context.Background(), spec, cloneURL, sessionData, personalKeys, operatorOK)
 }
-func (j *JobManager) precheckRepositoryContext(parent context.Context, spec SessionJobSpec, cloneURL string, sessionData map[string][]byte, personalKeys map[string]bool, operatorOK bool) error {
+func (j *JobManager) precheckRepositoryContext(parent context.Context, spec SessionJobSpec, cloneURL string, sessionData map[string][]byte, personalKeys map[string]bool, operatorOK bool) (result error) {
+	defer func() {
+		refusal := clusterRefusal(result)
+		if refusal == nil || !errors.Is(refusal, errRepositoryUnreadable) {
+			return
+		}
+		endpoint, err := url.Parse(cloneURL)
+		if err != nil {
+			return
+		}
+		repository := strings.TrimSuffix(strings.Trim(endpoint.Path, "/"), ".git")
+		if !repositoryDisplayName.MatchString(repository) {
+			return
+		}
+		contextual := *refusal
+		contextual.repository = repository
+		contextual.provider, _ = j.gitCredentialFor(cloneURL)
+		contextual.worker = spec.ReadOnlyGitWorker
+		result = &contextual
+	}()
 	if spec.NoRepo || spec.NewRepo {
 		return nil
 	}

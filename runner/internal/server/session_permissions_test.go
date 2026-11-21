@@ -201,7 +201,7 @@ func TestRestrictedAndCronSessionsCannotHoldPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := filingRequest(fx, "POST", "/api/sessions/"+fx.sess+"/proposal-grants", human, map[string]any{"kind": "board_file", "board_id": "board-a"})
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "restricted") {
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), msgPermRestricted) {
 		t.Fatalf("restricted: %d %s", rec.Code, rec.Body.String())
 	}
 	get := filingRequest(fx, "GET", "/api/sessions/"+fx.sess+"/permissions", human, nil)
@@ -505,7 +505,7 @@ func TestPanelShowsAGrantWhoseSignInEndedAsInactive(t *testing.T) {
 	get := filingRequest(fx, "GET", "/api/sessions/"+fx.sess+"/permissions", fx.token(topicOwner, "human"), nil)
 	var view struct{ Grants []proposalGrantView }
 	_ = json.Unmarshal(get.Body.Bytes(), &view)
-	if len(view.Grants) != 1 || view.Grants[0].Active || view.Grants[0].Inactive != "signed_out" {
+	if len(view.Grants) != 1 || view.Grants[0].Active || view.Grants[0].Inactive != "suspended" {
 		t.Fatalf("grants = %+v", view.Grants)
 	}
 	// Giving it again from the current sign-in replaces it.
@@ -546,7 +546,7 @@ func (c *countingPermissionCore) ListConnections(ctx context.Context, p mcpgw.Pr
 	return c.deadLoginCore.ListConnections(ctx, p)
 }
 
-func TestPermissionPanelCachesSignInAndInvalidatesOnLevelChange(t *testing.T) {
+func TestPermissionPanelRechecksAuthorityOnEveryRead(t *testing.T) {
 	fx, _ := newPermFx(t)
 	core := &countingPermissionCore{}
 	fx.api.hub.mcpStart.set(&mcpStartConfig{Core: core})
@@ -569,27 +569,35 @@ func TestPermissionPanelCachesSignInAndInvalidatesOnLevelChange(t *testing.T) {
 	}
 	get()
 	get()
-	if got := core.calls.Load(); got != 1 {
-		t.Fatalf("panel made %d core calls, want 1", got)
+	if got := core.calls.Load(); got != 2 {
+		t.Fatalf("panel made %d core calls, want 2", got)
 	}
 	g, err := db.InsertProposalGrant(t.Context(), fx.pool, db.ProposalGrant{SessionID: fx.sess, AccountID: topicOwner, Kind: db.ProposalGrantBoard, BoardID: "board-a", Level: db.BoardLevelRead, ProofSessionID: "other-login", CreatedVia: "panel"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	get()
-	if got := core.calls.Load(); got != 2 {
+	if got := core.calls.Load(); got != 3 {
 		t.Fatalf("level change did not invalidate: calls=%d", got)
 	}
 	if _, err := db.RevokeProposalGrant(t.Context(), fx.pool, g.ID, topicOwner, "revoked"); err != nil {
 		t.Fatal(err)
 	}
 	get()
-	if got := core.calls.Load(); got != 3 {
+	if got := core.calls.Load(); got != 4 {
 		t.Fatalf("revoke did not invalidate: calls=%d", got)
 	}
 	now = now.Add(permissionSignInTTL)
 	get()
-	if got := core.calls.Load(); got != 4 {
+	if got := core.calls.Load(); got != 5 {
 		t.Fatalf("expired cache did not refresh: calls=%d", got)
+	}
+}
+
+func TestPermissionMessagesUsePersonFacingNouns(t *testing.T) {
+	for _, message := range []string{msgPermNotActive, msgPermCron, msgPermRestricted, msgPermBoardRun, msgPermStarter, msgPermKind, msgPermSignIn, msgPermPlugin, msgPermBoardCreate, msgPermMCPTool, msgPermBuiltin} {
+		if strings.Contains(strings.ToLower(message), "session") {
+			t.Errorf("permission wording: %s", message)
+		}
 	}
 }

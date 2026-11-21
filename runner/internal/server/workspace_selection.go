@@ -48,23 +48,7 @@ func (a *API) prepareWorkspaceSelection(ctx context.Context, owner string, dc *D
 	if v.Folder != nil || len(v.Members) != 1 {
 		m.Kind = "folder"
 	}
-	authorized := map[string]bool{}
-	if a.repos != nil {
-		list, _ := a.repos.List(ctx)
-		for _, repo := range list {
-			if !repo.IsLocal {
-				authorized[repoKey(repo.Provider, repo.FullName)] = true
-			}
-		}
-	}
-	if a.userRepos != nil && coreProofFrom(ctx).valid() {
-		list, _ := a.userRepos.List(ctx, owner)
-		for _, repo := range list {
-			if !repo.IsLocal {
-				authorized[repoKey(repo.Provider, repo.FullName)] = true
-			}
-		}
-	}
+	authorized := a.authorizedHostedKeys(ctx, owner)
 	paths, _ := workspaceselection.MemberPaths(*v)
 	for i, source := range v.Members {
 		member := protocol.WorkspaceMember{ID: source.ID, Name: source.Name, Path: paths[i], SourceIdentity: source.SourceIdentity, CommonDirectoryIdentity: source.CommonDirectoryIdentity, Destination: source.SourceIdentity}
@@ -85,6 +69,28 @@ func (a *API) prepareWorkspaceSelection(ctx context.Context, owner string, dc *D
 		return nil, errDiscoveryUnavailable
 	}
 	return &m, nil
+}
+
+// authorizedHostedKeys is the owner's hosted repository authority right now.
+func (a *API) authorizedHostedKeys(ctx context.Context, owner string) map[string]bool {
+	authorized := map[string]bool{}
+	if a.repos != nil {
+		list, _ := a.repos.List(ctx)
+		for _, repo := range list {
+			if !repo.IsLocal {
+				authorized[repoKey(repo.Provider, repo.FullName)] = true
+			}
+		}
+	}
+	if a.userRepos != nil && coreProofFrom(ctx).valid() {
+		list, _ := a.userRepos.List(ctx, owner)
+		for _, repo := range list {
+			if !repo.IsLocal {
+				authorized[repoKey(repo.Provider, repo.FullName)] = true
+			}
+		}
+	}
+	return authorized
 }
 
 func (h *Hub) releaseWorkspaceSelection(dc *DaemonConn, m *protocol.WorkspaceManifest) {

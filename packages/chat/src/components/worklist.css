@@ -265,8 +265,8 @@ a.ticket-key:focus-visible {
   color: var(--chat-muted);
   min-width: 0;
   overflow-wrap: anywhere;
-  -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent);
-  mask-image: linear-gradient(to bottom, #000 55%, transparent);
+  -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent); /* themecheck:allow BLG-473: a mask-image gradient stop's RGB is irrelevant to the mask, only its alpha matters (opaque to transparent); any solid color renders identically */
+  mask-image: linear-gradient(to bottom, #000 55%, transparent); /* themecheck:allow BLG-473: a mask-image gradient stop's RGB is irrelevant to the mask, only its alpha matters (opaque to transparent); any solid color renders identically */
 }
 
 .ticket-excerpt .md {
@@ -345,10 +345,11 @@ a.ticket-key:focus-visible {
   box-sizing: border-box;
   width: 100%;
 }
-/* Beside the file viewer it opens from, the same size: most of the screen, any size of screen. */
+/* A readable sheet, not the whole screen: wide enough for the text beside the details column,
+   bounded so a large or high-DPI window doesn't stretch it edge to edge. Maximize for full width. */
 @media (min-width: 900px) {
   .artifact-dialog.ticket-modal {
-    width: min(1400px, 94vw);
+    width: min(1120px, 90vw);
     max-height: 90vh;
   }
 }
@@ -768,3 +769,34 @@ a.ticket-key:focus-visible {
   border-block-start: 1px solid color-mix(in srgb, var(--chat-border, #313d4f) 25%, transparent);
   padding-block-start: 2px;
 }
+
+/* Questions use the existing dialog controls at a compact reading width. */
+.artifact-dialog.ticket-modal.question-modal {
+  width: min(480px, 100%);
+  height: auto;
+  max-height: calc(100dvh - 48px);
+  border: 1px solid var(--chat-border);
+  border-radius: 12px;
+  padding: 24px;
+  gap: 16px;
+}
+.question-modal .artifact-header.ticket-modal-header {
+  display: flex;
+  justify-content: space-between;
+  padding: 0;
+  border: 0;
+  gap: 16px;
+}
+.question-modal .ticket-modal-header .artifact-header-text { display: block; }
+.question-modal .artifact-header .ticket-modal-title { margin: 0; font-size: 18px; }
+.question-modal .ticket-modal-title .md { font: inherit; color: inherit; }
+.question-modal .artifact-body.ticket-modal-body { padding: 0; color: var(--chat-muted); overflow: auto; }
+.question-modal .question-card-asker { font-size: 12px; margin-bottom: 8px; color: var(--chat-muted); }
+.question-modal .ticket-modal-header { min-height: 0; }
+.question-modal .ticket-modal-header .artifact-header-text { min-width: 0; overflow-wrap: anywhere; max-height: 40dvh; overflow: auto; }
+.question-modal .ask-reply { display: block; }
+.question-modal .ask-reply-box { width: 100%; box-sizing: border-box; }
+.question-modal .ask-reply-actions { justify-content: flex-end; margin-top: 16px; }
+.question-modal .ticket-modal-body > .md-doc:first-child > :first-child { margin-top: 0; }
+
+.artifact-overlay.question-overlay:not(.is-maximized) { padding: 24px; align-items: center; }

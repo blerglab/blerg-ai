@@ -97,7 +97,7 @@ function renderTwo() {
 
 const rail = () => screen.queryByTestId('session-rail')
 // Live's name carries what needs the person ("Live, 1 needs you").
-const tab = (name: 'Live' | 'History' | 'Files' | 'Capabilities') => within(rail()!).getByRole('tab', { name: ['Live', 'Files', 'Capabilities'].includes(name) ? new RegExp(`^${name}`) : name })
+const tab = (name: 'Live' | 'History' | 'Shared' | 'Capabilities') => within(rail()!).getByRole('tab', { name: ['Live', 'Shared', 'Capabilities'].includes(name) ? new RegExp(`^${name}`) : name })
 
 function askNow(sessionId: string) {
   act(() => {
@@ -115,8 +115,8 @@ const settle = () => act(async () => { await vi.advanceTimersByTimeAsync(MIN_GAP
 describe('the session panel\'s History tab', () => {
   beforeEach(() => {
     wsMock.resetWsMock()
-    localStorage.removeItem(RAIL_PREF_KEY)
-    localStorage.removeItem(RAIL_TAB_KEY)
+    // Workspace-specific layout/panel preferences must not leak from the previous case.
+    localStorage.clear()
     stubFetch()
     viewport(1280)
   })
@@ -130,7 +130,7 @@ describe('the session panel\'s History tab', () => {
   it('sits beside Live in a tablist, before Files and Capabilities, and the choice is remembered', async () => {
     localStorage.setItem(RAIL_PREF_KEY, '1')
     const { unmount } = renderPage()
-    expect(within(rail()!).getAllByRole('tab').map(t => t.textContent)).toEqual(['Live', 'History', 'Files', 'Capabilities'])
+    expect(within(rail()!).getAllByRole('tab').map(t => t.textContent)).toEqual(['Live', 'History', 'Shared', 'Capabilities'])
     expect(tab('Live')).toHaveAttribute('aria-selected', 'true')
     expect(await within(rail()!).findByTestId('rail-needs')).toBeInTheDocument()
     fireEvent.click(tab('History'))
@@ -230,8 +230,8 @@ describe('the session panel\'s History tab', () => {
     fireEvent.keyDown(within(rail()!).getByRole('tablist'), { key: 'ArrowLeft' })
     expect(tab('Capabilities')).toHaveAttribute('aria-selected', 'true')
     fireEvent.keyDown(within(rail()!).getByRole('tablist'), { key: 'ArrowLeft' })
-    expect(tab('Files')).toHaveAttribute('aria-selected', 'true')
-    expect(tab('Files')).toHaveFocus()
+    expect(tab('Shared')).toHaveAttribute('aria-selected', 'true')
+    expect(tab('Shared')).toHaveFocus()
     fireEvent.keyDown(within(rail()!).getByRole('tablist'), { key: 'Home' })
     expect(tab('Live')).toHaveAttribute('aria-selected', 'true')
     expect(tab('Live')).toHaveFocus()

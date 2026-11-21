@@ -53,10 +53,18 @@ class Safety(unittest.TestCase):
                 terms = pod["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
                 for term in terms:
                     self.assertIn({"key": "kubernetes.io/hostname", "operator": "NotIn", "values": self.values["excluded_nodes"]}, term["matchExpressions"])
-                for c in pod["containers"]:
+                for c in pod["containers"] + pod.get("initContainers", []):
                     self.assertIn(":", c["image"])
                     self.assertNotIn(":latest", c["image"])
                     self.assertIn("limits", c["resources"])
+        self.assertFalse(any(d["kind"] == "Secret" and d["metadata"]["name"].startswith("blerg-live-data") for d in items))
+        self.assertFalse(any(d['kind'] == 'CronJob' and d['metadata']['name'] == 'blerg-live-data-renew' for d in items))
+        self.assertFalse(any(v.get('secret', {}).get('secretName') == 'blerg-live-data-authority'
+                             for d in items if d['kind'] in ('Deployment', 'StatefulSet')
+                             for v in d['spec']['template']['spec'].get('volumes', [])))
+        for d in items:
+            if d["kind"] == "Deployment" and d["metadata"]["name"] in ("blerg-core", "blerg-runner"):
+                self.assertTrue(all(v["secret"]["optional"] for v in d["spec"]["template"]["spec"]["volumes"] if v["name"].startswith("live-data") and "secret" in v))
         core = next(d for d in items if d["kind"] == "Deployment" and d["metadata"]["name"] == "blerg-core")
         core_env = core["spec"]["template"]["spec"]["containers"][0]["env"]
         self.assertIn({"name": "BLERG_SETUP_ALLOW_LOCAL", "value": "true"}, core_env)
